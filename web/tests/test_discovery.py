@@ -48,6 +48,38 @@ class DiscoveryTests(TestCase):
 		queued.assert_called_once_with(scan.id, 'standard')  # standard is the default
 		return scan
 
+	def _hosts(self, count, extra=()):
+		events = [{'type': 'DNS_NAME', 'id': f'D{i}', 'data': f'h{i}.example.test', 'host': f'h{i}.example.test', 'module': 'crt',
+				   'resolved_hosts': [f'192.0.2.{i + 1}'], 'parent': 'S'} for i in range(count)]
+		return events + list(extra)
+
+	def _run_for_web_check(self, events, mode='standard', scan_name='demo_scan'):
+		scan = self._scan()
+		scan_event = {'type': 'SCAN', 'id': 'S', 'data': None, 'data_json': {'name': scan_name}}
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, mode=mode, stream=lambda *a, **k: iter([scan_event] + events))
+		return [a for a in AgentActivity.objects.filter(message__contains='no web page').order_by('id')]
+
+	def test_many_hosts_and_no_web_page_at_all_is_said_in_the_activity_feed_with_where_to_look(self):
+		said = self._run_for_web_check(self._hosts(6))
+		self.assertEqual(len(said), 1)
+		self.assertEqual((said[0].status, said[0].kind, said[0].project_id), ('failed', 'discovery', self.project.id))
+		self.assertIn('found 6 hosts but bbot reported no web page', said[0].message)
+		self.assertIn('~/.bbot/scans/demo_scan/scan.log', said[0].message)
+		self.assertIn('are not affected', said[0].message)  # the screenshot stage and the route checks make their own requests
+
+	def test_a_discovery_that_reported_a_url_or_an_http_response_says_nothing(self):
+		url = {'type': 'URL', 'id': 'U1', 'data': 'https://h0.example.test/', 'host': 'h0.example.test', 'module': 'http', 'parent': 'D0', 'tags': ['status-200']}
+		response = {'type': 'HTTP_RESPONSE', 'id': 'R1', 'data': None, 'host': 'h0.example.test', 'module': 'http', 'parent': 'D0',
+					'data_json': {'url': 'https://h0.example.test/', 'status_code': 200}}
+		self.assertEqual(self._run_for_web_check(self._hosts(6, [url])), [])
+		AgentActivity.objects.all().delete()
+		self.assertEqual(self._run_for_web_check(self._hosts(6, [response])), [])
+
+	def test_a_few_hosts_or_a_passive_discovery_is_not_a_reason_to_warn(self):
+		self.assertEqual(self._run_for_web_check(self._hosts(discovery.MIN_HOSTS_FOR_WEB_CHECK - 1)), [])
+		self.assertEqual(self._run_for_web_check(self._hosts(8), mode='passive'), [])  # passive never visits a host
+
 	def test_a_rejected_key_becomes_an_activity_line_naming_the_service(self):
 		from cveFeed.models import AgentActivity
 		from dashboard.models import ApiCredential
@@ -64,6 +96,38 @@ class DiscoveryTests(TestCase):
 		self.assertIn('VirusTotal', lines[0][0])
 		self.assertIn('401', lines[0][0])
 		self.assertEqual(lines[0][1], 'failed')
+
+	def test_a_hard_failed_gowitness_is_one_activity_line_and_discovery_is_otherwise_unchanged(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+
+		def stream(targets, problems=None, hard_failures=None, **k):
+			hard_failures += [('gowitness', 'Failed to set up Google chrome. Please install manually.'), ('gowitness', ''), ('baddns', 'x')]
+			return iter(EVENTS)
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			out = discovery.run_discovery(scan.id, stream=stream)
+		self.assertEqual(out['status'], discovery.SUCCESS)  # screenshots missing never fails the discovery
+		lines = list(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').values_list('message', 'status'))
+		self.assertEqual(lines, [('Screenshots unavailable: the gowitness module failed to set up (Failed to set up Google chrome. Please '
+		                          'install manually.); no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', 'failed')])
+
+	def test_a_hard_failure_with_no_reason_and_another_module_failing_alone(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=lambda *a, hard_failures=None, **k: (hard_failures.append(('gowitness', '')), iter(EVENTS))[1])
+		self.assertEqual(AgentActivity.objects.filter(message__contains='gowitness module failed to set up (no reason given)').count(), 1)
+		other = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(other.id, stream=lambda *a, hard_failures=None, **k: (hard_failures.append(('baddns', 'x')), iter(EVENTS))[1])
+		self.assertEqual(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').count(), 1)  # still just the first
+
+	def test_no_activity_line_when_nothing_hard_failed(self):
+		from cveFeed.models import AgentActivity
+		scan = self._scan()
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=lambda *a, **k: iter(EVENTS))
+		self.assertFalse(AgentActivity.objects.filter(message__startswith='Screenshots unavailable').exists())
 
 	def test_streaming_discovery_persists_assets_events_and_activity(self):
 		scan = self._scan()
@@ -343,6 +407,50 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
 			discovery.run_discovery(scan.id, stream=capturing_stream)
 		self.assertEqual(seen_kwargs.get('extra_args'), [])
+
+
+class TrufflehogBountyTests(TestCase):
+	"""CVENGINE_BBOT_TRUFFLEHOG=1 lets a project's discovery use bbot's live-verifying trufflehog module, except a bug bounty project's."""
+
+	def setUp(self):
+		self.org = Org.objects.create(name='T', slug='truffle')
+		self.project = Project.objects.create(name='T', slug='ptruffle', insert_date=timezone.now(), org=self.org)
+		self.domain = Domain.objects.create(name='truffle.test', project=self.project, insert_date=timezone.now())
+		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
+
+	def run_with(self, env):
+		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
+			scan = discovery.start_discovery(self.domain)
+		seen = {}
+
+		def capturing_stream(targets, **kwargs):
+			seen.update(kwargs)
+			return iter(EVENTS)
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': env}), mock.patch('reNgine.tasks.geo_localize.delay'), \
+				mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			discovery.run_discovery(scan.id, stream=capturing_stream)
+		return seen.get('extra_args', [])
+
+	def bounty(self):
+		from cveFeed.models import BountyEngagement, BountyProgram
+		program = BountyProgram.objects.create(platform='hackerone', handle='acme-t', name='Acme')
+		BountyEngagement.objects.create(project=self.project, program=program, status='active')
+
+	def test_off_by_default(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		self.assertNotIn(TRUFFLEHOG_FLAG, self.run_with(''))
+
+	def test_opt_in_reaches_the_stream_for_an_ordinary_project(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG
+		self.assertIn(TRUFFLEHOG_FLAG, self.run_with('1'))
+
+	def test_a_bug_bounty_project_never_gets_it_even_with_the_setting_on(self):
+		from reNgine.bbot import TRUFFLEHOG_FLAG, trufflehog_allowed
+		self.bounty()
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': '1'}):
+			self.assertFalse(trufflehog_allowed(self.project.id))
+			self.assertTrue(trufflehog_allowed(None))
+		self.assertNotIn(TRUFFLEHOG_FLAG, self.run_with('1'))
 
 
 class ActivityTests(TestCase):
@@ -918,7 +1026,8 @@ class IpTargetTests(TestCase):
 		from cveFeed.tasks import watch_certificates_all
 		named = Domain.objects.create(name='named.example', project=self.project, insert_date=timezone.now())
 		with mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async') as queued, \
-				mock.patch('cveFeed.ledger.sweep_claim', return_value=True):  # the real claim outlives the test, in Redis
+				mock.patch('cveFeed.ledger.sweep_claim', return_value=True), \
+				mock.patch('cveFeed.ct_queue._client', return_value=None):  # the real claim and markers outlive the test, in Redis
 			out = watch_certificates_all()
 		self.assertEqual(out['queued'], 1)
 		self.assertEqual(queued.call_args[1]['args'], [named.id])

@@ -453,6 +453,57 @@ class AdminSuspendRevokeTests(SentinelBase):
         self.assertEqual(out['recent_tasks'][0]['kind'], 'nmap')
 
 
+class SentinelHoldBackTests(SentinelBase):
+    """The rule that holds a user's new agents back while another of theirs is suspended or revoked, as an administrator meets it on Sentinels."""
+
+    def test_an_app_admins_second_sentinel_is_active_although_an_old_one_is_revoked(self):
+        # the reported case: an App Admin revoked a Sentinel long ago, then provisioned another instance-wide one from Settings > Sentinels
+        _, old = register_sentinel(self.t['root'], name='old-sentinel')
+        self.assertEqual(call(self.t['root'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})[0], 200)
+        status, enroll = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll')
+        self.assertEqual(status, 201, enroll)
+        status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': enroll['enrollment_token'], 'name': 'johnny'})
+        self.assertEqual((status, boot['status'], boot['status_note'], boot['held_by']), (201, 'active', '', None))
+        is_error, out = tool_call(self.t['root'], 'generate_sentinel_enrollment', {})
+        self.assertFalse(is_error, out)
+        boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'johnny-2'})[1]
+        self.assertEqual(boot['status'], 'active')
+
+    def test_an_org_admins_own_held_sentinel_offers_no_buttons_they_cannot_use(self):
+        _, old = register_sentinel(self.t['dana'], name='danas-old')
+        call(self.t['root'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
+        _, held = register_sentinel(create_token(self.dana, 'second')[1], name='danas-new', approve=False)
+        self.assertEqual(held['status'], 'suspended')
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']
+        self.assertFalse(row['can_manage'])  # her own: Reinstate and Delete would be refused, so the card shows neither
+        self.assertEqual(row['held_by']['id'], old['id'])  # her own agents: she may know which one
+        self.assertEqual(call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')[0], 403)
+        self.assertFalse({r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['danas-new']['manageable'])
+        self.assertTrue({r['name']: r for r in call(self.t['root'], 'GET', '/api/v1/sentinels/live')[1]['results']}['danas-new']['can_manage'])
+
+    def test_a_held_sentinel_reads_suspended_with_the_agent_to_reinstate_or_delete(self):
+        _, old = register_sentinel(self.t['alice'], name='old-alice')
+        call(self.t['dana'], 'PATCH', f'/api/v1/agents/{old["id"]}', {'status': 'revoked'})
+        token = create_token(self.alice, 'second')[1]
+        _, held = register_sentinel(token, name='new-alice', approve=False)
+        self.assertEqual(held['status'], 'suspended')
+        Agent.objects.filter(pk=held['id']).update(last_seen=timezone.now())  # checking in: it would read idle if it were active
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual(row['state'], 'suspended')
+        self.assertIn(f'"old-alice" (#{old["id"]}) of the same user was revoked', row['status_note'])
+        self.assertEqual((row['held_by']['id'], row['held_by']['status'], row['can_manage']), (old['id'], 'revoked', True))
+        tab = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/projects/sen-a/sentinels')[1]['results']}['new-alice']
+        self.assertEqual((tab['status'], tab['status_note'], tab['manageable']), ('suspended', row['status_note'], True))
+        # the card's Delete button: the revoked one goes, the held one stays suspended until it is reinstated
+        status, out = call(self.t['dana'], 'DELETE', f'/api/v1/agents/{old["id"]}')
+        self.assertEqual((status, [h['id'] for h in out['still_held']]), (200, [held['id']]))
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual((row['state'], row['held_by']), ('suspended', {'id': None, 'deleted': True}))
+        call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
+        row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
+        self.assertEqual((row['state'], row['status_note'], row['held_by']), ('idle', '', None))
+
+
 class McpToolTests(SentinelBase):
     """The MCP tools are thin wrappers over the same broker functions the REST routes use; one pass through the real
     JSON-RPC transport per verb proves the wiring (names, argument shapes) is correct, not just importable."""
@@ -499,6 +550,15 @@ class McpToolTests(SentinelBase):
         self.assertIn('CVENGINE_SENTINEL_NETWORK=internal', setup['configure'])
         self.assertIn('COMPOSE_PROFILES=\\n', setup['configure'])  # light: no OpenVAS profile
         self.assertIn('./setup.sh --light --internal --blob', setup['configure_alternative'])
+        # one command a person pastes on the machine: clone, write .env, start
+        self.assertIn('git clone https://github.com/hevnsnt/cvengine-sentinel.git', setup['one_liner'])
+        self.assertIn(f"./setup.sh --light --internal --yes --name \"$(hostname -s)\" --blob '{out['blob']}'", setup['one_liner'])
+        self.assertTrue(setup['one_liner'].endswith('docker compose up -d'))
+        # a finished prompt for an AI agent: the blob and the choices already in it
+        self.assertIn(out['blob'], setup['agent_prompt'])
+        self.assertIn('./setup.sh --light --internal --yes', setup['agent_prompt'])
+        self.assertIn(out['server_url'], setup['agent_prompt'])
+        self.assertNotIn('| sh', setup['agent_prompt'])
         self.assertIn('private network', setup['note'])
         err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a'})
         self.assertEqual((out['setup']['network'], out['setup']['profile']), ('external', 'full'))
@@ -973,3 +1033,54 @@ class ProvisionPickerTests(SentinelBase):
         html = self.page(self.alice)
         self.assertNotIn('<option value="org">', html)
         self.assertNotIn('placeholder="org-slug"', html)
+
+
+class NucleiFindingCapTests(SimpleTestCase):
+    """A nuclei result with many findings keeps the strongest instead of being rejected whole."""
+
+    def finding(self, i, severity='info'):
+        return {'template_id': f't{i}', 'name': f'n{i}', 'severity': severity, 'host': 'a.example', 'matched_at': 'https://a.example/'}
+
+    def test_a_result_within_the_cap_is_kept_whole(self):
+        from agentapi import sentinel_broker as b
+        out = b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS)]})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertNotIn('dropped_findings', out)
+
+    def test_a_result_over_the_cap_keeps_the_strongest_and_counts_the_rest(self):
+        from agentapi import sentinel_broker as b
+        many = [self.finding(i) for i in range(b.MAX_FINDINGS + 50)] + [self.finding('crit', 'critical'), self.finding('high', 'high')]
+        out = b._clean_nuclei_result({'findings': many})
+        self.assertEqual(len(out['findings']), b.MAX_FINDINGS)
+        self.assertEqual(out['dropped_findings'], 52)
+        self.assertEqual([f['template_id'] for f in out['findings'][:2]], ['tcrit', 'thigh'])  # the strongest first, never dropped
+
+    def test_a_list_that_is_no_nuclei_result_is_still_refused(self):
+        from agentapi import sentinel_broker as b
+        from agentapi.services import ApiError
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': [self.finding(i) for i in range(b.MAX_FINDINGS_SENT + 1)]})
+        with self.assertRaises(ApiError):
+            b._clean_nuclei_result({'findings': 'lots'})
+
+
+class ExplainErrorTests(SimpleTestCase):
+    def test_a_warning_that_came_first_is_dropped_and_a_kill_is_named_for_what_it_is(self):
+        raw = ("nuclei exited with status -9: WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), "
+               "but your environment is not suitable and will fallback to encoding/json")
+        out = sentinels.explain_error(raw)
+        self.assertTrue(out.startswith('nuclei exited with status -9'))
+        self.assertNotIn('sonic', out)
+        self.assertIn('out of memory', out)
+
+    def test_a_multi_line_error_keeps_the_line_that_was_not_a_warning(self):
+        self.assertEqual(sentinels.explain_error('[WRN] something minor\nconnection refused by 10.0.0.5'), 'connection refused by 10.0.0.5')
+
+    def test_an_ordinary_error_is_left_as_it_is(self):
+        self.assertEqual(sentinels.explain_error('nuclei exited with status 2: no templates found'), 'nuclei exited with status 2: no templates found')
+
+    def test_an_error_that_is_only_a_warning_is_not_made_empty(self):
+        self.assertTrue(sentinels.explain_error('WARNING: it is only this'))
+
+    def test_the_error_is_clipped(self):
+        self.assertLessEqual(len(sentinels.explain_error('x' * 1000)), 300)

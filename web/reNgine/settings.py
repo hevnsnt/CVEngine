@@ -102,6 +102,10 @@ DATABASES = {
         'PASSWORD': env('POSTGRES_PASSWORD'),
         'HOST': env('POSTGRES_HOST'),
         'PORT': env('POSTGRES_PORT'),
+        # No JIT. CVEngine's host queries are large (one row per host: window functions, a dozen correlated subqueries) and Postgres
+        # overestimates their cost, so it compiled each one with LLVM before running it: a 0.1 s query took 2 s here and up to a minute
+        # on a busy 3-core server, which is what made a 2,000-host project's dashboard slow to open. The queries themselves are cheap.
+        'OPTIONS': {'options': '-c jit=off'},
         # 'OPTIONS':{
         #     'sslmode':'verify-full',
         #     'sslrootcert': os.path.join(BASE_DIR, 'ca-certificate.crt')
@@ -252,6 +256,13 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # pipeline safe.
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': env.int('CELERY_VISIBILITY_TIMEOUT', default=12 * 3600)}
+
+# The Live screen's snapshot refresher (cveFeed/live_refresh.py). Unlike the schedules a migration creates, this one is written by beat itself at
+# every start, so its cadence follows CVENGINE_LIVE_REFRESH_SECONDS and its row is switched off by CVENGINE_LIVE_REFRESH=0 (reNgine/livecache_config.py).
+from reNgine import livecache_config as _livecache  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry()}
+
 '''
 ROLES and PERMISSIONS
 '''

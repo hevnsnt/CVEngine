@@ -59,6 +59,14 @@ def wpscan_thorough(project_id):
     return wpscan_scan.run_thorough(project_id)
 
 
+@app.task(name='wpscan_quick', bind=False, queue='wpscan_queue')
+def wpscan_quick(scan_id, hosts, attempt=1):
+    """The quick WPScan pass for WordPress sites the scan's own stage could not reach in time (over its limit, out of its time budget, no memory),
+    a little later each attempt: see ``wpscan_scan.run_quick``."""
+    from cveFeed import wpscan_scan
+    return wpscan_scan.run_quick(scan_id, hosts, attempt)
+
+
 @app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
 def testssl_sweep():
     """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so
@@ -87,6 +95,30 @@ def subdir_apps_sweep():
     """Every 30 minutes: a few web hosts asked for the well-known application mount paths (see ``cveFeed.subdir_apps``)."""
     from cveFeed import subdir_apps
     return subdir_apps.sweep_all()
+
+
+@app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
+def drain_screenshots():
+    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
+    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    from cveFeed import web_shot
+    return web_shot.drain()
+
+
+@app.task(name='screenshot_backfill', bind=False, queue='screenshot_queue')
+def screenshot_backfill():
+    """Hourly: queue the hosts that have no web screenshot (or an old one), a few per project per run, then drain: see ``cveFeed.web_shot.backfill``."""
+    from cveFeed import web_shot
+    return web_shot.sweep()
+
+
+@app.task(name='refresh_live_snapshots', bind=False, queue='live_cache_queue', ignore_result=True)
+def refresh_live_snapshots():
+    """Every few seconds (``CVENGINE_LIVE_REFRESH_SECONDS``, 5): recompute the live screen's snapshots of the scopes people are looking at, so a
+    poll is served from the cache (see ``cveFeed.live_refresh``). It has a queue and a worker of its own so scan work never starves it, and
+    it reads and writes only the cache and the database: it never touches a target."""
+    from cveFeed import live_refresh
+    return live_refresh.refresh_hot_scopes()
 
 
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
@@ -299,6 +331,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     pause_for = sleep or time.sleep
     explicit = bool(ids or techs)
     row = cutoff = now = None
+    assumed_days, failures, set_aside = None, {}, set()
     if not explicit:
         from cveFeed import feed_watermark
         window = _coverage_days() if days is None else int(days)
@@ -311,6 +344,10 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 and now - row.checked_at < feed_watermark.RECHECK):
             return {'status': 'covered', 'covered_through': row.covered_through.isoformat()}
         cutoff = feed_watermark.floor_for(row, now, window)
+        if row.covered_through is None or row.covered_through > now + feed_watermark.SKEW:
+            assumed_days = max(feed_watermark.LEGACY_DAYS, window)  # nothing says how far back the feed is complete: this window is a guess
+        failures = dict(row.failures or {})
+        set_aside = {i for i, tries in failures.items() if tries >= feed_watermark.MAX_ATTEMPTS}
         max_scan = feed_watermark.scan_budget(cutoff, now, max_scan)
         if now - cutoff > timedelta(days=2):
             max_new = max(max_new, GAP_MAX_NEW)
@@ -321,6 +358,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     reached, head, page_cursor = False, None, None
 
     def want(entry_id):
+        if entry_id in set_aside and not force:
+            return  # refused on every attempt of earlier runs: reported (feed_watermark.status), retried by a forced run, not read again here
         if entry_id not in first_seen and entry_id not in wanted:
             wanted.append(entry_id)
 
@@ -377,7 +416,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         if not wanted:
             return result
     result['wanted'] = len(wanted)
-    created_rows = []
+    created_rows, refused = [], []
     for entry_id in wanted[:max_new]:
         try:
             entry = client.get_entry(entry_id)
@@ -386,9 +425,11 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             obj, _ = CVEEntry.from_api(entry)
             created_rows.append(obj)
             result['created'] += 1
+            failures.pop(entry_id, None)
         except requests.RequestException as exc:
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
             result['failed'] += 1
+            refused.append(entry_id)
             logger.warning('cve.now backfill: failed to fetch %s: %s', entry_id, exc)
             if status in (401, 403, 429):
                 result['blocked'], result['status'] = True, 'blocked'
@@ -396,12 +437,37 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
             result['failed'] += 1
             logger.warning('cve.now backfill: failed to save %s: %s', entry_id, exc)
+            refused.append(entry_id)
         pause_for(pause)
     if row is not None:
+        if result['status'] == 'ok':
+            # an entry that fails run after run is set aside once (up to a few), so one bad entry cannot hold the window back for good; a feed
+            # that refuses everything is not a bad entry and never gets that far (the cap), and a refusal (401/403/429) says nothing about an entry
+            for entry_id in refused:
+                tries = failures.get(entry_id, 0) + 1
+                if tries >= feed_watermark.MAX_ATTEMPTS and entry_id not in set_aside:
+                    if len(set_aside) >= feed_watermark.MAX_UNREADABLE:
+                        tries = feed_watermark.MAX_ATTEMPTS - 1
+                    else:
+                        set_aside.add(entry_id)
+                        activity.log('feed', f'cve.now backfill: {entry_id} could not be read in {tries} runs and is set aside; it is listed in the feed status', status='failed')
+                failures[entry_id] = min(tries, feed_watermark.MAX_ATTEMPTS)
+        if failures:
+            stored = set(CVEEntry.objects.filter(cve_id__in=list(failures)).values_list('cve_id', flat=True))
+            failures = {i: t for i, t in failures.items() if i not in stored}
+        failures_changed = failures != (row.failures or {})
+        row.failures = failures
+        if feed_watermark.unreadable(row):
+            result['unreadable'] = feed_watermark.unreadable(row)
         clean = result['status'] == 'ok' and not result['failed'] and result['created'] == result['wanted'] and len(wanted) <= max_new
         if reached and clean:
             # everything the feed lists back to the floor is stored: the watermark moves to the head this walk started from
-            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = head or now, '', None, now
+            row.covered_through, row.resume_cursor, row.resume_head, row.checked_at = min(head or now, now), '', None, now
+            if assumed_days:
+                row.assumed_days = assumed_days
+                result['window_assumed_days'] = assumed_days
+                activity.log('feed', f'cve.now backfill: no seed time or earlier walk says how far back the feed was complete, so it was read back '
+                             f'{assumed_days} days; anything older that is missing stays missing', status='done')
             row.save()
             result['covered_through'] = row.covered_through.isoformat()
         elif clean:
@@ -409,6 +475,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             row.resume_cursor, row.resume_head = page_cursor or '', head
             row.save()
             result['continues'] = True
+        elif failures_changed:
+            row.save(update_fields=['failures', 'updated_at'])
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
@@ -478,6 +546,8 @@ def sync_threat_intel():
                                         .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
+    if result.get('ranges_repaired'):  # entries whose ranges were re-derived are correlated again (cveFeed.intel.repair_ranges)
+        correlate_refreshed_cves.delay()
     tiers = [c.threat_tier for c in created]
     if created or changed or result['errors']:
         activity.log('feed', (f"Threat intelligence: {len(created)} CVEs imported from the CVE List ({tiers.count(FIRE)} fire, "
@@ -688,6 +758,7 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
+    from django.db import transaction
     from django.utils import timezone
     from cveFeed import activity, correlation, triage, validation, validation_plan
     from cveFeed.validation_authority import require_authority
@@ -706,6 +777,8 @@ def validate_match_on_demand(request_id):
     try:
         require_authority(job)
         owned = CVEMatch.objects.filter(pk=job.match_id, subdomain__target_domain__project_id=job.project_id)
+        def still_current():
+            return owned.filter(latest_scan_q('subdomain__')).exists()
         match = owned.filter(latest_scan_q('subdomain__')).select_related('cve_entry', 'subdomain__target_domain').first()
         if not match:
             # a rescan replaced the match while the job waited (or the host left the inventory): superseded work, not a worker failure.
@@ -724,9 +797,8 @@ def validate_match_on_demand(request_id):
             activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(invalid_reason)})',
                             check_state='no_check', ai_state='not_needed', assessment_status='closed_not_applicable')
             return result
-        row = triage.track(triage.with_cves([match]))[0][0]
-        row.review_nonce = str(job.pk)
-        row.save(update_fields=['review_nonce', 'updated_at'])
+        row, described = triage.track(triage.with_cves([match]))[0]
+        triage.request_fresh_review(row, described, str(job.pk))
         row, _ = triage.track(triage.with_cves([match]))[0]
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(evidence_signature=row.signature)
         subject = validation.subject_for(row, match)
@@ -743,6 +815,10 @@ def validate_match_on_demand(request_id):
         plans = [plan]
         activity.settle(planning, 'done', f'Validation request #{job.pk}: {plan["reason"]}',
                         check_kinds=plan['check_kinds'], plan_source=plan['source'])
+        if not still_current():
+            # a scan finished while the plan was asked for: stop before the checks, the template draft and the review, which are the
+            # rest of the work (and of the AI calls) and would all be spent on a match nobody sees any more
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         candidate = None
         if plan['generate_template']:
             draft_step = activity.log('write_check', f'Validation request #{job.pk}: testing an AI-written template draft for {cve_id}',
@@ -805,6 +881,8 @@ def validate_match_on_demand(request_id):
                      f'{check_result.get("reused", 0)} reused, {check_result.get("capped", 0)} deferred'
                      + ('; no executable check available' if no_check else ''), project=job.project_id,
                      cve_id=cve_id, **detail)
+        if not still_current():
+            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         # Rebuild the signature after checks, so a fresh template hit is part of the AI review.
         match.refresh_from_db()
         row, described = triage.track(triage.with_cves([match]))[0]
@@ -838,11 +916,50 @@ def validate_match_on_demand(request_id):
         status = 'failed' if broken or capped_only else 'completed'  # capped: no coverage was established yet
         if capped_only:
             result['deferred_by_cap'] = True  # retried once the per-day caps reset, without spending an attempt
-        OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(),
-            next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
-            error=('deferred until the daily validation cap resets' if capped_only else
-                   'a check or AI review failed or was blocked') if status == 'failed' else '')
+        # what the job answered for. The signature it recorded when it started is not the row's once the checks ran: the probe results and
+        # the earlier checks a validation stores are part of the host context the signature is made from, so the next sweep took the
+        # finished job for one of other evidence and queued the same match again (issue 338, jobs 4750 and 4752).
+        row.refresh_from_db()
+        match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
+        with transaction.atomic():
+            done = OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
+                status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
+                next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
+                error=('deferred until the daily validation cap resets' if capped_only else
+                       'a check or AI review failed or was blocked') if status == 'failed' else '')
+            if done:
+                # What the job answered for is described AFTER it left 'running', in the same transaction (nobody sees the finished job
+                # without it). A manual job counts as standing (match_policy.has_standing) once it is no longer running, and closure_basis
+                # reads that: the key, and the signature, made while it still ran described an edge-fronted match as clearable, the ones
+                # enqueue and track make from the database do not, so the gap never held after a manual validation (the key), and the job
+                # was never taken for the evidence the row has (the signature), so the same match was validated again later.
+                after = triage.describe(match)
+                result['revalidation_key'] = triage.revalidation_key(after)
+                signature = triage.effective_signature(after, row.review_nonce)
+                OnDemandValidation.objects.filter(pk=job.pk).update(result=result, evidence_signature=signature)
+                # Equal but for the job's own standing: closure_basis, and the host text key that only a match with no floor has (the
+                # standing is what gives this one its floor back), which is compared as the match would have it
+                ignored = ('closure_basis', 'host_text')
+                standing_only = (
+                    {k: v for k, v in described['signature_fields'].items() if k not in ignored}
+                    == {k: v for k, v in after['signature_fields'].items() if k not in ignored}
+                    and described['signature_fields'].get('host_text') in (None, triage.host_text_key(after)))
+                if (standing_only and row.status == 'triaged' and row.verdict_id and row.signature != signature
+                        and triage.rank(row.classification) >= triage.rank(triage.hard_evidence('cve_match', after['facts'])[0])):
+                    # The review above was made with the signature the running job gave the match, and the only thing that differs now is the
+                    # job's own standing (closure_basis): the evidence is the one the model answered for. The answer it stored already
+                    # satisfies the floor the finished job leaves, so the row takes the new signature without a second review (and not over
+                    # a fresh review requested meanwhile). A classification below the floor is asked again.
+                    Triage.objects.filter(pk=row.pk, signature=row.signature, review_nonce=row.review_nonce).update(
+                        signature=signature, evidence_key=triage.evidence_key_for(after['kind'], after['signature_fields'], row.review_nonce))
+        if done:
+            # Anything else that moved while the checks and the review ran (a lowered floor, a new banner, a new template result) is NOT
+            # absorbed above: track the match as it is now, so a real change resets or queues the row as always, and the row and the finished
+            # job describe the same evidence (a failed job's backoff then holds: enqueue sees one signature, not two).
+            try:
+                triage.track(triage.with_cves([match]))
+            except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
+                logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
         activity.settle(progress, 'failed' if status == 'failed' else 'done',
                         f'Validation request #{job.pk} {status} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
@@ -950,8 +1067,7 @@ def automatic_validate_finding(job_id):
             return _skip_automatic_validation(job, progress, 'out_of_scope')
         # This is a new automatic assessment of the current evidence. A prior shared verdict
         # must not short circuit its AI review, while later sweeps still deduplicate this job.
-        row.review_nonce = str(job.pk)
-        row.save(update_fields=['review_nonce', 'updated_at'])
+        triage.request_fresh_review(row, described, str(job.pk))
         row, described = triage.track([finding])[0]
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(signature=row.signature)
         check_state = 'no_check'
@@ -1079,33 +1195,66 @@ def run_hygiene_all():
     if not ledger.sweep_claim('hygiene', 1800):
         return {"queued": 0, "skipped": "another sweep is running"}
     from cveFeed.conductor import bounty_blocked_projects
-    due = ledger.stale_first('hygiene', Domain.objects.exclude(project_id__in=bounty_blocked_projects()).values_list("id", "name", "project_id"))  # not a bug bounty project that has not confirmed automated testing
+    due = ledger.stale_first('hygiene', Domain.objects.exclude(project_id__in=bounty_blocked_projects()).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)  # a manual only target is not touched on its own
+                             .values_list("id", "name", "project_id"))  # not a bug bounty project that has not confirmed automated testing
     for domain_id, _name, _project in due[:HYGIENE_SWEEP_MAX]:
         run_hygiene_task.delay(domain_id)
     return {"queued": min(len(due), HYGIENE_SWEEP_MAX), "due": len(due)}
 
 
-@app.task(name="watch_certificate_transparency", bind=True, queue="cve_feed_queue")
+@app.task(name="watch_certificate_transparency", bind=True, queue="ctwatch_queue")
 def watch_certificate_transparency(self, domain_id):
     """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
-    (rate limit, timeout) the check is tried again later instead of the target being skipped."""
-    from cveFeed.ctmonitor import run_ct_watch
-    result = run_ct_watch(domain_id)
-    if result.get("failed") and self.request.retries < 3:
-        raise self.retry(countdown=600 * (self.request.retries + 1), max_retries=3)
-    return result
+    (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
+    feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
+    and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``).
+    Every publish carries a lifetime (``expires``, kept by the retries) and a per-domain marker (``cveFeed.ct_queue``): the marker is
+    cleared here once the lookup ends for good, and a lookup that ends in failure is remembered so the sweep stops re-queuing it."""
+    import random
+
+    from cveFeed import ct_queue
+    from cveFeed.ctmonitor import CtBusy, run_ct_watch
+    retrying = False
+    try:
+        try:
+            result = run_ct_watch(domain_id)
+        except CtBusy as busy:  # waiting for crt.sh's pacing is not a failure: it is asked again when the slot is due, with no slot held meanwhile
+            retrying = True
+            raise self.retry(exc=busy, countdown=int(busy.wait) + random.randint(1, 60), max_retries=None)
+        except Exception:  # a target the lookup cannot handle (a timeout, a reply it cannot read): not at the head of every sweep
+            ct_queue.record_failure(domain_id)
+            raise
+        if result.get("failed"):
+            delay = 600 * (self.request.retries + 1)
+            # a retry that would start after the message's lifetime is dropped unseen by the worker, so this failure is the last this
+            # lookup will see: record it now (the sweep's messages live about 20 minutes, the retries wait 10, 20 and 30)
+            if self.request.retries < 3 and not ct_queue.expires_within(self.request.expires, delay):
+                retrying = True
+                raise self.retry(countdown=delay, max_retries=3)
+            ct_queue.record_failure(domain_id)
+        return result
+    finally:
+        if not retrying:  # a retry is the same lookup still on its way: its marker stays
+            ct_queue.clear(domain_id)
 
 
 @app.task(name="watch_certificates_all", bind=False, queue="cve_feed_queue")
 def watch_certificates_all():
     """Periodic sweep: every target is "subscribed" to certificate-transparency monitoring this way. Targets checked in the
-    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds)."""
-    from cveFeed import ledger
+    last 24 hours are skipped; the rest go oldest first, as many as fit in one interval (a check starts every ~3 seconds).
+    It is bounded: nothing is queued while ``ctwatch_queue`` holds ``CVENGINE_CT_BACKLOG_MAX`` messages, a sweep adds at most the room
+    left under that cap, a target already queued or that recently failed for good is left out, and every message expires."""
+    from cveFeed import ct_queue, ledger
     from dashboard.models import SystemTimings
     from targetApp.models import Domain
     from targetApp.shared_domains import is_provider_domain
     from targetApp.target_types import IP, classify_target
     window = SystemTimings.current().ct_watch_minutes * 60
+    size = max(1, window // 3)
+    cap = ct_queue.backlog_max(size)
+    waiting = ct_queue.backlog()
+    if waiting is not None and waiting >= cap:  # the consumer is behind: more lookups would only lengthen the line
+        return {"queued": 0, "skipped": f"ctwatch_queue already holds {waiting} (cap {cap})", "backlog": waiting, "cap": cap}
     if not ledger.sweep_claim('ct-watch', int(window * 0.8)):
         return {"queued": 0, "skipped": "another sweep is running"}
     # crt.sh has nothing on a bare IP, so only names are asked about
@@ -1115,10 +1264,14 @@ def watch_certificates_all():
     rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
-    batch = due[:max(1, window // 3)]
-    for i, (domain_id, _name, _project) in enumerate(batch):  # spread out: crt.sh blocks a burst, so each check starts a couple of seconds after the last
-        watch_certificate_transparency.apply_async(args=[domain_id], countdown=int(i * 2.5))
-    return {"queued": len(batch), "due": len(due)}
+    failed = ct_queue.recently_failed(due)
+    candidates = [r[0] for r in due if r[0] not in failed]
+    room = cap if waiting is None else cap - waiting
+    # oldest first, as many as fit in one interval and under the cap; a domain already on its way is skipped without using a place,
+    # and each lookup starts a couple of seconds after the last (crt.sh blocks a burst)
+    queued = ct_queue.queue_lookups(candidates, lifetime=window, limit=min(size, room))
+    return {"queued": len(queued), "due": len(due), "backlog": waiting, "cap": cap,
+            "not_queued": len(candidates) - len(queued), "recently_failed": len(failed)}  # not_queued: already on its way, or past the batch and the cap's room
 
 
 DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)
@@ -1177,6 +1330,7 @@ def internal_discovery_sweep():
 
 
 DEEP_SWEEP_MAX = 50  # apexes queued per run (CVENGINE_DEEP_SWEEP_MAX)
+DEEP_SWEEP_PER_PROJECT = 10  # of them, at most this many for one project (CVENGINE_DEEP_SWEEP_PER_PROJECT)
 
 
 @app.task(name="deep_scan_apexes", bind=False, queue="cve_feed_queue")
@@ -1211,8 +1365,11 @@ def deep_scan_apexes():
     # a bug bounty project is never widened to a parent domain (the program's scope names what may be tested, and a Domain target counts as
     # a person's confirmation of it) and, until its owner confirmed automated testing, not deep-scanned either
     engaged = set(BountyEngagement._base_manager.values_list("project_id", flat=True))
-    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode").order_by("id"))
-    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode in rows}  # a project's own row for a name
+    rows = list(Domain.objects.exclude(project=None).exclude(project_id__in=engaged).values_list("id", "name", "project_id", "scope_mode", "discovery_mode").order_by("id"))
+    own = {(project_id, name): domain_id for domain_id, name, project_id, _mode, _disc in rows}  # a project's own row for a name
+    # a target added as passive, or as "just add it", was never meant to be scanned deeply: it adds nothing to the sweep, and its own apex row is not scanned by it
+    held = (Domain.DISCOVERY_PASSIVE, Domain.DISCOVERY_MANUAL)
+    held_apex = {(project_id, name) for _domain_id, name, project_id, _mode, disc in rows if disc in held}
     from cveFeed.exclusions import excluded_names
     banned_by_project = {}  # project id -> the names its organization excluded for good (one read per project)
 
@@ -1222,8 +1379,8 @@ def deep_scan_apexes():
         return name.lower().rstrip(".") in banned_by_project[project_id]
     wanted = {}  # (project id, apex) -> the project's own Domain row for it, if there is one
     forced = set()  # apexes a target asked for with scope_mode='parent': promoted even when on the shared list
-    for _domain_id, name, project_id, mode in rows:
-        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST:
+    for _domain_id, name, project_id, mode, disc in rows:
+        if classify_target(name) != DOMAIN or mode == Domain.SCOPE_HOST or disc in held:
             continue  # scope_mode='host': never promoted to a parent
         if mode == Domain.SCOPE_PARENT:
             apex = apex_domain(name)
@@ -1236,13 +1393,24 @@ def deep_scan_apexes():
             apex, host_scoped = effective_apex(name)
             if host_scoped:
                 continue
-        if apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
+        if apex and (project_id, apex) not in held_apex and not excluded(project_id, apex):  # an excluded apex is never promoted, queued or scanned
             wanted.setdefault((project_id, apex), own.get((project_id, apex)))
     due = ledger.stale_first("bbot-deep", [(key, key[1], key[0]) for key in wanted])
     busy = set(ScanHistory.objects.filter(
         scan_status__in=(QUEUED, RUNNING), start_scan_date__gte=timezone.now() - running_window(),
         domain__name__in={key[1] for key in wanted}).exclude(tasks__contains=[HOST_PIPELINE_TASK]).values_list("domain__name", "domain__project_id"))
-    todo = [key for key, apex, project_id in due if (apex, project_id) not in busy][:cap]
+    try:
+        per_project = max(1, int(os.environ.get("CVENGINE_DEEP_SWEEP_PER_PROJECT", DEEP_SWEEP_PER_PROJECT)))
+    except ValueError:
+        per_project = DEEP_SWEEP_PER_PROJECT
+    todo, taken = [], {}
+    for key, apex, project_id in due:  # oldest first, but one project's apexes cannot fill the whole run: the others wait behind them otherwise
+        if (apex, project_id) in busy or taken.get(project_id, 0) >= per_project:
+            continue
+        taken[project_id] = taken.get(project_id, 0) + 1
+        todo.append(key)
+        if len(todo) >= cap:
+            break
     domains, skipped = [], 0
     for project_id, apex in todo:
         domain = Domain.objects.filter(pk=wanted[(project_id, apex)]).first() if wanted[(project_id, apex)] else None
@@ -1288,6 +1456,14 @@ def assess_host(self, assessment_id):
     """Execute one stored, scope-checked host assessment; the broker carries no target text."""
     from cveFeed.host_assessment import execute
     return execute(assessment_id, celery_id=self.request.id)
+
+
+@app.task(name='assess_hosts', bind=True, queue='discovery_queue')
+def assess_hosts(self, assessment_ids):
+    """Execute a batch of stored, scope-checked host assessments of one target as one pipeline run (each host keeps its own row and outcome);
+    the broker carries no target text, only row ids. The time limit is the discovery queue's, as for ``assess_host``."""
+    from cveFeed.host_assessment import execute_batch
+    return execute_batch(assessment_ids, celery_id=self.request.id)
 
 
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
@@ -1367,8 +1543,9 @@ def weekly_deep_nuclei():
                                                 archived_at__isnull=False)
             from cveFeed.bounty_gate import Gate
             gate = Gate()  # a bug bounty project that has not confirmed automated testing is not swept; a host outside its scope is never a target
+            from targetApp.models import Domain
             base = Subdomain.objects.filter(scan_history__scan_status=2, target_domain__project__isnull=False).exclude(
-                target_domain__project_id__in=gate.blocked).filter(latest_scan_q()).filter(~Exists(archived)).select_related(
+                target_domain__project_id__in=gate.blocked).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL).filter(latest_scan_q()).filter(~Exists(archived)).select_related(
                 'scan_history__domain', 'target_domain').order_by('pk')
             rows = list(base.filter(pk__gt=cursor.last_pk)[:100])
             if not rows:
@@ -1485,7 +1662,10 @@ def update_nuclei_templates():
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("nuclei template update failed: %s", exc)
         return {"updated": False, "error": str(exc)[:200]}
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-1:] or [""]
+    # the line that says what happened, not a warning nuclei prints about its JSON library on a newer Go release (it was recorded as the result)
+    lines = [line.strip() for line in (proc.stdout + proc.stderr).splitlines() if line.strip()]
+    said = [line for line in lines if not re.match(r"(?:\[wrn\]|(?:warning|warn)\b)", line, re.I)]
+    tail = said[-1:] or ["ran with no message (the templates were already current)" if proc.returncode == 0 else "no message"]
     from cveFeed.templategen import invalidate_template_index
     invalidate_template_index()
     try:  # system_status judges the refresh on this, not on the age of the files (they only change when a release is published)
@@ -1600,7 +1780,29 @@ def report_resources():
     container) can show it. See reNgine/resources.py."""
     from reNgine import resources
     resources.report_state()
+    from cveFeed import scan_concurrency
+    scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
+    from cveFeed import tunables
+    tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
+    from cveFeed import autotune
+    autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
     return {}
+
+
+@app.task(name="autotune", bind=False, queue="cve_feed_queue")
+def autotune_task():
+    """Every ten minutes: one auto-tuning round (cveFeed.autotune): measure, then move (mode Auto) or recommend (mode Suggest) the throughput
+    settings of configMaxxing that no person pinned, one bounded step at a time. Changes nothing while scanning is paused or updating."""
+    from cveFeed import autotune
+    return autotune.run()
+
+
+@app.task(name="apply_scan_concurrency", bind=False, queue="cve_feed_queue")
+def apply_scan_concurrency():
+    """After a save on Settings, configMaxxing: resize the running discovery worker to the saved value with celery's ``autoscale`` remote
+    control (the other numbers are read live by the workers). report_resources does the same every 30 seconds."""
+    from cveFeed import scan_concurrency
+    return scan_concurrency.apply_discovery()
 
 
 PRUNE_ROUNDS, PRUNE_BATCH = 20, 5000
@@ -1749,6 +1951,11 @@ def weekly_maintenance():
         return {'error': type(exc).__name__}
     finally:
         cache.delete('cvengine:weekly-maintenance')
+    try:
+        from cveFeed import web_shot
+        result['screenshot_files_removed'] = web_shot.sweep_orphans()  # picture files no row names (a project or target deleted with its rows)
+    except Exception:  # noqa: BLE001 - housekeeping only
+        logger.exception('screenshot file sweep failed')
     archived = sum(result['archived'].values())
     activity.log('feed', (f'Weekly log maintenance archived and removed {archived:,} log rows older than their retention '
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '

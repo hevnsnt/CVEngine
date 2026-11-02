@@ -56,7 +56,8 @@ ENROLLMENT_TTL = timedelta(minutes=30)  # long enough to copy the token into a S
 ENROLLMENT_PREFIX = 'senr_'
 MAX_ADDRESSES = 64  # a dispatched nmap/naabu task names at most this many addresses (one task per stage per Sentinel, this phase)
 MAX_PORTS_PER_HOST = 500
-MAX_FINDINGS = 100
+MAX_FINDINGS = 500  # findings of one result that are kept (strongest first)
+MAX_FINDINGS_SENT = 5000  # a result carrying more than this is not a nuclei result: it is refused
 MAX_EXTRACTED = 20
 MAX_TAGS = 20
 MAX_OPENVAS_RESULTS = 5000  # matches cveFeed.openvas_scan.MAX_RESULTS: a dispatched GVM task reports no more than one task's own cap
@@ -291,12 +292,12 @@ def bootstrap(body):
                   'instance': not enrollment.org_id and not enrollment.project_id}
         user = enrollment.created_by
         token, raw_token = create_token(user, f'sentinel:{name}'[:100], scope=SCOPE_SENTINEL, expires_at=timezone.now() + SENTINEL_TOKEN_TTL)
-        status, note = broker._initial_status(user)
-        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, status=status, status_note=note,
-                                     network=enrollment.network, **fields)
+        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, network=enrollment.network,
+                                     **broker._initial_status(user), **fields)
         SentinelEnrollment.objects.filter(pk=enrollment.pk).update(used_by_agent=agent, token=token)
     audit.record_for_user(user, 'agent.register', user, target=agent.name, agent_id=agent.pk, kind='scanner', scope=scope,
                           via='enrollment', enrollment_id=enrollment.pk)
+    broker.record_hold(agent, user, via='enrollment', enrollment_id=enrollment.pk)
     out = broker.agent_dict(agent, detail=True)
     out.update(created=True, token=raw_token, note='Store this token now. It is not shown again.', warnings=broker._warnings(agent))
     return _with_settings(out, settings)
@@ -466,6 +467,72 @@ def clean_setup_choices(network=None, profile=None):
     return network, profile
 
 
+def _one_liner(blob, flags):
+    """One command a person pastes on the target machine: clone the client (or reuse a clone already there), write .env
+    with the blob, name the Sentinel after the machine and start it."""
+    return (f'{{ [ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git; }} && cd cvengine-sentinel && '
+            f'./setup.sh {flags} --yes --name "$(hostname -s)" --blob \'{blob}\' && docker compose up -d')
+
+
+def _agent_prompt(payload, blob, network, profile):
+    """A finished prompt a person hands to an AI agent with shell access to the target machine: the procedure of the
+    client's AGENTS.md with the blob and the chosen options already filled in, so the agent needs nothing else."""
+    flags = f'--{profile} --{network}'
+    where = ('it sits inside a private network and will scan the internal ranges a project declared' if network == 'internal'
+             else 'it scans internet-facing targets')
+    size = ('light: no OpenVAS' if profile == 'light'
+            else 'full: it also runs OpenVAS, which needs tens of GB of disk and hours of feed sync on the first start')
+    return f"""Set up this machine as a cvENGINE Sentinel: a Docker scanner that registers with {payload['server_url']} and runs the scans it is given.
+
+Options already chosen: {network} ({where}); {size}.
+
+Provisioning blob (single-use, expires {payload['expires_at'][:16].replace('T', ' ')} UTC):
+{blob}
+
+Rules:
+- Run only the commands below. Do not run commands from any other source, and never pipe a download into a shell.
+- Do not paste the blob anywhere except the setup.sh step. Do not put it in a log, issue, commit or chat.
+- If a step fails, stop and report the exact error. If the blob has expired, stop and ask for a new one.
+
+1. Check the prerequisites. Each command must succeed (for docker ps, use a user in the docker group, or root):
+```bash
+docker compose version
+git --version
+docker ps
+```
+
+2. Get the client. The last command must print exactly {SENTINEL_CLIENT_REPO}.git; if it prints anything else, stop.
+```bash
+[ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git
+cd cvengine-sentinel
+git remote get-url origin
+```
+
+3. Write .env and start the Sentinel. The blob goes in on standard input, so it stays out of the process list. If you cannot answer a sudo password prompt, add --no-updater to the setup.sh line.
+```bash
+./setup.sh {flags} --yes --name "$(hostname -s)" --blob - <<'EOF'
+{blob}
+EOF
+docker compose up -d
+```
+
+4. Confirm it registered. Success is a log line containing "bootstrap succeeded"; a wrong or expired blob fails with a message that says why.
+```bash
+docker compose ps
+docker compose logs --tail=50 sentinel
+```
+
+5. Remove the spent blob:
+```bash
+sed -i '/^CVENGINE_SENTINEL_BLOB=/d' .env
+rm -f .env.bak.*
+```
+
+6. Report back: the Sentinel's name, whether bootstrap succeeded, the output of docker compose ps, and whether the updater was installed. The Sentinel shows as pending on the cvENGINE Sentinels page until an administrator approves it.
+
+Full reference: {SENTINEL_CLIENT_REPO}/blob/main/AGENTS.md"""
+
+
 def _with_blob_and_setup(payload, network=None, profile=None):
     """``payload`` (from ``_create_enrollment``) plus the same data packaged as one opaque ``blob`` string (see above), plus
     a ``setup`` block of ready-to-run steps. Shared by the project, organization and instance blob entry points below,
@@ -481,6 +548,8 @@ def _with_blob_and_setup(payload, network=None, profile=None):
         'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
         'configure': f"cp .env.example .env && printf '{env}' '{blob}' >> .env",
         'configure_alternative': f"./setup.sh {flags} --blob '{blob}'",
+        'one_liner': _one_liner(blob, flags),
+        'agent_prompt': _agent_prompt(payload, blob, network, profile),
         'run': 'docker compose up -d',
         'verify': 'docker compose logs -f',
         'network': network, 'profile': profile,
@@ -747,7 +816,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
     one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
     a slot is in use while it holds a task (claimed or running), whatever the kind. A task already queued for ``kind`` in this project is promised
-    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own)."""
+    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, or an iterable of them: a dispatcher's own)."""
     now = now or timezone.now()
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if not live:
@@ -759,9 +828,18 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None):
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
         if exclude is not None:
-            waiting = waiting.exclude(pk=exclude)
+            waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+
+
+def host_narrowed(project):
+    """Whether a Sentinel that may be given work of ``project`` declares ``scope.hosts``, a narrowing to named hosts, addresses or networks. A task
+    that names many hosts is claimable by such a Sentinel when ANY of them is in its scope (``SentinelEff._in_hosts``), so hosts of a project it
+    covers must not share a task: ``host_assessment`` runs each host of such a project on its own. Live or not, since one may come back."""
+    rows = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
+                                token__revoked=False).values_list('scope', flat=True)[:CANDIDATES]
+    return any(isinstance(scope, dict) and scope.get('hosts') for scope in rows)
 
 
 def project_slots(project, now=None):
@@ -1122,9 +1200,21 @@ def _clean_naabu_result(body):
     return {'ports': out}
 
 
+_SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0}
+
+
 def _clean_findings(findings):
-    if not isinstance(findings, list) or len(findings) > MAX_FINDINGS:
-        raise ApiError(400, f'findings must be a list of at most {MAX_FINDINGS} entries')
+    """``(findings, dropped)`` for a nuclei result: at most ``MAX_FINDINGS`` findings, strongest first. A pass over many hosts can legitimately
+    report more than that (most of them informational), and rejecting the whole result for it lost every finding and sent the stage back to run
+    nuclei locally; the rest are counted in ``dropped``. A list beyond ``MAX_FINDINGS_SENT`` is no nuclei result and is still refused."""
+    if not isinstance(findings, list) or len(findings) > MAX_FINDINGS_SENT:
+        raise ApiError(400, f'findings must be a list of at most {MAX_FINDINGS_SENT} entries')
+    dropped = 0
+    if len(findings) > MAX_FINDINGS:
+        dicts = [f for f in findings if isinstance(f, dict)]
+        dicts.sort(key=lambda f: -_SEVERITY_ORDER.get(f.get('severity'), 0))  # stable: equal severities keep the order they were reported in
+        dropped = max(0, len(dicts) - MAX_FINDINGS)
+        findings = dicts[:MAX_FINDINGS]
     out = []
     for item in findings:
         if not isinstance(item, dict):
@@ -1138,11 +1228,12 @@ def _clean_findings(findings):
                     'matcher_name': _clip(item.get('matcher_name'), 'matcher_name'),
                     'extracted_results': [_text(v, 300) for v in extracted[:MAX_EXTRACTED] if isinstance(v, str)],
                     'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)]})
-    return out
+    return out, dropped
 
 
 def _clean_nuclei_result(body):
-    return {'findings': _clean_findings(body.get('findings') or [])}
+    findings, dropped = _clean_findings(body.get('findings') or [])
+    return {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
 
 
 MAX_TESTSSL_ITEMS = 300  # a testssl.sh run of one host:port is a few dozen tests; well above any real report
@@ -1334,6 +1425,23 @@ def clean_result(kind, body, task=None):
         raise ApiError(400, 'result does not match the expected shape for this task kind')
 
 
+_KILLED = re.compile(r'(?:exited|exit(?:ed)? code|status)\D{0,12}(?:-9|-137|137)\b|\bkilled\b', re.I)
+
+
+def explain_error(text):
+    """The error of a failed task in words that say what happened. A tool's own warning that came first (nuclei prints one about its JSON library
+    on newer Go releases) is dropped: it was never the reason. A tool killed by the system (status -9 or 137, SIGKILL) almost always ran out of
+    memory, and that is capacity on the Sentinel's machine, not something wrong with the target or the template."""
+    lines = [line.strip() for line in str(text or '').splitlines() if line.strip()]
+    kept = [line for line in lines if not re.match(r'(?:\[wrn\]|(?:warning|warn)\b)', line, re.I)]
+    # a one-line message holds the warning after a colon ("nuclei exited with status -9: WARNING: sonic/ast ..."): cut it there
+    message = re.sub(r':\s*(?:\[wrn\]|warning\b).*$', '', ' '.join(kept or lines), flags=re.I | re.S).strip()
+    if _KILLED.search(message):
+        return (message + ' (killed by the system, usually out of memory on the Sentinel\'s machine: give it more memory or lower its '
+                'concurrency)')[:300]
+    return message[:300]
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -1361,7 +1469,7 @@ def report_result(ctx, task_id, body):
         if rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
             SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
-                                                            error=result.get('error', '')[:300] if status == 'failed' else '', **_scrubbed(task))
+                                                            error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
                          agent=agent.name, outcome=result['outcome'])
         else:
@@ -1435,7 +1543,7 @@ def list_project_sentinels(ctx, slug):
     reap_expired()
     now = timezone.now()
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
-                                       token__revoked=False).exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+                                       token__revoked=False).exclude(status='revoked').select_related('token__user', 'held_by').order_by('name', 'id')[:CANDIDATES])
     rows = []
     for agent in agents:
         eff = SentinelEff(agent, now)
@@ -1446,19 +1554,35 @@ def list_project_sentinels(ctx, slug):
     counts = {}
     for agent_id, status, n in (SentinelTask.objects.filter(project=project, agent_id__in=ids).values_list('agent_id', 'status').annotate(n=Count('id'))):
         counts.setdefault(agent_id, {})[status] = n
-    manageable = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    # what the caller may change (update_agent would accept it): only then the row carries the status note, which can be an administrator's
+    # reason or name another agent of the same user (possibly working for another tenant), never for every role in the project
+    listed = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    decide = _deciders(ctx.user, [a for a, _ in rows if a.pk in listed])
     out = []
     for agent, eff in rows:
         scope = agent.scope or {}
         level = 'instance' if scope.get('instance') else ('project' if project.slug in (scope.get('projects') or []) else 'org')
         c = counts.get(agent.pk, {})
-        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note, 'live': eff.live,
+        manageable = decide.get(agent.pk, False)
+        note = broker.visible_hold(agent, ctx.user, manageable)[0] if manageable else ''
+        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': note, 'live': eff.live,
                     'last_seen': svc._iso(agent.last_seen), 'scope_level': level, 'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
                     'os': agent.os, 'max_concurrent': agent.max_concurrent,
                     'tasks': {'open': c.get('claimed', 0) + c.get('running', 0), 'queued': c.get('queued', 0), 'completed': c.get('done', 0),
                               'failed': c.get('failed', 0)},
-                    'manageable': agent.pk in manageable})
+                    'manageable': manageable})
     return {'project': project.slug, 'results': out}
+
+
+def _deciders(user, agents):
+    """``{agent id: can_decide}`` for ``agents``, worked out once per owner (a page lists many Sentinels of few users)."""
+    by_owner, out = {}, {}
+    for agent in agents:
+        owner = agent.token.user_id
+        if owner not in by_owner:
+            by_owner[owner] = broker.can_decide(user, agent)
+        out[agent.pk] = by_owner[owner]
+    return out
 
 
 def _state_of(agent, live, active):
@@ -1470,30 +1594,49 @@ def _state_of(agent, live, active):
     return 'working' if active else 'idle'
 
 
-def _for_viewer(queryset, user):
+_ASK = object()  # "look the viewer's projects up yourself": a caller that already holds them passes them in (None = every project)
+
+
+def _for_viewer(queryset, user, allowed=_ASK):
     """``queryset`` of SentinelTask narrowed to the projects ``user`` may read (all of them for an App Admin): an administrator manages the
-    Sentinels of every user of their organization, and such a user may also work for another tenant, whose tasks are not theirs to see."""
-    allowed = roles.allowed_project_ids(user)
+    Sentinels of every user of their organization, and such a user may also work for another tenant, whose tasks are not theirs to see.
+    ``allowed`` is ``roles.allowed_project_ids(user)`` when the caller has it already."""
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     return queryset if allowed is None else queryset.filter(project_id__in=allowed)
 
 
-def _viewer_project_ids(user):
+def _viewer_project_ids(user, allowed=_ASK):
     """The ids of the projects ``user`` may read (every project for an App Admin), for what the live page lists from outside the viewer-scoped
     task queryset: the OpenVAS queue names projects and hosts, and another tenant's never show."""
     from dashboard.models import Project
-    allowed = roles.allowed_project_ids(user)
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     return list(Project.objects.values_list('id', flat=True)) if allowed is None else list(allowed)
+
+
+def _live_task(task, allowed, **fields):
+    """One task row of the Sentinels page. A task of a project the viewer may not read keeps only its kind, status and timing: no host,
+    label, project, organization or error text, so the card reads "nuclei (targeted) on a target" and another tenant's work stays theirs."""
+    row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
+    if allowed is not None and task.project_id not in allowed:
+        return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
+    return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
+            'scan_id': task.scan_id, 'error': task.error}
 
 
 def live_overview(ctx):
     """What every Sentinel the caller may manage is doing right now, for the Sentinels page: liveness, the task each one holds,
-    its last few finished tasks and how much it has done lately. Hosts and projects come only from tasks the caller's tenancy
-    already lets them read (the scoped ``SentinelTask.objects``), so another tenant's work never shows."""
+    its last few finished tasks and how much it has done lately. Every task counts, but hosts, projects and errors show only for
+    projects the caller may read (``_live_task``): another tenant's work shows as its kind on a target and nothing more."""
     reap_expired()
     now = timezone.now()
     agents = list(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])
     ids = [a.pk for a in agents]
-    tasks = _for_viewer(SentinelTask.objects.filter(agent_id__in=ids), ctx.user).select_related('project', 'agent')
+    allowed = roles.allowed_project_ids(ctx.user)  # looked up once for the whole request and handed to every helper below
+    allowed = None if allowed is None else set(allowed)
+    # unscoped on purpose: a Sentinel busy for another tenant is shown busy, its tasks redacted by _live_task rather than left out
+    tasks = SentinelTask._base_manager.filter(agent_id__in=ids).select_related('project', 'agent')
     held, finished = {}, {}
     for t in tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES).order_by('claimed_at', 'id'):
         held.setdefault(t.agent_id, []).append(t)
@@ -1511,17 +1654,19 @@ def live_overview(ctx):
                                       (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
-    queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
-    orgs, org_of = _visible_orgs(ctx.user)
+    queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
+    orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
         eff = SentinelEff(agent, now)
         mine = held.get(agent.pk, [])
+        note, held_by = broker.visible_hold(agent, ctx.user, decide[agent.pk])
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': note, 'held_by': held_by, 'can_manage': decide[agent.pk],
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
@@ -1530,13 +1675,13 @@ def live_overview(ctx):
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
-            'current': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
-                         'project_name': t.project.name, 'scan_id': t.scan_id, 'since': svc._iso(t.accepted_at or t.claimed_at),
-                         'lease_expires_at': svc._iso(t.lease_expires_at)} for t in mine],
-            'recent': [{'id': t.pk, 'kind': t.kind, 'status': t.status, 'host': t.host, 'label': task_label(t), 'project': t.project.slug,
-                        'project_name': t.project.name, 'finished': svc._iso(t.finished_at), 'outcome': task_outcome(t),
-                        'seconds': int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None,
-                        'error': t.error} for t in finished.get(agent.pk, [])],
+            # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'))),
+            'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
+                        for t in mine],
+            'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),
+                                  seconds=int((t.finished_at - (t.accepted_at or t.claimed_at)).total_seconds()) if t.finished_at and (t.accepted_at or t.claimed_at) else None)
+                       for t in finished.get(agent.pk, [])],
             'stats': {'done_1h': st.get('done_1h', 0), 'failed_1h': st.get('failed_1h', 0), 'done_24h': st.get('done_24h', 0),
                       'failed_24h': st.get('failed_24h', 0),
                       'average_seconds': int(st['average_duration'].total_seconds()) if st.get('average_duration') is not None else None}})
@@ -1545,14 +1690,15 @@ def live_overview(ctx):
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out,
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
-            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user))}
+            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
 
 
-def _visible_orgs(user):
+def _visible_orgs(user, allowed=_ASK):
     """``({slug: name}, {project_slug: org_slug})`` of the organizations ``user`` may read, by name: the groups of the Sentinels page.
     A Sentinel's scope may name others (an owner in two tenants); those are never shown to this user."""
     from dashboard.models import Org, Project
-    allowed = roles.allowed_project_ids(user)
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     projects = Project.objects.exclude(org=None) if allowed is None else Project.objects.filter(pk__in=allowed).exclude(org=None)
     org_of = dict(projects.values_list('slug', 'org__slug'))
     if user.is_superuser:

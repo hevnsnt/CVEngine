@@ -109,7 +109,7 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiate
             part = fresh[start:start + 500]
             scans = ScanHistory.objects.bulk_create([
                 ScanHistory(domain=d, scan_type=engine, start_scan_date=now, scan_status=QUEUED, results_dir='/usr/src/scan_results',
-                           initiated_by=initiated_by)
+                           initiated_by=initiated_by, discovery_mode=mode)
                 for d in part])
             ScanActivity.objects.bulk_create([
                 ScanActivity(scan_of=scan, title='BBOT discovery', name='bbot_discovery', time=now, status=QUEUED) for scan in scans])
@@ -130,6 +130,22 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiate
 def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
     """Queue discovery of one domain (see ``start_discoveries``). Returns the ScanHistory."""
     return start_discoveries([domain], mode, quiet, initiated_by=initiated_by)[0]
+
+
+def start_in_stored_modes(domains, quiet=False, initiated_by=None):
+    """Queue discovery of each domain in the mode stored on it (``Domain.discovery_mode``): the way every start that nobody asked for
+    one by one goes (the work conductor, the assessment review, a Tailscale sweep, a move), so a target added as passive is never
+    rescanned in standard. A manual only target ("just add it, do not scan yet") is left out. Returns the scans of the rest; targets
+    of one mode are queued together, each group in the order given."""
+    from targetApp.models import Domain
+    groups = {}
+    for d in domains:
+        if d.discovery_mode != Domain.DISCOVERY_MANUAL:
+            groups.setdefault(d.discovery_mode, []).append(d)
+    scans = []
+    for mode, group in groups.items():
+        scans += start_discoveries(group, mode=mode, quiet=quiet, initiated_by=initiated_by)
+    return scans
 
 
 def queued_ids():
@@ -231,6 +247,41 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
+MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
+
+
+def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
+    """One activity line when a standard or deep discovery found many hosts and bbot reported no web page at all (no URL and no HTTP_RESPONSE event).
+    Its web module (``http``) is what turns a host into a URL, so without it a discovery records no endpoint, no HTTP status and no page title, and
+    gowitness has nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
+    cvENGINE keeps. The line says what to look at, with the name of bbot's own scan directory."""
+    if mode not in ('standard', 'deep') or any(web_events.values()):
+        return
+    from cveFeed import activity
+    from startScan.models import Subdomain
+    hosts = Subdomain.objects.filter(scan_history=scan).count()
+    if hosts < MIN_HOSTS_FOR_WEB_CHECK:
+        return
+    where = f'~/.bbot/scans/{bbot_scan_name}/scan.log' if bbot_scan_name else "bbot's scan.log"
+    activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but bbot reported no web page for any of them '
+                 f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. bbot\'s web module may have failed '
+                 f'to start or reach the hosts: look in {where} in the celery container (docs/PIPELINE.md, "When discovery finds no web pages"). '
+                 'Web screenshots and the route checks make their own requests and are not affected.',
+                 project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
+
+
+def _report_screenshot_failure(hard_failures, scan):
+    """One activity line when bbot's gowitness module (the only front-page screenshot taker) failed to set up. With --force bbot
+    carries on without it, so without this line a discovery that took no screenshots looks like one that found no web pages."""
+    from cveFeed import activity
+    reasons = [reason for module, reason in hard_failures if module == 'gowitness']
+    if not reasons:
+        return
+    reason = ((reasons[0] or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
+    activity.log('discovery', f'Screenshots unavailable: the gowitness module failed to set up ({reason}); '
+                 'no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
     """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
     from cveFeed.api_credentials import bbot_config_args
@@ -239,6 +290,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     mark_running(scan_id)
     ctx = {'scan_history_id': scan.id, 'domain_id': scan.domain_id, 'subscan_id': None}
     extra_args = bbot_config_args(scan.domain.project) if scan.domain.project_id else []
+    if bbot_lib.trufflehog_allowed(scan.domain.project_id):  # opt-in (CVENGINE_BBOT_TRUFFLEHOG=1), never for a bug bounty project
+        extra_args = [*extra_args, bbot_lib.TRUFFLEHOG_FLAG]
     strict_scope = scan.domain.is_host_scoped()  # a tenant on a shared provider domain: this host only, never its parent or siblings
     batch, hosts, observed = bbot_lib.BbotResult(), {}, []
     shown = set()  # bbot reports the same name from several modules; show each thing once
@@ -256,6 +309,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
     problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
+    web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what bbot's web module reported, counted over the whole run (``batch`` is emptied at every flush)
+    hard_failures = []  # (bbot module, reason) for modules whose set-up hard-failed, e.g. gowitness without a working Chrome
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
@@ -269,9 +324,11 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         for attempt, run_mode in enumerate(modes):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
-                               strict_scope=strict_scope, problems=problems):
+                               strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
+                    if event.get('type') in web_events:
+                        web_events[event['type']] += 1
                     seen = bbot_lib.parse_event(event, batch, hosts)
                     if seen and (seen.type, seen.label) not in shown:
                         shown.add((seen.type, seen.label))
@@ -292,6 +349,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
         _report_key_problems(problems, extra_args, scan)
+        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name)
+        _report_screenshot_failure(hard_failures, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
@@ -541,6 +600,11 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         message = f'{scan.domain.name} is excluded for this organization and is not scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
+    from targetApp.models import Domain
+    if scan.initiated_by_id is None and scan.domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # set to manual only after the system queued it: no person asked for this one
+        message = f'{scan.domain.name} is set to manual only and is not scanned on its own; choose a discovery mode to scan it'
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from cveFeed.bounty_gate import Gate
     why = Gate().refusal(scan.domain.project_id, scan.domain.name, unattended=scan.initiated_by_id is None)  # a bug bounty program: confirmed automated testing (unless a person started this) and a target its scope names
     if why:
@@ -572,7 +636,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -602,6 +666,14 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
+        if stopped(scan_id):
+            return gone
+    from cveFeed import web_shot
+    shot_result = None
+    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by the screenshot worker (its own queue and memory gate)
+        shot_result = _stage(scan, 'Web screenshots', 'web_screenshot',
+                             lambda: (screenshot_queuer or web_shot.queue_for_scan)(scan_id, by_person=by_person or scan.initiated_by_id is not None, force=retest or force),
+                             fallback={'queued': 0})
         if stopped(scan_id):
             return gone
     db_result = _stage(scan, 'Database exposure check', 'db_exposure_scan',
@@ -702,8 +774,9 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     hygiene_result = None
     if hygiene_host and not stopped(scan_id):
         from cveFeed.hygiene import run_hygiene
+        hygiene_hosts = [hygiene_host] if isinstance(hygiene_host, str) else list(hygiene_host)  # one host, or every host of a batch
         hygiene_result = _stage(scan, 'Host TLS hygiene', 'host_hygiene',
-                                lambda: run_hygiene(scan.domain_id, hosts=[hygiene_host]), fallback={'tls_hosts': 0})
+                                lambda: run_hygiene(scan.domain_id, hosts=hygiene_hosts), fallback={'tls_hosts': 0})
     if stopped(scan_id):
         return gone
     # Discovery itself succeeded, so the scan does and its hosts become the domain's current inventory (correlation.latest_scan_q
@@ -732,6 +805,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         result['node2shell'] = node2shell_result
     if rdp_result is not None:
         result['rdp_screenshot'] = rdp_result
+    if shot_result is not None:
+        result['web_screenshot'] = shot_result
     _announce(scan, result, summary=hygiene)
     return result
 
@@ -748,26 +823,45 @@ def _announce(scan, result, summary=True):
 
 # --- new hosts found between scans -------------------------------------------------------------------------------
 
-def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20):
-    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool."""
+def _no_such_name(exc):
+    """True when a lookup error is the resolver's definitive answer that the name has no address (NXDOMAIN, or the name exists with no A or AAAA
+    record), as opposed to a resolver that could not answer (a timeout, a temporary failure, an unreachable server)."""
+    import socket
+    return isinstance(exc, socket.gaierror) and exc.errno in {code for code in (getattr(socket, 'EAI_NONAME', None), getattr(socket, 'EAI_NODATA', None))
+                                                              if code is not None}
+
+
+def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
+    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool.
+
+    A name the resolver answers "no such name" for is simply absent. A lookup that could not be answered (a timeout, a temporary resolver
+    failure) is not an answer about the name: it is put in ``errors`` (``{name: reason}``) when the caller passes one, so it is never mistaken for
+    a host that has no address, and it is counted in the log either way."""
     import concurrent.futures
     import socket
     pairs = set()
+    failed = errors if errors is not None else {}
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(socket.getaddrinfo, name, None, 0, socket.SOCK_STREAM): name for name in names}
         for future, name in futures.items():
             try:
                 pairs.update((name, info[4][0]) for info in future.result(timeout=timeout))
-            except Exception:  # noqa: BLE001 - no record, a resolver error or a timeout: the name stays unresolved
-                continue
+            except concurrent.futures.TimeoutError:
+                failed[name] = f'no answer within {timeout} seconds'
+            except Exception as exc:  # noqa: BLE001 - one lookup failing never stops the rest
+                if not _no_such_name(exc):
+                    failed[name] = f'{type(exc).__name__}: {exc}'[:120]
     finally:
         pool.shutdown(wait=False)
+    if failed:
+        logger.warning('DNS lookup could not be answered for %s of %s names (for example %s: %s)', len(failed), len(list(names)),
+                       next(iter(failed)), next(iter(failed.values())))
     return pairs
 
 
 def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, retest=False, source_scan_id=None,
-                      force=False, hygiene=False, assessment_id=None, by_person=False, **stage_kwargs):
+                      force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
     correlation and the targeted nuclei pass. The ledger still dedupes each scanner per asset, so a host or IP covered
@@ -775,26 +869,49 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     stopped; the stop flag is honoured between stages. ``retest`` marks a run started because these hosts changed (see
     cveFeed.retest): its CVE checks ignore the ledger. ``by_person`` marks a run a person asked for: any other run does nothing for a bug
     bounty project whose owner has not confirmed automated testing, and no run scans a host the program's scope does not name
-    (cveFeed.bounty_gate). Returns the stage results."""
+    (cveFeed.bounty_gate). Returns the stage results.
+
+    ``assessment_ids`` (a batch of host assessments, see ``host_assessment.execute_batch``) carries many hosts of the target through one run, so
+    each stage hands a Sentinel multi-target tasks instead of one tiny task per host. Every host keeps its own outcome: a host the gates drop,
+    whose lookup is not answered or that has no scannable address is named in the result's ``per_host`` (its own status, error and ``resolved``
+    count) and the rest go on; the run as a whole fails only when no host is left. The stages are the scan's, so a failed stage is every host's."""
     from cveFeed import activity
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     suffix = domain.name.lower()
+    if not by_person and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's own request takes its hosts through the stages
+        return {'status': 'inconclusive', 'hosts': 0, 'error': 'the target is set to manual only; nothing was scanned'}
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
+    requested = list(wanted)
     from cveFeed.exclusions import drop_excluded
-    wanted = drop_excluded(domain.project_id, [n for n in wanted if n == suffix or n.endswith('.' + suffix)])[:MAX_PIPELINE_HOSTS]
+    in_target = [n for n in wanted if n == suffix or n.endswith('.' + suffix)]
+    wanted = drop_excluded(domain.project_id, in_target)[:MAX_PIPELINE_HOSTS]
+    not_excluded = set(wanted)
     from cveFeed.archive_rediscovery import archived_names
     archived = archived_names(domain.project_id)
     wanted = [n for n in wanted if n not in archived]
+    not_archived = set(wanted)
     from cveFeed.bounty_gate import Gate
     gate = Gate()
     if not by_person and gate.project_blocked(domain.project_id):
         return {'status': 'inconclusive', 'hosts': 0, 'error': 'the bug bounty engagement has not confirmed automated testing; nothing was scanned'}
     wanted = [n for n in wanted if gate.allows(domain.project_id, n, unattended=False)]  # a host the program's scope does not name is never scanned
+    assessment_ids = list(assessment_ids or ([assessment_id] if assessment_id else []))
+    per_host = {}  # a batch only: the hosts that do not go on to the stages, each with its own outcome
+    if len(assessment_ids) > 1:
+        def why(name):  # the reason a host of a batch was not scanned, so its row never shows a blank outcome
+            if name not in in_target:
+                return 'host is outside the target'
+            if name not in not_excluded:
+                return 'host is excluded'
+            if name not in not_archived:
+                return 'host is archived'
+            return 'host is outside the program scope'
+        per_host = {n: {'status': 'empty', 'hosts': 0, 'error': why(n)} for n in requested if n not in wanted}
     if not wanted:
-        return {'status': 'empty', 'hosts': 0}
+        return {'status': 'empty', 'hosts': 0, **({'per_host': per_host} if per_host else {})}
     engine = pick_engine()
     if engine is None:
         raise RuntimeError('no scan engine is configured')
@@ -803,10 +920,10 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                                       results_dir='/usr/src/scan_results',
                                       tasks=[HOST_PIPELINE_TASK, RETEST_TASK] if retest else [HOST_PIPELINE_TASK],
                                       celery_ids=[celery_id] if celery_id else [])
-    if assessment_id:
+    if assessment_ids:
         from cveFeed.models import HostAssessment
-        HostAssessment.objects.filter(pk=assessment_id).update(scan=scan)
-        if not HostAssessment.objects.filter(pk=assessment_id, status='running').exists():
+        HostAssessment.objects.filter(pk__in=assessment_ids).update(scan=scan)
+        if not HostAssessment.objects.filter(pk__in=assessment_ids, status='running').exists():  # every one was stopped while it waited
             ScanHistory.objects.filter(pk=scan.pk).update(scan_status=ABORTED, stop_scan_date=timezone.now())
             return {'scan_id': scan.pk, 'status': 'aborted'}
     step = ScanActivity.objects.create(scan_of=scan, title='Resolve and record new hosts', name='host_resolve', time=now, status=QUEUED)
@@ -821,24 +938,50 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                                        + (f' after scan #{source_scan_id}' if source_scan_id else '')) if retest else
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
-            pairs = resolver(wanted)
+            lookup_errors = {}
+            pairs = resolver(wanted, errors=lookup_errors) if resolver is resolve_names else resolver(wanted)
+            if lookup_errors:  # a name whose lookup was not answered is not recorded as a host with no address: the next pass looks again
+                wanted = [n for n in wanted if n not in lookup_errors]
+                activity.log('discovery', f'DNS could not answer {len(lookup_errors)} lookup{"s" if len(lookup_errors) != 1 else ""} for {domain.name} '
+                                          f'({next(iter(lookup_errors.values()))}); those hosts are not recorded and are looked up again later',
+                             project=domain.project_id, scan_id=scan.id)
+                if len(assessment_ids) > 1:
+                    for name, reason in lookup_errors.items():  # that host's own outcome: the other hosts of the batch are not held to it
+                        per_host[name] = {'scan_id': scan.id, 'status': 'inconclusive', 'hosts': 1, 'resolved': 0, 'lookup_errors': 1,
+                                          'error': f'DNS could not answer any lookup ({reason}); nothing was recorded'}
             if force:
                 from targetApp.target_types import is_scannable_ip
                 pairs = {(name, address) for name, address in pairs if is_scannable_ip(address, project=domain.project_id if name == address else None)}
             persist_bbot_result(bbot_lib.BbotResult(subdomains=set(wanted), resolutions=pairs),
                                 ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
             ScanActivity.objects.filter(pk=step.pk).update(status=SUCCESS, time=timezone.now())
-            found['resolved'] = len({name for name, _ in pairs})
+            resolved_names = {name for name, _ in pairs}
+            found['resolved'] = len(resolved_names)
+            if force and len(assessment_ids) > 1:
+                for name in wanted:
+                    if name not in resolved_names:  # no scannable address: this host did nothing, the others carry on
+                        per_host[name] = {'scan_id': scan.id, 'status': 'inconclusive', 'hosts': 1, 'resolved': 0,
+                                          'error': 'No scannable IP address resolved; no active checks ran'}
+            if lookup_errors:
+                found['lookup_errors'] = len(lookup_errors)
+                if not wanted:  # every lookup failed: nothing was learned, and the run says so instead of reporting success
+                    message = f'DNS could not answer any lookup ({next(iter(lookup_errors.values()))}); nothing was recorded'
+                    ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+                    return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             if force and not pairs:
                 message = 'No scannable IP address resolved; no active checks ran'
                 ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
-                return {**found, 'status': 'inconclusive', 'error': message}
-            return _run_stages(scan.id, found, hygiene=hygiene, hygiene_host=wanted[0] if assessment_id else None,
-                               retest=retest, force=force, **stage_kwargs)
+                return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
+            scanned = [n for n in wanted if n in resolved_names] if force else wanted  # the hosts the stages have something to do for
+            result = _run_stages(scan.id, found, hygiene=hygiene, hygiene_host=scanned if assessment_ids else None,
+                                 retest=retest, force=force, by_person=by_person, **stage_kwargs)
+            if per_host:
+                result['per_host'] = per_host
+            return result
     except resources.ScanAborted:
-        return {'scan_id': scan.id, 'status': 'aborted'}
+        return {'scan_id': scan.id, 'status': 'aborted', **({'per_host': per_host} if per_host else {})}
     except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
         logger.exception('host pipeline failed for scan %s', scan.id)
         ScanActivity.objects.filter(pk=step.pk).update(status=FAILED, time=timezone.now(), error_message=str(exc)[:290])
         ScanHistory.objects.filter(pk=scan.id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
-        return {'scan_id': scan.id, 'status': FAILED, 'error': str(exc)[:290]}
+        return {'scan_id': scan.id, 'status': FAILED, 'error': str(exc)[:290], **({'per_host': per_host} if per_host else {})}

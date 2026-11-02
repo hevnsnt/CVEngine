@@ -23,7 +23,7 @@
   <nav class="strip in-cell" aria-label="Engine counters">
     <a id="n-matches" title="CVE matches the AI has not ruled out. The CVE matches page opens on the same view." {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><b id="s-matches">-</b><span>CVE matches</span></a>
     <a id="n-findings" title="Open scanner findings of low severity or worse (the Findings page, Scanner, Actionable). Informational detections and closed findings are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?type=scanner"{% endif %}><b id="s-scanner_findings">-</b><span>Scanner findings</span></a>
-    <a id="n-hygiene" class="wide" title="Open hygiene issues of low severity or worse: TLS, certificates, SPF, DKIM, DMARC, CAA" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-hygiene_open">-</b><span>Hygiene issues</span><ul class="hy-top" id="hy-top" aria-label="Biggest hygiene issues"></ul></a>
+    <a id="n-hygiene" class="wide" title="Open hygiene issues of low severity or worse: TLS, certificates, SPF, DKIM, DMARC, CAA, cleartext services" {% if slug %}href="{% url 'cve_section' slug 'hygiene' %}"{% endif %}><b id="s-hygiene_open">-</b><span>Hygiene issues</span><ul class="hy-top" id="hy-top" aria-label="Biggest hygiene issues"></ul></a>
     <a id="n-coverage" title="Hosts a scan has looked at, out of the hosts that can be scanned. A host never scanned has no findings because nothing looked, not because it is clean." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?heat=unscanned"{% endif %}><p class="of"><b id="s-coverage">-</b><small id="s-coverage_of"></small></p><span>Hosts scanned</span></a>
     <a id="n-queue" hidden title="Scans are waiting but none is running. Look at the Scans page." {% if slug %}href="{% url 'cve_section' slug 'scans' %}"{% endif %}><b id="s-scans_queued">-</b><span>Queued, none running</span></a>
     <a id="n-oldest" hidden title="The critical or high issue that has gone unfixed the longest, and for how many days: a CVE match with CVSS 7.0 or more, or a high or critical scanner or hygiene finding. Fixed, accepted-risk, ruled-out and resolved items are not counted." {% if slug %}href="{% url 'cve_section' slug 'vulns' %}"{% endif %}><p class="of"><b id="s-oldest_open_days">-</b><small id="s-oldest_unit">days</small></p><span>Longest unfixed issue</span><small id="s-oldest_note"></small><small id="s-oldest_host" class="mono"></small></a>
@@ -76,9 +76,7 @@
       </div>
     </div>
     <div class="counts" id="d-counts"></div>
-    <div class="node-card" id="d-detail" aria-live="polite"></div>
     <ul class="ticker" id="d-ticker" aria-live="polite" tabindex="0" aria-label="Discovery findings, newest first. Scroll up for earlier lines."></ul>
-    {% if slug %}<a class="see-all" href="{% url 'cve_section' slug 'vulns' %}?type=scanner">See scanner findings</a>{% endif %}
   </div>
 
   <section class="trends" id="trends" aria-label="Trends" hidden></section>

@@ -28,6 +28,20 @@ class WordPressFixture(RouteFixture):
         self.scan_obj = self.scan(names=('www.rt.test', 'rt.test', 'plain.rt.test'))
         self.asked, self.table = [], {}
         self.calls = []
+        self.clear_claims()
+        self.addCleanup(self.clear_claims)
+
+    def clear_claims(self):
+        """The WPScan passes hold a Redis claim per project id (``cvengine:wpscan:thorough:<id>``, ``cvengine:wpscan:quick:<id>``, 5 to 10 minutes). A
+        test database starts its ids over, so a claim left by an earlier or interrupted run on the same Redis would make a pass answer "another one is
+        running": the tests never depend on what an earlier run left behind."""
+        from reNgine import resources
+        client = getattr(resources.get_store(), 'r', None)
+        if client is not None:
+            try:
+                client.delete(*(f'cvengine:wpscan:{kind}:{self.project.id}' for kind in ('thorough', 'quick')))
+            except Exception:  # noqa: BLE001 - no Redis: no claim to leave behind
+                pass
 
     def probe_get(self, url):
         self.asked.append(url)

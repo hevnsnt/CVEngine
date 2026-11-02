@@ -370,6 +370,28 @@ class SentinelTenancyTests(SentinelBase):
         self.assertEqual(out['queued'], 1)
         self.assertIn('secret.b.example', json.dumps(out))
 
+    def test_the_sentinels_page_shows_another_tenants_work_only_as_its_kind_on_a_target(self):
+        agent = Agent.objects.get(pk=self.agent['id'])
+        held = SentinelTask.objects.create(project=self.pb, kind='nuclei_targeted', host='held.b.example', target={'hosts': {'203.0.113.9': 'named.b.example'}},
+                                           ips=['203.0.113.9'], status='running', agent=agent, claimed_at=timezone.now())
+        SentinelTask.objects.filter(pk=self.theirs.pk).update(status='failed', error='secret.b.example refused the connection')
+        status, out = call(self.t['dana'], 'GET', '/api/v1/sentinels/live')
+        self.assertEqual(status, 200, out)
+        text = json.dumps(out)
+        for leak in ('secret.b.example', 'held.b.example', 'named.b.example', '203.0.113', 'sen-b'):
+            self.assertNotIn(leak, text)
+        row = next(r for r in out['results'] if r['id'] == self.agent['id'])
+        self.assertEqual(row['state'], 'working')
+        self.assertEqual([(t['id'], t['kind'], t['hidden'], t['host'], t['label'], t['project'], t['scan_id']) for t in row['current']],
+                         [(held.pk, 'nuclei_targeted', True, '', '', '', None)])
+        hidden = next(t for t in row['recent'] if t['id'] == self.theirs.pk)
+        self.assertEqual((hidden['status'], hidden['error'], hidden['project_name']), ('failed', '', ''))
+        mine = next(t for t in row['recent'] if t['id'] == self.mine.pk)
+        self.assertEqual((mine['host'], mine['project'], mine.get('hidden')), ('visible.a.example', 'sen-a', None))
+        status, out = call(self.t['root'], 'GET', '/api/v1/sentinels/live')
+        row = next(r for r in out['results'] if r['id'] == self.agent['id'])
+        self.assertEqual([(t['host'], t['project']) for t in row['current']], [('held.b.example', 'sen-b')])
+
 
 class ExistingSentinelTokensMigrationTests(SentinelBase):
     def test_a_sentinel_enrolled_before_sentinel_tokens_existed_is_narrowed_and_tied_to_its_enrollment(self):

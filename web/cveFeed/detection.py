@@ -303,11 +303,11 @@ def _range_params(rng):
 def rules_strategy(cve, template_ids=()):
     """The strategy the CVE's own record supports, with no AI: a version check per affected product, a package check where the
     record names a package and a fixed version, and any installed nuclei template. None when the record names no product."""
-    from cveFeed.correlation import clean_affected
+    from cveFeed.correlation import clean_affected, prepared_ranges
     remote, local = [], []
     for item in clean_affected(cve.affected)[:6]:
         product = next((item.get(k) for k in ('product', 'package') if isinstance(item.get(k), str) and _PRODUCT.match(item[k])), None)
-        ranges = [r for r in (_range_params(x) for x in item.get('ranges', [])[:10]) if r]
+        ranges = [r for r in (_range_params(x) for x in prepared_ranges(item.get('ranges'))[:10]) if r]  # as matching reads them, then capped
         if not product or not ranges:
             continue
         slug = re.sub(r'[^a-z0-9]+', '-', product.lower()).strip('-')[:24] or 'product'

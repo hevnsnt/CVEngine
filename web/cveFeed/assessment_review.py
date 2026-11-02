@@ -56,6 +56,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     from cveFeed.internal_scan import TASK_TAG as INTERNAL_PIPELINE_TASK
     from cveFeed.unresolved_archive import COUNTS_FOR
     from startScan.models import ScanActivity, Subdomain
+    from targetApp.models import Domain
 
     completed = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
                                          scan_history__scan_status=2)
@@ -63,8 +64,9 @@ def host_coverage_due(project, at, limit=1, need_count=True):
         check = ScanActivity.objects.filter(scan_of_id=OuterRef('scan_history_id'), name=stage, status=2)
         key = f'stage_{index}'
         completed = completed.annotate(**{key: Exists(check)}).filter(**{key: True})
+    from cveFeed.host_assessment import BATCH_STOPPED
     attempts = HostAssessment.objects.filter(project=project, host=OuterRef('name'),
-                                             created_at__gte=at - timedelta(hours=24))
+                                             created_at__gte=at - timedelta(hours=24)).exclude(error=BATCH_STOPPED)  # a host caught in a batch someone stopped never had its turn
     active = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
                                       scan_history__scan_status__in=(-1, 1))
     excluded = HostExclusion.objects.filter(org_id=project.org_id, host=OuterRef('name'))
@@ -80,6 +82,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     # here would try the external pipeline and cannot repair missing internal stages.
     rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
             .exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
+            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: no automatic assessment, so it is no backlog either
             .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
                       excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
             .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
@@ -140,7 +143,7 @@ def project_facts(project_id, start, end):
     latest_success = (ScanHistory.objects.filter(domain_id=OuterRef('pk'), scan_status=2)
                       .exclude(tasks__contains=[HOST_PIPELINE_TASK])
                       .order_by('-stop_scan_date', '-id'))
-    due = (Domain.objects.filter(project_id=project_id)
+    due = (Domain.objects.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never started for a person
            .annotate(last_success=Subquery(latest_success.values('stop_scan_date')[:1]))
            .filter(Q(last_success__isnull=True) | Q(last_success__lt=end - timedelta(days=7)))
            .order_by('last_success', 'id').values_list('id', flat=True).first())
@@ -216,9 +219,10 @@ def dispatch(project, facts, action):
         from cveFeed.exclusions import is_excluded
         from targetApp.models import Domain
         target = Domain.objects.filter(pk=facts['due_discovery_target_id'], project=project).first()
-        if not target or is_excluded(project.pk, target.name) or running_discovery(target):
-            return 'stale', None, 'target is excluded, absent or already scanning'
-        scan = start_discovery(target)
+        if (not target or target.discovery_mode == Domain.DISCOVERY_MANUAL or is_excluded(project.pk, target.name)
+                or running_discovery(target)):
+            return 'stale', None, 'target is excluded, absent, manual only or already scanning'
+        scan = start_discovery(target, target.discovery_mode)
         return 'queued', scan.pk, f'discovery scan #{scan.pk}'
     if action == 'assess_host':
         from cveFeed.host_assessment import enqueue

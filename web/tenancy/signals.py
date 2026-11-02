@@ -1,8 +1,9 @@
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from tenancy import roles, scope
+from tenancy import membership_cache, roles, scope
 
 
 @receiver(post_save, sender='dashboard.Project')
@@ -31,3 +32,14 @@ def place_new_project(sender, instance, created, **kwargs):
 def keep_global_role_in_sync(sender, instance, **kwargs):
     if User.objects.filter(pk=instance.user_id).exists():
         roles.sync_global_role(instance.user)
+
+
+@receiver([post_save, post_delete], sender='dashboard.Org')
+@receiver([post_save, post_delete], sender='dashboard.Project')
+@receiver([post_save, post_delete], sender='dashboard.OrgMembership')
+@receiver([post_save, post_delete], sender='dashboard.ProjectMembership')
+def forget_cached_scopes(sender, **kwargs):
+    """What a user may see changed: drop every user's cached set of project ids (tenancy.membership_cache). Once now, for what reads next in this
+    transaction, and once more when it commits, so a poll that cached the old answer in between is not believed."""
+    membership_cache.bump_epoch()
+    transaction.on_commit(membership_cache.bump_epoch, robust=True)  # robust: a failure here is logged, it never stops the commit's other callbacks

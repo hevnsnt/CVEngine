@@ -98,12 +98,12 @@ class StatsTests(ViewBase):
     def setUp(self):
         super().setUp()
         from cveFeed import views
-        views._STATS_CACHE.clear()  # the payload is cached for a short while per user
-        self.addCleanup(views._STATS_CACHE.clear)
+        views.clear_stats_cache()  # the payload is cached for a short while per user
+        self.addCleanup(views.clear_stats_cache)
 
     def stats(self, project=''):
         from cveFeed import views
-        views._STATS_CACHE.clear()
+        views.clear_stats_cache()
         client = Client()
         client.force_login(self.admin)
         return client.get('/cve/api/stats', {'project': project} if project else {}).json()

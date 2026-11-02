@@ -17,12 +17,13 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from django.conf import settings
 from django.utils import timezone
 
-QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'celery')
+QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'live_cache_queue', 'screenshot_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
 MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
 FEED_STALE_HOURS = 48
 MEMORY_REPORT_STALE_SECONDS = 180
+CT_BACKLOG_WARN = 5000  # lookups waiting in ctwatch_queue before status says so; the reaper stops recovering orphans past broker_recovery.MAX_QUEUE_SCAN
 
 
 def _probe(problems, name, fn):
@@ -84,7 +85,38 @@ def _project_row(project):
         'wordpress': wpscan_scan.status_counts([project.id]),
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
         'web_discovery': subdir_apps.status_counts([project.id]),
+        # web screenshots (cveFeed.web_shot): hosts with a picture of how many have a web page, what waits, what failed, and the last capture error
+        'screenshots': _screenshots_of(project),
     }
+
+
+def _screenshots_of(project):
+    from cveFeed import web_shot
+    try:
+        return web_shot.status_counts([project.id])
+    except Exception as exc:  # noqa: BLE001 - counts only: the row is shown without them rather than not at all
+        return {'error': type(exc).__name__}
+
+
+def _screenshots(problems, notes):
+    """The screenshot browser of this server: switched on, installed (the Chromium the pinned Playwright drives), the last time the browser itself failed
+    to run, and what waits (cveFeed.web_shot). A missing browser or a failing one is a problem worth seeing: no host will get a picture."""
+    from django.core.cache import cache
+    from cveFeed import web_shot
+    from cveFeed.models import HostScreenshot
+    pinned = web_shot.pinned_browser()
+    try:
+        last = cache.get('screenshots:last_browser_error')
+    except Exception:  # noqa: BLE001
+        last = None
+    out = {'enabled': web_shot.enabled(), 'chromium_installed': web_shot.browser_installed(), 'chromium_version': pinned.get('version') or None,
+           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last}
+    reason = web_shot.unavailable_reason()
+    if reason and web_shot.enabled():
+        notes.append(f'screenshots: {reason}')  # a note, not a problem: an image that predates the feature runs everything else fine
+    elif last:
+        problems.append(f"screenshots: the browser last failed to run at {last.get('at')}: {last.get('error')}")
+    return out
 
 
 def _projects(ctx):
@@ -156,7 +188,32 @@ def _queues():
     """Messages waiting in each Celery queue, plus those a worker has taken but not yet acknowledged."""
     client = _broker_client()
     waiting = {name: sum(client.llen(name + suffix) for suffix in PRIORITY_SUFFIXES) for name in QUEUES}
-    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked')}
+    from cveFeed import ct_queue
+    from cveFeed.broker_recovery import MAX_QUEUE_SCAN
+    ct = waiting.get('ctwatch_queue', 0)
+    try:  # the cap the sweep itself works to: it is never below one sweep's batch
+        from dashboard.models import SystemTimings
+        batch = max(1, SystemTimings.current().ct_watch_minutes * 60 // 3)
+    except Exception:  # noqa: BLE001
+        batch = 0
+    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked'),
+            'ct_backlog': {'waiting': ct, 'cap': ct_queue.backlog_max(batch), 'warn_at': CT_BACKLOG_WARN, 'scan_limit': MAX_QUEUE_SCAN}}
+
+
+def _ct_backlog_problem(queues):
+    """A line for ``problems`` when the certificate lookups wait in a line long enough to threaten the reaper, else None."""
+    info = queues.get('ct_backlog') if isinstance(queues, dict) else None
+    if not isinstance(info, dict) or info.get('waiting', 0) <= info.get('warn_at', CT_BACKLOG_WARN):
+        return None
+    waiting, limit = info['waiting'], info['scan_limit']
+    if waiting > limit:
+        tail = f"above {limit}: the reaper's orphan recovery (redispatch of queued scans, expiry of orphaned running scans) has stopped"
+    elif waiting >= limit * 0.75:
+        tail = f"close to {limit}, above which the reaper's orphan recovery stops"
+    else:
+        tail = f"it would stop the reaper's orphan recovery above {limit}"
+    return (f"queues: {waiting} certificate lookups are waiting in ctwatch_queue (cap {info['cap']}); {tail}. "
+            'The sweep adds no more while it is at the cap; the queue can be purged, the sweep re-derives the work from the ledger.')
 
 
 def _workers_and_jobs(user):
@@ -231,12 +288,30 @@ def _os_detection():
 
 
 def _ai():
+    from cveFeed import autotune, tunables
     from cveFeed.models import ValidationBudget
     from dashboard.models import AIProviderSettings
     cfg = AIProviderSettings.objects.first()
     today = {row.scope: row.reserved for row in ValidationBudget.objects.filter(day=timezone.localdate())}
     return {'provider_enabled': bool(cfg and cfg.enabled), 'provider': cfg.provider if cfg and cfg.enabled else None,
-            'validation_attempts_today': today}
+            'validation_attempts_today': today,
+            'autotune_advisor_today': {'used': autotune.advisor_calls_today(), 'cap': tunables.value('autotune_ai_max_per_day'),
+                                       'since': 'UTC midnight'}}
+
+
+def _autotune():
+    """Auto-tuning (cveFeed.autotune): the mode, the last run and what it did, why each setting was not raised, and the last decisions."""
+    from cveFeed import autotune
+    full = autotune.status()
+    last = full.get('last_run') or {}
+    not_raised = {key: info.get('why_not_raised') for key, info in (last.get('settings') or {}).items() if info.get('why_not_raised')}
+    return {'mode': full['mode'], 'effective_mode': full['effective_mode'], 'killed': full['killed'],
+            'advisor': {k: full['advisor'].get(k) for k in ('enabled', 'provider', 'used_today', 'cap', 'last_error')},
+            'last_run_at': last.get('at'), 'held': last.get('held'), 'changes_last_run': last.get('changes') or [],
+            'sized_for': last.get('sized_for'), 'targets': {key: info.get('target') for key, info in (last.get('settings') or {}).items() if info.get('target') is not None},
+            'why_not_raised': not_raised, 'pinned': [p['setting'] for p in full['pinned']],
+            'last_decisions': [{k: d[k] for k in ('at', 'setting', 'old_value', 'new_value', 'source', 'action', 'applied', 'reason')}
+                               for d in full['recent_decisions'][:5]]}
 
 
 TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
@@ -264,6 +339,11 @@ def _tool_version(argv):
         value = None
     _VERSION_CACHE[argv] = (now, value)
     return value
+
+
+def _chromium_version():
+    from cveFeed import web_shot
+    return web_shot.pinned_browser().get('version') if web_shot.browser_installed() else None
 
 
 def _template_refresh():
@@ -317,7 +397,9 @@ def _tools():
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
                          'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
-                         'testssl': _tool_version(('testssl.sh', '--version'))}}
+                         'testssl': _tool_version(('testssl.sh', '--version')),
+                         # the screenshot browser: the Chromium the pinned Playwright drives, when it is on disk (looked up, never launched)
+                         'chromium': _chromium_version()}}
 
 
 def _runzero(problems):
@@ -338,6 +420,28 @@ def _udp_scan(problems):
     """The background UDP sweep: on or off, whether the worker can run it (a worker without raw sockets says so), and what it holds."""
     from cveFeed import udp_scan
     return udp_scan.status(problems)
+
+
+def _live_cache(notes):
+    """The Live screen's snapshot cache (``cveFeed.snapshot_cache``, ``cveFeed.live_refresh``): whether the refresher is on and running, how many
+    scopes are hot, and how this hour's and the last hour's polls were answered (served from the cache fresh or stale, computed by the request,
+    waited for another request's answer; ``refreshed`` is the refresher's own work). A poll should almost never be a ``miss`` while the
+    refresher runs."""
+    from cveFeed import snapshot_cache
+    from reNgine import livecache_config
+    enabled, interval = livecache_config.refresh_enabled(), livecache_config.refresh_seconds()
+    last = snapshot_cache.last_beat()
+    out = {'refresher': 'off' if not enabled else ('running' if snapshot_cache.refresher_alive() else 'silent'),
+           'interval_seconds': interval, 'hot_seconds': livecache_config.hot_seconds(),
+           'auth_cache_seconds': livecache_config.auth_cache_seconds(),
+           'hot_scopes': len(snapshot_cache.hot_recipes()),
+           'last_run': None if not last else {'seconds_ago': round(snapshot_cache._clock() - last['at'], 1),
+                                              **{k: last[k] for k in ('state', 'hot', 'refreshed', 'errors', 'seconds', 'overran', 'skipped') if k in last}},
+           'polls': snapshot_cache.metrics()}
+    if enabled and out['refresher'] == 'silent' and out['hot_scopes']:  # people are on the Live screen and nothing keeps it warm
+        notes.append('the live cache refresher has not run lately (is celery beat running, and does the classic worker consume live_cache_queue?): the Live screen computes '
+                     'its numbers on request until it does')
+    return out
 
 
 SENTINEL_RECENT_ERRORS = 10
@@ -435,14 +539,20 @@ def _system(user, problems, notes):
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['autotune'] = _probe(problems, 'autotune', _autotune)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
+    out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
     out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
+    out['live_cache'] = _probe(problems, 'live_cache', lambda: _live_cache(notes))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:
         problems.append(problem)
     queues = out['queues']
+    ct_problem = _ct_backlog_problem(queues)
+    if ct_problem:
+        problems.append(ct_problem)
     if isinstance(queues, dict) and queues.get('waiting_total'):
         notes.append(f"{queues['waiting_total']} message(s) waiting in the work queues")
     return out

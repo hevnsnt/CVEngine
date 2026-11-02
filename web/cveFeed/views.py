@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
-from cveFeed import match_policy
+from cveFeed import match_policy, snapshot_cache
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
@@ -132,8 +132,10 @@ def graph_payload(domain_id=None, scan_id=None):
         return False
 
     from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
+    from django.db.models import F
     subs = subs.filter(LIVE_HOST_Q).distinct()
-    sub_list = list(subs[:GRAPH_NODE_CAP])
+    # the riskiest hosts first, then by name: past the node cap the drawn hosts are the ones that matter, and the same ones on every poll
+    sub_list = list(subs.order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
     # "scanned" = at least one finding exists at all, even an info-only one (something looked); a
     # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
@@ -168,6 +170,14 @@ def graph_payload(domain_id=None, scan_id=None):
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
                                                   name__in=NUCLEI_SCAN_ACTIVITY_NAMES, status=2).values_list('scan_of_id', flat=True))
+    # the alias and note a person gave each host (one query): the node's label stays the name, the tooltip and card add them
+    from types import SimpleNamespace
+    from agentapi.services import alias_and_note
+    from cveFeed.models import HostProfile
+    wanted = {s.name.lower() for s in sub_list} | {n.lower() for rows in siblings.values() for _, n in rows}
+    tags = {(row.project_id, row.host): {'alias': row.alias, 'note': row.note}
+            for row in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')}
+    cut = False  # the node cap stopped the drawing before every host was in
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
@@ -189,14 +199,18 @@ def graph_payload(domain_id=None, scan_id=None):
             status = 'vulnerable'
         tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)) for m in live]
         heat = host_heat(status, tiers, sev)
+        given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
+                    **{k: given[k] for k in ('alias', 'note') if given[k]},
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
                     status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
                     internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
                     network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
+            cut = True
             break
         by_name[sub.name.lower()] = sid
         if sub.target_domain_id and node(f'dom:{sub.target_domain_id}', 'domain', sub.target_domain.name,
+                **{k: getattr(sub.target_domain, k) for k in ('alias', 'note') if getattr(sub.target_domain, k)},
                 project=sub.target_domain.project.slug if sub.target_domain.project_id else '',
                 project_name=sub.target_domain.project.name if sub.target_domain.project_id else '',
                 root=root_for(sub.target_domain)):
@@ -225,7 +239,32 @@ def graph_payload(domain_id=None, scan_id=None):
         a, b = by_name.get((parent or '').lower()), by_name.get((host or '').lower())
         if a and b and a != b:
             edges.add((a, b))
-    return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)]}
+    drawn_hosts = sum(1 for n in nodes.values() if n['kind'] == 'subdomain')
+    capped = cut or len(sub_list) >= GRAPH_NODE_CAP  # counted only when the cap may have cut the list
+    total_hosts, per_project = drawn_hosts, {}
+    if capped:
+        from django.db.models import Count
+        per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
+        total_hosts = max(sum(per_project.values()), drawn_hosts)
+    return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
+            'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
+            'projects': _graph_projects(domain_id, scan_id)}
+
+
+def _graph_projects(domain_id=None, scan_id=None):
+    """``{slug: {'name', 'hygiene'}}`` for every project the caller sees: its open, actionable hygiene findings (the dashboard's Hygiene
+    tile), which the graph hangs off the project's cloud beside its fire, smoke and ice hosts. Hygiene findings belong to a target, not
+    a host row, so they are counted here rather than from the drawn hosts. One query."""
+    from django.db.models import Count
+    from cveFeed import counts
+    from dashboard.models import Project
+    hygiene = counts.actionable_hygiene(HygieneFinding.objects.all())
+    if domain_id:
+        hygiene = hygiene.filter(domain_id=domain_id)
+    if scan_id:
+        hygiene = hygiene.none()  # one scan's graph: its hosts only
+    found = dict(hygiene.order_by().values_list('domain__project__slug').annotate(n=Count('id')))
+    return {slug: {'name': name, 'hygiene': found.get(slug, 0)} for slug, name in Project.objects.values_list('slug', 'name')}
 
 
 def _running_scans(ScanHistory):
@@ -243,10 +282,11 @@ def tier_counts():
 
 def live_scan_counts():
     """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
-    the first thing a person watches)."""
+    the first thing a person watches). The running window (a settings lookup) is read once for all three."""
     from cveFeed import counts
-    return {'scans_running': counts.running_scans().count(), 'scans_queued': counts.queued_scans().count(),
-            'scans_background_running': counts.background_running().count()}
+    window = counts.running_window()
+    return {'scans_running': counts.running_scans(window=window).count(), 'scans_queued': counts.queued_scans().count(),
+            'scans_background_running': counts.background_running(window=window).count()}
 
 
 def _oldest_open_what(kind, row_id):
@@ -276,14 +316,16 @@ def stats_payload():
     from targetApp.models import Domain
     tiers = tier_counts()
     reps = counts.host_reps()
+    from django.db.models import Count
+    host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
         'certs_total': TlsCertificate.objects.count(),
         'hygiene_open': counts.actionable_hygiene(HygieneFinding.objects.all()).count(),
-        'hosts': reps.count(),
-        'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
+        'hosts': host_counts['total'],
+        'hosts_live': host_counts['live'],
         **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': CVEEntry.objects.count(),
@@ -380,7 +422,8 @@ def ui_context(request, active, slug=None, remember=True):
             'ai_usage_model': ai_cfg.model if ai_connected else '',
             'all_projects': slug == ALL_PROJECTS, 'show_all_option': len(projects) >= 2,
             'scope_org': scope_org, 'scope_org_name': next((o['name'] for o in orgs if o['slug'] == scope_org), '') if scope_org else '',
-            'scope_projects': len(in_scope)}
+            'scope_projects': len(in_scope),
+            'here_name': here['name'] if here else '', 'here_org_name': (here['org_name'] or '') if here else ''}
 
 
 def _bounty_allowed(user):
@@ -483,13 +526,18 @@ def project_page(request, slug, section):
 
 
 def host_screenshot(request, slug, subdomain_id):
-    """Serve a gowitness screenshot for a host. The tenancy middleware already confirmed the caller may
-    see ``slug``; this only needs to confirm the subdomain actually belongs to that project."""
+    """Serve a host's screenshot. The tenancy middleware already confirmed the caller may see ``slug``; this confirms the subdomain belongs to
+    that project and then looks the picture up by the project and the host's name, never by a path the caller names.
+
+    The browser's captures (``HostScreenshot``) come first (``?scheme=&port=`` picks one page, else the best one; ``?previous=1`` is the capture it
+    replaced). Without one, the discovery screenshot of the newest same-name row that has one is served (a rescan writes a newer row without it).
+    ``?row=1`` serves only the row's own discovery file, which the change history's before and after pictures name."""
     import os
 
     from django.conf import settings
-    from django.http import FileResponse
 
+    from cveFeed import shots, web_shot
+    from cveFeed.models import HostScreenshot
     from dashboard.models import Project
     from startScan.models import Subdomain
     project = Project.objects.filter(slug=slug).first()
@@ -497,18 +545,46 @@ def host_screenshot(request, slug, subdomain_id):
         raise Http404
     sub = Subdomain.objects.filter(pk=subdomain_id, scan_history__domain__project=project).first() or \
         Subdomain.objects.filter(pk=subdomain_id, target_domain__project=project).first()
-    if not sub or not sub.screenshot_path:
-        raise Http404
-    media_root = os.path.realpath(settings.MEDIA_ROOT)
-    path = os.path.realpath(os.path.join(media_root, sub.screenshot_path))
-    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+    if not sub:
         raise Http404
     size = request.GET.get('size', 'full')
     if size not in ('full', 'thumb'):
         return HttpResponseBadRequest('size must be full or thumb')
+    rel = thumb_rel = None
+    if request.GET.get('row') != '1':
+        rows = HostScreenshot.objects.filter(project=project, host=sub.name.lower().rstrip('.'))
+        if request.GET.get('port') or request.GET.get('scheme'):
+            try:
+                port = int(request.GET.get('port', ''))
+            except ValueError:
+                return HttpResponseBadRequest('port must be a number')
+            shot = rows.filter(port=port, scheme=request.GET.get('scheme', 'https')).first()
+            if shot is None or not shot.image_path:
+                raise Http404
+        else:
+            shot = web_shot.primary(list(rows))
+        if shot is not None and request.GET.get('previous') == '1':
+            rel, thumb_rel = shot.previous_image_path, None
+            if not rel:
+                raise Http404
+        elif shot is not None:
+            rel, thumb_rel = shot.image_path, shot.thumb_path
+    if rel is None:
+        rel = sub.screenshot_path
+        if not rel and request.GET.get('row') != '1':
+            legacy = Subdomain.objects.filter(target_domain__project=project, name=sub.name).exclude(screenshot_path__isnull=True) \
+                .exclude(screenshot_path='').order_by('-id').values_list('screenshot_path', flat=True).first()
+            rel = legacy
+    if not rel:
+        raise Http404
+    media_root = os.path.realpath(settings.MEDIA_ROOT)
+    path = os.path.realpath(os.path.join(media_root, rel))
+    if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
+        raise Http404
     if size == 'thumb':
-        from cveFeed import shots
-        thumb = shots.thumbnail_path(path)
+        thumb = os.path.realpath(os.path.join(media_root, thumb_rel)) if thumb_rel else ''
+        if not (thumb and thumb.startswith(media_root + os.sep) and os.path.isfile(thumb)):
+            thumb = shots.thumbnail_path(path)
         if thumb:
             return _cacheable_file(request, thumb, 'image/jpeg')
     return _cacheable_file(request, path)
@@ -571,7 +647,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.3.1'
+HOW_REVIEWED_VERSION = '1.3.2'
 
 
 def how_page(request):
@@ -632,6 +708,7 @@ def project_scoped(view):
             ids = set(Project.objects.filter(org__slug=org).values_list('id', flat=True)) if org else set()
             if allowed is not None:
                 ids &= set(allowed)
+            request.live_org = org if ids else ''  # only an organization that narrowed the projects is part of a snapshot's scope (see _live_org)
             if not ids:
                 return view(request, *args, **kwargs)
             tokens = scope.set_scope(ids, scope.current_user())
@@ -642,6 +719,7 @@ def project_scoped(view):
         project = Project.objects.filter(slug=slug).only('id').first()
         if not project or (allowed is not None and project.id not in allowed):
             return JsonResponse({'error': 'project not found'}, status=404)
+        request.live_org = ''  # a named project ignores the organization
         tokens = scope.set_scope({project.id}, scope.current_user())
         try:
             return view(request, *args, **kwargs)
@@ -664,41 +742,54 @@ def api_feed(request):
     return JsonResponse({'items': [serialize_cve(e, counts.get(e.pk, 0)) for e in entries]})
 
 
-STATS_CACHE_SECONDS = 10
-_STATS_CACHE = {}  # (user id, project slug) -> (computed at, payload)
-STATS_CACHE_ENTRIES = 256
-STATS_REVISION_KEY = 'cvengine:stats:revision'
+def _live_org(request):
+    """The organization slug a snapshot's scope carries: the one ``project_scoped`` found to narrow the projects, else ''. A ``?org=`` that names
+    nothing (or nothing of the caller's) never becomes a scope of its own, so a caller cannot mint scopes, and hot recipes, by varying it."""
+    return getattr(request, 'live_org', '')
+
+
+def _hot_check(domain_id=None, scan_id=None):
+    """Whether a ``?domain=`` and ``?scan=`` of a poll name rows the caller may see (run inside ``project_scoped``, only when a scope is about to be
+    registered as hot): a made-up id is answered as before but never refreshed in the background."""
+    def check():
+        from startScan.models import ScanHistory
+        from targetApp.models import Domain
+        try:
+            return ((not domain_id or Domain.objects.filter(id=domain_id).exists())
+                    and (not scan_id or ScanHistory.objects.filter(id=scan_id).exists()))
+        except Exception:  # noqa: BLE001 - an id the database refuses (out of range) is not a scope
+            return False
+    return check
+
+
+STATS_CACHE_SECONDS = 10  # how long a headline snapshot is fresh; it is kept three times as long to serve while one request refreshes it
+STATS_REVISION_KEY = snapshot_cache.REVISION_KEY
 
 
 def bump_stats_revision():
-    """Invalidate every web worker's short dashboard cache after a finding is closed."""
-    from django.core.cache import cache
-    _STATS_CACHE.clear()
-    _DISCOVERY_COUNTS_CACHE.clear()
-    try:
-        cache.set(STATS_REVISION_KEY, timezone.now().isoformat(), timeout=None)
-    except Exception:  # noqa: BLE001 - other workers still expire within ten seconds
-        pass
+    """Make every dashboard snapshot (headline counts, discovery counts, the graph's version) stale in every web worker after a finding is
+    closed: the next poll of each scope rebuilds it."""
+    snapshot_cache.bump_revision()
 
 
-def cached_stats(key='', now=None):
-    """stats_payload, kept per process for STATS_CACHE_SECONDS: every open dashboard polls it every few seconds and it runs a dozen
-    full-table counts, so the polls of one viewer share one computation. The counts go through the tenancy-scoped managers, so they
-    differ per caller and per selected project: ``key`` (user id and project slug) is part of the cache key, never shared."""
-    import time
-    from django.core.cache import cache
-    try:
-        revision = cache.get(STATS_REVISION_KEY) or ''
-    except Exception:  # noqa: BLE001
-        revision = ''
-    key = (key, revision)
-    now = time.monotonic() if now is None else now
-    hit = _STATS_CACHE.get(key)
-    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
-        if len(_STATS_CACHE) >= STATS_CACHE_ENTRIES:
-            _STATS_CACHE.clear()
-        hit = _STATS_CACHE[key] = (now, stats_payload())
-    return hit[1]
+def clear_stats_cache():
+    """Make every shared live-screen snapshot stale (tests, and a factory reset): the next poll of each scope rebuilds its own. The hot scopes and the
+    refresher's heartbeat are forgotten too, so nothing is served on the strength of a refresher that was running before."""
+    snapshot_cache.bump_revision()
+    snapshot_cache.reset_hot()
+
+
+def cached_stats_snapshot(params=(), scope=None):
+    """The headline counts snapshot (``{'payload', 'etag', ...}``) of the current scope, shared by every viewer of that scope in every worker for
+    STATS_CACHE_SECONDS. Run it inside ``project_scoped``: ``scope_hash`` reads the scope the counts are filtered by, so the key is who may see
+    the rows, not who asks."""
+    return snapshot_cache.snapshot('stats', scope or snapshot_cache.scope_hash(*params), stats_payload, STATS_CACHE_SECONDS,
+                                   hot={'params': params, 'args': {}})
+
+
+def cached_stats(params=()):
+    """``stats_payload`` of the current scope from the shared snapshot (see ``cached_stats_snapshot``)."""
+    return cached_stats_snapshot(params)['payload']
 
 
 @require_GET
@@ -713,12 +804,28 @@ def api_alive(request):
 @require_GET
 @project_scoped
 def api_stats(request):
-    from tenancy.roles import scope_org
-    return JsonResponse({**cached_stats((request.user.pk, request.GET.get('project', ''), scope_org(request))), **live_scan_counts()})
+    snap = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))
+    live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
+    # the ETag is the snapshot's (computed once, when it was built) and the live counts: a poll that finds both unchanged gets a 304 and no body
+    return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
 
 
 GRAPH_CACHE_SECONDS = 30
+GRAPH_LIVE_SECONDS = 2  # how long what the running scans are doing is shared between tabs
+GRAPH_VERSION_SECONDS = 5  # the version token is itself kept this long per scope: the 304 path of every open graph asked eight aggregate queries per poll
 GRAPH_VERSION_WINDOW = 300  # a graph that "has not changed" is still re-sent this often: edits to existing rows move no id
+
+
+def _label_version():
+    """What the graph shows of the aliases and notes people gave hosts and targets, as a token: an edit moves no id, so the newest change of the
+    host rows and the labelled targets' own text stand for them. The graph would otherwise show an old tooltip until the time window passes."""
+    from django.contrib.postgres.aggregates import StringAgg
+    from django.db.models import Count, Max
+    from cveFeed.models import HostProfile
+    from targetApp.models import Domain
+    hosts = HostProfile.objects.aggregate(m=Max('updated_at'), n=Count('id'))
+    targets = Domain.objects.exclude(alias='', note='').aggregate(a=StringAgg('alias', '\x1f', ordering='id'), n=StringAgg('note', '\x1f', ordering='id'))
+    return hosts, targets
 
 
 def graph_version(domain_id=None, scan_id=None):
@@ -740,41 +847,68 @@ def graph_version(domain_id=None, scan_id=None):
         ScanActivity.objects.aggregate(m=Max('id'), t=Max('time')),
         DiscoveryEvent.objects.aggregate(m=Max('id'))['m'],
         CVEMatch.objects.aggregate(m=Max('id'), u=Max('updated_at')),
+        _label_version(),
         int(timezone.now().timestamp() // GRAPH_VERSION_WINDOW),
     ]
     return hashlib.sha1(repr(parts).encode()).hexdigest()[:16]
+
+
+def graph_cache_key(scope, version):
+    return f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
 
 
 @require_GET
 @project_scoped
 def api_graph(request):
     """The asset graph. ``?v=<version>`` equal to the current version answers 304, so the dashboard's poller costs a few
-    aggregate queries when nothing changed; otherwise the payload is served from a short per-user cache."""
+    aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
+    same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
+    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
     from django.core.cache import cache
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
-    version = graph_version(domain_id, scan_id)
+    params = (request.GET.get('project', ''), _live_org(request), domain_id, scan_id)
+    scope = snapshot_cache.scope_hash(*params)
+    version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS,
+                                      hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    from tenancy.roles import scope_org
-    key = f'cve-graph:{request.user.pk}:{request.GET.get("project", "")}:{scope_org(request)}:{domain_id}:{scan_id}:{version}'
-    payload = cache.get(key)
+    key = graph_cache_key(scope, version)
+    try:
+        payload = cache.get(key)
+    except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
+        payload = None
     if payload is None:
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
-        cache.set(key, payload, GRAPH_CACHE_SECONDS)
+        try:
+            cache.set(key, payload, GRAPH_CACHE_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
     return JsonResponse(payload)
 
 
 @require_GET
 @project_scoped
 def api_graph_live(request):
-    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. Never cached."""
+    """Running scans, their current step and the hosts they are working on: what the graph pulses and SOC mode lists. A snapshot kept two seconds
+    per scope (the page polls every three: every open tab of a project shares one set of queries), with an ETag of what the scans are doing, so
+    an unchanged poll is a 304. ``elapsed`` and ``at`` move every second and are left out of the ETag: the page counts the time from ``started``."""
     from cveFeed import graph_live
     slug, domain = request.GET.get('project', ''), request.GET.get('domain', '')
-    response = JsonResponse(graph_live.live(slug if slug and slug != ALL_PROJECTS else None, int(domain) if domain.isdigit() else None))
-    response['Cache-Control'] = 'no-store'
-    return response
+    project = slug if slug and slug != ALL_PROJECTS else None
+    domain_id = int(domain) if domain.isdigit() else None
+    params = (slug, _live_org(request), domain_id)
+    snap = snapshot_cache.snapshot('graph-live', snapshot_cache.scope_hash(*params),
+                                   lambda: graph_live.live(project, domain_id), GRAPH_LIVE_SECONDS, etag_of=_graph_live_token,
+                                   hot={'params': params, 'args': {'project': project, 'domain_id': domain_id}, 'check': _hot_check(domain_id)})
+    return snapshot_cache.respond(request, snap['etag'], lambda: snap['payload'])
+
+
+def _graph_live_token(payload):
+    """What the running scans are doing, without the clock (``at``, and each scan's ``elapsed``), as an ETag."""
+    return snapshot_cache.token_of({**{k: v for k, v in payload.items() if k != 'at'},
+                                    'scans': [{k: v for k, v in s.items() if k != 'elapsed'} for s in payload['scans']]})
 
 
 def _kv(*pairs):
@@ -824,6 +958,7 @@ def node_detail(node_id):
         if not d:
             return None
         return {'kind': 'domain', 'title': d.name, 'rows': _kv(
+            ('Alias', d.alias), ('Note', d.note),
             ('Hosts', Subdomain.objects.filter(target_domain=d).count()),
             ('Scans', ScanHistory.objects.filter(domain=d).count()),
             ('Findings', Vulnerability.objects.filter(target_domain=d).count()),
@@ -836,14 +971,25 @@ def node_detail(node_id):
         ports = [f'{p.number}{"/udp" if p.protocol == "udp" else ""} {p.product} {p.version}'.strip() for ip in s.ip_addresses.all() for p in open_services(ip)]
         matches = list(CVEMatch.objects.filter(subdomain=s).exclude(ai_verdict='not_affected').select_related('cve_entry', 'triage'))
         vulns = Vulnerability.objects.filter(subdomain=s).order_by('-severity')[:8]
-        from agentapi.services import _host_heat
+        from agentapi.services import _host_heat_merged, _merge_group, _name_siblings, alias_and_note
+        from cveFeed.models import HostProfile
         project = s.target_domain.project if s.target_domain else None
-        return {'kind': 'host', 'title': s.name, 'heat': _host_heat(s),
+        mine = HostProfile.objects.filter(project=project, host=s.name.lower()).first() if project else None
+        given = alias_and_note(s, [], {(project.id, s.name.lower()): {'alias': mine.alias, 'note': mine.note}} if mine else {})  # what a person calls it
+        # why the host has its colour: the same reasons, over the same copies of the host, as its row on the Hosts page, hottest first
+        others = _name_siblings(project, [s]).get(s.id, [])
+        _, reasons, _, _ = _merge_group(s, others)
+        return {'kind': 'host', 'title': s.name, 'heat': _host_heat_merged(s, others, reasons), 'project': project.slug if project else '',
+                'reasons': [{**{k: r.get(k) for k in ('kind', 'label', 'description', 'detail', 'temp', 'finding', 'id')},
+                             'classification': (r.get('classification') or '').replace('_', ' '),
+                             'href': f'/cve/{quote(project.slug)}/vulns/#{r["finding"]}-{r["id"]}' if project else ''} for r in reasons[:12]],
+                'reasons_total': len(reasons),
                 'link': f'/cve/{project.slug}/hosts/?host={quote(s.name)}' if project else '', 'rows': _kv(
+            ('Alias', given['alias']), ('Note', given['note']),
             ('Target', [(s.target_domain.name, _host_href(project.slug, s.target_domain.name))] if project else (s.target_domain.name if s.target_domain else '')),
             ('IP addresses', [(ip.address, _ip_href(project.slug, ip.address)) for ip in s.ip_addresses.all()] if project
              else ', '.join(ip.address for ip in s.ip_addresses.all())),
-            ('Heat', _host_heat(s)), ('Score', s.score),
+            ('Score', s.score),
             ('Open ports', ', '.join(ports)),
             ('HTTP', f'{s.http_status} {s.page_title or ""}'.strip() if s.http_status else ''),
             ('Web server', s.webserver), ('CDN', s.cdn_name if s.is_cdn else ''),
@@ -945,12 +1091,10 @@ def api_activity(request):
         since = None
     if since and after.isdigit() and int(after) > 0:
         bumped = list(activity.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
-    return JsonResponse({'items': [_serialize_activity(a) for a in items],
-                         'settled': [_serialize_activity(a) for a in settled],
-                         'bumped': [_serialize_activity(a) for a in bumped], 'now': timezone.now().isoformat()})
-
-
-_DISCOVERY_COUNTS_CACHE = {}  # (user id, project slug) -> (computed at, counts)
+    body = {'items': [_serialize_activity(a) for a in items], 'settled': [_serialize_activity(a) for a in settled],
+            'bumped': [_serialize_activity(a) for a in bumped]}
+    # the ETag is the lines themselves, never ``now``: a poll that finds the same lines gets a 304 (the page keeps its cursor, and asks again)
+    return snapshot_cache.respond(request, snapshot_cache.token_of(body), lambda: {**body, 'now': timezone.now().isoformat()})
 
 
 def discovery_counts():
@@ -962,17 +1106,12 @@ def discovery_counts():
     return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
 
 
-def cached_discovery_counts(key='', now=None):
-    """``discovery_counts`` kept per process for STATS_CACHE_SECONDS: the dashboard polls the ticker every 2.5 s and the three distinct
-    counts walk the caller's whole inventory. Per caller and project like ``cached_stats``, and dropped with it by ``bump_stats_revision``."""
-    import time
-    now = time.monotonic() if now is None else now
-    hit = _DISCOVERY_COUNTS_CACHE.get(key)
-    if hit is None or now - hit[0] >= STATS_CACHE_SECONDS:
-        if len(_DISCOVERY_COUNTS_CACHE) >= STATS_CACHE_ENTRIES:
-            _DISCOVERY_COUNTS_CACHE.clear()
-        hit = _DISCOVERY_COUNTS_CACHE[key] = (now, discovery_counts())
-    return hit[1]
+def cached_discovery_counts(params=()):
+    """``discovery_counts`` of the current scope from a snapshot shared by every viewer of that scope in every worker for STATS_CACHE_SECONDS:
+    the dashboard polls the ticker every 2.5 s and the three distinct counts walk the caller's whole inventory. Dropped with the headline
+    counts by ``bump_stats_revision``. Run it inside ``project_scoped``."""
+    return snapshot_cache.snapshot('discovery-counts', snapshot_cache.scope_hash(*params), discovery_counts, STATS_CACHE_SECONDS,
+                                   hot={'params': params, 'args': {}})['payload']
 
 
 @require_GET
@@ -988,19 +1127,19 @@ def api_discovery(request):
         qs = ScanHistory.objects.select_related('domain', 'scan_type')
         scan = _running_scans(qs.model).order_by('-id').first() or qs.order_by('-id').first()
     if not scan:
-        return JsonResponse({'scan': None, 'events': [], 'counts': {}})
+        return snapshot_cache.respond_payload(request, {'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
     events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
-    return JsonResponse({
+    return snapshot_cache.respond_payload(request, {
         'scan': {'id': scan.id, 'target': scan.domain.name, 'project': scan.domain.project.slug if scan.domain.project else None,
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': cached_discovery_counts((request.user.pk, request.GET.get('project', ''))),
+        'counts': cached_discovery_counts((request.GET.get('project', ''), _live_org(request))),
     })
 
 
@@ -1014,23 +1153,28 @@ def _json_body(request):
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_detect(request):
-    from reNgine.ai_providers import detect_provider
-    return JsonResponse({'provider': detect_provider(_json_body(request).get('key'))})
+    from reNgine.ai_providers import ambiguous_key, detect_provider
+    key = _json_body(request).get('key')
+    return JsonResponse({'provider': detect_provider(key), 'ambiguous': ambiguous_key(key)})  # ambiguous: an sk- key more than one vendor issues
 
 
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_onboarding_save(request):
-    """Detect the provider from the key, verify it with a live call, then save + enable it."""
+    """Verify the key against the provider the user chose (or its unambiguous prefix names) with a live call, then save + enable it. A key
+    whose vendor is not certain is never tried anywhere: the user is asked to pick the provider."""
     from dashboard.models import AIProviderSettings
     from reNgine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
 
     body = _json_body(request)
     key = (body.get('key') or '').strip()
     previous = AIProviderSettings.objects.first()
-    provider_name = body.get('provider') or detect_provider(key) or (previous.provider if previous and previous.enabled else None)
+    # A pasted key goes only to the provider the user picked or its prefix names; the connected provider is the fallback only when no key was
+    # pasted (re-checking the stored one), never for a new key whose vendor is unknown.
+    provider_name = body.get('provider') or detect_provider(key) or (previous.provider if not key and previous and previous.enabled else None)
     if not provider_name:
-        return JsonResponse({'ok': False, 'error': 'Could not recognise this key. Pick a provider.'}, status=400)
+        return JsonResponse({'ok': False, 'error': 'This key does not say which vendor issued it (many do not). Pick the provider it belongs to; '
+                                                   'nothing was sent anywhere.'}, status=400)
     model = (body.get('model') or '').strip()
     if not key and previous and previous.provider == provider_name:
         key = previous.api_key or ''
@@ -1038,7 +1182,9 @@ def api_onboarding_save(request):
     needs_model = provider_name in SELECTABLE and not model
     try:
         base_url = previous.base_url if previous and previous.provider == provider_name else None
-        provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url)
+        from reNgine.ai_profiles import AIRuntime
+        provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url,
+                                runtime=AIRuntime.from_row(previous) if previous else None)  # the timeouts saved in Settings apply to the first check too
         with usage_stage('connection_test'):
             if needs_model:
                 provider.list_models()  # OpenRouter/Ollama/vLLM/LM Studio: prove the connection, the user picks the model in Settings

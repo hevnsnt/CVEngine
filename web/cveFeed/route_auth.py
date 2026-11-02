@@ -285,7 +285,11 @@ def analyse(result):
 
 
 CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
-MAX_BASELINES_PER_HOST = 8  # extra requests a host may be asked for what its missing pages look like, on top of its routes
+MAX_BASELINES_PER_BASE = 8  # extra requests a web base may be asked for what its missing pages look like, on top of its routes
+# ... and the host as a whole, over both its bases: two bases need 12 for the common routes (the most MAX_URLS_PER_HOST urls can ask for), so a
+# host is asked for at most its routes and these, MAX_REQUESTS_PER_HOST requests in all (a front page's own scripts are read besides: _read_scripts)
+MAX_BASELINES_PER_HOST = 12
+MAX_REQUESTS_PER_HOST = MAX_URLS_PER_HOST + MAX_BASELINES_PER_HOST
 
 
 def _split_route(path):
@@ -306,10 +310,10 @@ def _baseline_path(directory, shape, ext):
 
 def _baseline(base, directory, shape, ext, probe, known):
     """The fingerprint of the server's answer for a path that cannot exist in ``directory``, of the kind ``shape`` names, read once per
-    web base, directory and shape. None when it could not be read or this host has used up its requests for it."""
+    web base, directory and shape. ``known`` is one host's. None when it could not be read or this host or base has used up its requests for it."""
     key = (base, directory, shape, ext if shape == 'ext' else '')
     if key not in known:
-        if sum(1 for k in known if k[0] == base) >= MAX_BASELINES_PER_HOST:
+        if len(known) >= MAX_BASELINES_PER_HOST or sum(1 for k in known if k[0] == base) >= MAX_BASELINES_PER_BASE:
             return None
         time.sleep(PER_REQUEST_GAP)
         path = _baseline_path(directory, shape, ext)
@@ -456,9 +460,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         connection.sock.settimeout(timeout[1])
         connection.request(method, path, headers=request_headers)
         response = connection.getresponse()
-        if response.getheader('Content-Encoding', 'identity').lower() not in ('', 'identity'):
-            raise ValueError('probe server ignored identity encoding')
-        raw = response.read(max_bytes) or b''
+        raw = pinned_transport.read_body(response, max_bytes)  # gzip and deflate from a device that ignores identity are decoded, capped after decoding
         if expired.is_set():
             raise TimeoutError('probe exceeded its total time budget')
         encoding = response.headers.get_content_charset() or 'utf-8'

@@ -170,6 +170,13 @@ class _Job:
 
 
 class RunTimeHitTests(unittest.TestCase):
+	def setUp(self):
+		# run_template resolves every name again at launch and treats one it cannot resolve in time as blocked; these tests are about what is
+		# done with nuclei's output, so they must not depend on a real DNS lookup answering (it did not, once, on a busy CI runner)
+		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def _run(self, lines):
 		FakeProc.lines = lines
 		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
@@ -243,6 +250,33 @@ class ValidateBeforeSaveTests(unittest.TestCase):
 		self.assertIn('positive fixture', tmpl.validation_output)
 		fixture.assert_called_once()
 		install.assert_not_called()
+
+	def test_literal_secrets_in_a_drafted_template_survive_the_round_trip(self):
+		"""The reply is a nuclei template: a hardcoded JWT, a Basic credential and a PEM header matcher must reach the saved YAML as written."""
+		from reNgine import ai_providers
+		jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+		yaml_text = ('id: CVE-2024-1234\ninfo:\n  name: t\n  severity: high\nhttp:\n  - method: GET\n    path:\n      - "{{BaseURL}}/x"\n'
+					 '    headers:\n      Authorization: "Bearer ' + jwt + '"\n      X-Basic: "Basic YWRtaW46YWRtaW4="\n'
+					 '    matchers:\n      - type: word\n        words:\n          - "-----BEGIN RSA PRIVATE KEY-----"\n')
+
+		class Resp:
+			def raise_for_status(self):
+				pass
+
+			def json(self):
+				return {'content': [{'type': 'text', 'text': '```yaml\n' + yaml_text + '```'}]}
+		provider = ai_providers.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
+		cve = CVEEntry(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8, affected=[], references=[])
+		with mock.patch('requests.post', return_value=Resp()), mock.patch.object(templategen, 'GENERATED_DIR', '/nonexistent-cvengine-test'), \
+				mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
+				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')), \
+				mock.patch('cveFeed.activity.log'), mock.patch('cveFeed.activity.step') as step, \
+				mock.patch('cveFeed.models.GeneratedTemplate.save'), mock.patch.object(templategen, 'save_template_file'):
+			step.return_value.__enter__.return_value = mock.Mock()
+			tmpl = templategen.generate_template(cve, provider, candidate_only=True)
+		for literal in (jwt, 'Basic YWRtaW46YWRtaW4=', '-----BEGIN RSA PRIVATE KEY-----'):
+			self.assertIn(literal, tmpl.yaml)
+		self.assertNotIn('[redacted', tmpl.yaml)
 
 	def _generate(self, valid):
 		import tempfile

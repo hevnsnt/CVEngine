@@ -6,7 +6,7 @@ detected technology. A target controls its own headers and pages, so every name 
 is capped; the evidence for each says where it came from."""
 import re
 
-from cveFeed import versions
+from cveFeed import cms, versions
 from cveFeed.versions import POWERED_BY_PRODUCTS, SAFE_NAME, SERVER_PRODUCTS, VERSION  # defined with the header parsers
 
 MAX_FINGERPRINTS = 20
@@ -33,8 +33,7 @@ def generator_content(text):
 BODY_MARKERS = (
     (re.compile(r"__NEXT_DATA__|/_next/static/"), "Next.js", "page:_next"),
     (re.compile(r"/_nuxt/"), "Nuxt.js", "page:_nuxt"),
-    (re.compile(r"/wp-content/|/wp-includes/"), "WordPress", "page:wp-content"),
-    (re.compile(r"Drupal\.settings|/sites/default/files/"), "Drupal", "page:drupal"),
+    *cms.MARKERS,  # WordPress, Drupal, Joomla, Magento, TYPO3, Umbraco: one table with the version sources
     (re.compile(r"cdn\.shopify\.com"), "Shopify", "page:shopify-cdn"),
     (re.compile(r"/static/CACHE/|csrfmiddlewaretoken"), "Django", "page:django"),
     (re.compile(r"(?:href|src|action)=[\"'][^\"'\s]*\.php(?:[?#\"'])", re.IGNORECASE), "PHP", "page:.php link"),

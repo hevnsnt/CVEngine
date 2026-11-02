@@ -132,6 +132,16 @@ def rdp_without_nla(port):
     return accepted or None
 
 
+def rdp_requires_nla(port):
+    """True when nmap's rdp-enum-encryption ran and the server accepts only CredSSP (Network Level Authentication): it sends no screen of its own
+    before someone signs in, so there is nothing to capture. False when the script did not run (nothing is known) or a connection without NLA is
+    accepted (``rdp_without_nla``)."""
+    text = ((port.extra or {}).get('scripts') or {}).get('rdp-enum-encryption', '')
+    if not text or rdp_without_nla(port):
+        return False
+    return any(value.upper().startswith('SUCCESS') and key.startswith('CredSSP') for key, value in _field_lines(text))
+
+
 def record_service_findings(scan):
     """Findings the scan's stored script output proves. Returns how many were new. Idempotent: a finding is one row per host and
     port, and a port that stopped allowing anonymous sign-in is simply no longer reported."""

@@ -67,7 +67,7 @@ class GraphLiveTests(TestCase):
             response = client.get('/cve/api/graph-live' + query)
             self.assertEqual(response.status_code, 200, query)
             self.assertEqual({s['project'] for s in response.json()['scans']}, {'live-north'}, query)
-            self.assertEqual(response['Cache-Control'], 'no-store')
+            self.assertEqual(response['Cache-Control'], 'private, no-cache')  # not no-store: a conditional request has to be possible
         self.assertEqual(client.get('/cve/api/graph-live?project=live-south').status_code, 404)
         self.assertEqual(client.get('/cve/api/graph-live?project=live-north&domain=' + str(self.ds.id)).json()['scans'], [])
         self.assertEqual({s['project'] for s in client_for(self.root).get('/cve/api/graph-live?project=_all').json()['scans']},

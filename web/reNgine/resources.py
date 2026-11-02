@@ -48,10 +48,11 @@ BASE_COSTS_MB = {
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
     'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
     'testssl': 150,         # testssl.sh and its openssl children against one TLS port
+    'screenshot': 450,      # one headless Chromium and its driver, one page at a time (cveFeed.web_shot); a batch of pages is one job
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.
-MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2}
+MAX_CONCURRENT = {'bbot-deep': 1, 'bbot-standard': 2, 'bbot-passive': 2, 'nuclei': 1, 'nuclei-light': 1, 'nmap': 2, 'nmap-full-bg': 1, 'nmap-udp-bg': 1, 'naabu': 1, 'template-test': 3, 'route-probe': 2, 'wpscan': 2, 'testssl': 2, 'screenshot': 1}
 DEFAULT_WAIT_SECONDS = 24 * 3600  # a queued deep discovery may wait behind several others, one at a time
 RESERVATION_TTL = 90        # a holder that stops heartbeating loses its reservation after this many seconds
 HEARTBEAT_SECONDS = 3
@@ -220,25 +221,193 @@ def _cost_override(kind):
     return _env_float('HEAVY_COST_' + kind.upper().replace('-', '_') + '_MB')
 
 
-def max_concurrent(kind):
-    baseline = int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
-    low, high = adaptive_bounds(kind, baseline)
+def _static_cap(kind):
+    """The cap before anything an App Admin saved: HEAVY_MAX_<KIND>, else the built-in default."""
+    return int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
+
+
+# What an App Admin saved on Settings, configMaxxing (cveFeed.scan_concurrency): the web process writes the saved values to this Redis key on every
+# save and the 30 second tick writes them again, and each process keeps a copy for SAVED_CACHE_SECONDS. This module only reads the key (it must stay
+# importable by itself: it runs inside every scanner task and in a child interpreter in the tests), and only for the caps of the scanner kinds.
+SAVED_VALUES_KEY = 'cvengine:scanconc:values'
+SAVED_CACHE_SECONDS = 5
+_saved = {'at': None, 'values': {}}
+_saved_clients = {}
+_saved_lock = threading.Lock()
+
+
+def redis_client():
+    """A Redis client for the broker URL, or None when the broker is not Redis. Created once per URL; connects on first use."""
+    url = os.environ.get('CELERY_BROKER') or os.environ.get('CELERY_BROKER_URL') or ''
+    if not url.startswith(('redis://', 'rediss://', 'unix://')):
+        return None
+    if url not in _saved_clients:
+        import redis
+        _saved_clients[url] = redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=3, decode_responses=True)
+    return _saved_clients[url]
+
+
+def invalidate_saved():
+    with _saved_lock:
+        _saved.update(at=None)
+
+
+def saved_values(now_fn=time.monotonic):
+    """The values saved on the configMaxxing page, {key: whole number}, cached SAVED_CACHE_SECONDS. When Redis cannot be reached the last copy this
+    process saw is kept; with none, nothing is saved as far as this process knows and the environment and the built-in defaults apply. When Redis
+    answers but holds no copy (restarted without persistence, flushed, recreated), the database is the truth: it is read (at most once per cache
+    window), used and published again, so a lost copy never silently puts a saved limit back to the default."""
+    now = now_fn()
+    with _saved_lock:
+        if _saved['at'] is not None and now - _saved['at'] < SAVED_CACHE_SECONDS:
+            return _saved['values']
+    values = None
     try:
-        client = getattr(get_store(), 'r', None)
-        raw = client.get(f'cvengine:adaptive:max:{kind}') if client is not None else None
-        value = json.loads(raw).get('value') if raw else None
-        return max(low, min(high, int(value))) if value is not None else max(low, min(high, baseline))
-    except Exception:  # Redis is advisory; admission must retain the static operator cap on an outage.
-        return max(low, min(high, baseline))
+        client = redis_client()
+        raw = client.get(SAVED_VALUES_KEY) if client is not None else None
+        values = json.loads(raw).get('values') if raw else None
+        values = values if isinstance(values, dict) else None
+    except (ValueError, AttributeError):
+        values = None  # a copy nobody can read is no copy
+    except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop admission or the conductor
+        logger.debug('saved scan concurrency could not be read', exc_info=False)
+        with _saved_lock:
+            _saved['at'] = now  # no retry on every call during an outage
+            return _saved['values']
+    if values is None:
+        values = _recover_saved(client is not None)
+        if values is None:  # the database could not be read either (or this is not a Django process): keep what this process had
+            with _saved_lock:
+                _saved['at'] = now
+                return _saved['values']
+    with _saved_lock:
+        _saved.update(at=now, values=values)
+    return values
+
+
+def _recover_saved(publish_again):
+    """The saved values from the database, published again; None where that cannot be done (a process without Django, a database that is down).
+    Imported here so that this module stays importable by itself."""
+    try:
+        from cveFeed import scan_concurrency
+        return scan_concurrency.recover(publish_again)
+    except Exception:  # noqa: BLE001
+        logger.debug('saved scan concurrency could not be recovered from the database', exc_info=False)
+        return None
+
+
+def _admin_cap(kind):
+    """The cap an App Admin saved for a kind, or None."""
+    value = saved_values().get('heavy.' + kind)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
+# What the auto-tuner chose (cveFeed.autotune), published by the process that changes it and again by the 30 second tick, read and cached the same
+# way as the saved values above. The copy holds numbers only while the instance's mode is Auto; Off and Suggest publish an empty copy, so a number
+# the tuner chose stops applying within seconds of turning it off. ``CVENGINE_AUTOTUNE=0`` (the kill switch) is honoured here too, by every reader.
+AUTO_VALUES_KEY = 'cvengine:autotune:values'
+_auto = {'at': None, 'values': {}}
+AUTOTUNE_OFF_WORDS = ('0', 'false', 'no', 'off')
+
+
+def autotune_killed(environ=None):
+    """Whether CVENGINE_AUTOTUNE turns auto-tuning off for this process (the environment's kill switch, read on every call)."""
+    return str((environ if environ is not None else os.environ).get('CVENGINE_AUTOTUNE', '')).strip().lower() in AUTOTUNE_OFF_WORDS
+
+
+def auto_values(now_fn=time.monotonic):
+    """The numbers the auto-tuner chose and that apply now, ``{key: whole number}`` (empty unless the mode is Auto), cached SAVED_CACHE_SECONDS.
+    The same three cases as ``saved_values``: a copy is used; Redis without a copy means the database is read and the copy published again; Redis
+    that cannot be reached keeps the last copy this process saw (none: no tuned numbers, so the saved value, the environment or the default)."""
+    if autotune_killed():
+        return {}
+    now = now_fn()
+    with _saved_lock:
+        if _auto['at'] is not None and now - _auto['at'] < SAVED_CACHE_SECONDS:
+            return _auto['values']
+    values = None
+    try:
+        client = redis_client()
+        raw = client.get(AUTO_VALUES_KEY) if client is not None else None
+        values = json.loads(raw).get('values') if raw else None
+        values = values if isinstance(values, dict) else None
+    except (ValueError, AttributeError):
+        values = None
+    except Exception:  # noqa: BLE001 - a cache that cannot be read must never stop admission or the conductor
+        logger.debug('auto-tuned values could not be read', exc_info=False)
+        with _saved_lock:
+            _auto['at'] = now
+            return _auto['values']
+    if values is None:
+        values = _recover_auto(client is not None)
+        if values is None:
+            with _saved_lock:
+                _auto['at'] = now
+                return _auto['values']
+    values = {k: v for k, v in values.items() if isinstance(v, int) and not isinstance(v, bool)}
+    with _saved_lock:
+        _auto.update(at=now, values=values)
+    return values
+
+
+def invalidate_auto():
+    with _saved_lock:
+        _auto.update(at=None)
+
+
+def _recover_auto(publish_again):
+    try:
+        from cveFeed import autotune
+        return autotune.recover(publish_again)
+    except Exception:  # noqa: BLE001
+        logger.debug('auto-tuned values could not be recovered from the database', exc_info=False)
+        return None
+
+
+def _auto_cap(kind):
+    value = auto_values().get('heavy.' + kind)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
+
+
+def env_cap_pin(kind):
+    """HEAVY_MAX_<KIND> when it pins the kind: set, a usable number, and not the built-in default (a value equal to the default cannot be told
+    from no value). None otherwise."""
+    raw = _env_float('HEAVY_MAX_' + kind.upper().replace('-', '_'))
+    value = int(raw) if raw else None
+    return value if value and value >= 1 and value != MAX_CONCURRENT.get(kind, 2) else None
+
+
+def base_cap(kind):
+    """The cap in effect: what a person saved (it pins the kind), else HEAVY_MAX_<KIND> when it pins the kind (set and not the default), else
+    what the auto-tuner chose (mode Auto only), else the environment or the built-in default."""
+    saved = _admin_cap(kind)
+    if saved is not None:
+        return saved
+    pinned = env_cap_pin(kind)
+    if pinned is not None:
+        return pinned
+    tuned = _auto_cap(kind)
+    return tuned if tuned is not None else _static_cap(kind)
+
+
+def max_concurrent(kind):
+    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it now, through ``base_cap``: the step the old
+    three-hour review kept in Redis (``cvengine:adaptive:max:<kind>``) is no longer read, so a leftover one changes nothing."""
+    return max(1, base_cap(kind))
 
 
 def adaptive_bounds(kind, baseline=None):
-    """Operator-controlled bounds; the default maximum is the established static cap."""
-    baseline = baseline or int(_env_float('HEAVY_MAX_' + kind.upper().replace('-', '_')) or MAX_CONCURRENT.get(kind, 2))
+    """The range the three-hour review's candidate is judged against (cveFeed.performance_review, which now only reports). The cap an App Admin
+    saved is the default maximum; HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen it as before. The auto-tuner has its own range per kind
+    (cveFeed.autotune.envelope), which HEAVY_TUNE_MIN/MAX_<KIND> also narrow or widen."""
+    baseline = baseline or base_cap(kind)
+    saved = _admin_cap(kind)
     suffix = kind.upper().replace('-', '_')
-    low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
-    high = max(low, int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline))
-    return low, high
+    env_low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
+    env_high = int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline)
+    if saved is None:
+        return env_low, max(env_low, env_high)
+    return min(env_low, saved), max(env_high, saved)
 
 
 def cost_mb(kind):
@@ -258,6 +427,49 @@ def effective_cost(kind, store):
     except Exception:  # noqa: BLE001 - a Redis hiccup must not stop a scan from starting
         learned = 0
     return int(max(cost_mb(kind), learned * LEARNED_MARGIN))
+
+
+def _proc_table():
+    """``{pid: (ppid, pgrp, rss bytes)}`` of every process (Linux /proc)."""
+    page = os.sysconf('SC_PAGE_SIZE') if hasattr(os, 'sysconf') else 4096
+    table = {}
+    try:
+        pids = [p for p in os.listdir('/proc') if p.isdigit()]
+    except OSError:
+        return table
+    for pid in pids:
+        stat = _read(f'/proc/{pid}/stat')
+        if not stat:
+            continue
+        try:  # the command name may contain spaces and parentheses: fields start after the last ')'
+            fields = stat.rsplit(')', 1)[1].split()
+            statm = (_read(f'/proc/{pid}/statm') or '0 0').split()
+            table[int(pid)] = (int(fields[1]), int(fields[2]), int(statm[1]) * page)
+        except (IndexError, ValueError):
+            continue
+    return table
+
+
+def tree_pids(root, table=None):
+    """The pids of ``root``'s process group and of every descendant by parent pid, however many sessions or groups they started. A browser starts its
+    own session: measuring or stopping the group alone saw only the launcher, not the several hundred MB behind it."""
+    table = _proc_table() if table is None else table
+    found = {pid for pid, (_ppid, pgrp, _rss) in table.items() if pgrp == root}
+    found.add(root)
+    changed = True
+    while changed:
+        changed = False
+        for pid, (ppid, _pgrp, _rss) in table.items():
+            if ppid in found and pid not in found:
+                found.add(pid)
+                changed = True
+    return {pid for pid in found if pid in table}
+
+
+def tree_rss_mb(root):
+    """Resident memory of ``root``'s group and all its descendants, in MB."""
+    table = _proc_table()
+    return sum(table[pid][2] for pid in tree_pids(root, table)) // (1 << 20)
 
 
 def group_rss_mb(pgid):
@@ -544,7 +756,13 @@ def redis_claim(key, owner, ttl):
 # --- the gate ------------------------------------------------------------------------------------------------------
 
 def terminate_group(proc, grace=10):
-    """Stop a subprocess and everything it started: SIGTERM to its process group, SIGKILL if it lingers."""
+    """Stop a subprocess and everything it started: SIGTERM to its process group, SIGKILL if it lingers. Descendants that left the group (a browser
+    starts its own session) are found by parent pid first and stopped with it."""
+    try:
+        others = tree_pids(proc.pid) - {proc.pid}
+    except Exception:  # noqa: BLE001 - the group kill below still happens
+        others = set()
+
     def send(sig):
         try:
             if os.getpgid(proc.pid) == proc.pid:
@@ -553,11 +771,16 @@ def terminate_group(proc, grace=10):
                 proc.send_signal(sig)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        for pid in others:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
     send(signal.SIGTERM)
     deadline = time.time() + grace
     while proc.poll() is None and time.time() < deadline:
         time.sleep(0.5)
-    if proc.poll() is None:
+    if proc.poll() is None or any(os.path.exists(f'/proc/{pid}') for pid in others):
         send(signal.SIGKILL)
 
 
@@ -616,7 +839,7 @@ class Job:
             terminate_group(proc, grace=5)
 
     def rss_mb(self):
-        return group_rss_mb(self.proc.pid) if self.proc is not None and self.proc.poll() is None else 0
+        return tree_rss_mb(self.proc.pid) if self.proc is not None and self.proc.poll() is None else 0
 
     def check_once(self):
         """One watchdog tick: publish this job's memory, and stop it if it is the biggest job while memory is critical."""

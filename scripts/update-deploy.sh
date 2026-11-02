@@ -87,6 +87,10 @@ deploy_steps() {
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1
+  # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
+  # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
+  "${compose[@]}" up -d --no-deps db || return 1
+  for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   phase applying backup
   backup_database || return 1
   DEPLOY_STAGE=migrate

@@ -369,6 +369,9 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertIn('docker compose -f docker-compose.yml up -d --no-recreate db redis', calls)
+        # the db container follows its compose definition (max_connections): recreated only if it changed, and before the migration
+        self.assertLess(calls.index('docker compose -f docker-compose.yml up -d --no-deps db'),
+                        next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
         self.assertLess(next(i for i, c in enumerate(calls) if ' migrate --noinput' in c),
                         next(i for i, c in enumerate(calls) if '--force-recreate web' in c))
         self.assertTrue(any('-f docker-compose.yml exec' in c for c in calls))  # the scan check

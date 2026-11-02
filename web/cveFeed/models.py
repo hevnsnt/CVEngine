@@ -5,10 +5,13 @@ One row per cve.now entry, carrying the merged severity, exploitation
 correlation engine matches against the discovered asset inventory.
 """
 from django.db import models
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 from django.db.models.functions import Lower
 
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
+from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 from django.utils.dateparse import parse_datetime
 
 
@@ -123,8 +126,16 @@ class CVEEntry(models.Model):
             "published_at": _feed_time(entry.get("publishedAt")),
             "first_seen_at": _feed_time(entry.get("firstSeenAt")),
         }
+        # the CVE List's own forms the feed passes on ("unspecified" bounds, a branch in two ranges, Junos' "21.1*" and comma lists of fixes) are
+        # made ranges correlation can read, and a block the feed states no range for keeps the ranges the CVE List record gave (issues 205, 210)
+        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges
+        defaults["affected"] = normalize_feed_ranges(defaults["affected"])
+        stored = cls.objects.filter(cve_id=str(entry["id"])[:64]).values_list("affected", "sources").first()
+        if stored and "CVE List V5" in (stored[1] or []):
+            defaults["affected"] = keep_published_ranges(defaults["affected"], stored[0])
+            if "CVE List V5" not in defaults["sources"]:  # the label is what lets the next refresh keep them too
+                defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
-        from cveFeed.intel import overlay_branch_ranges
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
@@ -273,6 +284,11 @@ class FeedWatermark(models.Model):
     resume_cursor = models.TextField(blank=True, default="")
     resume_head = models.DateTimeField(null=True, blank=True)
     checked_at = models.DateTimeField(null=True, blank=True)  # when a walk last reached its floor
+    # entries a walk listed but could not read, as {id: attempts}; one that failed ``MAX_ATTEMPTS`` runs in a row is set aside (reported, no longer
+    # allowed to keep the window from being declared covered)
+    failures = models.JSONField(default=dict, db_default={}, blank=True)
+    # set when the first walk had no seed time and no earlier walk to start from: the feed was only read back this many days
+    assumed_days = models.PositiveSmallIntegerField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
 
@@ -528,7 +544,7 @@ class TlsCertificate(models.Model):
 
 
 class HygieneFinding(models.Model):
-    """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA."""
+    """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA, cleartext services."""
 
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)
@@ -620,8 +636,10 @@ class ProbeObservation(models.Model):
 
 
 class HostProfile(models.Model):
-    """Editable asset information for one host of a project: who owns it, what it is for and how much it matters.
-    One row per (project, host); the host name is stored lowercase. Never read by a scanner."""
+    """Editable asset information for one host of a project: who owns it, what it is for and how much it matters, and the alias (a short
+    display name) and note a person gave it. One row per (project, host); the host name is stored lowercase. Never read by a scanner.
+    It is keyed by the host's name, not by a scan row or an address set, so it survives rescans, and when other names resolve to the same
+    addresses the Hosts page shows one host and takes the alias and note from whichever of its names has them (agentapi.services._host)."""
 
     CRITICALITY = ("unknown", "low", "medium", "high", "critical")
     CRITICALITY_CHOICES = [(c, c) for c in CRITICALITY]
@@ -631,6 +649,8 @@ class HostProfile(models.Model):
     owner = models.CharField(max_length=200, blank=True, default="")
     purpose = models.CharField(max_length=500, blank=True, default="")
     criticality = models.CharField(max_length=16, choices=CRITICALITY_CHOICES, default="unknown")
+    alias = models.CharField(max_length=ALIAS_MAX, blank=True, default="", db_default="")  # display only: the address and discovered names stay
+    note = models.CharField(max_length=NOTE_MAX, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -771,6 +791,62 @@ class RdpScreenshot(models.Model):
 
     def __str__(self):
         return f"{self.host}:{self.port}"
+
+
+class HostScreenshot(models.Model):
+    """The newest capture of one web page (or RDP login screen) of a host: one row per (project, host, scheme, port).
+
+    Written by ``cveFeed.web_shot`` (a real browser, its own stage and queue), never by discovery, so a host's screenshot no longer lives on
+    a per-scan ``Subdomain`` row that a rescan replaces. ``outcome`` and ``reason`` say what the last attempt did, so a host with no image
+    can say why. A failed attempt keeps the previous image (``image_path``) and ``captured_at`` (the time of the last success); a row that
+    is waiting for the capture worker is ``queued``. ``previous_image_path`` is the capture before the current one (the pair a visual diff
+    needs); older files are deleted."""
+
+    OUTCOMES = ("queued", "ok", "blank", "timeout", "unreachable", "tls_error", "blocked", "nla_required", "unavailable", "too_big", "error")
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    scheme = models.CharField(max_length=8, default="https")  # http, https or rdp
+    port = models.PositiveIntegerField(default=443)
+    image_path = models.CharField(max_length=1000, blank=True, default="")  # relative to MEDIA_ROOT
+    thumb_path = models.CharField(max_length=1000, blank=True, default="")
+    image_hash = models.CharField(max_length=16, blank=True, default="")  # cveFeed.shots.dhash_file
+    image_bytes = models.PositiveIntegerField(default=0)
+    previous_image_path = models.CharField(max_length=1000, blank=True, default="")
+    previous_image_hash = models.CharField(max_length=16, blank=True, default="")
+    previous_image_bytes = models.PositiveIntegerField(default=0)
+    final_url = models.CharField(max_length=2000, blank=True, default="")  # where the page ended up after redirects
+    http_status = models.PositiveIntegerField(null=True, blank=True)
+    title = models.CharField(max_length=300, blank=True, default="")
+    outcome = models.CharField(max_length=16, default="queued")
+    reason = models.CharField(max_length=300, blank=True, default="")
+    captured_at = models.DateTimeField(null=True, blank=True)  # the last successful capture
+    attempted_at = models.DateTimeField(null=True, blank=True)  # the last attempt, success or not
+    queued_at = models.DateTimeField(null=True, blank=True)
+    by_person = models.BooleanField(default=False)  # a person asked for it: the bug bounty confirmation does not hold it back
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "scheme", "port"], name="uniq_hostshot_project_host_scheme_port")]
+        indexes = [models.Index(fields=["project", "outcome"], name="hostshot_project_outcome_idx"),
+                   models.Index(fields=["outcome", "queued_at"], name="hostshot_queue_idx")]
+
+    def __str__(self):
+        return f"{self.scheme}://{self.host}:{self.port} ({self.outcome})"
+
+    @property
+    def has_image(self):
+        return bool(self.image_path)
+
+
+@receiver(post_delete, sender=HostScreenshot)
+def _remove_screenshot_files(sender, instance, **kwargs):
+    """A row deleted, by a cascade from its project or target or by a purge, takes its picture files with it (never raises)."""
+    try:
+        from cveFeed import web_shot
+        web_shot.remove_row_files(instance)
+    except Exception:  # noqa: BLE001 - the weekly sweep removes whatever is left
+        pass
 
 
 class HostAssessment(models.Model):
@@ -1769,6 +1845,100 @@ class OpenvasSettings(models.Model):
 
     def __str__(self):
         return f"OpenVAS add-on ({'on' if self.enabled else 'off'})"
+
+
+class ScanConcurrency(models.Model):
+    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``heavy.nmap``,
+    ``discovery_concurrency``, ``work_depth``) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
+    absent was never set (or was reset), so the environment variable, then the built-in default, applies. The row is the durable truth; the
+    workers read a copy published to Redis (a few seconds old at most) so that admission never waits on the database."""
+
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"scan concurrency ({len(self.values)} set)"
+
+
+class TunableSettings(models.Model):
+    """Single-row store of the advanced tunables chosen on Settings, configMaxxing (see cveFeed.tunables): ``values`` maps a tunable's key
+    (``triage_max_per_day``, ``stage_parallel`` ...) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that
+    is absent was never set (or was reset), so the environment variable, then the built-in default, applies. One row for every tunable, so
+    another tunable is one registry entry and no migration. The row is the durable truth; the processes that read a tunable use a copy that is
+    published to Redis (a few seconds old at most). It belongs to the instance, not to a project or an organization."""
+
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"tunables ({len(self.values)} set)"
+
+
+class AutoTuneSettings(models.Model):
+    """Single-row auto-tuning state of Settings, configMaxxing (see cveFeed.autotune): the mode (``off``, ``suggest`` or ``auto``, the default),
+    whether the AI advisor may be asked, and ``values``: the numbers the tuner chose for the settings it manages, ``{key: whole number}``. A
+    number here is used only while the mode is ``auto`` (and ``CVENGINE_AUTOTUNE`` is not ``0``), and only for a setting no person saved a value
+    for: a saved value pins its setting and always wins. Instance-wide, like the settings it tunes."""
+
+    MODES = ("off", "suggest", "auto")
+    mode = models.CharField(max_length=10, default="auto")
+    advisor = models.BooleanField(default=True)  # ask the AI advisor when a provider is configured
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"hold_until": iso time}}
+    changed_at = models.DateTimeField(null=True, blank=True)  # the last change of the mode or the advisor switch, by a person
+    changed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"auto-tuning ({self.mode}, {len(self.values)} tuned)"
+
+
+class TuningDecision(models.Model):
+    """One change, or one recommendation, of a setting the auto-tuner manages (cveFeed.autotune): who proposed it (the controller, the AI
+    advisor, or a person applying or reverting one), the number before and after, the reason in one sentence and the measurements it read
+    (numbers only). ``applied`` is False for a recommendation that changed nothing (Suggest mode). ``layer`` says where an applied number went:
+    ``auto`` (the tuner's own numbers) or ``saved`` (a person applied it, which pins the setting). Kept ``RETENTION_DAYS`` (cveFeed.autotune)."""
+
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    setting = models.CharField(max_length=64)
+    old_value = models.IntegerField(null=True, blank=True)
+    new_value = models.IntegerField(null=True, blank=True)
+    mode = models.CharField(max_length=10)
+    source = models.CharField(max_length=12)  # controller | ai | person
+    action = models.CharField(max_length=12)  # raise | lower | apply | revert | release
+    layer = models.CharField(max_length=8, blank=True, default="")  # auto | saved | "" for a recommendation
+    old_layer_value = models.IntegerField(null=True, blank=True)  # what that layer held before (None: nothing), so a revert restores it exactly
+    applied = models.BooleanField(default=False)
+    pressure = models.BooleanField(default=False)  # a back-off forced by trouble (memory, database, worker, Sentinel time-outs)
+    phase = models.CharField(max_length=12, blank=True, default="")  # aim_high | back_off | cap | probe | emergency | recover | "" (a person, or a calm change)
+    reason = models.CharField(max_length=300, blank=True, default="")
+    signals = models.JSONField(default=dict, blank=True)
+    actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    resolved_at = models.DateTimeField(null=True, blank=True)  # a recommendation applied or replaced, or a change reverted
+    resolved_by = models.CharField(max_length=150, blank=True, default="")
+    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted
+
+    class Meta:
+        indexes = [models.Index(fields=["setting", "created_at"], name="tuning_setting_time_idx")]
+
+    def __str__(self):
+        return f"{self.setting} {self.old_value}->{self.new_value} ({self.source})"
 
 
 class SmtpSettings(models.Model):

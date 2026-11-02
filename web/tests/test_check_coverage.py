@@ -3,9 +3,12 @@
 The rules are tested on plain facts (no database) and on stored hosts through the real host list. A test at the end fails when a ledger kind,
 a sweep or a scan stage exists in the code that is neither in the registry nor listed as deliberately excluded."""
 import ast
+import contextlib
 import os
 import pathlib
 import re
+import sys
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
@@ -269,6 +272,66 @@ class ApplicabilityTests(SimpleTestCase):
 		self.assertEqual(state_of(facts(ports=[port(80, 'http')]), 'db-exposure')[0], 'not_applicable')
 		self.assertEqual(state_of(facts(ports=[port(6379, 'redis')]), 'db-exposure')[0], 'due')
 
+	def test_cleartext_check_applies_only_to_a_host_with_a_cleartext_service_or_a_checked_web_route(self):
+		self.assertEqual(state_of(facts(ports=[port(80, 'http'), port(22, 'ssh')]), 'cleartext')[0], 'not_applicable')
+		for number, service in ((23, 'telnet'), (21, 'ftp'), (513, 'login'), (514, 'shell'), (512, 'exec')):
+			self.assertEqual(state_of(facts(ports=[port(number, service)]), 'cleartext')[0], 'due', service)
+		for number, service in ((990, 'ftps'), (992, 'telnets'), (23, 'tcpwrapped')):  # encrypted or not a service: nothing to report on
+			self.assertEqual(state_of(facts(ports=[port(number, service)]), 'cleartext')[0], 'not_applicable', service)
+		self.assertEqual(state_of(facts(ports=[port(23, 'telnet', protocol='udp')]), 'cleartext')[0], 'not_applicable')
+		web = facts(ports=[port(80, 'http')], web_bases=['http://www.example.test'])
+		self.assertEqual(state_of(web, 'cleartext')[0], 'not_applicable')  # no route check has read its pages yet
+		ev = cc.Evidence(NOW)
+		ev.routes[(1, web.name)] = ago(days=1)
+		self.assertEqual(state_of(web, 'cleartext', ev)[0], 'due')
+
+	def test_cleartext_check_leaves_out_a_cdn_edge_and_a_tailnet_address_like_the_check_itself(self):
+		edge = facts(addresses=[cc.Addr('203.0.113.10', is_cdn=True, ports=[port(21, 'ftp')])])
+		self.assertEqual(state_of(edge, 'cleartext')[0], 'not_applicable')
+		tailnet = facts(addresses=[cc.Addr('100.101.102.103', ports=[port(23, 'telnet')])])
+		self.assertEqual(state_of(tailnet, 'cleartext')[0], 'not_applicable')
+
+	def test_cleartext_check_is_judged_by_the_hygiene_run_of_the_target_or_the_scan_stage(self):
+		host = facts(name='router.example.test', ports=[port(23, 'telnet')], scan_id=9)
+		state, row = state_of(host, 'cleartext')
+		self.assertEqual((state, row['detail']), ('due', 'never run'))
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=3))  # the whole-target run is recorded on the target
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=30))  # past its 24 hour window
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'due')
+		ev.stages[(9, 'host_hygiene')] = [(2, ago(days=1))]  # a run limited to this scan's hosts counts too
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+		ev.stages[(9, 'host_hygiene')] = [(0, ago(days=1))]
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'due')
+		other = facts(name='router.example.test', ports=[port(23, 'telnet')], target_name='other.test')
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=3))  # another target's run is not this host's
+		self.assertEqual(state_of(other, 'cleartext', ev)[0], 'due')
+
+	def test_cleartext_check_follows_its_switch_and_the_bounty_gate(self):
+		host = facts(ports=[port(23, 'telnet')])
+		with mock.patch.dict(os.environ, {'CVENGINE_HYGIENE_CLEARTEXT': '0'}):
+			state, row = state_of(host, 'cleartext')
+		self.assertEqual(state, 'not_applicable')
+		self.assertIn('CVENGINE_HYGIENE_CLEARTEXT=0', row['detail'])
+		ev = cc.Evidence(NOW)
+		ev.blocked = {1}  # the hygiene sweep skips the project, so nothing would refresh the check
+		state, row = state_of(host, 'cleartext', ev)
+		self.assertEqual((state, row['detail']), ('not_applicable', cc.BOUNTY_REASON))
+
+	def test_cleartext_check_is_judged_for_a_host_inside_a_declared_internal_network_too(self):
+		host = facts(name='10.20.0.7', address='10.20.0.7', ports=[port(23, 'telnet')], internal='10.20.0.0/24', target_name='10.20.0.7',
+			target_is_domain=False)
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, '10.20.0.7', ago(hours=2))
+		with mock.patch.object(cc, '_sentinel_online', return_value=True):
+			self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+			self.assertEqual(state_of(host, 'cleartext')[0], 'due')
+			# the rest of the external checks stay not applicable to it, as before
+			self.assertEqual(state_of(host, 'waf')[0], 'not_applicable')
+
 	def test_target_level_checks_count_on_the_target_only(self):
 		sub = facts(name='www.example.test')
 		target = facts(name='example.test')
@@ -480,6 +543,22 @@ class StoredHostTests(TestCase):
 	def check(self, host, check_id):
 		return {c['id']: c for c in host['check_coverage']['checks']}[check_id]
 
+	@contextlib.contextmanager
+	def steady_caches(self):
+		"""Pin the per-process caches that expire on the clock, so no request of a measure pays for one. A request costs two queries more when the
+		IP allowlist and ban caches (reNgine.ip_allowlist, reNgine.input_guard: 10 seconds) have expired, and one or three more when the internal
+		network table (cveFeed.internal_view: 5 minutes) has. Those queries belong to whichever request lands after the expiry, whatever the page
+		holds: on a slow CI worker one landed in the host-less ``without`` request of the first measure only, and the cost read 7 against 9."""
+		from cveFeed import internal_view
+		from reNgine import input_guard, ip_allowlist
+		internal_view.invalidate()
+		with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
+				mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \
+				mock.patch.object(input_guard, 'banned_ips', return_value=frozenset()):
+			internal_view.table()  # built once, here, outside the measure
+			yield
+		internal_view.invalidate()  # the next test builds its own from its own rows
+
 	def coverage_cost(self, project, token=None):
 		"""The queries the check coverage adds to the host list: the list with it, less the list without it (the rest of the host record has
 		its own cost, which is not what is measured here)."""
@@ -488,11 +567,12 @@ class StoredHostTests(TestCase):
 				status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts')
 			self.assertEqual(status, 200, data)
 			return ctx, data
-		queries()  # the first request of a user does its own one-off work (preferences, token use)
-		with_it, data = queries()
-		self.assertTrue(all('check_coverage' in h for h in data['results']))
-		with mock.patch.object(services, '_coverage_for', return_value=None):
-			without, _ = queries()
+		with self.steady_caches():
+			queries()  # the first request of a user does its own one-off work (preferences, token use)
+			with_it, data = queries()
+			self.assertTrue(all('check_coverage' in h for h in data['results']))
+			with mock.patch.object(services, '_coverage_for', return_value=None):
+				without, _ = queries()
 		return len(with_it) - len(without)
 
 	def test_the_host_record_carries_the_field(self):
@@ -630,11 +710,30 @@ class StoredHostTests(TestCase):
 		self.assertLessEqual(big, 12)
 
 	def test_all_projects_view_costs_the_same_however_many_hosts(self):
-		small = self.coverage_cost('_all')
+		small = self.coverage_cost('_all', token=self.superuser_token)  # the same caller for both measures: the query count of a request depends on who asks
 		for i in range(8):
 			self.host(self.da, self.scan_a, f'm{i}.alpha.example.test', f'203.0.113.{150 + i}', [(443, 'https')])
 			self.host(self.db, self.scan_b, f'n{i}.beta.example.test', f'203.0.113.{170 + i}', [(443, 'https')])
 		self.assertEqual(self.coverage_cost('_all', token=self.superuser_token), small)
+
+	def test_the_measure_does_not_move_when_the_clock_caches_expire(self):
+		"""Regression for a flake (9 != 7 on slow CI workers): the per-process caches that expire on the clock (allowlist and bans after 10 seconds,
+		internal networks after 5 minutes) each cost a query, to whichever request lands after the expiry. Here the host-less request of the
+		measure always does: the cost must still read the same as with the clock still."""
+		steady = self.coverage_cost('_all', token=self.superuser_token)
+		clock, calls = {'offset': 0.0}, {'n': 0}
+		real_call, real_time, real_monotonic = call, time.time, time.monotonic
+
+		def later(*args, **kwargs):
+			if calls['n'] and calls['n'] % 2 == 0:  # the second request of a pair
+				clock['offset'] += 600
+			calls['n'] += 1
+			return real_call(*args, **kwargs)
+		with mock.patch.object(time, 'time', lambda: real_time() + clock['offset']), \
+				mock.patch.object(time, 'monotonic', lambda: real_monotonic() + clock['offset']), \
+				mock.patch.object(sys.modules[__name__], 'call', later):
+			self.assertEqual(self.coverage_cost('_all', token=self.superuser_token), steady)
+		self.assertGreater(clock['offset'], 0)
 
 
 class SignedInTests(TestCase):

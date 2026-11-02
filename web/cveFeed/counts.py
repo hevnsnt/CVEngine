@@ -63,23 +63,24 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-def running_scans(qs=None):
+def running_scans(qs=None, window=None):
+    """``window``: the running window when the caller already read it (it is a settings lookup)."""
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - running_window())
+    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - (running_window() if window is None else window))
 
 
 BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
 BACKGROUND_KINDS = ("run_check", "discovery", "scan", "hygiene", "validate")
 
 
-def background_running(now=None):
+def background_running(now=None, window=None):
     """The activity lines of background work in progress: a check, sweep, rescan or assessment that runs under a scan record that is
     no longer running (the weekly deep nuclei pass, a host rescan, an assessment), so it is invisible to ``running_scans``. A line that
     belongs to a scan ``running_scans`` already counts is left out, so the two never count the same work twice."""
     from cveFeed.models import AgentActivity
     now = now or timezone.now()
-    under_a_running_scan = list(running_scans().values_list("id", flat=True))
+    under_a_running_scan = list(running_scans(window=window).values_list("id", flat=True))
     qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
     if under_a_running_scan:
         # a missing key is not "in": filter first, then exclude by id. The inner query repeats the status, kind and age bounds (the lines it
@@ -148,14 +149,19 @@ def exposed_among(reps, project_ids=None):
     """The hosts of ``reps`` (one row each, see ``host_reps``) that are exposed. A host is exposed when any of its names is, so a
     finding on ``www`` exposes the host whose row is ``example.com``. ``project_ids``: the projects ``reps`` is drawn from, so the
     exposed set is not built over every other project's hosts too (a host's key and name never cross projects, so the answer is the same)."""
-    from django.db.models import Exists, OuterRef
+    from django.db.models import CharField, Value
+    from django.db.models.functions import Cast, Concat
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     exposed = Subdomain.objects.filter(latest_scan_q()).filter(exposure_filter())
     if project_ids is not None:
         exposed = exposed.filter(target_domain__project_id__in=list(project_ids))
-    same_name = Exists(exposed.filter(name=OuterRef('name'), target_domain__project_id=OuterRef('target_domain__project_id')))
-    return with_host_key(reps).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(same_name))
+
+    def named(qs):
+        """Project and name as one value (the same name in two projects is two hosts), so "some row of this name is exposed" is one
+        uncorrelated IN. A correlated EXISTS per host made this count take 14 s at 10,000 hosts."""
+        return qs.annotate(_named=Concat(Cast('target_domain__project_id', CharField()), Value(':'), 'name', output_field=CharField()))
+    return named(with_host_key(reps)).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(_named__in=named(exposed).values('_named')))
 
 
 def host_reps(domain_id=None, domain_ids=None):

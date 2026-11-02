@@ -64,7 +64,7 @@ def start(domain, initiated_by=None):
 
 
 def due_targets(limit=SWEEP_MAX, now=None):
-    """Internal targets to scan now, oldest scan first: not scanned inside the cadence, none with a scan going, and only in a project
+    """Internal targets to scan now, oldest scan first: not scanned inside the cadence, none with a scan going, none set to passive or manual only, and only in a project
     where a live ``network:internal`` Sentinel could take the work (a scan nobody can run would only fail)."""
     from django.db.models import Exists, F, OuterRef, Q, Subquery
     from django.db.models.functions import Coalesce
@@ -97,7 +97,10 @@ def due_targets(limit=SWEEP_MAX, now=None):
             continue
         nets = internal_networks(project.id)
         banned = excluded_names(project.id)
-        rows = (Domain.objects.filter(project=project).annotate(last_success=Subquery(last_success), last_failure=Subquery(last_failure))
+        # a target set to manual only ("just add them, do not scan yet") or passive (public sources only) is never scanned on a schedule: an internal
+        # scan is nmap and nuclei through a Sentinel, which neither mode allows. A person's Scan or Discover still starts one.
+        rows = (Domain.objects.filter(project=project).exclude(discovery_mode__in=(Domain.DISCOVERY_MANUAL, Domain.DISCOVERY_PASSIVE))
+                .annotate(last_success=Subquery(last_success), last_failure=Subquery(last_failure))
                 .order_by(F('last_success').asc(nulls_first=True), 'id'))
         for domain in rows:
             if len(chosen) >= limit:

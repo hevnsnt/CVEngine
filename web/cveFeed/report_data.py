@@ -17,6 +17,8 @@ from datetime import datetime, timezone as dt_timezone
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
+from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
+
 HEAT_NAMES = {3: 'fire', 2: 'smoke', 1: 'ice'}
 SEVERITY_ORDER = ('critical', 'high', 'medium', 'low')
 STATUS_LABELS = {'open': 'Open', 'in_progress': 'In progress', 'fixed': 'Fixed', 'accepted_risk': 'Accepted risk'}
@@ -228,11 +230,13 @@ def _hygiene_group(check):
         return 'TLS and certificates'
     if check.startswith(('spf_', 'dmarc_', 'dkim_', 'mx_', 'mta_', 'bimi_', 'smtp_')):
         return 'Email'
+    if check.startswith('cleartext_'):  # Telnet, FTP, rlogin and a plain-HTTP login (cveFeed.cleartext)
+        return 'Cleartext services'
     return 'Other configuration'
 
 
 def _hygiene(qs, cap):
-    """Hygiene findings (TLS, certificates, email) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
+    """Hygiene findings (TLS, certificates, email, cleartext services) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
     from agentapi import services as svc
     groups = {}
     for f in qs[:cap]:
@@ -244,7 +248,7 @@ def _hygiene(qs, cap):
             'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]],
             'remediation': clean(verdict.remediation if verdict else '', 800), 'tracking': _tracking(f),
             'first_seen': _date(f.first_seen)})
-    return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Other configuration') if name in groups]
+    return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Cleartext services', 'Other configuration') if name in groups]
 
 
 # --- hosts ---------------------------------------------------------------------------------------------------------------------
@@ -252,7 +256,7 @@ def _hygiene(qs, cap):
 def _host_row(h, findings_by_host, detail):
     ports = sorted({(p['number'], p['protocol'] or '') for ip in h['ips'] for p in ip['ports']})
     names = {h['host'].lower()} | {alias.lower() for alias in h['aliases']}
-    row = {'host': clean(h['host'], 200), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
+    row = {'host': clean(h['host'], 200), 'alias': clean(h['alias'], ALIAS_MAX), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
            'score': int(h['score'] or 0), 'findings': sum(findings_by_host.get(name, 0) for name in names), 'addresses': len(h['ips']),
            'ports': [f'{n}/{proto}' if proto else str(n) for n, proto in ports][:14], 'port_count': len(ports), 'ports_more': max(0, len(ports) - 14),
            'owner': clean(h['profile'].get('owner'), 80), 'criticality': clean(h['profile'].get('criticality'), 12),
@@ -263,6 +267,7 @@ def _host_row(h, findings_by_host, detail):
         row['aliases'] = [clean(a, 200) for a in h['aliases'][:10]]
         row['address_list'] = [clean(ip['address'], 64) for ip in h['ips'][:20]]
         row['purpose'] = clean(h['profile'].get('purpose'), 300)
+        row['note'] = clean(h['note'], NOTE_MAX)
         row['score_lines'] = [{'label': clean(d.get('label'), 120), 'points': int(d.get('points') or 0)} for d in h['score_detail'][:12]]
         row['services'] = [{'address': clean(ip['address'], 64), 'port': f"{p['number']}/{p['protocol']}", 'service': clean(p['service'], 30),
                             'product': clean(' '.join(x for x in (p['product'], p['version']) if x), 80), 'banner': clean(p['banner'], 160)}
@@ -292,13 +297,28 @@ def _hosts(project, host, findings_by_host, cap):
     return total, [_host_row(h, findings_by_host, detail=bool(host)) for h in rows[:cap]], aliases
 
 
+def _label_hosts(project, hosts, entries):
+    """Set ``host_alias`` on each of ``entries`` (findings, hygiene rows): the alias of the host it names, from the listed hosts (which resolve it
+    across the names on one set of addresses) or else the host's own profile, one query. Display only; ``host`` stays the name."""
+    from cveFeed.models import HostProfile
+    known = {h['host'].lower(): h['alias'] for h in hosts if h['alias']}
+    for h in hosts:
+        known.update({a.lower(): h['alias'] for a in h.get('aliases', ()) if h['alias']})
+    named = {e['host'].lower() for e in entries if e['host']} - set(known)
+    if named:
+        known.update({row.host: clean(row.alias, ALIAS_MAX) for row in HostProfile.objects.filter(project=project, host__in=named).exclude(alias='')})
+    for e in entries:
+        e['host_alias'] = known.get((e['host'] or '').lower(), '')
+
+
 # --- scope and method ----------------------------------------------------------------------------------------------------------
 
 def _scope(project, host):
     from targetApp.models import Domain
     domains = Domain.objects.filter(project=project).order_by('name')
     count = domains.count()
-    return {'targets': count, 'target_names': [clean(n, 120) for n in domains.values_list('name', flat=True)[:15]], 'targets_more': max(0, count - 15)}
+    return {'targets': count, 'targets_more': max(0, count - 15),
+            'target_names': [clean(f'{n} ({a})' if a else n, 180) for n, a in domains.values_list('name', 'alias')[:15]]}  # a target's alias beside its name
 
 
 SCAN_DONE = 2
@@ -356,10 +376,12 @@ def collect(project, host=None, include_closed=False, now=None):
     hygiene_total, _, hygiene_severity = _tally({'hygiene': sources['hygiene']})
     detailed = _findings(sources, caps['findings'])
     hygiene = _hygiene(sources['hygiene'], caps['hygiene'])
+    _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
     org = project.org
     return {
         'title': 'Host security report' if host else 'Security exposure report', 'subject': clean(host or project.name, 200),
         'project': clean(project.name, 200), 'organization': clean(org.name if org else '', 200), 'host': clean(host or '', 200),
+        'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
         'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': include_closed, 'branding': _branding(),
         'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
         'summary': {'findings': total, 'heat': heat, 'severity': severity, 'hygiene': hygiene_total, 'hygiene_severity': hygiene_severity,

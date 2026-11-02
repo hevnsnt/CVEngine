@@ -2,7 +2,7 @@
 
 Scans used to start only when someone asked or when a daily/weekly sweep ran, so for most of the day nothing was running even with a
 thousand hosts to look after. Every minute this keeps the discovery pipeline fed: it counts the scans that are running or queued and,
-below the wanted depth (``CVENGINE_WORK_DEPTH``, default 3; 0 turns the conductor off), starts discovery of the targets that have gone
+below the wanted depth (Settings, configMaxxing, else ``CVENGINE_WORK_DEPTH``, default 3; 0 turns the conductor off), starts discovery of the targets that have gone
 longest without one. Never scanned first, then the stalest, at most one per project per round so no project starves the rest, and
 never a project whose bug bounty engagement has not confirmed automated testing, never a target scanned within ``CVENGINE_WORK_MIN_GAP_HOURS`` (default 2), one that already has a scan queued or running, one an
 organization excluded, or anything while scanning is paused (including the pause an update holds).
@@ -30,11 +30,23 @@ def _env_int(name, default):
 
 
 def wanted_depth():
+    """The depth an App Admin saved on Settings, configMaxxing, else the auto-tuner's number, else CVENGINE_WORK_DEPTH, else 3 (see
+    cveFeed.scan_concurrency)."""
+    try:
+        from cveFeed import scan_concurrency
+        got = scan_concurrency.resolve('work_depth')
+        if got['source'] in ('admin', 'auto'):  # saved by a person, or chosen by the auto-tuner (cveFeed.autotune)
+            return got['value']
+    except Exception:  # noqa: BLE001 - the saved copy is a cache: without it the environment decides, as before
+        logger.debug('work conductor: the saved depth could not be read', exc_info=False)
     return _env_int('CVENGINE_WORK_DEPTH', DEFAULT_DEPTH)
 
 
 def min_gap():
-    return timedelta(hours=_env_int('CVENGINE_WORK_MIN_GAP_HOURS', DEFAULT_MIN_GAP_HOURS))
+    """The least time between two conductor scans of one target: what an App Admin saved on Settings, configMaxxing, else
+    CVENGINE_WORK_MIN_GAP_HOURS, else 2 hours (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return timedelta(hours=tunables.value('work_min_gap_hours', DEFAULT_MIN_GAP_HOURS))
 
 
 def active_scans():
@@ -60,7 +72,8 @@ def bounty_blocked_projects():
 
 def next_targets(limit, now=None):
     """The targets to scan next, most overdue first: never scanned, then longest since the last scan. At most one per project, none
-    with a scan going, none scanned inside the minimum gap, none excluded."""
+    with a scan going, none scanned inside the minimum gap, none excluded, none set to manual only (added with "just add them, do not
+    scan yet": only a person starts those)."""
     from django.db.models import F, OuterRef, Subquery
     from django.utils import timezone
 
@@ -78,7 +91,7 @@ def next_targets(limit, now=None):
     newest = (ScanHistory.objects.filter(domain_id=OuterRef('pk'))
               .exclude(tasks__contains=[HOST_PIPELINE_TASK])
               .order_by('-start_scan_date').values('start_scan_date')[:1])
-    rows = (Domain.objects.exclude(project=None).annotate(last_scan=Subquery(newest))
+    rows = (Domain.objects.exclude(project=None).exclude(discovery_mode=Domain.DISCOVERY_MANUAL).annotate(last_scan=Subquery(newest))
             .order_by(F('last_scan').asc(nulls_first=True), 'id').values_list('id', 'project_id', 'name', 'last_scan'))
     from targetApp.target_types import internal_networks, sentinel_only_target
     chosen, projects, banned, internal = [], set(), {}, {}
@@ -119,14 +132,14 @@ def keep_work_queued():
             current = active_scans().count()
             result['active'] = current
             if current < depth:
-                from cveFeed.discovery import start_discoveries
+                from cveFeed.discovery import start_in_stored_modes
                 from targetApp.models import Domain
                 ids = next_targets(depth - current)
                 if ids:
                     domains = list(Domain.objects.filter(pk__in=ids))
                     domains.sort(key=lambda d: ids.index(d.id))
                     try:
-                        result['started'] = len(start_discoveries(domains, 'standard'))
+                        result['started'] = len(start_in_stored_modes(domains))
                     except Exception:  # noqa: BLE001 - a failed round must not stop the next one
                         logger.exception('work conductor: could not queue discovery')
                         result['error'] = 'could not queue discovery'

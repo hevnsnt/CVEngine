@@ -7,6 +7,7 @@
 import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
 import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
+import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -53,7 +54,8 @@ function task(t) {
   const row = el("div", "sl-task");
   const what = el("div", "sl-what");
   what.append(el("b", "mono", kindName(t.kind)), document.createTextNode(` on ${t.label || t.host || "a target"}`));
-  const meta = el("span", "sl-meta", `${t.project}${t.status === "claimed" ? " · starting" : ""}`);
+  // a task of a project this viewer may not read arrives with no host, project or error: it reads "nuclei (light) on a target"
+  const meta = el("span", "sl-meta", `${t.project || ""}${t.status === "claimed" ? `${t.project ? " · " : ""}starting` : ""}`);
   row.append(what, meta);
   if (t.since) row.append(el("span", "sl-since", "", { "data-since": t.since }));
   return row;
@@ -61,7 +63,7 @@ function task(t) {
 
 function recent(t) {
   const li = el("li", `sl-r ${t.status}`);
-  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || ""));
+  li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || (t.hidden ? "a target" : "")));
   const tail = t.status === "failed" ? t.error || "failed" : t.seconds != null ? span(t.seconds) : "";
   li.append(el("span", "sl-tail", tail));
   if (t.finished) li.append(el("span", "sl-when", "", { "data-ago": t.finished }));
@@ -70,12 +72,33 @@ function recent(t) {
 
 const INTERNAL = "network:internal";
 
+// The state in words. A suspended Sentinel says why on the same line ("Suspended: <reason>"), so its reason never reads as a remark on a
+// working one.
+export function stateLine(s) {
+  const word = WORDS[s.state] || s.state;
+  return s.state === "suspended" && s.status_note ? `${word}: ${s.status_note}` : word;
+}
+
+// The buttons a card offers, in order. None when the viewer may not decide on this Sentinel (`can_manage` false: their own, unless App Admin, or
+// a user who also works for a tenant they do not administer), because each would only be refused. Delete names the revoked agent that holds this
+// one back.
+export function actionsFor(s) {
+  if (!s.can_manage) return [];
+  const out = [];
+  if (s.status === "pending") out.push("approve");
+  if (s.status === "suspended") out.push("reinstate");
+  if (s.held_by && s.held_by.id && s.held_by.status === "revoked") out.push("delete");
+  if (s.status !== "suspended") out.push("suspend");
+  out.push("revoke");
+  return out;
+}
+
 function card(s, reload, detail, group) {
   const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
   const head = el("header", "sl-head");
   head.append(orbFor(s, group));
   const title = el("div", "sl-title");
-  const state = el("p", "sl-state", WORDS[s.state] || s.state);
+  const state = el("p", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
   title.append(el("h3", "", s.name), state);
   head.append(title);
@@ -84,19 +107,35 @@ function card(s, reload, detail, group) {
     await api("PATCH", `/api/v1/agents/${s.id}`, { status });
     await reload();
   };
-  if (s.status === "pending") actions.append(button("Approve", patch("active"), "btn sm"));
-  if (s.status === "suspended") actions.append(button("Reinstate", patch("active"), "btn sm"));
-  if (s.status !== "suspended") actions.append(button("Suspend", patch("suspended"), "btn ghost sm"));
-  actions.append(
-    button(
-      "Revoke",
-      async () => {
-        if (!confirm(`Revoke ${s.name}? This cannot be undone.`)) return;
-        await patch("revoked")();
-      },
-      "btn ghost sm",
-    ),
-  );
+  const culprit = s.held_by;
+  const keep = s.status === "pending" ? "approve" : "reinstate";
+  const ACT = {
+    approve: () => button("Approve", patch("active"), "btn sm"),
+    reinstate: () => button("Reinstate", patch("active"), "btn sm"),
+    // held back only because another agent of the same user is revoked: deleting that one ends the hold for the next registrations
+    delete: () =>
+      button(
+        `Delete ${culprit.name}`,
+        async () => {
+          if (!confirm(`Delete the revoked agent ${culprit.name} (#${culprit.id}) and revoke its token? New agents of this user then start normally. ${s.name} stays ${s.status} until you ${keep} it.`)) return;
+          await api("DELETE", `/api/v1/agents/${culprit.id}`);
+          toast(`${culprit.name} deleted. ${keep === "approve" ? "Approve" : "Reinstate"} ${s.name} to use it.`);
+          await reload();
+        },
+        "btn ghost sm",
+      ),
+    suspend: () => button("Suspend", patch("suspended"), "btn ghost sm"),
+    revoke: () =>
+      button(
+        "Revoke",
+        async () => {
+          if (!confirm(`Revoke ${s.name}? This cannot be undone.`)) return;
+          await patch("revoked")();
+        },
+        "btn ghost sm",
+      ),
+  };
+  actionsFor(s).forEach((a) => actions.append(ACT[a]()));
   head.append(actions);
   c.append(head);
 
@@ -106,7 +145,7 @@ function card(s, reload, detail, group) {
   const version = versionBlock(detail, { onChange: reload });
   if (version) c.append(version);
   if (s.problem) c.append(el("p", "sl-note", s.problem));
-  else if (s.status_note) c.append(el("p", "sl-note", s.status_note));
+  else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 
   const now = el("div", "sl-now");
   if (s.current.length) s.current.forEach((t) => now.append(task(t)));
@@ -296,13 +335,27 @@ function section(g, reload, details) {
   return box;
 }
 
-const DETAIL_MS = 15000; // settings, version and update come from each Sentinel's detail, asked for less often than the live list
+const DETAIL_SAFETY_MS = 120000; // a detail is also asked for again after this long: the list's `revision` should move first, this is only the net under it
+
+// What the live list says about the detail card of one Sentinel: when it changes, the detail has to be asked for again.
+const detailKey = (s) => `${s.revision || ""}|${s.version_state || ""}`;
 
 export function sentinelLive(mount) {
   let data = null;
-  let timer = null;
+  const pace = createPace();
+  const conditional = createGet();
   const details = detailCache(() => paint());
+  const seen = new Map(); // id -> {key, at}: the detail key of the live list when its detail was last asked for, and when
   const ids = () => (data ? data.results.map((s) => s.id) : []);
+  // the Sentinels whose detail is not in hand, whose live-list revision moved since, or that has not been asked for in a while
+  const stale = () => (data ? staleRows(data.results, seen, { key: detailKey, has: details.has, safetyMs: DETAIL_SAFETY_MS }) : []);
+  const refreshDetails = async () => {
+    const want = stale();
+    [...seen.keys()].forEach((id) => { if (!ids().includes(id)) seen.delete(id); });
+    if (!want.length) return;
+    const stamp = Date.now();
+    if (await details.refresh(ids(), want.map((s) => s.id))) want.forEach((s) => seen.set(s.id, { key: detailKey(s), at: stamp }));
+  };
   const paint = () => {
     mount.textContent = "";
     if (!data) return;
@@ -333,26 +386,26 @@ export function sentinelLive(mount) {
   };
   async function load() {
     try {
-      data = await api("GET", LIVE);
-      paint();
+      const fresh = await conditional(LIVE); // null: a 304, nothing on the page has changed (the cards age by themselves below)
+      pace.ok();
+      if (fresh) {
+        data = fresh;
+        paint();
+      }
     } catch (err) {
-      if (!data) toast(err.message, true);
+      pace.fail(err);
+      if (!data) toast(err.status ? `Request failed (${err.status})` : err.message, true);
     }
   }
   async function reload() {
     await load();
-    await details.refresh(ids());
+    await refreshDetails();
   }
-  reload();
-  setInterval(() => {
-    if (!document.hidden) details.refresh(ids());
-  }, DETAIL_MS);
-  timer = setInterval(() => {
-    if (document.hidden) return;
-    load();
-  }, POLL_MS);
+  // One request at a time, jittered, paused while the tab is hidden; the detail of a Sentinel (settings, version, update) is asked for only when its live
+  // row says it moved (``revision``), not on every round.
+  const live = every(reload, POLL_MS, { pace });
   setInterval(tick, 1000);
-  return () => clearInterval(timer);
+  return () => live.stop();
 }
 
 const mount = document.getElementById("live");

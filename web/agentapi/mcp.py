@@ -21,6 +21,7 @@ from reNgine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
 from agentapi.models import SentinelTask
@@ -80,32 +81,37 @@ SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'ty
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
     ('list_projects', 'Projects you can access, with your role in each.', _schema(), lambda c, a: svc.list_projects(c), False),
-    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness and today's AI validation budget. Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
+    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness, today's AI validation budget, and auto-tuning (mode, last run, its last decisions and why each setting was not raised). Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
     ('list_engines', 'Legacy: scan engines are only labels, every scan runs the same fixed pipeline.', _schema(), lambda c, a: svc.list_engines(c), False),
     ('list_targets', 'Targets (domains, IPs) in a project.', _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_targets(c, a.get('project'), a), False),
-    ('add_target', 'Add a domain, IP, CIDR or range as a target.', _schema(
+    ('add_target', 'Add a domain, IP, CIDR or range as a target. mode is kept on the target and is what every later automatic scan of it uses: standard (default), deep, passive (public sources only), or manual (never scanned automatically).', _schema(
         {'project': SLUG, 'value': {'type': 'string'}, 'description': {'type': 'string'},
-         'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'}}, ['project', 'value']),
-     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover'))), True),
-    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
+         'discover': {'type': 'boolean', 'description': 'also start live bbot discovery'},
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'value']),
+     lambda c, a: svc.add_target(c, a.get('project'), a.get('value', ''), a.get('description', ''), bool(a.get('discover')), a.get('mode')), True),
+    ('add_targets', 'Add many targets at once (list or pasted text) and start discovery. mode: standard (default), deep or passive, or manual to just add them and never scan them automatically; it is kept on each target and used for every later automatic scan. A line starting with - (for example -example.com) EXCLUDES that domain and every name under it for the whole organization and removes its hosts and targets (needs an organization-level role).', _schema(
         {'project': SLUG, 'targets': {'type': 'array', 'items': {'type': 'string'}}, 'discover': {'type': 'boolean'},
-         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']}}, ['project', 'targets']),
+         'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}}, ['project', 'targets']),
      lambda c, a: svc.add_targets(c, a.get('project'), a.get('targets'), bool(a.get('discover', True)), a.get('mode')), True),
     ('add_targets_by_org', 'Bulk add across one organization. text: "##Org" once, then "#Project" above each list of domains/IPs/CIDRs. Creates missing projects (needs org admin).', _schema(
-        {'text': {'type': 'string'}, 'discover': {'type': 'boolean'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']},
+        {'text': {'type': 'string'}, 'discover': {'type': 'boolean'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']},
          'current_project': {'type': 'string', 'description': 'slug of the project in use; its organization is used when the paste names none'}}, ['text']),
      lambda c, a: svc.add_targets_by_org(c, a.get('text', ''), bool(a.get('discover', True)), a.get('mode'), a.get('current_project')), True),
     ('delete_targets', 'Delete targets (and their hosts, scans and results) by ids, or all matching q. Targets with a running scan are skipped. Irreversible.', _schema(
         {'project': SLUG, 'ids': {'type': 'array', 'items': {'type': 'integer'}}, 'all_matching': {'type': 'boolean'}, 'q': {'type': 'string'}}, ['project']),
      lambda c, a: svc.delete_targets(c, a.get('project'), a.get('ids'), bool(a.get('all_matching')), a.get('q') or ''), True),
-    ('discover_target', 'Run standard (default), deep or passive bbot discovery and then nuclei on an existing target.', _schema(
+    ('discover_target', "Run standard, deep or passive bbot discovery and then nuclei on an existing target. Without mode the target's own mode is used (a manual only target needs one); a mode given here is kept on the target.", _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive']}}, ['project', 'target_id']),
      lambda c, a: svc.discover_target(c, a.get('project'), int(a['target_id']), a.get('mode')), True),
     ('set_target_scope', 'Set a target\'s scope_mode: auto (the shared-domain list decides: a tenant on a provider domain such as acme.jfrog.com is host-only), host (this host only, never its parent domain) or parent (the parent domain is yours even if it is a provider domain; use with care).', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'scope_mode': {'type': 'string', 'enum': ['auto', 'host', 'parent']}},
         ['project', 'target_id', 'scope_mode']),
      lambda c, a: svc.set_target_scope(c, a.get('project'), int(a['target_id']), a.get('scope_mode')), True),
+    ('set_target_discovery_mode', "Set the mode a target is discovered in whenever discovery starts on its own (the work conductor's rescans, the weekly sweeps): standard, deep, passive (public sources only) or manual (never started automatically). Changing it starts nothing.", _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'discovery_mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}},
+        ['project', 'target_id', 'discovery_mode']),
+     lambda c, a: svc.set_target_discovery_mode(c, a.get('project'), int(a['target_id']), a.get('discovery_mode')), True),
     ('rescan_hosts', 'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run. Hosts must be the target or under it; up to 200. Work done recently is skipped.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'hosts': {'type': 'array', 'items': {'type': 'string'}}},
         ['project', 'target_id', 'hosts']),
@@ -113,6 +119,12 @@ TOOLS = [
     ('assess_host', 'Queue a fresh scoped assessment of one stored host, including DNS, ports, templates, correlation, AI and host TLS. Returns a durable job ID.',
      _schema({'project': SLUG, 'host_id': {'type': 'integer'}}, ['project', 'host_id']),
      lambda c, a: svc.request_host_assessment(c, a.get('project'), a.get('host_id')), True),
+    ('screenshot_host', 'Queue a fresh browser screenshot of every web page of one stored host (all HTTP(S) ports nmap found). Returns each page\'s outcome and reason; the pictures arrive within a minute or so.',
+     _schema({'project': SLUG, 'host_id': {'type': 'integer'}}, ['project', 'host_id']),
+     lambda c, a: svc.request_host_screenshot(c, a.get('project'), a.get('host_id')), True),
+    ('get_host_screenshots', 'The screenshots of one stored host: for every web page the outcome (ok, queued, timeout, unreachable, tls_error, blocked, ...), the reason, the final URL, HTTP status and title.',
+     _schema({'project': SLUG, 'host_id': {'type': 'integer'}}, ['project', 'host_id']),
+     lambda c, a: svc.host_screenshots(c, a.get('project'), a.get('host_id')), False),
     ('get_host_assessment', 'Get the status and individual scan stages of a host assessment.',
      _schema({'project': SLUG, 'assessment_id': {'type': 'integer'}}, ['project', 'assessment_id']),
      lambda c, a: svc.get_host_assessment(c, a.get('project'), int(a['assessment_id'])), False),
@@ -134,7 +146,7 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase". heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
@@ -163,10 +175,16 @@ TOOLS = [
     ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}]}, which of the checks that apply to it have run.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'target_id': {'type': 'integer'}, 'sort': {'type': 'string', 'enum': ['score', 'name']}}), ['project']),
      lambda c, a: svc.list_hosts(c, a.get('project'), a), False),
-    ('set_host_profile', 'Set the asset information of a host: owner, purpose and criticality (unknown, low, medium, high, critical). Only the fields given change.', _schema(
+    ('set_host_profile', 'Set the asset information of a host: owner, purpose, criticality (unknown, low, medium, high, critical), alias (a short display name shown beside the address in lists, search, reports and the graph; the address and discovered names never change) and note (free text). Only the fields given change; an empty alias or note clears it.', _schema(
         {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'owner': {'type': 'string'}, 'purpose': {'type': 'string'},
-         'criticality': {'type': 'string', 'enum': ['unknown', 'low', 'medium', 'high', 'critical']}}, ['project', 'host']),
-     lambda c, a: hosts.update_host_profile(c, a.get('project'), a['host'], a.get('owner'), a.get('purpose'), a.get('criticality')), True),
+         'criticality': {'type': 'string', 'enum': ['unknown', 'low', 'medium', 'high', 'critical']},
+         'alias': {'type': 'string', 'maxLength': 60, 'description': 'a short display name, one line of plain text'},
+         'note': {'type': 'string', 'maxLength': 1000, 'description': 'free text'}}, ['project', 'host']),
+     lambda c, a: hosts.update_host_profile(c, a.get('project'), a['host'], a.get('owner'), a.get('purpose'), a.get('criticality'), a.get('alias'), a.get('note')), True),
+    ('set_target_profile', 'Set the alias (a short display name) and/or note of a target, shown beside its name in lists, search and reports. Only the fields given change; an empty alias or note clears it. The target\'s name, which is what is scanned, never changes.', _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'alias': {'type': 'string', 'maxLength': 60, 'description': 'a short display name, one line of plain text'},
+         'note': {'type': 'string', 'maxLength': 1000, 'description': 'free text'}}, ['project', 'target_id']),
+     lambda c, a: svc.set_target_profile(c, a.get('project'), int(a['target_id']), a.get('alias'), a.get('note')), True),
     ('archive_host', 'Reversibly archive one stored host of a project, preserving evidence. Pinned hosts cannot be archived.',
      _schema({'project': SLUG, 'host': {'type': 'string'}, 'reason': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.host_archive(c, a.get('project'), a['host'], 'archive', reason=a.get('reason', '')), True),
@@ -232,7 +250,7 @@ TOOLS = [
     ('list_certificates', 'TLS certificates on the project hosts, soonest expiry first. expiring_within = days.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'expiring_within': {'type': 'string'}, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_certificates(c, a.get('project'), a), False),
-    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings. check: spf|dmarc|dkim|tls|caa.', _schema(
+    ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings, and cleartext services (Telnet, FTP, rlogin, a login over plain HTTP). check: spf|dmarc|dkim|tls|caa|cleartext.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'check': {'type': 'string'}, 'status': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_hygiene(c, a.get('project'), a), False),
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(
@@ -414,6 +432,21 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
+    ('get_tuning_status', 'App Admin only. Auto-tuning of the instance throughput settings (Settings, configMaxxing): mode (off, suggest or auto; auto by default) and effective_mode (off when the CVENGINE_AUTOTUNE=0 kill switch is set), the AI advisor and its daily budget, the numbers it chose, the settings a person pinned by saving a value (with who), the settings it manages with range and step, its last run with why each setting was not raised, and the last ten decisions.',
+     _schema(), lambda c, a: tuning.get_status(c), False),
+    ('list_tuning_decisions', 'App Admin only. Auto-tuning decisions, newest first: each change or recommendation with old and new value, source (controller, ai or person), reason, whether it was applied, and can_apply / can_revert.',
+     _schema({'setting': {'type': 'string', 'description': 'only this setting key (see get_tuning_status managed[].setting)'},
+              'limit': {'type': 'integer', 'description': 'at most 200 (default 50)'}, 'offset': {'type': 'integer'}}),
+     lambda c, a: tuning.list_decisions(c, a), False),
+    ('set_tuning_mode', 'App Admin only. Set auto-tuning to off (hand tuning: nothing is measured or changed), suggest (recommendations only) or auto (bounded changes are applied), and/or turn the AI advisor on or off. Leaving auto drops the tuned numbers at once.',
+     _schema({'mode': {'type': 'string', 'enum': ['off', 'suggest', 'auto']}, 'advisor': {'type': 'boolean'}}),
+     lambda c, a: tuning.set_mode(c, {k: a[k] for k in ('mode', 'advisor') if k in a}), True),
+    ('apply_tuning_suggestion', 'App Admin only. Apply an open auto-tuning recommendation by its decision id (see list_tuning_decisions, can_apply). In auto mode it becomes the tuned number; otherwise it is saved as your value, which pins the setting. Refused when the setting changed since.',
+     _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.apply_decision(c, a['decision_id']), True),
+    ('revert_tuning_decision', 'App Admin only. Revert the newest applied auto-tuning change of a setting by its decision id (see list_tuning_decisions, can_revert); the tuner then does not raise that setting for 24 hours.',
+     _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.revert_decision(c, a['decision_id']), True),
+    ('release_tuning_pin', 'App Admin only, auto mode. Let auto-tuning manage a setting a person pinned: the saved value is removed and the same number becomes the tuned one.',
+     _schema({'setting': {'type': 'string'}}, ['setting']), lambda c, a: tuning.release(c, a['setting']), True),
     ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now. It applies to every Sentinel with no value of its own.',
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
     ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
@@ -423,10 +456,12 @@ TOOLS = [
      _schema(), lambda c, a: sentinel_dispatch.budgets(), False),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
-    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
+    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here; a new agent of someone (not an App Admin) with another agent an administrator suspended or revoked in the last CVENGINE_AGENT_HOLD_DAYS days starts suspended (the agent of an administrator with such a decision older than that, still standing, starts pending), its note and held_by naming that agent (reinstate or approve it, or delete_agent the revoked one). Any status you send for such an agent, the same one included, makes it your decision. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
      _schema({'agent_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': list(broker.ADMIN_STATUSES)}, 'note': {'type': 'string'},
               'limits': {'type': 'object'}, 'settings': {'type': 'object'}, 'update': {'type': 'string', 'enum': ['now']}}, ['agent_id']),
      lambda c, a: broker.update_agent(c, a.get('agent_id'), {k: v for k, v in a.items() if k != 'agent_id'}), True),
+    ('delete_agent', 'Administrator only (not for your own agent unless App Admin). Delete a REVOKED agent or Sentinel and revoke its API token, so it no longer holds back new agents of the same user (a user with an agent suspended or revoked in the last CVENGINE_AGENT_HOLD_DAYS days gets new agents suspended). Irreversible. Agents it held back stay suspended until reinstated with update_agent; the reply lists them under still_held.',
+     _schema({'agent_id': {'type': 'integer'}}, ['agent_id']), lambda c, a: broker.delete_agent(c, a.get('agent_id')), True),
     # --- Sentinels: scan-stage agents (kind=scanner). A Sentinel is an Agent, so register_agent/agent_heartbeat/list_agents/
     # get_agent/update_agent above already work for one; the tools below are the matching scan-stage-work verbs (SentinelTask,
     # not AgentTask) and thin, kind-forced or kind-filtered aliases of the agent tools for a predictable Sentinel-only surface.

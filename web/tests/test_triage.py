@@ -236,6 +236,81 @@ class BuilderTests(unittest.TestCase):
 		self.assertNotIn('secret-corp', self.prompt(bbot))
 
 
+GOOGLE_KEY = 'AIzaSyD' + '1234567890abcdefghijklmnopqrstuv'
+
+
+class SecretMaskingTests(unittest.TestCase):
+	"""A secret a scanner found never reaches the AI provider: the prompt carries a mask (class, length, fingerprint), while the evidence
+	signature, and so every stored verdict's key, stays what it was."""
+
+	def prompt(self, d):
+		return ai_providers.build_triage_prompt(d['kind'], d['payload'])
+
+	def google(self, **kw):
+		return fake_vuln(template_id='google-api-key', name='Google API Key', extracted_results=[GOOGLE_KEY], severity=1, **kw)
+
+	def test_a_token_template_extract_is_masked_in_the_prompt(self):
+		d = triage.describe_vulnerability(self.google(), tags=['exposure', 'token', 'google'])
+		prompt = self.prompt(d)
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn(GOOGLE_KEY[4:], prompt)
+		self.assertIn('google_api_key', prompt)
+		self.assertIn('redacted 39 chars', prompt)
+		self.assertIn('AIza', prompt)
+
+	def test_a_secret_template_masks_the_value_even_when_the_value_has_no_known_shape(self):
+		v = fake_vuln(template_id='generic-token-leak', extracted_results=['hunter2-hunter2-hunter2'])
+		prompt = self.prompt(triage.describe_vulnerability(v, tags=['token']))
+		self.assertNotIn('hunter2', prompt)
+		self.assertIn('redacted 23 chars', prompt)
+
+	def test_a_secret_in_a_template_nobody_tagged_is_caught_by_the_shape(self):
+		prompt = self.prompt(triage.describe_vulnerability(fake_vuln(template_id='some-panel', extracted_results=[GOOGLE_KEY]), tags=['panel']))
+		self.assertNotIn(GOOGLE_KEY, prompt)
+
+	def test_a_secret_in_the_description_is_masked(self):
+		v = fake_vuln(description='Leaked key ' + GOOGLE_KEY + ' and postgres://root:hunter2pw@db.example.test/x')
+		prompt = self.prompt(triage.describe_vulnerability(v))
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn('hunter2pw', prompt)
+
+	def test_a_bbot_secret_is_masked_in_the_prompt(self):
+		v = fake_vuln(source='bbot', template_id='badsecrets', name='BadSecrets - Known Secret',
+					  description='Known Secret Found. Secret Type: [ASP.NET] Secret: [s3cr3t-signing-value] Product Type: [ViewState] '
+								  'Product: [' + 'Zm9vYmFy' * 8 + '] Detecting Module: [x]')
+		d = triage.describe_vulnerability(v)
+		prompt = self.prompt(d)
+		for leaked in ('s3cr3t-signing-value', 'Zm9vYmFy'):
+			self.assertNotIn(leaked, prompt)
+		self.assertIn('Known Secret Found', prompt)
+		self.assertIn('Secret Type: [ASP.NET]', prompt)
+
+	def test_the_signature_is_what_it_was_before_the_masking(self):
+		d = triage.describe_vulnerability(self.google(), tags=['token'])
+		self.assertEqual(d['signature_fields']['extracted'], [GOOGLE_KEY])  # the raw cleaned value, as before: the hash of the evidence is unchanged
+		legacy = {'source': 'nuclei', 'template_id': 'google-api-key', 'matcher': 'word', 'name': 'Google API Key', 'cves': [], 'severity': 1,
+				  'extracted': [GOOGLE_KEY]}
+		self.assertEqual(triage.signature_for('nuclei', d['signature_fields']), triage.signature_for('nuclei', legacy))
+		self.assertNotIn(GOOGLE_KEY, json.dumps(d['payload']))
+
+	def test_the_signature_of_an_ordinary_finding_is_unchanged_and_so_is_its_payload(self):
+		d = triage.describe_vulnerability(fake_vuln(), cves=['CVE-2099-5'], tags=['panel', 'exposure'])
+		self.assertEqual(d['payload']['extracted_results'], ['v1.2'])
+		self.assertEqual(d['signature_fields']['extracted'], ['v1.2'])
+
+	def test_db_exposure_reply_keeps_its_hard_evidence_and_masks_a_secret(self):
+		db = triage.describe_vulnerability(fake_vuln(source='db_exposure', template_id='db-exposure-redis', http_url='redis://203.0.113.5:6379',
+													 extracted_results=['PONG (redis 7.0.1) ' + GOOGLE_KEY], name='Unauthenticated Redis exposure'),
+										   port=('redis', '7.0.1'))
+		self.assertIn(GOOGLE_KEY[:20], db['facts']['reply'])  # the facts and the signature read the raw reply
+		self.assertNotIn(GOOGLE_KEY, json.dumps(db['payload']))
+
+	def test_the_triage_clean_pass_masks_a_secret_a_builder_missed(self):
+		prompt = ai_providers.build_triage_prompt('nuclei', {'note': 'saw ' + GOOGLE_KEY + ' there', 'nested': [{'x': 'AKIAIOSFODNN7EXAMPLE'}]})
+		self.assertNotIn(GOOGLE_KEY, prompt)
+		self.assertNotIn('AKIAIOSFODNN7EXAMPLE', prompt)
+
+
 class TriageDbBase(TestCase):
 	def setUp(self):
 		org = Org.objects.create(name='T', slug='t')
@@ -327,6 +402,25 @@ class RescanTwinTests(TriageDbBase):
 		for match in (other_host, other_cve):
 			self.assertEqual((self.rows_of(match).status, self.rows_of(match).validation_status), ('pending', 'none'))
 
+	def test_a_cve_matched_twice_on_one_host_inherits_both_from_its_own_predecessor(self, _log):
+		"""Apache 2.4.58 is matched once from the port scan and once from the web fingerprint, with different evidence: a rescan must carry
+		both records over (11 of 24 started over when only the newest row of the pair was looked at)."""
+		port = self.match('a.tr.test')
+		tech = CVEMatch.objects.create(cve_entry=self.cve, subdomain=port.subdomain, matched_product='Apache HTTP Server', matched_version='1.18.0',
+									   version_in_range=True, source='tech')
+		self.run_all(provider=self.provider())
+		Triage.objects.update(validation_status='clean', validation_steps=[{'kind': 'nuclei_template', 'result': 'clean'}],
+							  validated_at=timezone.now() - datetime.timedelta(days=1))
+		self.assertEqual(Triage.objects.filter(status='triaged').count(), 2)
+		again_port = self.match('a.tr.test')
+		again_tech = CVEMatch.objects.create(cve_entry=self.cve, subdomain=again_port.subdomain, matched_product='Apache HTTP Server',
+											 matched_version='1.18.0', version_in_range=True, source='tech')
+		self.track_all()
+		for match in (again_port, again_tech):
+			row = self.rows_of(match)
+			self.assertEqual((row.status, row.validation_status), ('triaged', 'clean'), match.source)
+		self.assertEqual(self.provider().complete.call_count, 0)
+
 	def test_a_twin_that_was_never_judged_gives_nothing(self, _log):
 		self.match('a.tr.test')
 		self.track_all()
@@ -396,14 +490,95 @@ class VersionOnlyCeilingTests(TriageDbBase):
 		self.assertEqual(Triage.objects.get(match=other).classification, 'likely')  # a host's own report is not a banner
 		self.assertEqual(triage.recap_version_only(), 0)  # idempotent
 
-	def test_the_stored_verdict_a_new_match_starts_from_stops_saying_affected(self, _log):
-		from cveFeed.models import MatchVerdict
+	def test_the_stored_verdict_a_new_match_starts_from_does_not_say_affected_for_a_version_only_match(self, _log):
+		# (was a rewrite of every stored verdict by recap_version_only; the verdict has no evidence class, so that also lowered the answer of
+		# a host with a template hit or a distribution listing. Now the seeding refuses it for a version-only match instead.)
+		from cveFeed import correlation
 		MatchVerdict.objects.create(cve_entry_id=self.cve.pk, matched_product='nginx', matched_version='1.18.0', version_in_range=True,
 									source='port', ai_verdict='affected')
-		MatchVerdict.objects.create(cve_entry_id=self.cve.pk, matched_product='nginx', matched_version='1.18.0', version_in_range=True,
-									source='host', ai_verdict='affected')
 		triage.recap_version_only()
-		self.assertEqual(sorted(MatchVerdict.objects.values_list('source', 'ai_verdict')), [('host', 'affected'), ('port', 'uncertain')])
+		self.assertEqual(MatchVerdict.objects.get().ai_verdict, 'affected')
+		correlation.save_matches([self.other_host_row('b.tr.test')])
+		self.assertEqual(CVEMatch.objects.get(subdomain__name='b.tr.test').ai_verdict, '')
+
+	def other_host_row(self, name, **kw):
+		"""The correlation row of one more host with the same product, version and range result as ``self.match``."""
+		sub = Subdomain.objects.create(name=name, target_domain=self.domain)
+		return {'cve_entry_id': self.cve.pk, 'source': 'port', 'matched_product': 'nginx', 'matched_version': '1.18.0', 'version_in_range': True,
+				'confidence': 0.9, 'scan_history_id': None, 'distro_status': 'no_data', 'distro_fixed_version': '',
+				'evidence': {'ip': '203.0.113.8', 'port': 443}, 'subdomain_id': sub.pk, **kw}
+
+	def test_a_verdict_a_hard_evidence_host_earned_does_not_make_a_version_only_match_affected(self, _log):
+		from cveFeed import correlation
+		from cveFeed.threat import match_temperature
+		self.match('a.tr.test', distro_status='vulnerable')
+		self.run_all(provider=self.provider(reply('likely')))
+		self.assertEqual(MatchVerdict.objects.get().ai_verdict, 'affected')  # the verdict key has no distro or template part
+		correlation.save_matches([self.other_host_row('b.tr.test')])
+		version_only = CVEMatch.objects.get(subdomain__name='b.tr.test')
+		self.assertEqual(version_only.ai_verdict, '')  # not seeded: the ceiling applies to it from the start
+		self.run_all(CVEMatch.objects.filter(pk=version_only.pk).select_related('cve_entry', 'subdomain__target_domain'), provider=None)
+		version_only.refresh_from_db()
+		self.assertNotEqual(version_only.ai_verdict, 'affected')  # with the AI off nothing else ever sets it
+		self.assertNotEqual(match_temperature('hot', 9.8, version_only.ai_verdict, version_only.distro_status), 'fire')
+
+	def test_the_same_verdict_still_seeds_a_match_with_the_same_hard_evidence(self, _log):
+		from cveFeed import correlation
+		self.match('a.tr.test', distro_status='vulnerable')
+		self.run_all(provider=self.provider(reply('likely')))
+		correlation.save_matches([self.other_host_row('c.tr.test', distro_status='vulnerable')])
+		self.assertEqual(CVEMatch.objects.get(subdomain__name='c.tr.test').ai_verdict, 'affected')
+
+	def test_a_moved_version_only_match_is_not_reseeded_as_affected(self, _log):
+		from cveFeed import correlation
+		self.match('a.tr.test', distro_status='vulnerable')
+		self.run_all(provider=self.provider(reply('likely')))
+		b = self.match('b.tr.test', version='1.17.0')  # an existing match whose version moves to the one the stored verdict is about
+		correlation.save_matches([{**self.other_host_row('x'), 'subdomain_id': b.subdomain_id}])
+		b.refresh_from_db()
+		self.assertEqual((b.matched_version, b.ai_verdict), ('1.18.0', ''))
+
+	def test_recap_leaves_the_stored_verdict_of_a_hard_evidence_match_alone(self, _log):
+		self.match('a.tr.test', distro_status='vulnerable')
+		self.run_all(provider=self.provider(reply('likely')))
+		self.assertEqual(MatchVerdict.objects.get().ai_verdict, 'affected')
+		triage.recap_version_only()
+		self.assertEqual(MatchVerdict.objects.get().ai_verdict, 'affected')
+
+	def test_an_unlisted_branch_is_a_version_string_too_and_capped(self, _log):
+		m = self.match('a.tr.test', in_range=None, evidence={'branch_unlisted': True})
+		self.run_all(provider=self.provider(reply('likely')))
+		row = Triage.objects.get(match=m)
+		m.refresh_from_db()
+		self.assertEqual((row.classification, m.ai_verdict), ('needs_validation', 'uncertain'))
+		self.assertIn('version string', row.reason)
+		self.run_all(CVEMatch.objects.filter(pk=m.pk).select_related('cve_entry', 'subdomain__target_domain'), provider=self.provider(reply('confirmed')))
+		self.assertEqual(Triage.objects.get(match=m).classification, 'needs_validation')
+
+	def test_an_unlisted_branch_with_hard_evidence_is_not_capped(self, _log):
+		for name, kw in (('r.tr.test', {'evidence': {'branch_unlisted': True, 'runzero': True}}),
+						 ('h.tr.test', {'evidence': {'branch_unlisted': True}, 'source': 'host'}),
+						 ('d.tr.test', {'evidence': {'branch_unlisted': True}, 'distro_status': 'vulnerable'}),
+						 ('t.tr.test', {'evidence': {'branch_unlisted': True}, 'template_result': 'vulnerable'})):
+			CVEMatch.objects.filter(pk=self.match(name, in_range=None).pk).update(**kw)
+		self.run_all(provider=self.provider(reply('likely')))
+		self.assertEqual(dict(Triage.objects.values_list('host', 'classification')),
+						 {'r.tr.test': 'likely', 'h.tr.test': 'likely', 'd.tr.test': 'confirmed', 't.tr.test': 'confirmed'})
+
+	def test_a_validation_hit_on_an_unlisted_branch_still_confirms(self, _log):
+		m = self.match('a.tr.test', in_range=None, evidence={'branch_unlisted': True})
+		self.run_all(provider=self.provider(reply('likely')))
+		Triage.objects.filter(match=m).update(validation_status='hit', classification='confirmed', reason='the check matched')
+		self.assertEqual(triage.recap_version_only(), 0)
+		self.assertEqual(Triage.objects.get(match=m).classification, 'confirmed')
+
+	def test_an_answer_stored_for_an_unlisted_branch_before_the_ceiling_is_recapped(self, _log):
+		m = self.match('a.tr.test', in_range=None, evidence={'branch_unlisted': True})
+		self.run_all(provider=self.provider(reply('likely')))
+		Triage.objects.filter(match=m).update(classification='likely')
+		CVEMatch.objects.filter(pk=m.pk).update(ai_verdict='affected')
+		self.assertEqual(triage.recap_version_only(), 1)
+		self.assertEqual((Triage.objects.get(match=m).classification, CVEMatch.objects.get(pk=m.pk).ai_verdict), ('needs_validation', 'uncertain'))
 
 	def test_the_rule_itself_is_pure(self, _log):
 		self.assertEqual(triage.ceiling('cve_match', {'version_only': True})[0], 'needs_validation')
@@ -526,7 +701,15 @@ class SignatureCacheTests(TriageDbBase):
 		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'patched'}), stored)
 		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data'}), stored)  # uncertain is not a clearing verdict
 		stored.ai_verdict = 'affected'
-		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data'}), stored)
+		# an affected verdict seeds a match only when that match has evidence beyond its version string (the verdict key has no
+		# distro, template or runZero part, so it may have been earned on a host that had one)
+		self.assertIsNone(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data'}))
+		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'vulnerable'}), stored)
+		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data', 'template_result': 'vulnerable'}), stored)
+		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data', 'evidence': {'runzero': True}}), stored)
+		self.assertIs(_seedable(stored, {'version_in_range': True, 'distro_status': 'no_data', 'source': 'host'}), stored)
+		self.assertIsNone(_seedable(stored, {'version_in_range': None, 'distro_status': 'no_data', 'evidence': {'branch_unlisted': True}}))
+		self.assertIs(_seedable(stored, {'version_in_range': None, 'distro_status': 'no_data'}), stored)
 
 	def test_model_cannot_clear_an_in_range_match(self, _log):
 		m = self.match('a.tr.test')

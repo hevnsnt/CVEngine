@@ -96,16 +96,30 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # udp_queue: the background UDP sweep (nmap -sU waits on silent ports, one IP at a time) likewise
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
-classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue"
+# ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
+# live_cache_queue: the Live screen's snapshot refresher (cveFeed/live_refresh.py), a few seconds of work every CVENGINE_LIVE_REFRESH_SECONDS. Its own queue
+# (a long sweep ahead of it in another queue never blocks it) on this worker, not the discovery, feed or validation ones, whose slots scan work holds for
+# hours; the slots here are greenlets (10, CLASSIC_CONCURRENCY; a certificate lookup may sleep up to 30 s in one waiting for crt.sh's pacing), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
+# tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
+classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
+# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+classic_queues+=",screenshot_queue"
 
 commands=""
 # each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
-commands+="$(generate_worker_command "discovery_queue" "${DISCOVERY_CONCURRENCY:-8}" "discovery_worker")"$'\n'
+# How many discovery tasks and host assessments run at once: what an App Admin saved on Settings, configMaxxing, else DISCOVERY_CONCURRENCY, else 8.
+# (A save also resizes the running worker live, see cveFeed/scan_concurrency.py; this makes a restart or an update land on the same number.)
+discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concurrency 2>/dev/null | tail -n 1)
+if ! [[ "$discovery_concurrency" =~ ^[0-9]+$ ]] || [ "$discovery_concurrency" -lt 1 ]; then
+    discovery_concurrency="${DISCOVERY_CONCURRENCY:-8}"
+fi
+echo "Discovery pool size (autoscale ceiling): $discovery_concurrency"
+commands+="$(generate_worker_command "discovery_queue" "$discovery_concurrency" "discovery_worker")"$'\n'
 commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.
 commands+="$(generate_worker_command "validation_priority_queue" "1" "validation_priority_worker")"$'\n'
-commands+="$(generate_worker_command "$classic_queues" "${CLASSIC_CONCURRENCY:-20}" "classic_worker")"$'\n'
+commands+="$(generate_worker_command "$classic_queues" "${CLASSIC_CONCURRENCY:-10}" "classic_worker")"$'\n'
 commands="${commands%&}"
 
 eval "$commands"

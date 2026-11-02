@@ -33,10 +33,13 @@ DEFAULTS = {
     'validation_priority_queue': SCAN_QUEUE,
     'wpscan_queue': SCAN_QUEUE,
     'testssl_queue': SCAN_QUEUE,
+    'screenshot_queue': 2 * HOUR,  # a drain stops taking batches after 40 minutes; a browser that hangs is killed long before this
     'bucketscan_queue': SCAN_QUEUE,
     'vhost_queue': SCAN_QUEUE,
     'udp_queue': SCAN_QUEUE,
     'supplier_queue': SCAN_QUEUE,
+    'live_cache_queue': 10 * 60,  # a run refreshes a few scopes in seconds (its own budget is three intervals); only a hung database holds it
+    'ctwatch_queue': 1 * HOUR,  # a lookup waits at most ``ctmonitor.MAX_INLINE_WAIT`` in a slot; a longer wait is a retry
     'run_command_queue': 1 * HOUR,
     'api_queue': 30 * 60,
     'send_notif_queue': 30 * 60,

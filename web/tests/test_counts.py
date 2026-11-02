@@ -84,7 +84,7 @@ class CountFixture(TestCase):
 
 	def setUp(self):
 		cache.clear()
-		views._STATS_CACHE.clear()
+		views.clear_stats_cache()
 		self.client_ = client_for(self.user)
 
 	def api(self, path, **params):
@@ -281,6 +281,15 @@ class GraphNodeLinkTests(CountFixture):
 		self.assertTrue(rows['IP addresses']['links'][0]['href'].startswith('/cve/ca/hosts/?q=ip%3A192.0.2.'))
 		self.assertEqual(rows['Target']['links'][0]['href'], '/cve/ca/hosts/?host=one.test')
 		self.assertEqual(rows['CVE matches']['links'][0]['href'], f'/cve/ca/matches/#{self.m_live.pk}')
+
+	def test_a_host_node_says_why_it_has_its_colour(self):
+		d = self.detail(f'sub:{self.live[0].pk}')
+		reason = next(r for r in d['reasons'] if r['kind'] == 'cve')
+		self.assertEqual(reason['label'], self.m_live.cve_entry.cve_id)
+		self.assertEqual(reason['href'], f'/cve/ca/vulns/#match-{self.m_live.pk}')  # the finding itself, opened on the Findings page
+		self.assertEqual(d['heat'], reason['temp'])  # the colour is the hottest reason's
+		self.assertEqual(d['reasons_total'], len(d['reasons']))
+		self.assertNotIn('Heat', {r['k'] for r in d['rows']})  # said once, by the badge
 
 	def test_an_ip_node_links_its_hosts_and_itself(self):
 		ip = self.live[0].ip_addresses.first()

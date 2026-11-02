@@ -3,6 +3,12 @@
 import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
+import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
+import "/staticfiles/cve/autotune-card.js"; // registers the Auto-tuning card first: the mode sits at the top of configMaxxing
+import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
+import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initialDrafts, labelOf, warnings } from "/staticfiles/cve/ai-settings-logic.js";
+import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
+import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -108,18 +114,20 @@ const card = (title, ...kids) => {
 const sections = {
   async ai(m) {
     const s = await api("GET", "ai");
-    const LABELS = {
-      anthropic: "Anthropic",
-      openai: "OpenAI",
-      openrouter: "OpenRouter",
-      ollama: "Ollama",
-      vllm: "vLLM",
-      lmstudio: "LM Studio",
-    };
-    const provider = selectOf(
-      s.providers.map((p) => [p, LABELS[p] || p]),
-      s.provider,
-    );
+    const provider = el("select");
+    const listed = new Set(s.providers);
+    const grouped = GROUPS.map(([title, ids]) => [title, ids.filter((id) => listed.has(id))]);
+    const named = new Set(grouped.flatMap(([, ids]) => ids));
+    const others = s.providers.filter((id) => !named.has(id));
+    if (others.length) grouped.push(["Other", others]);
+    grouped.forEach(([title, ids]) => {
+      if (!ids.length) return;
+      const g = el("optgroup");
+      g.label = title;
+      ids.forEach((id) => g.append(Object.assign(el("option", "", labelOf(id)), { value: id })));
+      provider.append(g);
+    });
+    provider.value = s.provider;
     const model = text(s.model, { list: "ai-models", autocomplete: "off" });
     const models = el("datalist", "", null, { id: "ai-models" });
     const modelNote = el("p", "note", "", { style: "margin:6px 0 0" });
@@ -129,10 +137,13 @@ const sections = {
     const baseField = field("Base URL", base);
     const BASE_HINT = {
       ollama: "required, e.g. http://100.64.0.5:11434 (Tailscale or remote), or http://localhost:11434 if it runs on this server",
-      vllm: "required, e.g. http://100.64.0.5:8000/v1, or http://localhost:8000/v1 if it runs on this server",
+      vllm: "required, e.g. http://100.64.0.5:8000/v1 (vLLM) or http://localhost:8080/v1 (llama.cpp's llama-server, LiteLLM or any OpenAI-compatible server); the API key is only needed if the server asks for one",
       lmstudio: "required, e.g. http://100.64.0.5:1234/v1, or http://localhost:1234/v1 if it runs on this server (the API key is only needed when you turned on authentication in LM Studio)",
       openrouter: "optional, defaults to https://openrouter.ai/api/v1",
+      openai: "optional, empty uses OpenAI (https://api.openai.com/v1); set it for a LiteLLM proxy or another OpenAI-compatible service, which then gets the key you type here",
+      anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
+    let refreshHints = () => {}; // set below, once the request settings exist
     const sync = () => {
       const p = provider.value;
       const pick = s.selectable.includes(p);
@@ -140,16 +151,16 @@ const sections = {
         ? "choose a model (Load models)"
         : "automatic: newest, cheapest";
       modelNote.textContent = pick
-        ? `${LABELS[p]} serves whichever models you pick or host, so choose one.`
-        : `Leave blank for the newest cheapest ${LABELS[p]} model, or choose another.`;
+        ? `${labelOf(p)} serves whichever models you pick or host, so choose one.`
+        : `Leave blank for the newest cheapest ${labelOf(p)} model, or choose another.`;
       key.placeholder = s.keyless.includes(p)
         ? "optional"
         : s.has_key && p === s.provider
           ? "saved (leave blank to keep)"
           : "API key";
       base.placeholder = BASE_HINT[p] || "optional";
-      baseField.style.display = ["anthropic", "openai"].includes(p) ? "none" : "";
       keyField.style.display = p === "ollama" ? "none" : "";
+      refreshHints();
     };
     const load = async () => {
       const r = await api("POST", "ai/models", {
@@ -175,8 +186,63 @@ const sections = {
     provider.addEventListener("change", () => {
       model.value = "";
       models.textContent = "";
+      base.value = provider.value === s.provider ? (s.base_url || "") : ""; // an address belongs to the service it was saved for
       sync();
     });
+    // --- how a request is made: timeouts, reply limit, context window, JSON mode, reasoning, keep-alive -----------------------------------
+    // An empty box follows the server's environment variable and then the provider's default; the line under each box says which one applies.
+    const inputs = {};
+    const hints = {};
+    const wraps = {};
+    const adv = el("details", "ai-adv");
+    adv.open = anySet(s);
+    adv.append(
+      el("summary", "", "Request settings"),
+      el("p", "note", "How each request to the model is made. Leave a box empty to use the provider's default (or the server's environment setting, if it has one); the line under each box says what is in force. These apply to every task the model does and to the connection test."),
+    );
+    const grid = el("div", "ai-adv-grid");
+    const warnBox = el("div", "ai-warns", null, { role: "status" });
+    FIELDS.forEach((f) => {
+      const initial = initialDrafts(s)[f.key];
+      const input =
+        f.kind === "choice"
+          ? selectOf(f.choices, initial)
+          : text(initial, { autocomplete: "off", spellcheck: "false", ...(f.kind === "number" ? { inputmode: "numeric" } : { placeholder: f.placeholder || "" }) });
+      const wrap = field(f.label, input, f.help);
+      const hint = el("p", "note ai-hint", "", { id: `${input.id}-hint` });
+      input.setAttribute("aria-describedby", hint.id);
+      wrap.append(hint);
+      // The hint under a box follows every keystroke; the one announced region (warnBox) is rewritten when the value is committed.
+      input.addEventListener("input", () => refreshHints(false));
+      input.addEventListener("change", () => refreshHints(true));
+      inputs[f.key] = input;
+      hints[f.key] = hint;
+      wraps[f.key] = wrap;
+      grid.append(wrap);
+    });
+    adv.append(grid, warnBox);
+    const drafts = () => Object.fromEntries(FIELDS.map((f) => [f.key, inputs[f.key].value]));
+    refreshHints = (announce = true) => {
+      const p = provider.value;
+      const now = drafts();
+      const problems = [];
+      FIELDS.forEach((f) => {
+        wraps[f.key].style.display = applies(s, f.key, p) ? "" : "none";
+        const checked = checkDraft(s, f.key, now[f.key]);
+        inputs[f.key].setAttribute("aria-invalid", checked.ok ? "false" : "true");
+        const eff = effective(s, f.key, p, now[f.key]);
+        hints[f.key].textContent = checked.ok ? eff.text : checked.error;
+        hints[f.key].className = `note ai-hint${checked.ok ? "" : " ai-hint-err"}`;
+        if (!checked.ok && applies(s, f.key, p)) problems.push(`${f.label}: ${checked.error}`);
+        if (f.kind === "number") inputs[f.key].placeholder = checked.ok && eff.value != null ? String(eff.value) : "default";
+      });
+      if (announce) {
+        warnBox.replaceChildren(
+          ...problems.map((w) => el("p", "note ai-warn ai-warn-err", w)),
+          ...warnings(s, p, now).map((w) => el("p", "note ai-warn", w)),
+        );
+      }
+    };
     sync();
     const enabled = check("Use this model to confirm CVE matches", s.enabled);
     const fire = check(
@@ -208,8 +274,32 @@ const sections = {
       const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
       guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
     }, "btn ghost sm");
+    const verified = el("p", "note", "");
+    const showVerified = () => {
+      verified.textContent = s.verified_at
+        ? `Connection verified ${new Date(s.verified_at).toLocaleString()}.`
+        : "Not tested since the last change.";
+    };
+    showVerified();
+    const status = el("p", "msg", "", { role: "status", "aria-live": "polite", hidden: "" });
+    const say = (message, ok) => {
+      status.hidden = !message;
+      status.className = `msg ${ok ? "ok" : "err"}`;
+      status.textContent = message || "";
+    };
     const save = async () => {
-      await api("PUT", "ai", {
+      const { values, errors } = collect(s, drafts(), provider.value); // only what the chosen provider uses: a hidden box cannot be fixed
+      const bad = FIELDS.find((f) => errors[f.key]);
+      if (bad) {
+        adv.open = true;
+        refreshHints();
+        inputs[bad.key].focus();
+        const message = `${bad.label}: ${errors[bad.key]}`;
+        say(message, false); // beside the toast, which goes after 3.5 seconds
+        throw new Error(message);
+      }
+      const saved = await api("PUT", "ai", {
+        ...values,
         cve_guidance_daily: guideDaily.value,
         plan_daily_total: planTotal.value,
         plan_daily_per_project: planProject.value,
@@ -221,8 +311,11 @@ const sections = {
         auto_fire: fire.box.checked,
         auto_fire_max_scans: max.value,
       });
+      Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
       key.value = "";
-      key.placeholder = "saved (leave blank to keep)";
+      key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
+      showVerified();
+      refreshHints();
     };
     m.append(
       card(
@@ -235,18 +328,21 @@ const sections = {
         })(),
         keyField,
         baseField,
+        adv,
         enabled.wrap,
         field("Validation planning requests per day, all projects", planTotal),
         field("Validation planning requests per day, one project", planProject),
         (() => {
           const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
           f.append(guideNote);
-          const row = el("div", "tools");
-          row.append(el("span", "note", "Or write the next"), guideNow, el("span", "note", "CVEs now, whatever is left of today's budget:"), guideRun);
+          const row = el("div", "tools guide-now");
+          row.append(el("span", "note", "Or, from what is left of today's budget, write the next"), guideNow, el("span", "note", "CVEs now"), guideRun);
           f.append(row);
           return f;
         })(),
+        verified,
         button("Save", async () => {
+          say("");
           await save();
           toast("Saved");
         }),
@@ -254,12 +350,21 @@ const sections = {
         button(
           "Save and test",
           async () => {
+            say("");
             await save();
-            const r = await api("POST", "ai/test");
-            toast(`Connection OK: ${r.reply}`);
+            say("Testing the connection…", true);
+            try {
+              const r = await api("POST", "ai/test");
+              say(`Connection OK. The model answered: ${r.reply}`, true);
+            } catch (err) {
+              say(err.message, false); // stays on the page: the sentence says what to change
+            }
+            Object.assign(s, await api("GET", "ai")); // verified_at moved
+            showVerified();
           },
           "btn ghost",
         ),
+        status,
       ),
     );
     const seedState = await api("GET", "cve_seed");
@@ -384,6 +489,7 @@ const sections = {
         dismissed: "A newer version is available (dismissed).",
         approved: "Update approved. Waiting for the host updater to apply it.",
         error: "The last check failed.",
+        unknown: "Whether a newer version is available cannot be told.",
         disabled: "Update checks are turned off.",
       }[s.status];
       const kids = [el("p", "", head, { style: "font-weight:500;margin:0 0 6px" })];
@@ -444,7 +550,7 @@ const sections = {
         kids.push(el("p", "msg err", `The branch has ${s.behind_by} new commit${s.behind_by === 1 ? "" : "s"}, but this server has ${s.local_commits} of its own on top of ${s.common || "it"}, so an update cannot be applied for you (it moves the checkout forward and never merges). On the server run git fetch origin, then git merge origin/${s.branch}, then scripts/update.sh or make up.`));
       else if (s.local_commits > 0 && s.status === "up_to_date")
         kids.push(el("p", "note", `This server has ${s.local_commits} commit${s.local_commits === 1 ? "" : "s"} of its own on top of ${s.branch}; everything on the branch is included.`));
-      if (s.status === "unknown")
+      if (s.status === "unknown" && !s.last_error)
         kids.push(el("p", "msg err", "Whether this server is behind cannot be told: GitHub has never seen the commit it was built from (commits of its own that were not pushed), and the host has not said which commit it shares with the branch. The host updater reports that within half an hour of running; if it is not installed, run scripts/install-updater.sh."));
       if (s.host_comparison) kids.push(el("p", "note", s.host_comparison));
       if (["available", "dismissed", "approved", "diverged"].includes(s.status)) {
@@ -583,8 +689,24 @@ const sections = {
       rows.forEach((r) => wrap.append(el("div", "find", r)));
       return wrap;
     };
+    // Always shown, also when no worker has reported yet (the cards below are not drawn then).
+    const pointer = () => {
+      const note = el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. ", { style: "margin:0" });
+      note.append(
+        Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
+          onclick: (event) => {
+            event.preventDefault();
+            open(SECTION_ID);
+          },
+        }),
+      );
+      const box = el("div", "card", null, { style: "max-width:640px;margin-bottom:16px" });
+      box.append(note);
+      return box;
+    };
     const draw = (snap) => {
       host.textContent = "";
+      host.append(pointer());
       if (!snap.containers.length) {
         host.append(card("Resources", el("p", "note", "No worker has reported yet. The celery worker publishes its memory every 30 seconds.")));
         return;
@@ -624,7 +746,7 @@ const sections = {
           "Tuning",
           el("p", "note", "Container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m). Memory reserved per job (an estimate at first, raised to what real runs needed): " +
             Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") +
-            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment. DISCOVERY_CONCURRENCY (default 3) sets how many discoveries may queue at once."),
+            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment."),
         ),
       );
     };
@@ -639,6 +761,10 @@ const sections = {
       if (document.body.contains(host)) timer = setTimeout(refresh, 5000);
     };
     await refresh();
+  },
+
+  async [SECTION_ID](m) {
+    await buildSection(m, { card: parseHash(location.hash).card });
   },
 
   async tailscale(m) {
@@ -1224,14 +1350,37 @@ const labels = {
   reset: "Factory reset",
 };
 
-async function open(name) {
+// configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
+let storage = null;
+try {
+  storage = window.localStorage;
+} catch (_) {
+  /* blocked: the group stays collapsed by default and nothing is remembered */
+}
+const cmItems = el("div", "set-group-items", null, { id: "set-cm-items" });
+const cmToggle = el("button", "set-group-title set-toggle", SECTION_LABEL, {
+  type: "button",
+  "aria-controls": "set-cm-items",
+});
+function setCmOpen(isOpen, remember = true) {
+  cmItems.hidden = !isOpen;
+  cmToggle.setAttribute("aria-expanded", String(isOpen));
+  cmToggle.dataset.open = isOpen ? "1" : "0";
+  if (remember) writeOpen(storage, isOpen);
+}
+
+async function open(name, card = "") {
   tabs
-    .querySelectorAll("button")
+    .querySelectorAll("button[data-tab]")
     .forEach((b) =>
-      b.setAttribute("aria-selected", String(b.dataset.tab === name)),
+      b.setAttribute(
+        "aria-selected",
+        String(b.dataset.tab === name && (!b.dataset.card || b.dataset.card === (card || b.dataset.card))),
+      ),
     );
+  if (name === SECTION_ID) setCmOpen(true);
   panel.textContent = "";
-  history.replaceState(null, "", `#${name}`);
+  history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
   try {
     await sections[name](panel);
   } catch (err) {
@@ -1253,7 +1402,29 @@ groups.forEach(([title, names]) => {
   });
   tabs.append(group);
 });
+const cmGroup = el("div", "set-group", null, { role: "presentation" });
+cmToggle.onclick = () => setCmOpen(cmItems.hidden);
+cards().forEach((entry) => {
+  const b = el("button", "btn ghost sm", entry.title, {
+    role: "tab",
+    "data-tab": SECTION_ID,
+    "data-card": entry.id,
+    "aria-selected": "false",
+  });
+  b.type = "button";
+  b.onclick = () => open(SECTION_ID, entry.id);
+  cmItems.append(b);
+});
+cmGroup.append(cmToggle, cmItems);
+tabs.append(cmGroup);
+setCmOpen(readOpen(storage), false);
+
 // an old link to #engines (the tab this replaced) opens the scan policy
 const legacyTabs = { engines: "scan_policy" };
-const hashTab = legacyTabs[location.hash.slice(1)] || location.hash.slice(1);
-open(sections[hashTab] ? hashTab : "ai");
+const hash = location.hash.slice(1);
+const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
+open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
+window.addEventListener("hashchange", () => {
+  if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
+});

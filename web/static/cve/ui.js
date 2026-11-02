@@ -34,6 +34,36 @@ export function toast(message, isError = false) {
   setTimeout(() => t.remove(), 4000);
 }
 
+// An empty list that says what it means and what to do next: an icon from the page's sprite, a short title, one line of why, and up
+// to two actions ({label, href} or {label, run}; the first is the primary button). tone "calm" is the good kind of empty, nothing to fix.
+export function emptyState({ icon, title, body, actions = [], tone = '' }) {
+  const box = el('div', `empty-state${tone ? ` ${tone}` : ''}`);
+  if (icon) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('class', 'empty-icon');
+    const use = document.createElementNS(ns, 'use');
+    use.setAttribute('href', `#i-${icon}`);
+    svg.append(use);
+    box.append(svg);
+  }
+  box.append(el('p', 'empty-title', title));
+  if (body) box.append(el('p', 'empty-body', body));
+  if (actions.length) {
+    const row = el('div', 'empty-actions');
+    actions.forEach((a, i) => {
+      const cls = `btn sm${i ? ' ghost' : ''}`;
+      const b = a.href ? el('a', cls, a.label, { href: a.href }) : el('button', cls, a.label, { type: 'button' });
+      if (a.run) b.addEventListener('click', a.run);
+      row.append(b);
+    });
+    box.append(row);
+  }
+  return box;
+}
+
 let uid = 0;
 export function field(label, input, help) {
   const id = `u${uid += 1}`;

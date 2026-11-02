@@ -1,12 +1,12 @@
 # Sentinels
 
-A Sentinel is a scanner you run on a machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE stores that result exactly as if it had run the tool itself.
+A Sentinel is a scanner you run on any machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE stores that result exactly as if it had run the tool itself.
 
 Why run one:
 
-- **Another vantage point.** Scan your internet-facing targets from a different network or region than the cvENGINE server.
+- **Scale out.** Deploy one or a hundred. Each Sentinel checks in and takes work, so scanning spreads across as many machines as you have. Every Sentinel adds its own CPU, memory and network path.
 - **Private networks.** The cvENGINE server never scans a private address. A Sentinel inside an office LAN, a VPC or a VPN is the only way to cover one ([Internal networks](#internal-networks)).
-- **Heavy scanners elsewhere.** nmap, nuclei and especially OpenVAS are hungry. A Sentinel takes that load off the server.
+- **Another vantage point.** Scan your internet-facing targets from a different network or region than the cvENGINE server.
 
 A project with no live Sentinel scans on the server, as it always did.
 
@@ -37,7 +37,7 @@ You choose two things when you provision a Sentinel, and can change both later.
 
 1. Open **Sentinels** (the Agents group in the side rail). In **Provision a Sentinel**, pick a scope, **Where it runs** and **Size**, then press **Provision**.
 2. Copy the blob. It is one string holding a single-use secret that expires in 30 minutes.
-3. On the machine that will scan (it needs Docker and outbound HTTPS to cvENGINE), clone the client from its own repository, [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel), put the blob in `CVENGINE_SENTINEL_BLOB` in its `.env`, and run `docker compose up -d`. The page also shows the equivalent one-line `./setup.sh` command.
+3. On the machine that will scan (it needs Docker and outbound HTTPS to cvENGINE), clone the client from its own repository, [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel), put the blob in `CVENGINE_SENTINEL_BLOB` in its `.env`, and run `docker compose up -d`. The page does this for you: after Provision it shows one command to paste on that machine (it clones the client, or reuses a clone already there, runs `setup.sh` with the blob, names the Sentinel after the machine and starts it), and a finished prompt to hand an AI agent with a shell on that machine, with the blob and your choices already in it. The same two strings are in the enrollment reply as `setup.one_liner` and `setup.agent_prompt`.
 4. Watch it appear on the Sentinels page. The client keeps its own token in a Docker volume, so a restart never needs the blob again.
 
 The client is a Docker Compose service. An AI agent can do all of this with the `generate_sentinel_enrollment` MCP tool.
@@ -46,13 +46,15 @@ The client is a Docker Compose service. An AI agent can do all of this with the 
 
 ## Approve, suspend, revoke
 
-A Sentinel enrolled by an administrator starts active. One registered by anyone else waits for approval (**Approve** on its card). **Suspend** stops new work and releases what it holds at once, and **Reinstate** brings it back. **Revoke** is permanent. All three work from the Sentinels page and from the project's Sentinels tab (on the rows you may manage).
+A Sentinel enrolled by an administrator starts active. One registered by anyone else waits for approval (**Approve** on its card). **Suspend** stops new work and releases what it holds at once, and **Reinstate** brings it back. **Revoke** is permanent. All three work from the Sentinels page and from the project's Sentinels tab (on the rows you may manage). A revoked Sentinel leaves those pages; **Administration, Agents, Manage, Delete** removes it for good and revokes its token.
+
+**Held back.** A new Sentinel (or other agent) of a user whose other agent an administrator suspended or revoked in the last 30 days starts suspended, so a revoked agent cannot come back under a new token. Its card reads `Suspended:` and then which agent caused it, its status and since when, and what to do: **Reinstate** the new one to use it, and reinstate or delete the old one so the next one starts normally. When the old one is revoked, the card also has **Delete <its name>**. Every such suspension is in the audit log (`agent.hold`). It never applies to an App Admin (their Sentinels, instance-wide ones included, start active whatever happened to an older one), to an agent that was itself only held back this way, to a deleted agent, or to a decision older than `CVENGINE_AGENT_HOLD_DAYS` days ([CONFIGURATION.md](CONFIGURATION.md#sentinels); `0` keeps it for as long as the old agent stays suspended or revoked). An organization admin is held back like anyone else, also for a Sentinel from an enrollment they generated: they cannot reinstate their own agent, so another administrator decides. After the window their new Sentinel still waits for approval while the old one stays revoked or suspended. A card shows **Reinstate**, **Delete**, **Suspend** and **Revoke** only to someone who may use them (not on your own Sentinel unless you are an App Admin, and not for a user who also works for an organization you do not administer); such a viewer also sees a general reason instead of the other agent's name. Details in [AGENT-API.md](AGENT-API.md#agents-and-assigned-work).
 
 ## The Sentinels pages
 
 The **Sentinels** page groups cards by the organizations each Sentinel covers (an instance-wide one sits under Every organization). Each card has:
 
-- A status orb and word: Working, Idle, Offline (not heard from for three minutes), Waiting for approval, or Suspended.
+- A status orb and word: Working, Idle, Offline (not heard from for three minutes), Waiting for approval, or Suspended. A suspension with a reason reads `Suspended: <reason>` on that line.
 - Its version, an **Update now** button and an update status. In **Settings** you can change its name, where it runs, its size, which kinds it never takes, and how many tasks it runs at once. The most recent change wins, whether made here or in the Sentinel's own `.env`.
 - The tasks it holds now and its last five, each with kind, host, project and outcome (completed, partial, failed, lost).
 - Counts for the last hour and day, and its average task time.

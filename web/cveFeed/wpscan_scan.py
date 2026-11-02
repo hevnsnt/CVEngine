@@ -101,7 +101,9 @@ BUDGET_ERROR = re.compile(r'limit|quota|exhaust|too many|requests', re.I)
 # any of these in a technology name says the host runs (or is hosted for) WordPress
 WP_TECH = re.compile(r'^(wordpress|woocommerce|wp ?engine|elementor|wpml|yoast|wp-)', re.I)
 WP_URL = r'/wp-(content|includes|json|login\.php|admin)|/xmlrpc\.php'
-STATES = ('not_wordpress', 'candidate', 'detected', 'scanned', 'blocked', 'failed', 'waiting', 'unavailable')
+STATES = ('not_wordpress', 'candidate', 'detected', 'scanned', 'blocked', 'failed', 'waiting', 'queued', 'unavailable')
+QUICK_ATTEMPTS = 6   # a deferred site is asked again this many times, a little later each time, before it waits for the next scan
+QUICK_DELAY = 120    # seconds; the n-th retry waits n times this
 
 
 class NotWordPress(ValueError):
@@ -506,11 +508,20 @@ def remaining_requests(report):
 # ----------------------------------------------------------------------------- states: what happened to each candidate, on the host
 
 def record_state(project_id, domain_id, host, state, reason='', **extra):
-    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result."""
+    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result.
+
+    The core version the last successful scan read stays on the row through a run that could not read one (blocked by the edge, failed, waiting,
+    queued): the host page shows the state with the version it last knew, and only a scan that read the site (``scanned``) or found it is not
+    WordPress replaces or clears it."""
     from cveFeed.models import ProbeObservation
+    host = host.lower()
+    version = str(extra.get('version') or '')[:100]
+    if not version and state not in ('scanned', 'not_wordpress'):
+        previous = ProbeObservation.objects.filter(project_id=project_id, host=host, probe='wpscan', port=0, kind='wordpress', product='WordPress').first()
+        version = previous.version if previous else ''
     ProbeObservation.objects.update_or_create(
-        project_id=project_id, host=host.lower(), probe='wpscan', port=0, kind='wordpress', product='WordPress',
-        defaults={'domain_id': domain_id, 'version': str(extra.get('version') or '')[:100], 'variant': state,
+        project_id=project_id, host=host, probe='wpscan', port=0, kind='wordpress', product='WordPress',
+        defaults={'domain_id': domain_id, 'version': version, 'variant': state,
                   'outcome': {'scanned': 'found', 'blocked': 'challenged', 'not_wordpress': 'absent'}.get(state, 'hidden'),
                   'confidence': 1.0 if state == 'scanned' else 0.0, 'source': 'wpscan',
                   'evidence': {'state': state, 'reason': str(reason)[:300], **{k: v for k, v in extra.items() if k != 'version'}},
@@ -599,7 +610,7 @@ def status_counts(project_ids=None):
 
 # ----------------------------------------------------------------------------- the stage
 
-def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
+def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only=None):
     """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
     Returns ``{host: first observation}`` for the hosts probed now."""
     from cveFeed import ledger, probes, route_auth
@@ -609,6 +620,8 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
     siblings = siblings_of(subs, set(candidates))
     web = {name for name, s in by_name.items() if route_auth.web_bases(s)}
     order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
+    if only is not None:
+        order = [h for h in order if h in only]
     covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
     group = set(candidates) | siblings
     results = {}
@@ -634,7 +647,11 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
         if not found:
             ledger.record(PROBE_SERVICE, [host], project, scan, 'failed')
             continue
-        probes.record(project, domain.id, host, 'wordpress-detect', found)
+        probes.record(project, domain.id, host, 'wordpress-detect', found[:1])
+        if found[1:]:  # the upgrade directory's state is its own probe: the rows that read 'wordpress-detect' as the host's WordPress state stay one
+            probes.record(project, domain.id, host, 'wp-upgrade-dir', found[1:])
+            from cveFeed import wp_core
+            wp_core.record_exposure(scan, sub, found[1].get('variant'), found[0].get('version', ''))
         if found[0]['outcome'] == 'found':
             probes.apply_to_subdomain(sub, found)
         ledger.record(PROBE_SERVICE, [host], project, scan, 'failed' if found[0]['outcome'] == 'challenged' else 'done')
@@ -642,14 +659,18 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False):
     return results
 
 
-def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, internal=False):
+def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, internal=False, only=None, attempt=0):
     """The pipeline stage: probe for WordPress, then WPScan every host that shows any sign of it (and every grouped name that probes
     positive), positive probes first. Never silent: every candidate gets a recorded state. Returns a summary dict; ``error`` is set only when
     every attempted site failed.
 
     ``internal`` is the run for a host inside a declared internal network (``cveFeed.internal_scan``): WPScan runs only through a Sentinel inside
     it with no local fallback, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
-    its own, to the site or to its plugin pages), and no thorough pass is queued (it would run from here)."""
+    its own, to the site or to its plugin pages), and no thorough pass is queued (it would run from here).
+
+    A site the stage cannot reach in time (over the per-scan limit, out of the stage's time budget, no memory for it) is not left for the next
+    scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
+    limits the run to those hosts (that job's call); ``attempt`` counts its retries. The summary's ``deferred`` lists the hosts queued."""
     from cveFeed import activity, ledger, probes, wp_correlation
     from reNgine import resources
     from startScan.models import ScanHistory, Subdomain
@@ -663,13 +684,16 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
     by_name = {s.name.lower(): s for s in subs}
     signals = candidate_signals(scan, subs)
+    if only is not None:
+        signals = {h: v for h, v in signals.items() if h in only}
     for host, found in signals.items():
         record_signals(project, domain.id, host, found)
-    probed = {} if internal else detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force)
+    probed = {} if internal else detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force, only=only)
     positive = {h for h, o in probed.items() if o['outcome'] == 'found'}
     for host in sorted(h for h, o in probed.items() if o['outcome'] == 'absent' and h not in signals):
         record_state(project, domain.id, host, 'not_wordpress', 'the probe found no WordPress signature')
     wanted = sorted(set(signals) | positive, key=lambda h: (h not in positive, h))
+    deferred = []
     summary = {'candidates': len(signals), 'probed': len(probed), 'sites': len(wanted), 'scanned': 0, 'findings': 0, 'technologies': 0, 'reused': 0}
     wp_correlation.carry_forward(scan)
     if not wanted:
@@ -686,8 +710,10 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     todo = sorted((h for h in wanted if h not in fresh), key=lambda h: (h not in positive, history.get(ledger._norm(h)) or epoch, h))
     for host in todo[max_sites():]:
         record_state(project, domain.id, host, 'waiting', f'over the per-scan limit of {max_sites()} sites; it goes first next time')
+        deferred.append(host)
     todo = todo[:max_sites()]
     if not todo:
+        summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
         return summary
     token = api_token(domain.project)
     running = activity.log('run_check', f'WPScan is checking {len(todo)} WordPress site(s) of {domain.name}'
@@ -699,6 +725,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
         if time.monotonic() - started > stage_seconds():
             for waiting in todo[index:]:
                 record_state(project, domain.id, waiting, 'waiting', 'the WPScan stage used its time budget; it goes first next time')
+                deferred.append(waiting)
             break
         sub, url = by_name[host], _base_of(by_name[host])
         use = token if token_ok else ''
@@ -722,9 +749,11 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
             record_state(project, domain.id, host, 'blocked', _hint(str(exc), token))
             errors.append(f'{host}: blocked by the edge')
             continue
-        except (resources.ScanAborted, resources.MemoryBusy):  # stopped, or no memory for it: not the site's fault, and nothing after it can run
+        except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no memory for it: not the site's fault, and nothing after it can run
             for waiting in todo[index:]:
                 record_state(project, domain.id, waiting, 'waiting', 'the scan was stopped or memory was short; it goes first next time')
+                if not isinstance(exc, resources.ScanAborted):  # a person stopped the scan: nothing is queued behind them
+                    deferred.append(waiting)
             break
         except Exception as exc:  # noqa: BLE001 - one site failing must not stop the rest
             logger.warning('wpscan failed for %s: %s', host, _redact(str(exc), token))
@@ -753,6 +782,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
         summary['technologies'] += techs
         scanned.append(host)
     summary['scanned'] = len(scanned)
+    summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
     summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
     message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
@@ -762,6 +792,47 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     if failed_all:
         summary['error'] = errors[0][:290]
     return summary
+
+
+# ----------------------------------------------------------------------------- the queued quick pass
+
+def queue_quick(scan, hosts, attempt=0, dispatch=True):
+    """Queue the quick pass for hosts the stage could not reach (``wpscan_quick``, on the WPScan queue, a little later each attempt): they are
+    marked ``queued`` and not left for the next scan. Past ``QUICK_ATTEMPTS`` they stay ``waiting`` for it. Returns the hosts queued."""
+    hosts = sorted(set(hosts))
+    if not hosts or not dispatch or attempt >= QUICK_ATTEMPTS:
+        return []
+    domain = scan.domain
+    try:
+        from cveFeed.tasks import wpscan_quick
+        wpscan_quick.apply_async(args=[scan.id, hosts, attempt + 1], countdown=QUICK_DELAY * (attempt + 1), queue=THOROUGH_QUEUE)
+    except Exception:  # noqa: BLE001 - the hosts stay waiting: the next scan's quick pass asks again
+        logger.exception('could not queue the WPScan quick pass for %s', domain.name)
+        return []
+    for host in hosts:
+        record_state(domain.project_id, domain.id, host, 'queued', f'WPScan could not reach this site in time; it is queued and asked again (attempt {attempt + 1} of {QUICK_ATTEMPTS})')
+    return hosts
+
+
+def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None):
+    """The queued quick pass: the stage's WPScan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
+    freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
+    spent. Returns the run's summary, or ``{'skipped': why}``."""
+    from cveFeed import ledger
+    from reNgine import resources
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
+    if scan is None:
+        return {'skipped': 'the scan is gone'}
+    only = {h.lower() for h in hosts}
+    if resources.global_pause_requested(fail_closed=True) or resources.abort_requested(scan_id):
+        queue_quick(scan, only, attempt, dispatch=not resources.abort_requested(scan_id))
+        return {'skipped': 'scanning is paused: the hosts stay queued'}
+    with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', f'quick-{os.getpid()}', 600) as holder:
+        if holder is not True:
+            queue_quick(scan, only, attempt)
+            return {'skipped': 'another quick pass is running for this project'}
+        return run_wpscan(scan_id, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
 
 
 # ----------------------------------------------------------------------------- the thorough pass
@@ -791,7 +862,10 @@ def _pending_hosts(project_id):
 
 def _latest_row(project_id, host):
     from startScan.models import Subdomain
-    return Subdomain.objects.filter(target_domain__project_id=project_id, name=host).select_related('scan_history', 'target_domain').order_by('-scan_history_id').first()
+    from targetApp.models import Domain
+    # a target set to manual only is never given the thorough pass on a schedule: its host is no longer one the pass may scan
+    return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+            .select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
 
 
 def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
@@ -827,7 +901,7 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
             host, domain_id = todo[0]
             sub = _latest_row(project_id, host)
             if sub is None or (exclusions.excluded_names(project_id) and exclusions.normalize(host) in exclusions.excluded_names(project_id)):
-                record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project')
+                record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project, or its target is set to manual only')
                 summary['failed'] += 1
                 continue
             why = gate.refusal(project_id, host)  # a bug bounty project that has not confirmed automated testing, or a host outside the program's scope

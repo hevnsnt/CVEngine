@@ -1,7 +1,10 @@
-"""Conservative three-hour scanner admission tuning.
+"""The three-hour review of scanner capacity, now a report only.
 
-Only Redis-backed live admission caps change. Worker process counts and external rate
-limits remain untouched. Sparse telemetry, a paused scanner, or model failure means no change.
+It used to move the scanner admission caps itself (a step kept in Redis, confirmed by an AI call). The auto-tuner (cveFeed.autotune) owns
+those numbers now, in every mode: Auto moves them, Suggest recommends, Off leaves them to the person who tunes by hand. This review still
+measures the window and works out what it would have done (``safe_candidate``), which the three-hour assessment review keeps with its record;
+it no longer changes anything and no longer asks the AI. ``failure_cause`` and ``CAPACITY_PATTERN`` are shared with the auto-tuner's
+measurements.
 """
 import json
 import logging
@@ -30,11 +33,7 @@ CONFIGURATION_PATTERN = (r'unavailable|not installed|not found|no such file|pass
                          r'unknown flag|unrecognized|missing|api key|unauthori[sz]ed|forbidden|not scanned:|is excluded|prohibited|'
                          r'is not allowed|not permitted|unsupported')
 COOLDOWN = 6 * 3600
-KEY = 'cvengine:adaptive:decision'
-SYSTEM = ('You review measured scanner capacity for the previous three hours. Reply with exactly one JSON object '
-          '{"kind":"nmap","direction":"up","reason":"..."} or '
-          '{"kind":"none","direction":"none","reason":"..."}. Choose only the candidate the safety controller offers; '
-          'do not propose changing scope, coverage, external rate limits or worker process counts.')
+KEY = 'cvengine:adaptive:decision'  # the last step the review applied, before the auto-tuner took over (read for its rollback rule)
 
 
 def failure_cause(message):
@@ -121,26 +120,6 @@ def safe_candidate(metrics, *, memory_kills=0, scanner_failures=0, scanner_runs=
     return {'kind': 'none', 'direction': 'none', 'reason': 'No sustained eligible wait or operator maximum reached'}
 
 
-def _model_agrees(candidate, metrics):
-    from reNgine.ai_settings import get_configured_provider
-    from reNgine.ai_providers import clean_text, usage_stage
-    provider = get_configured_provider()
-    if provider is None:
-        return False, 'AI provider unavailable'
-    payload = {'candidate': candidate, 'measurements': metrics}
-    with usage_stage('performance_review'):
-        reply = provider.complete(SYSTEM, json.dumps(payload, sort_keys=True, separators=(',', ':')))
-    try:
-        obj = json.loads(str(reply).strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip())
-    except (TypeError, ValueError):
-        return False, 'AI performance recommendation was invalid'
-    if not isinstance(obj, dict) or set(obj) != {'kind', 'direction', 'reason'} or not isinstance(obj['reason'], str):
-        return False, 'AI performance recommendation was invalid'
-    if obj['kind'] != candidate['kind'] or obj['direction'] != candidate['direction']:
-        return False, 'AI did not confirm the policy candidate'
-    return True, clean_text(obj['reason'], 300)
-
-
 def review(now=None):
     from cveFeed.models import AIUsage
     from cveFeed.scan_control import pause_requested
@@ -197,21 +176,8 @@ def review(now=None):
                 'memory_kills_now': memory_kills}
         if candidate['kind'] == 'none':
             return record
-        agrees, explanation = _model_agrees(candidate, record)
-        if not agrees:
-            return {**record, 'reason': explanation}
-        kind, before = candidate['kind'], caps[candidate['kind']]
-        after = before + (1 if candidate['direction'] == 'up' else -1)
-        low, high = bounds[kind]
-        if not low <= after <= high or pause_requested():
-            return {**record, 'reason': 'Capacity bound or pause changed before application'}
-        adjustment = {'kind': kind, 'direction': candidate['direction'], 'previous': before,
-                      'value': after, 'at': now.timestamp(), 'metrics': metrics,
-                      'reason': f'{candidate["reason"]}; AI: {explanation}'[:400]}
-        client.set(f'cvengine:adaptive:max:{kind}', json.dumps(adjustment), ex=30 * 86400)
-        client.set(KEY, json.dumps(adjustment), ex=30 * 86400)
-        return {**record, 'status': 'changed', 'reason': adjustment['reason'], 'kind': kind,
-                'before': before, 'after': after, 'rollback': candidate['reason'].startswith('Rollback')}
+        # Report only: the auto-tuner moves the scanner limits (cveFeed.autotune), so two tuners never pull the same number.
+        return {**record, 'candidate': candidate, 'note': 'scanner limits are moved by auto-tuning (Settings, configMaxxing), not by this review'}
     except Exception as exc:
         logger.error('three-hour performance review failed (%s)', type(exc).__name__)
         return {'status': 'no_change', 'reason': 'Performance telemetry or AI review failed; admission caps unchanged'}

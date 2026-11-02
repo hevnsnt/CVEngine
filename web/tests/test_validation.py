@@ -626,14 +626,31 @@ class ApplyValidationTests(ValidationBase):
 		Triage.objects.filter(pk=row.pk).update(next_attempt_at=None)
 		self.assertIn(row.pk, validation.due_ids(self.project.pk))
 
-	def test_a_reaffirmed_version_raises_a_triaged_finding_to_likely(self):
+	def test_a_reaffirmed_version_alone_keeps_a_version_only_match_at_the_ceiling(self):
+		"""Reading the same version a second time is not more evidence than reading it once: v1.3.1 lifted such a match to likely, and the next
+		triage pass put it back about twelve minutes later (camstork, issue 210)."""
 		m, row = self.prepared()
+		self.assertTrue(validation._version_only(row))
 		row.classification = 'needs_validation'
 		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'nmap reports nginx 1.18.2'})
-		self.assertEqual(row.classification, 'likely')
+		self.assertEqual(row.classification, 'needs_validation')
 		row.classification = ''
 		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'again'})
 		self.assertEqual(row.classification, '')  # not triaged: a version reading does not invent a classification
+
+	def test_a_reaffirmed_version_still_raises_a_match_that_has_more_than_the_version(self):
+		m, row = self.prepared()
+		CVEMatch.objects.filter(pk=m.pk).update(distro_status='vulnerable')  # the distribution's own tracker lists the release as affected
+		row.refresh_from_db()
+		row.match.refresh_from_db()
+		self.assertFalse(validation._version_only(row))
+		row.classification = 'needs_validation'
+		validation.apply_validation(row, self.check('nmap_sv'), {'status': 'reaffirmed', 'summary': 'nmap reports nginx 1.18.2'})
+		self.assertEqual(row.classification, 'likely')
+
+	def test_a_reaffirmed_route_is_not_a_version_match_and_still_raises(self):
+		from types import SimpleNamespace
+		self.assertFalse(validation._version_only(SimpleNamespace(match_id=None)))  # a route (or any finding that is not a CVE match) has no version to read twice
 
 
 class RunValidationTests(ValidationBase):
@@ -855,6 +872,59 @@ class RunValidationTests(ValidationBase):
 		runners, calls = self.runners()
 		self.run_validation(runners=(runners, calls))
 		self.assertEqual(calls, [])
+
+
+class OnDemandKeepsTriageTests(ValidationBase):
+	"""A validation request asks for a fresh AI review (it sets the row's review nonce) but must never erase the triage the finding
+	already has: with no AI to answer, the earlier result stands."""
+
+	def provider(self, text):
+		p = mock.Mock(model='m')
+		p.name = 'anthropic'
+		p.complete.return_value = text
+		return p
+
+	def run_job(self, match, provider):
+		from cveFeed import tasks
+		from cveFeed.models import OnDemandValidation
+		job = OnDemandValidation.objects.create(match=match, project=self.project, evidence_signature='x', priority=9)
+		plan = {'check_kinds': ['nmap_sv'], 'reason': 'x', 'source': 'rules', 'generate_template': False}
+		observed = {'status': 'observed', 'summary': 'nmap reports nginx', 'observed': {'product': 'nginx', 'version': '1.18.0'}}
+		with mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)), \
+				mock.patch('cveFeed.validation_authority.require_authority'), \
+				mock.patch.dict(validation.RUNNERS, {'nmap_sv': lambda check: observed}), \
+				mock.patch('cveFeed.triage._resolve_provider', return_value=provider), \
+				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')):
+			tasks.validate_match_on_demand(job.pk)
+		return job
+
+	def triaged_match(self):
+		from tests.test_triage import reply
+		m = self.match()
+		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))),
+						  provider=self.provider(reply('likely')))
+		row = Triage.objects.get(match=m)
+		self.assertEqual((row.status, row.classification), ('triaged', 'needs_validation'))  # version string alone: capped
+		self.assertEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'uncertain')
+		return m, row
+
+	def test_a_validation_with_the_ai_off_keeps_the_earlier_triage(self):
+		m, before = self.triaged_match()
+		job = self.run_job(m, None)
+		row = Triage.objects.get(match=m)
+		self.assertEqual(job.__class__.objects.get(pk=job.pk).status, 'completed')
+		self.assertEqual((row.classification, row.verdict_id, row.reason), (before.classification, before.verdict_id, before.reason))
+		self.assertEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'uncertain')
+		self.assertEqual(row.validation_status, 'observed')  # and the validation still ran and was recorded
+
+	def test_a_validation_with_the_ai_on_still_reviews_the_evidence_afresh(self):
+		from tests.test_triage import reply
+		m, before = self.triaged_match()
+		self.run_job(m, self.provider(reply('likely_false_positive')))
+		row = Triage.objects.get(match=m)
+		self.assertEqual(row.status, 'triaged')
+		self.assertNotEqual(row.verdict_id, before.verdict_id)  # a new question, under the request's nonce
+		self.assertIn('AI said likely false positive', row.verdict.reason)
 
 
 class DispatchTests(ValidationBase):

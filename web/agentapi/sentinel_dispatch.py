@@ -19,9 +19,10 @@ takes and handed to the *same persistence function* local execution uses (``cveF
 back to running the tool locally, exactly as today; the subprocess-running code itself (``nmap_scan.run_nmap_xml``,
 ``naabu_scan.run_naabu``, ``nuclei_scan.stream_nuclei``) is never touched by this module.
 
-This phase dispatches a whole stage (all of a chunk's addresses, or a chunk's nuclei targets) as a single SentinelTask to
-one Sentinel; splitting a stage across multiple Sentinels, or letting several share one project's work, is left to a
-follow-up once there is real-world experience with how many Sentinels a project actually registers.
+A stage that splits into several chunk tasks (nmap and naabu: 64 addresses each, nuclei: 64 targets each) sends them side by side
+through ``dispatch_many``: a bounded window of chunk tasks, created up front and waited for in one poll loop, refilled as chunks finish
+(``CVENGINE_STAGE_PARALLEL``, default 4; ``1`` is the serial loop of before). Each chunk is still one task for one Sentinel, with the
+single-task wait above and its own fallback to local execution.
 """
 import contextlib
 import ipaddress
@@ -29,7 +30,7 @@ import os
 import tempfile
 import time
 
-MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: everything beyond this in one stage call is scanned locally
+MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
 DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispatched task to finish
 RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounded parallel pass, never one lookup per target serially
 RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
@@ -117,6 +118,131 @@ def _label(host, ips):
     return f'{n} address{"es" if n != 1 else ""}' if n else 'its target'
 
 
+TERMINAL = ('done', 'failed', 'expired')
+STAGE_KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep')  # the kinds a stage splits into chunk tasks (and so fans out)
+DEFAULT_STAGE_PARALLEL = 4  # CVENGINE_STAGE_PARALLEL: the most chunk tasks one stage keeps in flight at once
+REFILL_EVERY = 5  # seconds between looks for a Sentinel slot that freed up while a stage still has chunks to send
+STOP_CHECK_EVERY = 2  # seconds between checks, while a fanned-out stage waits, for a stop or a global pause
+
+
+def stage_parallel():
+    """CVENGINE_STAGE_PARALLEL: the hard ceiling on how many chunk tasks one scan stage keeps in flight across Sentinel slots (default 4).
+    ``1`` is the serial behaviour of before this existed: one chunk task at a time, each waited for before the next is created. What an App Admin
+    saved on Settings, configMaxxing wins over the environment and is read on every call (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return max(1, int(tunables.value('stage_parallel', DEFAULT_STAGE_PARALLEL)))
+
+
+class _Dispatch:
+    """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
+    several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
+
+    def __init__(self, project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, label=None, siblings=None):
+        from agentapi.models import SentinelTask
+        from cveFeed import activity
+        self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
+        self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
+        targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
+        self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
+        self.task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
+                                                ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
+        self.label = label or _label(host, ips)
+        self.busy = capacity['state'] == 'busy'
+        self.entry = activity.log('run_check', (f'Queued {kind} work for {self.label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one'
+                                                if self.busy else f'Handed {kind} work for {self.label} to a Sentinel'),
+                                  project=project, status='running', scan_id=getattr(scan, 'id', None), sentinel_task_id=self.task.pk)
+        self.started = time.monotonic()
+        self.queue_budget = _queue_timeout(kind)
+        self.claim_deadline = self.started + (self.queue_budget if self.busy else min(_claim_timeout(), self.timeout))
+        self.run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
+        self.never_claimed = False
+
+    @property
+    def finished(self):
+        return self.task.status in TERMINAL
+
+    def step(self, now, no_sentinel_left=False):
+        """Act on the task as it was just read: start the completion clock once it is claimed, and give it up (expire it, so the stage falls back)
+        when the wait for a Sentinel or for its report ran out. Returns True once the task is over. ``no_sentinel_left`` is set by the loop
+        after a reap that found no live, eligible Sentinel any more."""
+        from agentapi import sentinel_broker
+        task = self.task
+        if task.status in TERMINAL:
+            return True
+        if no_sentinel_left and task.status == 'queued':
+            self.never_claimed = True  # the last live Sentinel went away while the task waited: nothing will take it
+            sentinel_broker.expire(task, 'no live Sentinel is left to take the task; the stage fell back to local execution')
+            return True
+        if task.status in ('claimed', 'running') and self.run_deadline is None:
+            self.run_deadline = now + self.timeout
+        if task.status == 'queued' and now >= self.claim_deadline:
+            others = [t.pk for t in self.siblings()] if self.siblings else []
+            if (not self.busy and now < self.started + self.queue_budget
+                    and sentinel_broker.capacity_state(self.project, self.kind, self.internal, exclude=[task.pk, *others])['state'] == 'busy'):
+                self.busy, self.claim_deadline = True, self.started + self.queue_budget  # another stage took the free slot first: wait for the next one
+                return False
+            hold = self._sibling_hold()
+            if hold:
+                self.claim_deadline = now + hold  # waiting behind its own stage's chunks, which are being worked: not a reason to run it here
+                return False
+            self.never_claimed = True
+            sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if self.busy
+                                          else 'no Sentinel claimed the task in time; the stage fell back to local execution'))
+            return True
+        if self.run_deadline is not None and now >= self.run_deadline:
+            sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
+            return True
+        return False
+
+    def _sibling_hold(self):
+        """Seconds this queued chunk task may keep waiting because the slots are held by other chunk tasks of its own stage that a Sentinel has
+        claimed (they finish and free a slot), or 0 to give it up. A safety net, since the window is sized to the free slots and a stage normally
+        has no chunk queued behind its own: never beyond the age at which the reaper would expire a queued task (``queued_ttl``, less two reap
+        intervals), so this loop expires it, and says why, before the reaper does."""
+        if not self.siblings or not any(t.status in ('claimed', 'running') for t in self.siblings()):
+            return 0
+        from agentapi import sentinel_broker
+        from django.utils import timezone
+        age = (timezone.now() - self.task.created_at).total_seconds()
+        return max(0, min(self.queue_budget, sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY - age))
+
+    def pause(self, now):
+        """Seconds to sleep before the next look."""
+        horizon = self.run_deadline if self.run_deadline is not None else self.claim_deadline
+        return min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now))
+
+    def settle(self):
+        """Close the activity line of the task that is over, saying what became of it."""
+        from cveFeed import activity
+        task, kind, label, busy = self.task, self.kind, self.label, self.busy
+        sentinel = task.agent.name if task.agent_id else None
+        if task.status == 'done':
+            activity.settle(self.entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
+                            else f'A Sentinel checked in {kind} work for {label}')
+        elif task.status == 'failed':
+            reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
+            activity.settle(self.entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
+                            else f'A Sentinel reported {kind} failed for {label}: {reason}'))
+        elif self.never_claimed:
+            activity.settle(self.entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; it ran locally instead' if busy
+                                                            else f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead'))
+        else:  # claimed, but not reported back before the completion timeout
+            activity.settle(self.entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
+
+    def cancel(self, reason):
+        """Hand the task back unfinished (the stage was stopped, or its consumer went away): expired, so it is neither claimed nor left queued."""
+        from agentapi import sentinel_broker
+        from cveFeed import activity
+        if self.task.status in TERMINAL:
+            return
+        sentinel_broker.expire(self.task, reason)
+        activity.settle(self.entry, 'expired', message=f'{self.kind} work for {self.label} was cancelled: {reason}')
+
+    @property
+    def result(self):
+        return self.task.result if self.task.status == 'done' else None
+
+
 def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None,
                      internal=False):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
@@ -132,69 +258,174 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     the database for the rest of the task's retention window once nothing needs it there any more."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
-    from cveFeed import activity
     capacity = sentinel_broker.capacity_state(project, kind, internal)
     if capacity['state'] == 'none':
         return None
-    targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
-    timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
-    task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
-                                       ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
-    label = _label(host, ips)
-    busy = capacity['state'] == 'busy'
-    entry = activity.log('run_check', (f'Queued {kind} work for {label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one' if busy
-                                       else f'Handed {kind} work for {label} to a Sentinel'),
-                         project=project, status='running', scan_id=getattr(scan, 'id', None), sentinel_task_id=task.pk)
-    started = time.monotonic()
-    queue_budget = _queue_timeout(kind)
-    claim_deadline = started + (queue_budget if busy else min(_claim_timeout(), timeout))
-    run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
-    never_claimed = False
-    last_reap = started
+    work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity)
+    last_reap = work.started
     while True:
-        task.refresh_from_db()
-        if task.status in ('done', 'failed', 'expired'):
+        work.task.refresh_from_db()
+        if work.finished:
             break
         now = time.monotonic()
+        none_left = False
         if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
             sentinel_broker.reap_expired()
             last_reap = now
-            if task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none':
-                never_claimed = True  # the last live Sentinel went away while the task waited: nothing will take it
-                sentinel_broker.expire(task, 'no live Sentinel is left to take the task; the stage fell back to local execution')
-                break
-        if task.status in ('claimed', 'running') and run_deadline is None:
-            run_deadline = now + timeout
-        if task.status == 'queued' and now >= claim_deadline:
-            if (not busy and now < started + queue_budget
-                    and sentinel_broker.capacity_state(project, kind, internal, exclude=task.pk)['state'] == 'busy'):
-                busy, claim_deadline = True, started + queue_budget  # another stage took the free slot first: wait for the next one
-                continue
-            never_claimed = True
-            sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if busy
-                                          else 'no Sentinel claimed the task in time; the stage fell back to local execution'))
+            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none'
+        if work.step(now, none_left):
             break
-        if run_deadline is not None and now >= run_deadline:
-            sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
-            break
-        horizon = run_deadline if run_deadline is not None else claim_deadline
-        time.sleep(min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now)))
-    sentinel = task.agent.name if task.agent_id else None
-    if task.status == 'done':
-        activity.settle(entry, 'done', message=f'Sentinel {sentinel} checked in {kind} work for {label}' if sentinel
-                        else f'A Sentinel checked in {kind} work for {label}')
-    elif task.status == 'failed':
-        reason = (task.error or (task.result or {}).get('error') or 'no reason given')[:180]
-        activity.settle(entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
-                        else f'A Sentinel reported {kind} failed for {label}: {reason}'))
-    elif never_claimed:
-        activity.settle(entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; it ran locally instead' if busy
-                                                   else f'No Sentinel picked up {kind} work for {label} in time; it ran locally instead'))
-    else:  # claimed, but not reported back before the completion timeout
-        activity.settle(entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; it ran locally instead')
+        time.sleep(work.pause(now))
+    work.settle()
     if redact_target is not None:
-        SentinelTask.objects.filter(pk=task.pk).update(target=redact_target(target))
-    return task.result if task.status == 'done' else None
+        SentinelTask.objects.filter(pk=work.task.pk).update(target=redact_target(target))
+    return work.result
+
+
+# --- fan-out: the chunks of one stage across several Sentinel slots, in one wait loop -----------------------------------
+
+def _stage_share(scan, kind, total_slots):
+    """The most chunk tasks this stage may keep in flight so that one scan never takes every slot: twice the instance's Sentinel slots, shared among
+    the scans with a stage dispatching right now (this one included)."""
+    from agentapi.models import SentinelTask, SENTINEL_ACTIVE_STATUSES
+    others = (SentinelTask.objects.filter(status__in=SENTINEL_ACTIVE_STATUSES, kind__in=STAGE_KINDS, scan__isnull=False)
+              .exclude(scan=scan).values('scan').distinct().count()) if scan is not None else 0
+    return max(1, (2 * total_slots) // (others + 1))
+
+
+def _stopped(scan):
+    """Whether the scan was stopped or scanning is paused: what a stage that waits on Sentinels must notice, since no local process is there to."""
+    if scan is None:
+        return False
+    from cveFeed.discovery import stopped
+    from reNgine import resources
+    return stopped(scan.id) or resources.global_pause_requested(fail_closed=False)
+
+
+def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, created_by=None, priority=1, internal=False,
+                  stop_on_none=False, labeler=None):
+    """Send the chunks of one stage to Sentinels in parallel and yield ``(index, result)`` for each chunk as it finishes (``result`` is the task's
+    typed result dict, or ``None`` when no Sentinel did that chunk: the caller runs it here, as for ``dispatch_or_none``). Chunks come back in
+    the order they finish, not the order they were given, and a chunk's own result is never split: a caller applies each as a whole.
+
+    A window of chunk tasks is created up front and waited for in ONE poll loop (one read of all of them per tick); each finished chunk refills the
+    window. Its width is the smallest of: the chunks left, the slots this stage holds plus the project's free Sentinel slots (never more chunk
+    tasks than slots, so none queues behind its own stage's chunks), twice the instance's slots divided among the scans dispatching now (one scan
+    does not take every slot), and ``CVENGINE_STAGE_PARALLEL`` (default 4, saved on Settings, configMaxxing: read ONCE when the stage starts, so a change applies from the next stage and a stage in flight keeps the ceiling it began with). The free slots and the other scans are read again on every refill, so
+    a slot another stage took is not counted on; the instance's slot total is read once, when the stage starts. When no live Sentinel is left, or one never claims a
+    task, no more chunks are sent: that chunk and every chunk not yet sent are yielded as ``None`` after the in-flight ones finish. A chunk
+    that failed or expired after a Sentinel took it falls back alone, and the rest carry on.
+
+    With ``CVENGINE_STAGE_PARALLEL=1`` (and for a single chunk) this is the serial loop of before: one ``dispatch_or_none`` per chunk, in order;
+    ``stop_on_none`` ends it at the first chunk nobody did, the way nmap and naabu always have.
+
+    ``prepare(chunk)`` returns ``(target, ips)`` for the task, or ``None`` for a chunk that must not be dispatched (yielded as ``None``);
+    by default the target is ``{'addresses': chunk}``. A stop or global pause while waiting cancels every outstanding chunk task (expired, none
+    left queued or claimed) and raises ``resources.ScanAborted``; so does closing the generator early."""
+    chunks = [list(c) for c in chunks]
+    if not chunks:
+        return
+    prepare = prepare or (lambda chunk: ({'addresses': chunk}, chunk))
+    ceiling = stage_parallel()  # read once per stage: a stage already in flight keeps the ceiling it started with
+    if ceiling <= 1 or len(chunks) == 1:
+        yield from _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none)
+        return
+    from agentapi import sentinel_broker
+    from agentapi.models import SentinelTask
+    from reNgine import resources
+    total = sentinel_broker.total_slots()
+    pending = list(range(len(chunks)))  # chunk indexes not sent yet, in order
+    flying = {}  # index -> _Dispatch
+    unserved = []  # indexes nobody took (not dispatched, or fan-out stopped before them)
+    halted, last_reap, last_refill, last_stop = False, time.monotonic(), None, time.monotonic()
+
+    def mine_queued():
+        return [d.task.pk for d in flying.values() if d.task.status == 'queued']
+
+    def refill(now):
+        """Create the chunk tasks the window has room for. Returns what it could not send as nobody's (``halted``)."""
+        nonlocal halted, last_refill
+        last_refill = now
+        capacity = sentinel_broker.capacity_state(project, kind, internal, exclude=mine_queued())
+        if capacity['state'] == 'none':
+            halted = True
+            return
+        holding = sum(d.task.status in ('claimed', 'running') for d in flying.values())
+        width = min(ceiling, _stage_share(scan, kind, total), max(1, holding + capacity['free']))
+        free_left = max(0, capacity['free'])
+        while pending and len(flying) < width:
+            index = pending.pop(0)
+            prepared = prepare(chunks[index])
+            if prepared is None:
+                unserved.append(index)
+                continue
+            target, ips = prepared
+            label = labeler(chunks[index]) if labeler else _label('', ips)
+            state = {**capacity, 'state': 'free' if free_left else 'busy'}
+            flying[index] = _Dispatch(project, kind, target, '', ips, scan, timeout, created_by, priority, internal, state,
+                                      label=f'{label} (part {index + 1} of {len(chunks)})',
+                                      siblings=lambda me=index: [d.task for i, d in flying.items() if i != me])
+            free_left = max(0, free_left - 1)
+
+    try:
+        refill(time.monotonic())
+        while flying:
+            now = time.monotonic()
+            if scan is not None and now - last_stop >= STOP_CHECK_EVERY:
+                last_stop = now
+                if _stopped(scan):
+                    raise resources.ScanAborted(f'{kind} dispatch was stopped with its scan')
+            rows = SentinelTask._base_manager.in_bulk([d.task.pk for d in flying.values()])  # one read for every chunk in flight
+            for d in flying.values():
+                if d.task.pk in rows:
+                    d.task = rows[d.task.pk]
+                else:
+                    d.task.status = 'expired'  # the row is gone: nothing will report it
+            none_left = False
+            if now - last_reap >= REAP_EVERY:
+                sentinel_broker.reap_expired()
+                last_reap = now
+                none_left = any(d.task.status == 'queued' for d in flying.values()) and sentinel_broker.capacity_state(
+                    project, kind, internal)['state'] == 'none'
+            over = []
+            for index in list(flying):
+                if flying[index].step(now, none_left):
+                    d = flying.pop(index)
+                    d.settle()
+                    if d.never_claimed:
+                        halted = True  # no Sentinel takes work right now: the chunks not sent yet are not tried one by one
+                    over.append((index, d.result))
+            if pending and not halted and (over or now - last_refill >= REFILL_EVERY):
+                refill(now)  # before the results are handed over, so the slots do not wait on the caller's own work
+            for index, result in sorted(over, key=lambda pair: pair[0]):
+                yield index, result
+            if flying:
+                time.sleep(min([d.pause(now) for d in flying.values()] + [DISPATCH_POLL_INTERVAL]))
+    finally:
+        for d in flying.values():
+            d.cancel('the stage stopped before the task finished')
+    for index in sorted(unserved + pending):
+        yield index, None
+
+
+def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none):
+    """``dispatch_many`` with a window of one: the chunks one after another through ``dispatch_or_none``, as a stage always did."""
+    ended = False
+    for index, chunk in enumerate(chunks):
+        prepared = None if ended else prepare(chunk)
+        if prepared is None:
+            yield index, None
+            continue
+        target, ips = prepared
+        kwargs = {'internal': True} if internal else {}
+        if created_by is not None:
+            kwargs['created_by'] = created_by
+        if priority != 1:
+            kwargs['priority'] = priority
+        result = dispatch_or_none(project, kind, target, ips=ips, scan=scan, timeout=timeout, **kwargs)
+        if result is None and stop_on_none:
+            ended = True  # the first chunk no Sentinel took ends the dispatching: it and the rest run here
+        yield index, result
 
 
 # --- nmap: dispatch a chunk of addresses, persist a hit through the exact same function local nmap uses ---------------
@@ -210,17 +441,24 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
         return targets, zero, local_ports
-    chunk = targets[:MAX_ADDRESSES]
-    result = dispatch_or_none(project, 'nmap', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
-    if result is None:
-        return targets, zero, local_ports
     from cveFeed.nmap_scan import persist_inventory
-    inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                 for host in result.get('hosts', []) if host.get('ip') in chunk]
-    totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
-    reported = {}
-    for host in inventory:
-        reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    # every chunk of MAX_ADDRESSES goes to a Sentinel (a batch of hosts has more addresses than one task takes), several at once when there are
+    # free slots; a chunk no Sentinel did is simply not reported, and what the caller fingerprints here is every address without a report
+    totals, reported = None, {}
+    chunks = _chunks(targets)
+    with contextlib.closing(dispatch_many(project, 'nmap', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
+        for index, result in results:
+            if result is None:
+                continue
+            chunk = chunks[index]
+            inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
+                         for host in result.get('hosts', []) if host.get('ip') in chunk]
+            done = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
+            totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
+            for host in inventory:
+                reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    if totals is None:
+        return targets, zero, local_ports
     remaining = []
     for ip in targets:
         if ip not in reported:
@@ -281,11 +519,16 @@ def wrap_naabu_runner(project, scan, timeout=None):
     def runner(ips):
         from cveFeed.naabu_scan import run_naabu
         ips = list(ips)
-        chunk, rest = ips[:MAX_ADDRESSES], ips[MAX_ADDRESSES:]
-        result = dispatch_or_none(project, 'naabu', {'addresses': chunk}, ips=chunk, scan=scan, timeout=timeout)
-        found = dict((result or {}).get('ports') or {}) if result is not None else run_naabu(chunk)
-        if rest:
-            found.update(run_naabu(rest))
+        found, unserved = {}, []
+        chunks = _chunks(ips)  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
+        with contextlib.closing(dispatch_many(project, 'naabu', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
+            for index, result in results:
+                if result is None:  # no Sentinel did this chunk: it, and with the serial limit everything after it, is scanned here, as before
+                    unserved.append(index)
+                else:
+                    found.update(dict(result.get('ports') or {}))
+        if unserved:
+            found.update(run_naabu([ip for index in sorted(unserved) for ip in chunks[index]]))
         return found
     return runner
 
@@ -381,6 +624,10 @@ def _local_kwargs(kind, kwargs):
     return {**kwargs, 'tech': True} if kind == 'nuclei_light' else kwargs
 
 
+def _targets_label(chunk):
+    return f'{len(chunk)} target{"s" if len(chunk) != 1 else ""}'
+
+
 def _chunks(targets):
     return [targets[i:i + MAX_ADDRESSES] for i in range(0, len(targets), MAX_ADDRESSES)]
 
@@ -416,12 +663,15 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     targets = [line.strip() for line in handle if line.strip()]
             except OSError:
                 targets = []
-            for chunk in _chunks(targets):  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
-                result = dispatch_or_none(project, kind, _nuclei_target(kind, chunk, kwargs), ips=[], scan=scan, internal=True, timeout=timeout)
-                if result is None:
-                    raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
-                for finding in result.get('findings', []):
-                    yield _finding_to_nuclei_line(finding)
+            chunks = _chunks(targets)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
+            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs), []), scan=scan,
+                                                  internal=True, timeout=timeout, labeler=_targets_label)) as results:
+                for _index, result in results:
+                    if result is None:
+                        raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
+                    for finding in result.get('findings', []):
+                        yield _finding_to_nuclei_line(finding)
+        internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
         return stream_nuclei
@@ -440,20 +690,28 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         if not targets:  # nothing readable to send: the local run decides what an empty or missing list means
             yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
-        for chunk in _chunks(targets):  # one task per chunk of MAX_ADDRESSES: the caller marks the whole list scanned, so none may be dropped
+        chunks = _chunks(targets)  # one task per chunk of MAX_ADDRESSES, several at once: the caller marks the whole list scanned, so none may be dropped
+
+        def prepare(chunk):
             live = resolvable_targets(chunk)
-            result = dispatch_or_none(project, kind, _nuclei_target(kind, live, kwargs), ips=[], scan=scan, timeout=timeout) if live else None
-            if result is None:
-                # no Sentinel took it, or nothing in the chunk resolves (a Sentinel would be asked to do nothing, and nuclei cannot reach what cannot
-                # be looked up either: run it anyway so the existing "ran, found nothing" accounting is unchanged): this chunk runs here
-                if len(targets) <= MAX_ADDRESSES:  # the whole list is this chunk: the caller's own file
-                    yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
+            # nothing in the chunk resolves (a Sentinel would be asked to do nothing, and nuclei cannot reach what cannot be looked up either: run it
+            # anyway so the existing "ran, found nothing" accounting is unchanged): this chunk runs here
+            return (_nuclei_target(kind, live, kwargs), []) if live else None
+        unserved = []
+        with contextlib.closing(dispatch_many(project, kind, chunks, prepare=prepare, scan=scan, timeout=timeout, labeler=_targets_label)) as results:
+            for index, result in results:
+                if result is None:
+                    unserved.append(index)  # no Sentinel took it: it runs here once the Sentinels' chunks are in, so they never wait on it
                     continue
-                with _targets_file(chunk) as path:
-                    yield from stream_nuclei(path, **_local_kwargs(kind, kwargs))
+                for finding in result.get('findings', []):
+                    yield _finding_to_nuclei_line(finding)
+        for index in sorted(unserved):
+            if len(targets) <= MAX_ADDRESSES:  # the whole list is this chunk: the caller's own file
+                yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
                 continue
-            for finding in result.get('findings', []):
-                yield _finding_to_nuclei_line(finding)
+            with _targets_file(chunks[index]) as path:
+                yield from stream_nuclei(path, **_local_kwargs(kind, kwargs))
+    stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     return stream
 
 

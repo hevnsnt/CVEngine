@@ -16,6 +16,7 @@ from agentapi import sentinel_dispatch
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
 from agentapi import internal_ranges, sentinel_settings, tailscale
@@ -144,7 +145,7 @@ def _queue_agent_work(request, ctx, slug, **_):
 
 ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
-    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed and AI budget',
+    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
@@ -157,7 +158,8 @@ ROUTES = [
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range',
-     lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover'))), 201)),
+     lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover')),
+                                            mode=_body(r).get('mode')), 201)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/bulk', 'Add many targets (list or pasted text), optionally start discovery',
      lambda r, c, slug, **k: (svc.add_targets(c, slug, _body(r).get('targets') or _body(r).get('text') or '',
                                               discover=bool(_body(r).get('discover', True)), mode=_body(r).get('mode')), 201)),
@@ -168,7 +170,7 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/delete', 'Delete targets by ids, or all matching a search (skips running scans)',
      lambda r, c, slug, **k: svc.delete_targets(c, slug, ids=_body(r).get('ids'), all_matching=bool(_body(r).get('all_matching')),
                                                 q=_body(r).get('q') or '')),
-    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discover', 'Run bbot discovery then nuclei on a target',
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discover', 'Run bbot discovery then nuclei on a target; body {mode} (standard, deep or passive; kept on the target), else the target\'s own mode',
      lambda r, c, slug, target_id, **k: (svc.discover_target(c, slug, int(target_id), _body(r).get('mode')), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/rescan-hosts',
      'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run; body {hosts: [...]}',
@@ -176,6 +178,14 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/scope',
      'Set a target\'s scope_mode: auto (shared-domain list decides), host (this host only) or parent (parent domain is owned); body {scope_mode}',
      lambda r, c, slug, target_id, **k: svc.set_target_scope(c, slug, int(target_id), _need(_body(r), 'scope_mode')[0])),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile',
+     'Set a target\'s alias (a short display name, up to 60 characters, one line) and/or note (free text, up to 1000 characters); body {alias, note}, any subset, an empty one clears it. Display only: the target\'s name is what is scanned',
+     lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile', 'Same as POST: set a target\'s alias and note',
+     lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discovery-mode',
+     'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}',
+     lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)', 'One target',
      lambda r, c, slug, target_id, **k: svc.get_target(c, slug, int(target_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
@@ -206,9 +216,13 @@ ROUTES = [
      lambda r, c, slug, assessment_id, **k: svc.get_host_assessment(c, slug, int(assessment_id))),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments/(?P<assessment_id>\d+)/stop', 'Stop a queued or running host assessment',
      lambda r, c, slug, assessment_id, **k: svc.stop_host_assessment(c, slug, int(assessment_id))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical}, any subset',
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshot', 'Take screenshot: queue a fresh browser capture of every web page of one inventoried host (the Take screenshot button)',
+     lambda r, c, slug, host_id, **k: (svc.request_host_screenshot(c, slug, host_id), 202)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshots', 'The browser captures of one host: each page\'s outcome, reason, final URL, status and title, and what is queued',
+     lambda r, c, slug, host_id, **k: svc.host_screenshots(c, slug, host_id)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical, alias (a short display name, up to 60 characters, one line), note (free text, up to 1000 characters)}, any subset; an empty alias or note clears it',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
-                                                             criticality=_body(r).get('criticality'))),
+                                                             criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/bulk', 'Archive, restore, pin or unpin many hosts; body {hosts: [names], action: archive|restore|pin|unpin, reason}. Up to 200; each host is independent',
      lambda r, c, slug, **k: hosts.host_bulk(c, slug, _body(r).get('hosts'), _body(r).get('action'), reason=_body(r).get('reason', ''))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/archive', 'Reversibly archive an inventoried host; body {reason}',
@@ -219,7 +233,7 @@ ROUTES = [
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'pin', pinned=_body(r).get('pinned'))),
     ('PATCH', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Same as POST: set a host\'s asset information',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
-                                                             criticality=_body(r).get('criticality'))),
+                                                             criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/delete', 'Delete a host\'s data from this project only (it can be rediscovered); exact name, irreversible',
      lambda r, c, slug, host, **k: hosts.delete_host(c, slug, host, with_aliases=bool(_body(r).get('with_aliases')))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/move', 'Move a host to another project you can write to; body {to_project, whole_target}. It is added there as a target and scanned; its data is deleted here and this project never brings it back. A host that is a target here with other hosts under it moves only with whole_target (the 409 says how many)',
@@ -266,7 +280,7 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_routes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/certificates', 'TLS certificates, soonest expiry first (?expiring_within=30)',
      lambda r, c, slug, **k: svc.list_certificates(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate and SPF/DKIM/DMARC findings',
+    ('GET', r'projects/(?P<slug>[-\w]+)/hygiene', 'TLS, certificate, SPF/DKIM/DMARC and cleartext-service findings (check=spf|dmarc|dkim|tls|caa|cleartext)',
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
@@ -400,10 +414,24 @@ ROUTES = [
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
     ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
+    ('DELETE', r'agents/(?P<agent_id>\d+)', 'Administrator: delete a revoked agent and revoke its API token, so it no longer holds back its user\'s new agents; {deleted, id, token_revoked, released_tasks, still_held: [{id, name}]} (agents it held stay suspended until reinstated); 409 unless revoked',
+     lambda r, c, agent_id, **k: broker.delete_agent(c, agent_id)),
     ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, changed_by, changed_at}; self_update applies to every Sentinel with no value of its own (null follows the instance\'s Automatic or Manual update choice)',
      lambda r, c, **k: sentinel_settings.get_defaults()),
     ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',
      lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r)))[1]),
+    ('GET', r'tuning', 'App Admin: auto-tuning of the configMaxxing throughput settings: mode (off|suggest|auto, default auto) and effective_mode (off when CVENGINE_AUTOTUNE=0), the AI advisor (enabled, provider, used_today, cap), the tuned numbers, the pinned settings (saved by a person) with who saved them, the managed settings with their range and step, the last run (per setting: value and why_not_raised) and the last ten decisions',
+     lambda r, c, **k: tuning.get_status(c)),
+    ('GET', r'tuning/decisions', 'App Admin: auto-tuning decisions, newest first (?setting=, limit up to 200, offset): old_value, new_value, source (controller|ai|person), action, applied, pressure, reason, resolution, can_apply, can_revert',
+     lambda r, c, **k: tuning.list_decisions(c, r.GET)),
+    ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again)',
+     lambda r, c, **k: tuning.set_mode(c, _body(r))),
+    ('POST', r'tuning/decisions/(?P<decision_id>\d+)/apply', 'App Admin: apply a recommendation (mode auto: it becomes the tuned number; otherwise it is saved as your value, which pins the setting); 409 when the setting changed since',
+     lambda r, c, decision_id, **k: tuning.apply_decision(c, decision_id)),
+    ('POST', r'tuning/decisions/(?P<decision_id>\d+)/revert', 'App Admin: revert the newest applied change of a setting (its layer gets back exactly what it held; no raise of that setting for 24 hours)',
+     lambda r, c, decision_id, **k: tuning.revert_decision(c, decision_id)),
+    ('POST', r'tuning/release', 'App Admin, mode auto: {setting}: remove the saved value that pins a setting and hand the same number to the tuner',
+     lambda r, c, **k: tuning.release(c, _body(r).get('setting'))),
     ('GET', r'sentinels/dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (for a Sentinel with a free slot), queue_seconds (for a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) plus per_target_seconds for each target beyond the first, and lease_seconds; read only (instance settings CVENGINE_SENTINEL_CLAIM_TIMEOUT, _QUEUE_TIMEOUT, _DISPATCH_TIMEOUT)',
      lambda r, c, **k: sentinel_dispatch.budgets()),
     ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Validation and remediation work for agents (status, kind, agent_id, host)',
@@ -480,6 +508,21 @@ def openapi_spec():
             'security': [{'bearer': []}], 'paths': paths}
 
 
+# Polled lists that answer a conditional request: the same list gets a 304 and no body (the live pages poll these every few seconds, and the browser
+# then skips the redraw). The ETag is a token of the body without the clocks in it (they move every second and mean nothing: the page counts the time
+# from the dates it already holds). The work behind the list is not saved; what a 304 saves is the transfer, the parse and the redraw.
+ETAG_ROUTES = re.compile(r'^(sentinels/live|projects/[-\w]+/scans)$')
+CLOCK_FIELDS = {'server_time', 'seconds_since_seen'}
+
+
+def _without_clocks(value):
+    if isinstance(value, dict):
+        return {k: _without_clocks(v) for k, v in value.items() if k not in CLOCK_FIELDS}
+    if isinstance(value, list):
+        return [_without_clocks(v) for v in value]
+    return value
+
+
 # Not csrf_exempt: bearer-token requests are exempted by AgentTokenMiddleware, session ones stay CSRF-checked.
 def dispatch(request, path):
     path = path.strip('/')
@@ -510,6 +553,9 @@ def dispatch(request, path):
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
             return result
         data, status = result if isinstance(result, tuple) else (result, 200)
+        if request.method == 'GET' and status == 200 and ETAG_ROUTES.match(path):
+            from cveFeed import snapshot_cache
+            return snapshot_cache.respond_payload(request, data, etag=snapshot_cache.token_of(_without_clocks(data)))
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)

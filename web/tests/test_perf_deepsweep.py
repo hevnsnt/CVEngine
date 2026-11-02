@@ -149,3 +149,23 @@ class DeepSweepTests(TestCase):
 		from django_celery_beat.models import PeriodicTask
 		task = PeriodicTask.objects.get(name='cvengine-deep-apex-sweep')
 		self.assertEqual((task.task, task.queue, task.enabled), ('deep_scan_apexes', 'cve_feed_queue', True))
+
+
+class DeepSweepFairnessTests(TestCase):
+	setUp, _domain, _queued = DeepSweepTests.setUp, DeepSweepTests._domain, DeepSweepTests._queued
+
+	def test_one_project_cannot_fill_the_whole_run(self):
+		for i in range(6):
+			self._domain(f'www.big{i}.com', self.p1)
+		self._domain('www.small.org', self.p2)
+		with mock.patch.dict(os.environ, {'CVENGINE_DEEP_SWEEP_PER_PROJECT': '3'}):
+			out = tasks.deep_scan_apexes()
+		queued = self._queued()
+		self.assertEqual(sum(1 for _name, pid in queued if pid == self.p1.id), 3)  # the other three wait for the next run
+		self.assertIn(('small.org', self.p2.id), queued)
+		self.assertEqual(out['queued'], 4)
+
+	def test_the_per_project_cap_is_not_a_limit_when_the_project_is_alone_and_small(self):
+		for i in range(4):
+			self._domain(f'www.few{i}.com', self.p1)
+		self.assertEqual(tasks.deep_scan_apexes()['queued'], 4)

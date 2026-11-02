@@ -15,6 +15,7 @@ import {
   copyButton,
   copyText,
   dialog,
+  emptyState,
   field,
   text as uiText,
 } from "/staticfiles/cve/ui.js";
@@ -22,6 +23,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } f
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 
 const root = document.getElementById("section");
@@ -68,6 +70,20 @@ const internalBadge = (network) => {
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
 const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
+// What a person calls a host or target, and the note they wrote, shown beside its address and never in place of it. Both are typed text: they only
+// ever become text nodes (el() sets textContent), the note is a tooltip and a clipped line.
+const aliasTag = (row) => (row && row.alias ? el("span", "alias-tag", row.alias, { title: [row.alias, row.note].filter(Boolean).join("\n") }) : null);
+const named = (link, row) => {
+  const box = el("span", "named");
+  box.append(link);
+  const tag = aliasTag(row);
+  if (tag) box.append(" ", tag);
+  if (row && row.note) box.append(el("span", "note alias-note", row.note, { title: row.note }));
+  return box;
+};
+// the two fields, bounded like the server bounds them (60 characters on one line, 1000 for the note); the host page and the target dialog share them
+const aliasInput = (value) => uiText(value || "", { maxlength: "60", placeholder: "A short name, e.g. Lab printer" });
+const noteInput = (value) => Object.assign(el("textarea", "alias-note-box", null, { rows: "3", maxlength: "1000", placeholder: "Anything worth remembering" }), { value: value || "" });
 // a CVE id printed anywhere links to its match on that host; without a match id, to the matches that name it
 const cveLink = (project, cveId, matchId, host) => (project ? cveAnchor(project, cveId, matchId, host) : el("span", "", cveId));
 // "CVE CVE-2026-1" in a host's search reasons links to that CVE's match on the host; the host and IP are this row itself
@@ -269,7 +285,7 @@ function createList({
       failures = 0;
       if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
-      if (reset && !items.length) body.append(el("p", "empty", empty));
+      if (reset && !items.length) body.append(emptyNode(empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset, quiet);
       more.textContent = "";
@@ -422,6 +438,55 @@ const duration = (from, to) => {
   if (m < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+// A scan's stages as a pipeline, in the order they were created. A stage's time is its start while it runs and its end once it is done,
+// and stages run one after another, so a finished stage took from the end of the one before it (or the scan's start) to its own time.
+// Each step shows that length as text and as a bar against the longest, so where the time went reads at a glance; the running stage
+// has a live timer and a beam on its connector, a failed one its error. Returns {node, tick}: tick() repaints the live timer.
+const STAGE_STATE = { success: "done", running: "running", queued: "waiting", failed: "failed", aborted: "stopped" };
+function stagePipeline(stages, scan) {
+  const steps = stages.slice().sort((a, b) => a.id - b.id);
+  let prevEnd = scan.started;
+  const spans = steps.map((st) => {
+    if (st.status === "queued") return { from: null, to: null };
+    if (st.status === "running") return { from: st.time, to: null };
+    const span = { from: prevEnd, to: st.time };
+    prevEnd = st.time;
+    return span;
+  });
+  const lengthOf = ({ from, to }) => (from ? Math.max(0, (to ? new Date(to) : new Date()) - new Date(from)) : 0);
+  const longest = Math.max(1, ...spans.map(lengthOf));
+  const node = el("div", "pipe-wrap");
+  const done = steps.filter((st) => st.status === "success").length;
+  const running = steps.filter((st) => st.status === "running").map((st) => st.title || st.name);
+  const failed = steps.filter((st) => st.status === "failed").length;
+  const total = `${steps.length} stage${steps.length === 1 ? "" : "s"}`;
+  node.append(el("p", "pipe-sum", running.length || steps.some((st) => st.status === "queued")
+    ? `${done} of ${total} done${running.length ? ` · now: ${running.join(", ")}` : ""}`
+    : `${total}${failed ? ` · ${failed} failed` : " · all done"}`));
+  const list = el("ol", "pipe");
+  const live = [];
+  steps.forEach((st, i) => {
+    const li = el("li", `pipe-step ${st.status}`);
+    const main = el("div", "pipe-main");
+    main.append(el("b", "", st.title || st.name), el("span", "pipe-state", STAGE_STATE[st.status] || st.status));
+    if (st.error) main.append(el("p", "pipe-err", st.error));
+    const bar = el("span", "pipe-bar", null, { "aria-hidden": "true" });
+    const fill = el("i");
+    bar.append(fill);
+    const dur = el("span", "pipe-dur");
+    const paint = () => {
+      const span = spans[i];
+      dur.textContent = span.from ? duration(span.from, span.to) : "";
+      fill.style.width = span.from ? `${Math.max(3, (100 * lengthOf(span)) / Math.max(longest, lengthOf(span)))}%` : "0";
+    };
+    paint();
+    if (st.status === "running") live.push(paint);
+    li.append(el("span", "pipe-dot", null, { "aria-hidden": "true" }), main, bar, dur);
+    list.append(li);
+  });
+  node.append(list);
+  return { node, tick: () => live.forEach((paint) => paint()) };
+}
 const meterCell = (n, of) => {
   const box = el("div", "meter-cell");
   const bar = el("div", "meter");
@@ -473,6 +538,23 @@ const whenCell = (iso) => {
   const t = el("time", "when", null, { datetime: iso, title: `${fmtDateTime(iso)} ${zoneLabel()} (${iso.replace("T", " ").slice(0, 19)} UTC)` });
   t.append(el("b", "", fmtTime(iso)), el("span", "", fmtDay(iso)));
   return t;
+};
+
+// What an empty list shows: a plain sentence, emptyState() options, or a function returning either, so a list can tell "nothing yet"
+// (say what to do next) from "nothing matches these filters" (offer to clear them).
+function emptyNode(empty) {
+  const v = typeof empty === "function" ? empty() : empty;
+  return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
+}
+// The empty Targets page's next step: the shell's own Add targets button, when this page has one
+function addTargetsAction() {
+  const add = document.querySelector("[data-add-targets]");
+  return add ? [{ label: "Add targets", run: () => add.click() }] : [];
+}
+const NO_TARGETS = {
+  icon: "target",
+  title: "No targets yet",
+  body: "A target is a domain, IP or range to watch. Paste a list, one per line; #Project headers sort them into projects. Discovery and scanning start on their own.",
 };
 
 function searchBox(placeholder, onChange) {
@@ -654,7 +736,7 @@ function shotPair(c, project = slug) {
   [c.before, c.after].forEach((side, i) => {
     if (!side || !side.subdomain_id) return;
     const img = el("img", "shot", null, {
-      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/`,
+      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/?row=1`,
       alt: `${i ? "Current" : "Previous"} screenshot of ${c.host}`,
       loading: "lazy",
     });
@@ -797,6 +879,8 @@ const hostOverview = (h) => {
   const http = h.http || {};
   const hosting = h.hosting || {};
   const rows = [];
+  if (h.alias) rows.push({ label: "Alias", value: h.alias });
+  if (h.note) rows.push({ label: "Note", value: h.note });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
@@ -868,7 +952,7 @@ const technologyTable = (h) => {
 // WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
 const WP_STATE_LABELS = {
   scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
-  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting", unavailable: "WPScan not available",
+  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting for the next scan", queued: "Queued, WPScan runs on it in the background", unavailable: "WPScan not available",
   not_wordpress: "Not WordPress",
 };
 // The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
@@ -978,10 +1062,101 @@ const subdirectoryCard = (h) => {
   });
   return box;
 };
+// The browser's screenshots of a host (cveFeed.web_shot): the best picture, then every captured page with its final URL, status and
+// title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
+const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
+const OUTCOME_TEXT = {
+  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+};
+function screenshotsSection(h, project, isCurrent) {
+  const box = el("div", "shots-box");
+  const head = el("div", "host-assess-head");
+  head.append(el("h3", "sec", "Screenshots"));
+  const button = el("button", "btn sm", "Take screenshot", { type: "button" });
+  button.title = "Queue a fresh browser capture of every web page of this host";
+  button.disabled = !!(h.excluded || h.archived);
+  head.append(button);
+  const body = el("div", "shots-body");
+  box.append(head, body);
+  const paint = (data) => {
+    body.textContent = "";
+    const rows = data.screenshots || [];
+    const withImage = rows.filter((r) => r.has_image);
+    const note = data.note !== undefined ? data.note : h.screenshot_note;
+    if (!withImage.length && !h.screenshot) body.append(el("p", "note", note || "No screenshot yet."));
+    withImage.forEach((r) => {
+      const figure = el("figure", "shot-figure");
+      const img = el("img", "shot", null, {
+        src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&v=${encodeURIComponent(r.captured_at || "")}`),
+        alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
+      });
+      img.onerror = () => img.remove();
+      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      figure.append(img, caption);
+      if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
+      if (r.has_previous) {
+        const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
+        const before = el("img", "shot", null, { src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&previous=1`), alt: `Previous screenshot of ${h.host} port ${r.port}`, loading: "lazy" });
+        before.hidden = true;
+        before.onerror = () => toggle.remove();
+        toggle.onclick = () => { before.hidden = !before.hidden; toggle.textContent = before.hidden ? "Compare with previous" : "Hide previous"; };
+        figure.append(toggle, before);
+      }
+      body.append(figure);
+    });
+    if (!withImage.length && h.screenshot) {
+      // only a discovery screenshot exists (the older bbot capture): the host's own picture URL serves it
+      const img = el("img", "shot", null, { src: shotUrl(project, h, `v=${h.screenshot_version || 0}`), alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy" });
+      img.onerror = () => img.remove();
+      body.append(img);
+      if (note) body.append(el("p", "note", note));
+    }
+    rows.filter((r) => !r.has_image).forEach((r) =>
+      body.append(el("p", "note", `${r.scheme}://${h.host}:${r.port}: ${OUTCOME_TEXT[r.outcome] || r.outcome}${r.reason ? `. ${r.reason}` : ""}`)),
+    );
+    if (data.unavailable_reason) body.append(el("p", "note", data.unavailable_reason));
+  };
+  paint({ screenshots: h.screenshots || [], note: h.screenshot_note });
+  let polling = 0;
+  const follow = async (token, tries) => {
+    if (!isCurrent() || token !== polling) return;
+    try {
+      const data = await api("GET", `${baseOf(project)}/hosts/${h.id}/screenshots`);
+      paint(data);
+      if (data.queued && tries > 0) return void setTimeout(() => follow(token, tries - 1), 5000);
+    } catch (e) {
+      body.append(el("p", "note", `Status refresh failed: ${e.message}`));
+    }
+    button.disabled = !!(h.excluded || h.archived);
+    button.textContent = "Take screenshot";
+  };
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Queued…";
+    try {
+      const data = await api("POST", `${baseOf(project)}/hosts/${h.id}/screenshot`, {});
+      paint(data);
+      toast("Screenshot queued");
+      follow(++polling, 30);
+    } catch (e) {
+      toast(e.message, true);
+      body.append(el("p", "note", e.message));
+      button.disabled = !!(h.excluded || h.archived);
+      button.textContent = "Take screenshot";
+    }
+  };
+  return box;
+}
 // A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
 // Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
 const rdpShotCard = (shot) => {
   const box = el("div", "rdp-shot");
+  if (shot.outcome === "nla_required") {
+    // no picture exists to take: the server insists on Network Level Authentication and paints nothing before sign-in
+    box.append(el("div", "note", `RDP login screen: not captured. ${shot.reason || "NLA is required, so there is no sign-in screen to photograph."}`));
+    return box;
+  }
   box.append(el("div", "note", "RDP login screen (captured with no credentials sent)"));
   if (shot.url) {
     const img = el("img", "shot rdp-shot-img", null, { src: shot.url, alt: "RDP login screen capture", loading: "lazy" });
@@ -1886,11 +2061,15 @@ function allTargets(mount) {
     mount,
     path: `${base}/targets`,
     params: () => ({ q: q.value }),
-    empty: 'No targets yet. Use "Add targets" with #Project headers to paste a list of domains, IPs or ranges.',
+    empty: () =>
+      q.value.trim()
+        ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; list.reload(); } }] }
+        : { ...NO_TARGETS, actions: addTargetsAction() },
     render: table(
       withProject([
-        { label: "Target", render: (t) => hostLink(t.name, projectOf(t)) },
+        { label: "Target", render: (t) => named(hostLink(t.name, projectOf(t)), t) },
         { label: "Scope", render: (t) => (t.host_scoped ? "this host only" : t.scope_mode === "parent" ? "includes parent domain" : "auto") },
+        { label: "Discovery", render: (t) => modeText(t.discovery_mode) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2028,6 +2207,66 @@ const pages = {
       box.append(pick, note);
       return box;
     };
+    // The alias (a short display name) and the note of a target: shown beside its name in lists, search and reports, searchable, never scanned
+    const editLabel = (t) =>
+      dialog(`Alias and note: ${t.name}`, (body, close) => {
+        const alias = aliasInput(t.alias);
+        const note = noteInput(t.note);
+        body.append(
+          field("Alias", alias, "A short display name. The target's name stays as it is."),
+          field("Note", note),
+        );
+        const failure = el("p", "msg err", "", { role: "alert", style: "display:none" });
+        const actions = el("div", "actions");
+        const no = el("button", "btn ghost", "Cancel", { type: "button" });
+        no.onclick = close;
+        const save = uiButton("Save", async () => {
+          failure.style.display = "none";
+          try {
+            const r = await post(`targets/${t.id}/profile`, { alias: alias.value, note: note.value });
+            t.alias = r.alias;
+            t.note = r.note;
+            close();
+            toast(`${t.name}: saved`);
+            list.reload();
+          } catch (err) {
+            failure.textContent = err.message;
+            failure.style.display = "block";
+          }
+        });
+        actions.append(no, save);
+        body.append(failure, actions);
+        setTimeout(() => alias.focus(), 0);
+      });
+    // The mode discovery runs in whenever it starts on its own (the work conductor's rescans, the weekly sweeps). "Manual only" is
+    // "just add it, do not scan yet": nothing automatic scans it until a person picks a mode here and presses Discover or Scan.
+    const modeSelects = new Map(); // target id -> the Discovery column's choice
+    const howSyncs = new Map(); // target id -> redraws the choice next to Discover (and its button) from the target's mode
+    const discoveryCell = (t) => {
+      const pick = el("select", "", null, { "aria-label": `Discovery mode of ${t.name}` });
+      for (const [value, label] of STORED) {
+        const o = el("option", "", label, { value });
+        o.selected = t.discovery_mode === value;
+        pick.append(o);
+      }
+      modeSelects.set(t.id, pick); // Discover keeps the mode it ran in: this shows it
+      pick.onchange = async () => {
+        pick.disabled = true;
+        try {
+          const r = await post(`targets/${t.id}/discovery-mode`, { discovery_mode: pick.value });
+          t.discovery_mode = r.discovery_mode;
+          howSyncs.get(t.id)?.();
+          toast(`${t.name}: discovery ${r.discovery_mode}`);
+        } catch (err) {
+          pick.value = t.discovery_mode;
+          toast(err.message, true);
+        }
+        pick.disabled = false;
+      };
+      const box = el("div", "scope-cell");
+      box.append(pick);
+      return box;
+    };
     const rowBox = (t) => {
       const b = el("input", "", null, { type: "checkbox", "aria-label": `Select ${t.name}` });
       b.checked = allMatching || selected.has(t.id);
@@ -2055,12 +2294,26 @@ const pages = {
         syncBar();
       },
       params: () => ({ q: q.value }),
-      empty:
-        'No targets yet. Use "Add targets" to paste a list of domains, IPs or ranges.',
+      empty: () =>
+        q.value.trim()
+          ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; reload(); } }] }
+          : { ...NO_TARGETS, actions: addTargetsAction() },
       render: table([
         { label: "", cls: "sel", head: () => headBox, render: rowBox },
-        { label: "Target", render: (t) => hostLink(t.name) },
+        {
+          label: "Target",
+          render: (t) => {
+            const box = named(hostLink(t.name), t);
+            // the edit sits with the name it labels (the actions column is already full)
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
+            edit.onclick = () => editLabel(t);
+            box.append(el("br"), edit);
+            return box;
+          },
+        },
         { label: "Scope", render: (t) => scopeCell(t) },
+        { label: "Discovery", render: (t) => discoveryCell(t) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2069,24 +2322,46 @@ const pages = {
           label: "",
           render: (t) => {
             const box = el("div", "row-actions");
+            // the mode Discover runs in: the target's own, or another one, which the server keeps on the target. A manual only target has none:
+            // the choice starts empty and the button waits for one.
+            const how = el("select", "", null, { "aria-label": `Mode to discover ${t.name} in` });
             const discover = el("button", "btn sm", "Discover", {
               type: "button",
             });
+            let busy = false;
+            const sync = () => {
+              how.replaceChildren(...discoverOptions(t.discovery_mode).map(([value, label]) => Object.assign(el("option", "", label), { value })));
+              how.value = defaultChoice(t.discovery_mode);
+              how.title = discoverHint(t.discovery_mode);
+              discover.disabled = busy || !canDiscover(how.value);
+            };
+            howSyncs.set(t.id, sync);
+            how.onchange = () => {
+              discover.disabled = busy || !canDiscover(how.value);
+            };
+            sync();
             discover.onclick = async () => {
+              busy = true;
               discover.disabled = true;
               discover.textContent = "Queueing…";
               try {
-                const r = await post(`targets/${t.id}/discover`, {});
-                toast(`Discovery #${r.scan_id} started`);
+                const stored = t.discovery_mode;
+                const r = await post(`targets/${t.id}/discover`, discoverBody(stored, how.value));
+                t.discovery_mode = modeAfter(r, stored);
+                const shown = modeSelects.get(t.id);
+                if (shown) shown.value = t.discovery_mode;
+                toast(startedText(r, stored));
                 discover.textContent = "Discovery queued";
                 setTimeout(() => {
+                  busy = false;
                   discover.textContent = "Discover";
-                  discover.disabled = false;
+                  sync();
                 }, 8000);
               } catch (err) {
                 toast(err.message, true);
+                busy = false;
                 discover.textContent = "Discover";
-                discover.disabled = false;
+                sync();
               }
             };
             const scan = el("button", "btn ghost sm", "Scan", {
@@ -2111,7 +2386,7 @@ const pages = {
                 scan.disabled = false;
               }
             };
-            box.append(discover, scan);
+            box.append(how, discover, scan);
             if (signIns) box.append(signInButton(signIns, t));
             return box;
           },
@@ -2171,7 +2446,15 @@ const pages = {
       mount,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
-      empty: "No scans here. Start one from Targets.",
+      empty: () =>
+        status.value
+          ? { icon: "radar", title: "No scans with this status", actions: [{ label: "Show all scans", run: () => status.node.querySelector("button").click() }] }
+          : {
+              icon: "radar",
+              title: "No scans yet",
+              body: "A scan starts when you add a target, on the target's schedule, or when you press Scan on the Targets page.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
@@ -2490,6 +2773,8 @@ const pages = {
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
           { label: "Host", value: (h) => h.host },
+          { label: "Alias", value: (h) => h.alias || "" },
+          { label: "Note", value: (h) => h.note || "" },
           { label: "Also answers to", value: (h) => (h.aliases || []).join(" ") },
           ...(ALL ? [{ label: "Project", value: (h) => projectOf(h) || "" }] : []),
           { label: "Temperature", value: (h) => h.heat || "unscanned" },
@@ -2540,20 +2825,20 @@ const pages = {
       };
       label.append(box, document.createTextNode(` Only hosts with a screenshot (${withShot.length} of ${shown.length})`));
       galleryHead.append(label);
-      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken when a scan finds a web page." : "No hosts match."));
+      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken by a browser after a scan finds a web page, and hourly for hosts that have none; open a host and press Take screenshot to take one now." : "No hosts match."));
       cards.forEach((h) => {
         const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
         const frame = el("span", "shot-frame");
         if (h.screenshot) {
-          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb`, alt: "", loading: "lazy", decoding: "async" });
+          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb&v=${h.screenshot_version || 0}`, alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy", decoding: "async" });
           img.onerror = () => {
             img.remove();
             frame.append(el("span", "shot-none", "No screenshot"));
           };
           frame.append(img);
-        } else frame.append(el("span", "shot-none", "No screenshot"));
+        } else frame.append(el("span", "shot-none", "No screenshot", h.screenshot_note ? { title: h.screenshot_note } : {}));
         const meta = el("span", "shot-meta");
-        meta.append(el("b", "mono", h.host), el("span", "note", [`score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
+        meta.append(el("b", "mono", h.host), el("span", "note", [h.alias, `score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
         card.append(frame, meta);
         card.onclick = () => {
           galleryOn = false;
@@ -2608,6 +2893,8 @@ const pages = {
       box.append(el("h3", "sec", "Asset info"));
       const p = h.profile || {};
       const rows = [
+        ["Alias", h.alias],
+        ["Note", h.note],
         ["Owner", p.owner],
         ["Purpose", p.purpose],
         ["Criticality", p.criticality && p.criticality !== "unknown" ? p.criticality : ""],
@@ -2627,12 +2914,23 @@ const pages = {
       crit.value = CRITICALITY.includes(p.criticality) ? p.criticality : "unknown";
       const grid = el("div", "asset-grid");
       grid.append(field("Owner", owner), field("Purpose", purpose), field("Criticality", crit));
+      // the alias and note are the host's own (saved per project and host name); one that only the target has is shown as a hint, not edited here
+      const own = (key) => (h[`${key}_from`] === "target" ? "" : h[key] || "");
+      const alias = aliasInput(own("alias"));
+      const note = noteInput(own("note"));
+      if (h.alias_from === "target") alias.placeholder = `${h.alias} (from the target)`;
+      if (h.note_from === "target") note.placeholder = "A note on the target is shown for this host";
+      const names = el("div", "asset-grid alias-grid");
+      names.append(field("Alias", alias, "A short display name, shown beside the address. The address and discovered names stay."), field("Note", note));
       const save = uiButton("Save", async () => {
-        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value });
+        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value, alias: alias.value, note: note.value });
         h.profile = { owner: r.owner, purpose: r.purpose, criticality: r.criticality };
+        Object.assign(h, { alias: r.alias, alias_from: r.alias ? "host" : "", note: r.note, note_from: r.note ? "host" : "" });
+        paintAlias(h);
+        list.reload();
         toast("Asset info saved");
       }, "btn sm");
-      box.append(grid, save);
+      box.append(grid, names, save);
       return box;
     }
     // After a removal the host is gone from the list: back to the Hosts list, refreshed
@@ -2807,6 +3105,14 @@ const pages = {
       return box;
     }
 
+    // the alias beside the title of the open host, after it was saved
+    function paintAlias(h) {
+      const tag = pane.querySelector(".host-alias");
+      if (!tag) return;
+      tag.textContent = h.alias || "";
+      tag.title = h.note || "";
+      tag.hidden = !h.alias;
+    }
     function showHost(h) {
       current = h && h.id;
       rows.querySelectorAll(".host-row").forEach((r) =>
@@ -2826,6 +3132,7 @@ const pages = {
       };
       const head = el("div", "host-head");
       head.append(el("h2", "host-title", h.host));
+      head.append(el("span", "alias-tag host-alias", h.alias || "", { title: h.note || "" }));
       head.append(copyButton(h.host, "hostname"), copyButton(() => `${location.origin}${location.pathname}#${h.id}`, "link to this host", "link"));
       const HEAT = { fire: ["Fire", "fire"], smoke: ["Smoke", "smoke"], ice: ["Ice", "ice"], clean: ["Clean", "success"], unscanned: ["Not scanned", "queued"] };
       if (HEAT[h.heat]) head.append(badge(HEAT[h.heat][0], HEAT[h.heat][1]));
@@ -3025,16 +3332,8 @@ const pages = {
       if (h.title) hdr.append(el("p", "sub", h.title));
       if (h.target) hdr.append(el("p", "note", `Target ${h.target}`));
       const compareBox = el("div", "shot-compare");
-      if (h.screenshot) {
-        const img = el("img", "shot", null, {
-          src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${h.id}/screenshot/`,
-          alt: `Screenshot of ${h.host}`,
-          loading: "lazy",
-        });
-        img.onerror = () => img.remove();
-        S.web.append(img);
-        S.web.append(compareBox);
-      }
+      S.web.append(screenshotsSection(h, projectOf(h), () => current === h.id));
+      S.web.append(compareBox);
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
       [wordpressCard(h), probeCard(h), alsoServedCard(h)].forEach((card) => {
@@ -3054,7 +3353,7 @@ const pages = {
             // the front page changed: let the previous screenshot be looked at next to the current one
             const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
             const before = el("img", "shot", null, {
-              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/`,
+              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/?row=1`,
               alt: `Previous screenshot of ${h.host}`,
               loading: "lazy",
             });
@@ -3198,7 +3497,33 @@ const pages = {
       path: `${base}/search`,
       params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
       pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
-      empty: "No hosts match. Hosts appear as discovery and port scans finish.",
+      empty: () =>
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+          ? {
+              icon: "search",
+              title: "No host matches",
+              body: q.value.trim() ? "Try a bare word, or one filter such as port:443 or tech:nginx." : "No host is at this temperature right now.",
+              actions: [
+                {
+                  label: "Clear filters",
+                  run: () => {
+                    q.value = "";
+                    heatFilter = "all";
+                    scopeFilter = "all";
+                    scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
+                    syncUrl();
+                    paintHeat();
+                    list.reload();
+                  },
+                },
+              ],
+            }
+          : {
+              icon: "server",
+              title: "No hosts yet",
+              body: "Hosts appear as discovery and port scans finish on your targets.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       onLoaded: (data) => {
         totalHosts = data.count || 0;
         scopeChips.hidden = !data.has_internal && scopeFilter === "all";
@@ -3220,6 +3545,8 @@ const pages = {
           const top = el("span", "hr-top");
           const nameBox = el("span", "cve-id");
           nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
+          const tag = aliasTag(h);
+          if (tag) nameBox.append(" ", tag); // beside the address, which stays the link
           top.append(nameBox, el("span", "hr-score", String(h.score || 0), { title: "Score" }));
           const meta = el("span", "host-meta");
           meta.append(h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"));
@@ -3390,7 +3717,35 @@ const pages = {
       path: `${base}/findings`,
       filters: [views.node, q, scope, type.node, sev.node, status.node],
       params,
-      empty: "No findings match these filters.",
+      empty: () => {
+        const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value;
+        if (narrowed)
+          return {
+            icon: "search",
+            title: "Nothing matches these filters",
+            actions: [
+              {
+                label: "Clear filters",
+                run: () => {
+                  setPicker(type, "type", "all");
+                  setPicker(sev, "severity", "all");
+                  q.value = "";
+                  scope.value = "";
+                  reload();
+                },
+              },
+            ],
+          };
+        if (status.value === "actionable")
+          return {
+            icon: "shield",
+            tone: "calm",
+            title: "Nothing needs action",
+            body: "Every finding is fixed, accepted, info only or ruled out by the AI. Scans keep looking.",
+            actions: [{ label: "Show everything", run: () => { setPicker(status, "status", "all"); reload(); } }],
+          };
+        return { icon: "bug", title: "No findings yet", body: "Findings appear as scans finish and new CVEs match your hosts." };
+      },
       onLoaded: (data, reset) => {
         if (reset) describe(data);
       },
@@ -3466,7 +3821,15 @@ const pages = {
       path: `${base}/matches`,
       filters: [cveNote, q, status.node, cls, verdict],
       params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
-      empty: "No CVE matches yet. They appear when a new CVE matches a host in your inventory.",
+      empty: () =>
+        q.value.trim() || status.value || cls.value || cveOnly || verdict.value !== "active"
+          ? { icon: "search", title: "No match for these filters" }
+          : {
+              icon: "match",
+              tone: "calm",
+              title: "No open CVE matches",
+              body: "When a new CVE matches software on one of your hosts, it appears here with the AI's verdict.",
+            },
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
       statusControl,
       row: (m) => ({
@@ -3536,7 +3899,7 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card");
+  const certs = el("section", "card hy-card hy-certs");
   certs.append(
     el("h2", "", "Certificates"),
     el(
@@ -3570,7 +3933,7 @@ pages.hygiene = function hygiene(mount) {
   }).start();
 
   const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS and email authentication"));
+  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
   const tools = el("div", "tools");
   const sev = picker(
     "Severity",
@@ -3590,6 +3953,7 @@ pages.hygiene = function hygiene(mount) {
     [
       ["", "All areas"],
       ["tls", "TLS and certificates"],
+      ["cleartext", "Cleartext services"],
       ["spf", "SPF"],
       ["dkim", "DKIM"],
       ["dmarc", "DMARC"],
@@ -3614,8 +3978,15 @@ pages.hygiene = function hygiene(mount) {
     mount: issues,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
-    empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
+    empty: () =>
+      sev.value || kind.value || q.value.trim()
+        ? { icon: "search", title: "No issue matches these filters" }
+        : {
+            icon: "shield",
+            tone: "calm",
+            title: "No open hygiene issues",
+            body: "Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
+          },
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
@@ -3696,7 +4067,7 @@ pages.changes = function changes(mount) {
     mount,
     path: `${base}/changes`,
     params: () => ({ since: since.value, host: host.value, kind: kinds.value }),
-    empty: "No changes in this period. Changes appear when a scan finds something different from the last one.",
+    empty: { icon: "pulse", title: "No changes in this period", body: "Changes appear when a scan finds something different from the last one." },
     onLoaded: (_, reset, quiet) => reset && !quiet && kinds.refresh(),
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
@@ -3782,7 +4153,7 @@ pages.activity = function activity(mount) {
     mount,
     path: `${base}/activity`,
     params: () => ({ kind: kinds.value }),
-    empty: "No activity yet. The engine reports here as it reads the feed, checks the inventory and runs scans.",
+    empty: { icon: "pulse", title: "No activity yet", body: "The engine reports here as it reads the feed, checks the inventory and runs scans." },
     render: table(withProject([
       { label: "When", render: (a) => whenCell(a.created) },
       { label: "Kind", render: (a) => badge(ACTIVITY_KIND[a.kind] || a.kind, ACTIVITY_BADGE[a.kind] || "") },
@@ -3940,8 +4311,10 @@ pages.scan = async function scanDetail(mount) {
         return [box, v];
       };
       const [durBox, durValue] = fact("Duration", duration(s.started, s.finished));
+      let pipe = null;
       const paintDur = () => {
         durValue.textContent = duration(s.started, s.finished);
+        if (pipe) pipe.tick();
       };
       if (live) ticker = setInterval(paintDur, 1000);
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
@@ -3962,16 +4335,8 @@ pages.scan = async function scanDetail(mount) {
       top.insertBefore(pop, top.lastChild);
       head.append(top, meta);
       if (stages.length) {
-        const row = el("div", "phases");
-        stages
-          .slice()
-          .sort((a, b) => (a.time || "").localeCompare(b.time || ""))
-          .forEach((st) => {
-            const box = el("div", `phase ${st.status}`);
-            box.append(el("b", "", st.title), el("span", "", st.error ? st.error : st.status));
-            row.append(box);
-          });
-        head.append(row);
+        pipe = stagePipeline(stages, s);
+        head.append(pipe.node);
       }
       if (s.error) head.append(el("p", "msg err", s.error));
 

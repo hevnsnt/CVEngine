@@ -432,6 +432,7 @@ class NucleiDispatchTests(DispatchBase):
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         self.assertIn('jQuery', [t.name for t in sub.technologies.all()])
 
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop, one dispatch_or_none per chunk; test_stage_parallel covers the fan-out
     def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_runs_here(self):
         """A stage marks its whole list scanned once the stream returns, so the targets past the first chunk must not be dropped."""
         self.make_sentinel(['nuclei_light'])
