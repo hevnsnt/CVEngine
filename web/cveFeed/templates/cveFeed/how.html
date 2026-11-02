@@ -22,19 +22,19 @@
   <li class="card">
     <span class="how-n">1</span>
     <h2>Discover everything you own</h2>
-    <p>From one domain, cvENGINE finds the subdomains, addresses, certificates and web apps behind it, including the ones nobody remembered to list. New hosts stream into your inventory while the scan is still running. For networks you cannot reach from the internet, a <b>Sentinel</b> inside the network finds the live hosts and scans them there, so the server never probes what it should not.</p>
-    <p class="how-tools"><span class="chip">bbot</span><span class="chip">crt.sh</span><span class="chip">gowitness</span></p>
+    <p>From one domain, cvENGINE finds the subdomains, addresses, certificates and web apps behind it, including the ones nobody remembered to list. New hosts stream into your inventory while the scan is still running. Each target keeps the discovery mode you pick (standard, deep, passive from public sources only, or manual only): every automatic discovery runs in it, and a manual only target is left alone until you ask. For networks you cannot reach from the internet, a <b>Sentinel</b> inside the network finds the live hosts and scans them there, so the server never probes what it should not.</p>
+    <p class="how-tools"><span class="chip">bbot</span><span class="chip">crt.sh</span></p>
   </li>
   <li class="card">
     <span class="how-n">2</span>
     <h2>Map every exposed service</h2>
-    <p>Every open port, not a guess at the popular ones. Each service is fingerprinted for its product, version and operating system, and web hosts are read for the technologies and libraries they run. Hosts behind a firewall or CDN are recognized, so the edge is never mistaken for the application. TLS settings and UDP services are audited on a slow schedule, and Sentinels you run on your own machines can do any of this work for you.</p>
-    <p class="how-tools"><span class="chip">naabu</span><span class="chip">nmap</span><span class="chip">nuclei</span><span class="chip">wafw00f</span><span class="chip">WPScan</span></p>
+    <p>Every open port, not a guess at the popular ones. Each service is fingerprinted for its product, version and operating system, web hosts are read for the technologies and libraries they run, and a headless browser takes a screenshot of their web pages. Hosts behind a firewall or CDN are recognized, so the edge is never mistaken for the application. TLS settings and UDP services are audited on a slow schedule. Sentinels you run on any machine take the scanners' work off the queue side by side, so each one adds capacity. cvENGINE tunes its own throughput settings from what the machine can carry and backs off under pressure; you can turn that off or pin any number.</p>
+    <p class="how-tools"><span class="chip">naabu</span><span class="chip">nmap</span><span class="chip">nuclei</span><span class="chip">wafw00f</span><span class="chip">WPScan</span><span class="chip">Chromium</span></p>
   </li>
   <li class="card">
     <span class="how-n">3</span>
     <h2>Match against the world's CVEs, only when it fits</h2>
-    <p>New vulnerabilities arrive from eight public feeds the moment they publish and are rated <b>fire</b>, <b>smoke</b> or <b>ice</b> by how dangerous they are right now. A CVE becomes a match only when the host runs that exact product at an affected version. No product-name guessing, no noise. A CVE that publishes no affected version range is kept apart as <b>needs review</b>, at the lowest priority, until the range is known.</p>
+    <p>New vulnerabilities arrive from eight public feeds the moment they publish and are rated <b>fire</b>, <b>smoke</b> or <b>ice</b> by how dangerous they are right now. A CVE becomes a match only when the host runs that exact product at an affected version. No product-name guessing, no noise. A CVE that publishes no affected version range is kept apart as <b>needs validation</b>, at the lowest priority, until the range is known.</p>
     <p class="how-tools"><span class="chip">CISA KEV</span><span class="chip">EPSS</span><span class="chip">NVD</span><span class="chip">EUVD</span><span class="chip">OSV</span><span class="chip">Exploit-DB</span></p>
   </li>
   <li class="card">
@@ -46,7 +46,7 @@
   <li class="card">
     <span class="how-n">5</span>
     <h2>Fix the right thing first</h2>
-    <p>Every host gets a 0 to 100 score and a temperature. The dashboard shows what changed since you last looked, how long the worst item has been open, and the hygiene problems nobody scans for: expiring certificates, missing SPF, DKIM and DMARC, weak TLS. Triage findings and track each fix in one place.</p>
+    <p>Every host gets a 0 to 100 score and a temperature. The dashboard shows what changed since you last looked, how long the worst item has been open, and the hygiene problems nobody scans for: expiring certificates, missing SPF, DKIM and DMARC, weak TLS, logins over Telnet, FTP or plain HTTP. Triage findings and track each fix in one place.</p>
     <p class="how-tools"><span class="chip">host score</span><span class="chip">change tracking</span><span class="chip">hygiene</span></p>
   </li>
 </ol>
@@ -55,8 +55,8 @@
   <h2>Why you can trust a finding</h2>
   <ul class="how-list">
     <li><b>Evidence, not opinion.</b> Every finding lists the checks that ran and what they returned.</li>
-    <li><b>Safe by design.</b> Checks are read-only. No exploit payloads, no password lists, and nothing that changes a host. Bug bounty projects are never scanned automatically until you confirm automated testing is allowed, and then only inside the program's scope.</li>
-    <li><b>Always watching.</b> Scans repeat on a schedule, certificates are watched daily, and every change to your attack surface is recorded with screenshots.</li>
+    <li><b>Safe by design.</b> Checks are read-only. No exploit payloads, no password lists, and nothing that changes a host. Secrets found on a target are masked before an AI provider sees them, and discovery does not try found credentials against the live service unless you turn that on. Bug bounty projects are never scanned automatically until you confirm automated testing is allowed, and then only inside the program's scope.</li>
+    <li><b>Always watching.</b> Scans repeat on a schedule, certificates are watched daily, and every change to your attack surface is recorded. Each web page's screenshot can be compared with the one before.</li>
     <li><b>Yours to inspect.</b> Open source under the GPL-3.0, built on proven scanners, and self-hosted so your inventory stays with you.</li>
   </ul>
   <p class="note how-stamp">Reviewed for version {{ how_reviewed_version }}. <a href="{% url 'cve_about' %}">Credits and tools</a></p>
