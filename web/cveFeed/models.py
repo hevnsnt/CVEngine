@@ -212,8 +212,9 @@ class CVEMatch(models.Model):
     # evidence turned a version-only match fire later): each match is paged as fire at most once.
     fire_notified_at = models.DateTimeField(null=True, blank=True)
 
-    # Remediation workflow, driven by people or agents through the API / MCP.
-    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk")
+    # Remediation workflow, driven by people or agents through the API / MCP. fixed, accepted_risk and false_positive close a finding
+    # (cveFeed.closure.CLOSED); remediation_note is the note on why, with who (remediation_by) and when (remediation_updated_at).
+    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk", "false_positive")
     remediation_status = models.CharField(max_length=16, default="open")
     remediation_note = models.TextField(blank=True, default="")
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
@@ -2095,10 +2096,12 @@ class SupplierHostCard(models.Model):
 class SupplierFinding(models.Model):
     """One thing a supplier's public face got wrong, as seen from outside: a "supplier posture" item. One row per (supplier, domain,
     check). ``status`` is ``open`` while the check still finds it, ``resolved`` (by the sweep) when a later check no longer does, and
-    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence). ``ask`` says what to ask the supplier.
-    Never validated by exploitation: nothing here is ever tested beyond what the supplier's service announces."""
+    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence), or ``false_positive`` when an admin found
+    the check got it wrong (the sweep leaves it as it is: never resolved, so never reopened). ``status_note`` says why, ``status_by`` and
+    ``status_at`` who and when. ``ask`` says what to ask the supplier. Never validated by exploitation: nothing here is ever tested beyond
+    what the supplier's service announces."""
 
-    STATUSES = ("open", "accepted", "resolved")
+    STATUSES = ("open", "accepted", "false_positive", "resolved")  # cveFeed.closure.SUPPLIER_STATUSES
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="findings")
     domain = models.CharField(max_length=255)
     check_name = models.CharField(max_length=60)
@@ -2108,12 +2111,13 @@ class SupplierFinding(models.Model):
     detail = models.TextField(blank=True, default="")
     ask = models.TextField(blank=True, default="")  # plain text: what to ask the supplier to do or confirm
     evidence = models.JSONField(default=dict, blank=True)
-    status = models.CharField(max_length=10, default="open")
+    status = models.CharField(max_length=16, default="open")
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     resolved_at = models.DateTimeField(null=True, blank=True)
     status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
-    status_note = models.CharField(max_length=500, blank=True, default="")
+    status_note = models.CharField(max_length=2000, blank=True, default="")
+    status_at = models.DateTimeField(null=True, blank=True)  # when a person last set the status (None before 1.3.3, or never set)
 
     class Meta:
         ordering = ["-severity", "domain", "check_name"]

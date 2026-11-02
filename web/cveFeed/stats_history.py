@@ -11,7 +11,7 @@ CVE_MATCH_HEATS = ('fire', 'smoke', 'ice')
 
 def _open_findings_and_cve_matches(project):
     """{severity band: count} over every currently-actionable finding (CVE matches not ruled out, open scanner and
-    hygiene findings, none of them already fixed/accepted_risk), and {heat: count} over the CVE matches alone:
+    hygiene findings, none of them closed: fixed, accepted_risk or false_positive), and {heat: count} over the CVE matches alone:
     the exact same set agentapi.services.list_findings shows as ``status=actionable``."""
     from cveFeed.threat import HEAT_RANK
 
