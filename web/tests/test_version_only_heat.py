@@ -180,6 +180,49 @@ class DatabaseTruthTableTests(Fixture):
 		self.assertEqual(via_triage, only & set(Triage.objects.values_list('match_id', flat=True)))
 
 
+class FalsyEvidenceStressTests(Fixture):
+	"""Python and SQL agree on every evidence value, falsy ones included: a key holding False, None, {}, [], '' or 0 is no evidence (the
+	review found 580 of 1,500 random rows rated differently before evidence_flag/evidence_flag_q)."""
+
+	VALUES = (True, False, None, {}, [], '', 0, 1, 'x', {'inventory_id': 1}, [1], 0.0)
+
+	def test_random_rows_rate_the_same_in_python_and_in_sql(self):
+		import random
+		rng = random.Random(1302)
+		entries = [CVEEntry.objects.create(cve_id=f'CVE-2099-{9200 + i}', published_at=timezone.now(), affected=[], **signals)
+				   for i, signals in enumerate(CVES.values())]
+		for i in range(1500):
+			evidence = {'source': 'tech'}
+			for key in ('host_reported', 'runzero', 'unbounded', 'branch_unlisted'):
+				if rng.random() < 0.5:
+					evidence[key] = rng.choice(self.VALUES)
+			m = CVEMatch.objects.create(
+				cve_entry=rng.choice(entries), subdomain=self.sub, matched_product=f'p{i}', evidence=evidence,
+				source=rng.choice(('tech', 'port', 'host', 'wpscan', 'openvas')), version_in_range=rng.choice((True, None, False)),
+				template_result=rng.choice(('', '', 'vulnerable', 'no_match')), distro_status=rng.choice(('no_data', 'vulnerable', 'patched', '')),
+				ai_verdict=rng.choice(('', 'uncertain', 'affected')))
+			if rng.random() < 0.3:
+				Triage.objects.create(project=self.project, domain=self.domain, host=self.sub.name, kind='cve_match', match=m,
+									  validation_status=rng.choice(('hit', 'clean', 'none', 'observed')))
+		loaded = {m.pk: m for m in CVEMatch.objects.select_related('cve_entry', 'triage')}
+		for cap in (SMOKE, FIRE, ICE):
+			with mock.patch.dict(os.environ, {ENV: cap}):
+				for capped in (True, False):
+					ranks = dict(CVEMatch.objects.annotate(h=threat.match_heat_rank_expr(capped)).values_list('pk', 'h'))
+					wrong = [pk for pk, m in loaded.items() if ranks[pk] != HEAT_RANK[threat.match_heat(m, capped=capped)]]
+					self.assertEqual(wrong, [], (cap, capped, [loaded[pk].evidence for pk in wrong[:5]]))
+		only = set(CVEMatch.objects.filter(match_policy.version_only_q()).values_list('pk', flat=True))
+		self.assertEqual(only, {pk for pk, m in loaded.items() if match_policy.is_version_only(m)})
+		unknown = set(CVEMatch.objects.filter(match_policy.version_unknown_q()).values_list('pk', flat=True))
+		self.assertEqual(unknown, {pk for pk, m in loaded.items() if match_policy.version_unknown(m)})
+
+	def test_the_flag_reads_falsy_values_as_no_evidence(self):
+		for value in match_policy.FALSY_JSON:
+			self.assertFalse(match_policy.has_hard_evidence('tech', {'host_reported': value, 'runzero': value}), value)
+		self.assertTrue(match_policy.has_hard_evidence('tech', {'runzero': True}))
+		self.assertFalse(match_policy.has_hard_evidence('tech', ['runzero']))  # not a dict: no evidence
+
+
 JQUERY = [{'vendor': 'jquery', 'product': 'jquery', 'ranges': [{'introduced': '1.0.3', 'fixed': '3.5.0'}]}]
 
 
@@ -304,6 +347,122 @@ class StoredJqueryMatchTests(Fixture):
 		self.assertEqual((list(found.values()), too_broad), ([self.sub.name], False))
 
 
+	# --- confirmers order by the uncapped heat --------------------------------------------------------------------------------
+
+	def test_openvas_still_selects_and_orders_it_as_fire_whatever_the_cap(self):
+		from cveFeed import openvas_scan
+		for cap in ('', 'ice'):
+			with mock.patch.dict(os.environ, {ENV: cap}):
+				self.assertEqual(threat.match_heat(self.fresh()), SMOKE if not cap else ICE)
+				self.assertIn(self.sub.name, openvas_scan.hot_names(self.project.id))
+				heat, (fire, smoke) = openvas_scan.host_heat(self.project.id, [self.sub.name])[self.sub.name]
+				self.assertEqual((heat, fire, smoke), (FIRE, 1, 0), cap)
+
+	# --- a match that turns fire later is paged once ---------------------------------------------------------------------------
+
+	def test_evidence_that_arrives_later_pages_once_rescores_and_bumps_the_snapshots(self):
+		from cveFeed import snapshot_cache
+		self.host_score()
+		Triage.objects.filter(match=self.match).update(validation_status='hit')  # e.g. a hit adopted from a sibling row
+		before = snapshot_cache.revision()
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			scoring.evidence_arrived([self.match.pk])
+			scoring.evidence_arrived([self.match.pk])  # a second worker, or the same evidence again: no second page
+		self.assertEqual(send.call_count, 1)
+		self.assertIn('confirmed on the host, now fire-tier', send.call_args.args[0])
+		self.assertIn('CVE-2020-11023', send.call_args.args[0])
+		self.assertIsNotNone(CVEMatch.objects.get(pk=self.match.pk).fire_notified_at)
+		self.assertEqual(Subdomain.objects.get(pk=self.sub.pk).score, scoring.CVE_POINTS[FIRE])  # rescored at once
+		self.assertNotEqual(snapshot_cache.revision(), before)
+
+	def test_a_runzero_report_pages_the_match_it_turns_fire(self):
+		from cveFeed import runzero_sync
+		port = CVEMatch.objects.create(cve_entry=self.entry, subdomain=self.sub, source='port', matched_product='jquery-port', matched_version='3.4.1',
+									   version_in_range=True, evidence={'source': 'port', 'port': 443})
+		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=port.pk)), SMOKE)
+		IpAddress.objects.filter(pk=self.ip.pk).update(fingerprint={'runzero': {'vulns': [{'cve': 'CVE-2020-11023', 'port': 443}]}})
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			self.assertEqual(runzero_sync._corroborate_matches(self.project, [IpAddress.objects.get(pk=self.ip.pk)]), 1)
+		self.assertEqual(send.call_count, 1)
+		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=port.pk)), FIRE)
+		self.assertIn('Fire CVE match CVE-2020-11023', Subdomain.objects.get(pk=self.sub.pk).score_detail[0]['label'])
+
+	def test_the_hosts_own_report_pages_the_external_match_it_confirms(self):
+		from cveFeed import inventory_match
+		match = CVEMatch.objects.select_related('cve_entry').get(pk=self.match.pk)
+		row = {'confidence': 0.9, 'evidence': {'inventory_id': 7, 'reported_at': '2026-11-01', 'component': 'jquery', 'raw_version': '3.4.1'}}
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			gained = inventory_match._add_evidence({'k': [(match, row)]}, timezone.now())
+			self.assertEqual(gained, [match.pk])
+			notify.fire_confirmed(gained)
+		self.assertEqual(send.call_count, 1)
+		self.assertEqual(threat.match_heat(self.fresh()), FIRE)
+
+	def test_a_match_paged_when_it_was_made_is_not_paged_again(self):
+		since = timezone.now() - timedelta(hours=1)
+		self.validate()
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			self.assertTrue(notify.fire_matches(since))
+			scoring.evidence_arrived([self.match.pk])
+			self.assertFalse(notify.fire_matches(since))
+		self.assertEqual(send.call_count, 1)
+
+	def test_a_template_hit_is_left_to_template_hits(self):
+		CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			self.assertFalse(notify.fire_confirmed([self.match.pk]))
+		self.assertEqual(send.call_count, 0)
+
+	def test_a_rescan_that_carries_a_hit_rescores_and_is_not_paged(self):
+		Triage.objects.filter(match=self.match).update(validation_status='hit', validated_at=timezone.now(), status='triaged',
+														classification='confirmed')
+		later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=self.scan)
+		later.ip_addresses.add(self.ip)
+		twin = CVEMatch.objects.create(cve_entry=self.entry, subdomain=later, source=self.match.source, matched_product=self.match.matched_product,
+									   matched_version=self.match.matched_version, version_in_range=True, evidence=self.match.evidence)
+		with mock.patch('cveFeed.notify._send', return_value=True) as send, \
+				mock.patch('cveFeed.scoring.rescore_for_matches', wraps=scoring.rescore_for_matches) as rescore:
+			row = triage.track(CVEMatch.objects.filter(pk=twin.pk).select_related('cve_entry', 'subdomain__target_domain'))[0][0]
+		self.assertEqual((row.validation_status, row.carried_from), ('hit', self.match.pk))
+		self.assertEqual(send.call_count, 0)
+		self.assertTrue(rescore.called)
+		self.assertIsNotNone(CVEMatch.objects.get(pk=twin.pk).fire_notified_at)  # marked: the finding is not new
+
+	def test_a_hit_adopted_from_a_sibling_row_rescores_and_pages(self):
+		from cveFeed import validation
+		row = Triage.objects.get(match=self.match)
+		older = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+		sibling_match = CVEMatch.objects.create(cve_entry=self.entry, subdomain=older, source='tech', matched_product='jquery-old', matched_version='3.4.1',
+												version_in_range=True, evidence={'source': 'tech'})
+		check = {'kind': 'http_head', 'label': 'version banner', 'display': 'curl -I', 'target': self.sub.name, 'service': 'validate-http-head',
+				 'asset': self.sub.name, 'params': {}}
+		step = {'kind': 'http_head', 'target': self.sub.name, 'result': 'hit', 'summary': 'the banner names the vulnerable build'}
+		Triage.objects.create(project=self.project, domain=self.domain, host=row.host, kind='cve_match', match=sibling_match, signature=row.signature,
+							  validation_status='hit', validation_steps=[step], validated_at=timezone.now())
+		with mock.patch('cveFeed.validation.plan_checks', return_value=([check], [])), \
+				mock.patch('cveFeed.ledger.fresh', return_value=[self.sub.name]), \
+				mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
+				mock.patch('cveFeed.notify._send', return_value=True) as send:
+			stats = validation.run_validation(self.project.id, [row.pk], template_for=lambda cve: ('', ''))
+		self.assertEqual(stats['reused'], 1)
+		self.assertEqual(Triage.objects.get(pk=row.pk).validation_status, 'hit')
+		self.assertEqual(send.call_count, 1)
+		self.assertEqual(Subdomain.objects.get(pk=self.sub.pk).score, scoring.CVE_POINTS[FIRE])  # rescored at once (verdict still uncertain: no AI bonus)
+
+	def test_the_kev_filter_finds_it_whatever_its_heat(self):
+		mild = CVEEntry.objects.create(cve_id='CVE-2099-9301', published_at=timezone.now(), affected=[], cvss=5.0)
+		CVEMatch.objects.create(cve_entry=mild, subdomain=self.sub, source='tech', matched_product='other', matched_version='1', version_in_range=True)
+		sources = services._finding_sources(self.project, {'kev': '1'})
+		self.assertEqual(list(sources), ['cve'])  # a scanner or hygiene finding has no KEV listing
+		self.assertEqual(list(sources['cve'].values_list('pk', flat=True)), [self.match.pk])
+		self.assertEqual(services._finding_sources(self.project, {'kev': '1', 'type': 'scanner'}), {})
+		self.assertEqual(services._finding_sources(self.project, {})['cve'].count(), 2)
+		row = services._finding_row('cve', sources['cve'].get())
+		self.assertEqual((row['heat'], row['kev'], row['heat_capped']), (SMOKE, True, True))
+		with mock.patch.dict(os.environ, {ENV: 'fire'}):  # not capped: the tooltip must not say it shows below fire
+			self.assertFalse(services._finding_row('cve', services._finding_sources(self.project, {'kev': '1'})['cve'].get())['heat_capped'])
+
+
 class RescoreOnCapChangeTests(SimpleTestCase):
 	def test_one_rescore_is_queued_when_the_cap_changes(self):
 		class Redis:
@@ -321,9 +480,34 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 				self.assertTrue(scoring.rescore_if_heat_cap_changed())
 			self.assertTrue(scoring.rescore_if_heat_cap_changed())  # back to smoke
 		self.assertEqual(queue.call_count, 3)
+		self.assertEqual(queue.call_args.kwargs['kwargs'], {'force': True})  # past another rescore's hour-long claim
+
+	def test_a_refused_task_leaves_the_change_for_the_next_worker(self):
+		class Redis:
+			value = 'fire'
+
+			def getset(self, key, value):
+				old, Redis.value = Redis.value, value
+				return old
+
+			def set(self, key, value):
+				Redis.value = value
+		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace(r=Redis())), \
+				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async', side_effect=RuntimeError('broker down')):
+			self.assertFalse(scoring.rescore_if_heat_cap_changed())
+		self.assertEqual(Redis.value, 'fire')
 
 	def test_no_redis_no_rescore_and_never_raises(self):
 		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace()):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
 		with mock.patch('reNgine.resources.get_store', side_effect=RuntimeError('down')):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
+
+
+class ForcedRescoreTests(Fixture):
+	def test_a_cap_change_rescore_runs_past_the_sweep_claim(self):
+		from cveFeed.tasks import rescore_all_hosts
+		with mock.patch('cveFeed.ledger.sweep_claim', return_value=False), mock.patch('cveFeed.ledger.sweep_claim_renew') as renew:
+			self.assertEqual(rescore_all_hosts()['hosts'], 0)  # the daily pass still yields to a running one
+			self.assertEqual(rescore_all_hosts(force=True)['hosts'], 1)
+		renew.assert_called_once_with('rescore', 3600)

@@ -130,6 +130,7 @@ class FeedAnnouncementTests(TestCase):
 		cve = self.cve()
 		auto_fire_new_cves([cve.pk])
 		self.sent.clear()
+		CVEMatch.objects.update(fire_notified_at=None)  # a match is paged as fire once (1.3.2): forget that page to test the scan filter again
 		other = ScanHistory.objects.create(domain=self.scan.domain, scan_type=self.scan.scan_type, scan_status=1, start_scan_date=timezone.now())
 		self.assertFalse(notify.fire_matches(timezone.now() - timedelta(minutes=5), other))
 		self.assertTrue(notify.fire_matches(timezone.now() - timedelta(minutes=5), self.scan))

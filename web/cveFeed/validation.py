@@ -595,6 +595,11 @@ def apply_validation(row, check, result, now=None, save=True):
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
                                 'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature', 'evidence_key',
                                 'hard_evidence', 'updated_at'])
+        if status == 'hit' and row.match_id and check['kind'] != 'nuclei_template':
+            # a validation hit is hard evidence: the match may have turned fire (a template hit rescored in _record_template_hit and is
+            # announced by notify.template_hits)
+            from cveFeed import scoring
+            scoring.evidence_arrived([row.match_id])
     return row
 
 
@@ -831,10 +836,15 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                     stats['blocked'] += 1
                     continue
                 if ledger.fresh(check['service'], [check['asset']], project_id):
+                    was_hit = row.validation_status == 'hit'
                     if _adopt(row, check) or any((s.get('kind'), s.get('target')) == (check['kind'], check['target'])
                                                  for s in row.validation_steps or []):
                         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at',
                                                 'classification', 'reason', 'updated_at'])
+                        if row.validation_status == 'hit' and not was_hit and row.match_id:
+                            # a sibling's hit adopted: the heat is read live, the stored score and the snapshots follow here
+                            from cveFeed import scoring
+                            scoring.evidence_arrived([row.match_id])
                         stats['reused'] += 1
                         continue
                 if state['run'] >= cap('VALIDATE_MAX_PER_RUN') or not _reserve_validation_check(project_id):

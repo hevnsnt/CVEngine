@@ -208,6 +208,9 @@ class CVEMatch(models.Model):
     # What the match rests on, so a reviewer need not redo the correlation: {source: "port"|"tech", source_id, raw_version,
     # service_extra, cpe, method, affected_index, range, distro}. Written by correlation.
     evidence = models.JSONField(default=dict, blank=True)
+    # When this match was announced as fire on the host (cveFeed.notify.fire_matches when it was made fire, or fire_confirmed when hard
+    # evidence turned a version-only match fire later): each match is paged as fire at most once.
+    fire_notified_at = models.DateTimeField(null=True, blank=True)
 
     # Remediation workflow, driven by people or agents through the API / MCP.
     REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk")

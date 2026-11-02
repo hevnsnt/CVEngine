@@ -70,13 +70,31 @@ def hard_version_evidence(in_range, detail=None):
     return in_range is True or bool((detail or {}).get('branch_unlisted'))
 
 
+# the JSON values Python reads as false (``bool(evidence.get(key))``): an evidence key holding one of them is no evidence at all
+FALSY_JSON = (False, None, {}, [], '', 0)
+
+
+def evidence_flag(evidence, key):
+    """Whether ``evidence`` (a match's evidence dict) holds ``key`` with a true value: a key holding ``False``, ``None``, ``{}``, ``[]``, ``''`` or
+    ``0`` is no evidence. ``evidence_flag_q`` is the database form, so the two never disagree."""
+    return isinstance(evidence, dict) and bool(evidence.get(key))
+
+
+def evidence_flag_q(key, prefix=''):
+    """The database form of ``evidence_flag``: the key is present and its value is none of ``FALSY_JSON``."""
+    from django.db.models import Q
+    q = Q(**{prefix + 'evidence__has_key': key})
+    for value in FALSY_JSON:
+        q &= ~Q(**{f'{prefix}evidence__{key}': value})
+    return q
+
+
 def is_version_unknown(evidence, version_in_range, template_result='', distro_status=''):
     """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``): kept
     for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
     report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
-    evidence = evidence or {}
-    return bool(evidence.get('unbounded')) and version_in_range is None and template_result != 'vulnerable' \
-        and distro_status != 'vulnerable' and not evidence.get('runzero')
+    return evidence_flag(evidence, 'unbounded') and version_in_range is None and template_result != 'vulnerable' \
+        and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
 
 
 # ----------------------------------------------------------------------------- hard evidence: the one definition
@@ -95,9 +113,8 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
     Everything else is *version-only*: a version read by nmap or a banner, by technology detection (a script name, a page generator), by
     WPScan, an OpenVAS test below its quality bar, or a CVE's version range read against any of those. An AI verdict is not evidence
     (text never confirms), and a version re-read by another tool is the same evidence again."""
-    evidence = evidence or {}
     return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
-            or bool(evidence.get('host_reported')) or bool(evidence.get('runzero')) or validation_status == 'hit')
+            or evidence_flag(evidence, 'host_reported') or evidence_flag(evidence, 'runzero') or validation_status == 'hit')
 
 
 def hard_evidence_q(prefix=''):
@@ -106,8 +123,7 @@ def hard_evidence_q(prefix=''):
     from django.db.models import Q
     p = prefix
     return (Q(**{p + 'template_result': 'vulnerable'}) | Q(**{p + 'distro_status': 'vulnerable'}) | Q(**{p + 'source': 'host'})
-            | Q(**{p + 'evidence__has_key': 'host_reported'}) | Q(**{p + 'evidence__has_key': 'runzero'})
-            | Q(**{p + 'triage__validation_status': 'hit'}))
+            | evidence_flag_q('host_reported', p) | evidence_flag_q('runzero', p) | Q(**{p + 'triage__validation_status': 'hit'}))
 
 
 def _validation_status(match):
@@ -139,7 +155,7 @@ def version_only(source, evidence, version_in_range, template_result='', distro_
     evidence (``has_hard_evidence``; a validation hit is weighed by the caller, on the Triage row). A banner version is the
     weakest evidence there is (a distribution backports fixes without changing it, a proxy answers for another server), so such a match
     is a lead to check, never a finding the AI can call affected (``triage.ceiling``)."""
-    on_version = version_in_range is True or (version_in_range is None and bool((evidence or {}).get('branch_unlisted')))
+    on_version = version_in_range is True or (version_in_range is None and evidence_flag(evidence, 'branch_unlisted'))
     return on_version and not has_hard_evidence(source, evidence, template_result, distro_status)
 
 
@@ -151,9 +167,9 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return (Q(**{prefix + 'evidence__has_key': 'unbounded'}) & Q(**{prefix + 'version_in_range__isnull': True})
+    return (evidence_flag_q('unbounded', prefix) & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
-            & ~Q(**{prefix + 'evidence__has_key': 'runzero'}))
+            & ~evidence_flag_q('runzero', prefix))
 
 
 def _has_other_evidence(match):

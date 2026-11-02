@@ -158,6 +158,18 @@ def sweep_claim(name, seconds):
         return True
 
 
+def sweep_claim_renew(name, seconds):
+    """Take the ``name`` sweep's claim for the next ``seconds`` whoever held it (a run that must not wait for it). Never raises."""
+    from reNgine import resources
+    client = getattr(resources.get_store(), 'r', None)
+    if client is None:
+        return
+    try:
+        client.set(f'cvengine:sweep:{name}', _owner(), ex=max(60, int(seconds)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _key(service, asset):
     return f'{KEY_PREFIX}:{service}:{_norm(asset)}'
 

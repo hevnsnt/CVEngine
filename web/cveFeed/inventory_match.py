@@ -240,14 +240,19 @@ def _row(inv, sub, component, ver, cve, product, details, local, fix_lookup):
 
 def _add_evidence(external, now):
     """Put the host's own evidence on current external matches of the same CVE and product: the version is confirmed from the machine, so its
-    confidence is at least that of a host-reported version."""
+    confidence is at least that of a host-reported version. Returns the ids of the matches that gained the host's evidence (hard evidence: a
+    version-only match turns fire with it, ``notify.fire_confirmed``)."""
     from cveFeed.models import CVEMatch
+    gained = []
     for matches in external.values():
         for match, row in matches:
             evidence = {**(match.evidence or {}), 'host_reported': {k: row['evidence'][k] for k in ('inventory_id', 'reported_at', 'component', 'raw_version')
                                                                   if k in row['evidence']}}
             if evidence != (match.evidence or {}) or match.confidence < row['confidence']:
                 CVEMatch.objects.filter(pk=match.pk).update(evidence=evidence, confidence=max(match.confidence, row['confidence']), updated_at=now)
+                if not (match.evidence or {}).get('host_reported'):
+                    gained.append(match.pk)
+    return gained
 
 
 def _close_unreported(inv, sub_id, current, now):
@@ -301,12 +306,15 @@ def refresh(inv, stale_days, now=None, fix_lookup=None):
     current = {(r['cve_entry_id'], r['subdomain_id'], r['source'], r['matched_product']) for r in rows}
     _reopen(inv, rows)
     correlation.save_matches(rows)
-    _add_evidence(external, now)
+    gained = _add_evidence(external, now)
     touched = _close_unreported(inv, sub.id, current, now) | ({sub.id} if rows or external else set())
     if touched:
         scoring.rescore_subdomain_ids(touched)
         from cveFeed.views import bump_stats_revision
         bump_stats_revision()
+    if gained:  # an external match the host's own report confirmed: paged once if that made it fire (the rescore above already ran)
+        from cveFeed import notify
+        notify.fire_confirmed(gained)
     local = sum(1 for r in rows if r['evidence']['scope'] == 'local')
     if rows:
         from cveFeed import activity
