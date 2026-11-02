@@ -270,12 +270,13 @@ def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_byt
     group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop. A "try later" (429, 503) is
     asked again once after a pause; an edge challenge is never retried and never pushed against: it is returned with ``challenge`` naming the
     edge. ``project`` (an id) lets the gate and the pinned transport accept the tailnet address of a device that project's own Tailscale
-    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``."""
+    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``, and, after a redirect, ``redirected_from``: the first
+    answer (the asked URL's own redirect, its headers without a body)."""
     from cveFeed import route_auth
     probe = probe or route_auth.probe_url
     last = None
     for attempt in range(len(RETRY_DELAYS) + 1):
-        current, hops = url, 0
+        current, hops, first = url, 0, None
         while True:
             if not _permitted(urlsplit(current).hostname or '', project):
                 raise ValueError('probe destination is not allowed')
@@ -285,11 +286,14 @@ def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_byt
             if 300 <= (response.get('status') or 0) < 400 and location and hops < MAX_REDIRECTS:
                 nxt = urljoin(current, location)
                 if urlsplit(nxt).hostname and (allowed is None or urlsplit(nxt).hostname.lower() in allowed):
+                    first = first or {**response, 'url': current, 'final_url': current, 'body': '', 'title': '', 'challenge': ''}
                     current, hops = nxt, hops + 1
                     sleep(REQUEST_GAP)
                     continue
             break
         last = {**response, 'final_url': current, 'challenge': challenge_of(response)}
+        if first is not None:
+            last['redirected_from'] = first  # the asked host's own answer (a redirect), headers only: what it says about itself
         if last['challenge'] or (response.get('status') or 0) not in (429, 503):
             return last
         if attempt < len(RETRY_DELAYS):
@@ -477,6 +481,10 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
         except (OSError, ValueError) as exc:
             logger.info('probe %s: %s did not answer (%s)', probe_id, path, type(exc).__name__)
             responses.append(None)
+    # fetch follows a redirect inside the host's group (apex and www answer for each other): a page another host served is that host's
+    # (its scripts, Server header and generator tags; the other host's own probe records them). Only what this host answered itself, its
+    # redirect, is read for it
+    responses = [own_answer(r, base) for r in responses]
     out = []
     first = responses[0] if responses else None
     if handler == 'headers' and first:
@@ -489,6 +497,26 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
     if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
         out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
     return out
+
+
+def own_answer(response, base):
+    """``response`` when ``base``'s own host served it, else that host's own first answer (``redirected_from``: a redirect, headers only),
+    or None when there is none to read: what another host served is never attributed to this one."""
+    if not response or served_by(response, base):
+        return response
+    origin = response.get('redirected_from')
+    return origin if origin and served_by(origin, base) else None
+
+
+def served_by(response, base):
+    """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
+    host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
+    final = response.get('final_url') or response.get('url') or ''
+    try:
+        here, there = (urlsplit(base).hostname or '').lower().rstrip('.'), (urlsplit(final).hostname or '').lower().rstrip('.')
+    except ValueError:
+        return False
+    return not there or here == there
 
 
 def _wordpress_responses(base, get, sleep):
