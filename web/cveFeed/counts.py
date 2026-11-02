@@ -165,13 +165,17 @@ def exposed_among(reps, project_ids=None):
     return named(with_host_key(reps)).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(_named__in=named(exposed).values('_named')))
 
 
-def host_reps(domain_id=None, domain_ids=None):
+def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     """One row per host (project and name) of the current inventory: the row the Hosts page shows for it. ``domain_id`` (one
-    target) or ``domain_ids`` (several) narrow it to those targets' hosts."""
+    target) or ``domain_ids`` (several) narrow it to those targets' hosts. ``in_scope`` (what a sweep may scan) leaves out the rows kept
+    under a target that is now exactly one host before the rows are collapsed, so a name another target still holds keeps that row."""
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     base = Subdomain.objects.filter(latest_scan_q())
+    if in_scope:
+        from targetApp.models import in_target_scope_q
+        base = base.filter(in_target_scope_q())
     if domain_id:
         base = base.filter(target_domain_id=domain_id)
     if domain_ids is not None:

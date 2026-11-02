@@ -1,5 +1,8 @@
-// "Add targets" dialog available on every page: paste or upload a list, choose how deep to look, go.
-// Entries may be domains, IP addresses, CIDR blocks or ranges, separated by lines, commas or spaces.
+// "Add targets" dialog available on every page: paste or upload a list, choose how deep to look and how far each target reaches, go.
+// Entries may be domains, IP addresses, CIDR blocks or ranges, separated by lines, commas or spaces. How a paste is read and counted, and the
+// scope choice, live in addtargets-logic.js (tested with node); "=example.com" adds exactly that host.
+import { DEFAULT_SCOPE, SCOPE_CHOICES, SCOPE_HINT, countEntries, countExclusions, countLabel, isOrgFormat, scopeBody } from "/staticfiles/cve/addtargets-logic.js";
+
 const slug = document.body.dataset.slug;
 // In the all-projects view ("_all") there is no one project to add to: every list needs a #Project line above it.
 const ALL = slug === '_all';
@@ -23,39 +26,6 @@ const el = (tag, cls, text, attrs = {}) => {
   if (text != null) n.textContent = text;
   Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
   return n;
-};
-
-// Grouped format: an optional "##Organization" line, then "#Project" above each list ("# a comment" with a space is a comment).
-// Anything else is a plain list for this project.
-const isOrgFormat = (text) => text.split('\n').some((l) => /^\s*#\S/.test(l));
-const countEntries = (text) =>
-  isOrgFormat(text)
-    ? countTokens(text.split('\n').filter((l) => !l.trim().startsWith('#')))
-    : countTokens(text.split('\n'));
-const projectCount = (text) => new Set(text.split('\n').map((l) => l.trim()).filter((l) => /^#[^#\s]/.test(l)).map((l) => l.slice(1).trim().toLowerCase())).size;
-// Mirrors agentapi.services.normalize_target so the count matches what will be added: URLs become hosts.
-const normalizeTarget = (token) => {
-  let t = (token || '').trim().replace(/^["'<>`,;]+|["'<>`,;]+$/g, '');
-  if (!t) return '';
-  if (t.length > 1 && t.startsWith('-')) { const rest = normalizeTarget(t.slice(1)); return rest && !rest.startsWith('-') ? `-${rest}` : ''; }
-  t = t.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
-  if (!/^[0-9a-fA-F:.]+\/\d{1,3}$/.test(t)) {
-    t = t.split(/[/?#]/)[0];
-    t = t.slice(t.lastIndexOf('@') + 1);
-    if (t.startsWith('[')) t = t.slice(1).split(']')[0];
-    else if ((t.match(/:/g) || []).length === 1) t = t.replace(/:\d{1,5}$/, '');
-  }
-  t = t.toLowerCase().replace(/\.+$/, '').replace(/^\*\./, '');
-  return t.replace(/^(\d{1,3}(\.\d{1,3}){3})\/32$/, '$1');
-};
-const stripLinks = (line) => line.replace(/\[[^\]]*\]\(([^)\s]*)\)/g, '$1');
-const tokensOf = (lines) => new Set(lines.map((l) => stripLinks(l.split('#')[0])).join(' ').split(/[,\s;]+/).map(normalizeTarget).filter(Boolean));
-const countTokens = (lines) => [...tokensOf(lines)].filter((t) => !t.startsWith('-')).length;
-// "-example.com" lines exclude a domain (and everything under it) instead of adding a target
-const countExclusions = (text) => [...tokensOf(text.split('\n').filter((l) => !isOrgFormat(text) || !l.trim().startsWith('#')))].filter((t) => t.startsWith('-')).length;
-const countLabel = (text) => {
-  const n = countEntries(text), x = countExclusions(text);
-  return `${n} target${n === 1 ? '' : 's'}${x ? `, ${x} exclusion${x === 1 ? '' : 's'}` : ''}${isOrgFormat(text) ? ` across ${projectCount(text)} project${projectCount(text) === 1 ? '' : 's'}` : ''}`;
 };
 
 function csrf() {
@@ -92,7 +62,7 @@ function build() {
   projField.append(wrapSel(projSel));
   dest.append(orgField, projField);
   const area = el('textarea', 'dlg-area', null, { rows: '8', spellcheck: 'false', autocapitalize: 'none', 'aria-label': 'Targets',
-    placeholder: 'example.com\n203.0.113.10\n10.0.0.0/28\n-not-ours.example.com   (exclude and remove)\n\nor, for several projects:\n##Acme\n#Web\nexample.com\n#Network\n10.0.0.0/28' });
+    placeholder: 'example.com\n=app.example.com   (this host only, no subdomains)\n203.0.113.10\n10.0.0.0/28\n-not-ours.example.com   (exclude and remove)\n\nor, for several projects:\n##Acme\n#Web\nexample.com\n#Network\n10.0.0.0/28' });
   const tools = el('div', 'dlg-tools');
   const count = el('span', 'note', '0 targets');
   const file = el('input', '', null, { type: 'file', accept: '.txt,.csv,.list,text/plain', id: 'dlg-file', style: 'display:none' });
@@ -101,6 +71,11 @@ function build() {
   const mode = el('select', '', null, { 'aria-label': 'Discovery' });
   [['standard', 'Standard discovery (subdomains and web fingerprinting, safe modules only)'], ['deep', 'Deep discovery (everything: brute forcing, spidering, takes hours)'], ['passive', 'Passive discovery (public sources only, fast)'], ['none', 'Just add them, do not scan yet (never scanned automatically)']]
     .forEach(([v, t]) => mode.append(Object.assign(el('option', '', t), { value: v })));
+  // how far each new domain target reaches; "=example.com" on a line is "this host only" whatever is chosen here
+  const scope = el('select', '', null, { 'aria-label': 'Scope', id: 'dlg-scope' });
+  SCOPE_CHOICES.forEach(([v, t]) => scope.append(Object.assign(el('option', '', t), { value: v })));
+  scope.value = DEFAULT_SCOPE;
+  const scopeHint = el('p', 'note', SCOPE_HINT, { style: 'margin:6px 0 0' });
   const auth = el('input', '', null, { type: 'checkbox', id: 'dlg-auth' });
   const authWrap = el('label', 'check', null, { for: 'dlg-auth' });
   authWrap.append(auth, document.createTextNode('I am authorized to test these targets. Standard and deep discovery send traffic to them. The mode you pick is kept: the work conductor rescans each target in it, and never scans one added with "just add them".'));
@@ -110,8 +85,11 @@ function build() {
   const cancel = el('button', 'btn ghost', 'Close', { type: 'button' });
   const go = el('button', 'btn', 'Add targets', { type: 'submit' });
   actions.append(el('span', 'grow'), cancel, go);
-  form.append(title, dest, lead, area, tools, el('div', 'field', null, { style: 'margin-top:12px' }), authWrap, msg, out, actions);
-  form.children[4].append(mode);
+  const discoveryField = el('div', 'field', null, { style: 'margin-top:12px' });
+  const scopeField = el('div', 'field', null, { style: 'margin-top:8px' });
+  form.append(title, dest, lead, area, tools, discoveryField, scopeField, authWrap, msg, out, actions);
+  discoveryField.append(mode);
+  scopeField.append(scope, scopeHint);
   d.append(form);
   document.body.append(d);
 
@@ -149,7 +127,7 @@ function build() {
       const orgMode = isOrgFormat(area.value);
       const res = await fetch(orgMode ? '/api/v1/targets/bulk-org' : `/api/v1/projects/${encodeURIComponent(projSel.value)}/targets/bulk`, {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
-        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? 'manual' : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined }), // the attestation travels with the request; the server does not record it yet
+        body: JSON.stringify({ text: area.value, discover: mode.value !== 'none', mode: mode.value === 'none' ? 'manual' : mode.value, current_project: orgMode && projSel.value ? projSel.value : undefined, authorized: auth.checked || undefined, ...scopeBody(scope.value) }), // the attestation travels with the request; the server does not record it yet
       });
       const data = await res.json();
       clearInterval(ticker);
@@ -162,6 +140,9 @@ function build() {
       if (data.created || !excluded.length) parts.push(`${data.created} added${!orgMode && destName ? ` to ${destName}` : ''}`);
       excluded.forEach((e) => parts.push(`${e.pattern} excluded (${e.hosts_removed} host${e.hosts_removed === 1 ? '' : 's'} and ${e.targets_removed} target${e.targets_removed === 1 ? '' : 's'} removed)`));
       if (orgMode && data.projects_created) parts.push(`${data.projects_created} project${data.projects_created === 1 ? '' : 's'} created`);
+      const scopes = orgMode ? Object.assign({}, ...data.projects.map((p) => p.scope_modes || {})) : (data.scope_modes || {});
+      const hostOnly = Object.values(scopes).filter((v) => v === 'host').length;
+      if (hostOnly) parts.push(`${hostOnly} as this host only`);
       if (existed) parts.push(`${existed} already existed`);
       if (bad.length) parts.push(`${bad.length} not applied`);
       if (data.discovery_started) parts.push(`${data.discovery_started} queued for discovery, in order`);

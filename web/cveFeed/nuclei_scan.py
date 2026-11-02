@@ -336,7 +336,8 @@ def scan_targets(scan):
     from cveFeed.bounty_gate import Gate
     gate, project = Gate(blocked=()), scan.domain.project_id  # a bug bounty program's scope: a host it does not name, or an address it excludes, is never a target of any stage
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
-            if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)]
+            if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)
+            and (not scan.domain.exact_host_only() or scan.domain.includes_host(s.name))]  # =example.com: only that host is ever a target
     # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
     pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
     for sub in subs:
