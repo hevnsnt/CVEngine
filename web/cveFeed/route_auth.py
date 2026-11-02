@@ -422,9 +422,12 @@ def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, 
     budget = budget if budget is not None else {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
     if isinstance(probe, functools.partial) and probe.func is probe_url:
         probe = functools.partial(probe, max_bytes=js_libraries.MAX_SCRIPT_BYTES)  # a library file is read further than a page
+    coverage = {}
     records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate, target), budget,
                                      before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id),
-                                     reader=reader, project=project)
+                                     reader=reader, project=project, coverage=coverage)
+    if isinstance(evidence.get('script_page'), dict):  # how many of the page's scripts were read whole: a script not read may hold anything
+        evidence['script_page']['unread'] = max(0, coverage.get('scripts', 0) - coverage.get('read', 0))
     # a file-name hint gives way only to a library the page's scripts were resolved for; any other stays as it was
     resolved = {r['product'].lower() for r in records.values()}
     hints = {f['name'] for f in evidence.get('fingerprints') or []

@@ -271,6 +271,7 @@ class PageScripts(list):
     ``inline`` the ``(library key, version)`` pairs inline scripts state."""
     capped = False
     inline = ()
+    inline_unread = 0
 
 
 def parse_page(body, page_url):
@@ -334,7 +335,10 @@ def parse_page(body, page_url):
         out.append({'order': this, 'url': None, 'timing': 'sync' if kind != 'module' else 'defer', 'noconflict': bool(NOCONFLICT.search(code))})
         if inline_read < MAX_INLINE_READ:  # a library pasted into the page is on the page: its banner or code says which
             inline_read += 1
-            inline += [(key, version) for key, version, _how in read_body(code)]
+            found = _inline_libraries(code)
+            inline += found
+            if len(inner) > MAX_INLINE or (not found and _LIBRARY_SHAPED.search(code)):
+                out.inline_unread += 1  # more than is read, or third-party code no rule names: what it carries is unknown
         elif code.strip():
             out.capped = True
         for written in itertools.islice(_WRITE_SRC.finditer(code), 3):
@@ -343,6 +347,20 @@ def parse_page(body, page_url):
                 out.append({'order': this, 'url': url, 'timing': 'sync', 'noconflict': False, 'fallback': True, 'alternative': 'document.write'})
     out.inline = list(dict.fromkeys(inline))[:20]
     return out
+
+
+_LIBRARY_SHAPED = re.compile(r'/\*!|@license|\(c\)\s{0,4}(?:19|20)\d\d', re.IGNORECASE)
+
+
+def _inline_libraries(code):
+    """``[(library key, version)]`` an inline script states: ``read_body`` (a banner in its first bytes, the libraries' own code), and a
+    banner anywhere in it (a bundle pasted into the page puts each library's banner where that library starts)."""
+    found = [(key, version) for key, version, _how in read_body(code)]
+    for key, pattern in _BANNERS:
+        match = pattern.search(code)
+        if match and (key, match.group(1)) not in found:
+            found.append((key, match.group(1)))
+    return found
 
 
 # ------------------------------------------------------------------ which hosts may be read
@@ -618,11 +636,13 @@ def _order_to_read(entries, page_url):
     return named + other + fallback
 
 
-def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None):
+def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None, coverage=None):
     """Read the scripts of a parsed page (``parse_page``) through ``fetch(url)`` (the caller's pinned, bounded GET returning the route probe
     dict; called as ``fetch(url, headers={'If-None-Match': etag})`` to revalidate a cached reading) and return ``resolve``'s records. ``vet``
     is ``vetter``'s; ``budget`` is ``{'left': n}``, shared by every page of one host; ``reader`` is the scan's ``Reader`` (one is made when
-    none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop)."""
+    none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop). ``coverage`` (a dict, when given)
+    receives how many scripts with a source the page loads (``scripts``) and how many of them were read whole (``read``): only a page whose
+    every script was read whole can show that a library is absent."""
     reader = reader if reader is not None else Reader(project)
     project = project if project is not None else reader.project
     entries = [dict(e) for e in entries or []]
@@ -671,6 +691,9 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             continue
         entry['read'] = read
         _remember(url, read, project)
+    if coverage is not None:
+        sourced = [e for e in entries if e.get('url')]
+        coverage.update(scripts=len(sourced), read=sum(1 for e in sourced if isinstance(e.get('read'), dict) and e['read'].get('sha256')))
     return resolve(entries)
 
 
@@ -812,6 +835,9 @@ def page_status(status):
     return isinstance(status, int) and (200 <= status < 300 or status in (404, 410))
 
 
+_THEME_OR_PLUGIN = re.compile(r'/wp-content/(?:themes|plugins)/', re.IGNORECASE)
+
+
 def script_page(entries):
     """What correlation keeps of a parsed front page (``parse_page`` entries): how many scripts with a source it loads and the ``?ver=``
     strings they carry, each with the library its script is ('' for a theme's or plugin's own script)."""
@@ -820,9 +846,12 @@ def script_page(entries):
     for url in urls:
         found = identify(url)
         if found['query_version']:
-            seen.setdefault((found['query_version'], found['library']), None)
+            # '' only for a theme's or plugin's own script (wp-content/themes|plugins): its ?ver= is its own release, a cache-buster. A
+            # core path's ?ver= (wp-includes: jQuery UI's real version on ui/core.min.js) or any other script's may be a library's own
+            owner = found['library'] or ('' if _THEME_OR_PLUGIN.search(urlsplit(url).path or '') else 'other')
+            seen.setdefault((found['query_version'], owner), None)
     return {'scripts': len(urls), 'query_versions': [{'version': v, 'library': k} for v, k in list(seen)[:60]],
-            'capped': bool(getattr(entries, 'capped', False)),
+            'capped': bool(getattr(entries, 'capped', False)), 'inline_unread': int(getattr(entries, 'inline_unread', 0)),
             'inline': [{'library': k, 'version': v} for k, v in getattr(entries, 'inline', ())]}
 
 
@@ -905,13 +934,15 @@ class HostLibraries:
     stored version may make a match and with what evidence. ``alias_of`` is the host the front page only redirects to (``redirect_alias_of``):
     such a host serves no scripts of its own, so no library version stored for it is matched."""
 
-    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, cache_busters=(), inline=()):
+    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, cache_busters=(), inline=(), all_read=False, fresh=False):
         self.records = records or {}  # library key -> record
         self.legacy = legacy or {}    # (library key, version) -> source, from fingerprints that predate records
         self.alias_of = alias_of
         self.page_read = page_read    # every web port's front page was read whole, lately, and is the site itself (complete_page)
         self.cache_busters = set(cache_busters)  # the ?ver= strings of the page's scripts that are no library's (a theme's, a plugin's)
         self.inline = set(inline)  # the libraries an inline script of the page states (their banner or code is in the page itself)
+        self.all_read = all_read      # ... and every script of it, of every port, was read whole (none failed, was refused or over budget)
+        self.fresh = fresh            # some reading of the host's page is recent (a route check or the libraries probe in FRESH_DAYS)
 
     @classmethod
     def for_subdomain(cls, subdomain, now=None):
@@ -967,6 +998,8 @@ class HostLibraries:
         # the host's page is known only when every web port's front page was read whole, lately, and is the site itself
         page_read = bool(origins) and all(origin in current and complete_page(current[origin]) for origin in origins)
         cache_busters, inline = set(), set()
+        all_read = page_read and all(((row.evidence or {}).get('script_page') or {}).get('unread') == 0
+                                     and not ((row.evidence or {}).get('script_page') or {}).get('inline_unread') for row in current.values())
         for row in current.values():
             script_page = (row.evidence or {}).get('script_page') or {}
             inline |= {str(item.get('library')) for item in script_page.get('inline') or [] if isinstance(item, dict) and item.get('library')}
@@ -974,7 +1007,8 @@ class HostLibraries:
                 for item in script_page.get('query_versions') or []:
                     if isinstance(item, dict) and item.get('version') and not item.get('library'):
                         cache_busters.add(str(item['version']))
-        return cls(records, legacy, redirect_alias_of(roots, host, bases) if roots else '', page_read, cache_busters, inline)
+        return cls(records, legacy, redirect_alias_of(roots, host, bases) if roots else '', page_read, cache_busters, inline, all_read,
+                   bool(current) or bool(dated))
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
@@ -991,15 +1025,21 @@ class HostLibraries:
             return False, {}, None
         skip, evidence, cap = self._judge(key, version)
         if not skip:
-            # whether a fresh reading of the page stands behind this answer: the version's own copy on the page, or the whole page known.
-            # A match the page closed is reopened only on such a reading (correlation.save_matches), never because a reading went stale
-            evidence = {**evidence, 'page_known': bool(evidence.get('script_url')) or self._known(key)}
+            # whether any recent reading of the host's page stands behind this answer: a match the page closed is reopened on a fresh
+            # reading, even a partial one (correlation.save_matches), never because the only reading went stale
+            evidence = {**evidence, 'page_fresh': self.fresh}
         return skip, evidence, cap
 
-    def _known(self, key):
-        """Whether the whole page is known for this library: every web port's front page read whole lately, and no inline script of the
-        library (a library pasted into the page is on it, whatever its script tags say)."""
+    def _whole(self, key):
+        """Whether the page is known whole for this library: every web port's front page read whole lately (``complete_page``) and no inline
+        script of the library (a library pasted into the page is on it, whatever its script tags say)."""
         return self.page_read and key not in self.inline
+
+    def _known(self, key):
+        """Whether the page can prove this library ABSENT (or a version a cache-buster): known whole, and every script of it, on every port,
+        read whole. A script not read (reading off, a failed or refused read, a spent budget, a third-party host, a cut body) may hold the
+        library under any name."""
+        return self._whole(key) and self.all_read
 
     def _judge(self, key, version):
         name = LIBRARIES[key][0]
@@ -1050,7 +1090,8 @@ class HostLibraries:
             # the string a script's query or name carries, where the file itself was read and states otherwise or nothing
             return True, {'reason': (f'the page\'s own scripts say {name} {said}; the {version} came from a script\'s name or query string'
                                      if said else f'the {name} script\'s own file does not state {version}')}, None
-        if stated and known:  # the whole page's files state the library's version(s), and this one is none of them
+        whole_copy = bool(record.get('script_sha256')) or any(c.get('sha256') for c in stated)
+        if stated and whole_copy and self._whole(key):  # the whole page's files, read in full, state other version(s) of the library
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
         if known and version in self.cache_busters:  # a theme's or plugin's ?ver= cache-buster, read as the library's version
             return True, {'reason': _cache_buster(name, version)}, None
