@@ -25,6 +25,7 @@ import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -1746,12 +1747,34 @@ function findingPage(mount, cfg) {
   // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
   // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
   const BULK_KINDS = ["match", "vulnerability", "hygiene"];
-  const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk"];
   const STATUS_LABELS = [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]];
   const BULK_MAX = 200;
   const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
   const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
-  async function setStatusBatch(items, value) {
+  // A group row (GET findings?group=cve) stands for several hosts' findings: it is sent as its members, each through the same route and
+  // the same per-finding gates and audit, and the members' results are read back onto the row (finding-groups-logic.js).
+  const resultKey = (i) => `${itemKind(i)}-${i.id}`;
+  // A group sends only the members the change applies to: by default the open and in progress ones whose status it changes (fixed,
+  // accepted and ruled-out hosts are left as they are unless `includeClosed`). The summary counts findings and sites, not rows.
+  async function setStatusBatch(items, value, opts = {}) {
+    if (!items.some(FG.isGroup)) {
+      const r = await setStatusEach(items, value);
+      return { ...r, summary: FG.doneSummary(r.ok) };
+    }
+    const r = FG.foldResults(items, await setStatusEach(FG.expandForBulk(items, value, opts), value), resultKey);
+    return { ...r, summary: FG.doneSummary(r.ok) };
+  }
+  // Undo: every finding (every member of a group) back to its own earlier status
+  async function restoreStatuses(items, priorOf) {
+    const out = { ok: [], failed: [] };
+    for (const [was, group] of FG.restoreBatches(items, priorOf)) {
+      const r = await setStatusEach(group, was);
+      out.ok.push(...r.ok);
+      out.failed.push(...r.failed);
+    }
+    return out;
+  }
+  async function setStatusEach(items, value) {
     const ok = [];
     const failed = [];
     const groups = new Map(); // one request series per project (the all-projects view mixes them)
@@ -1796,32 +1819,28 @@ function findingPage(mount, cfg) {
         side,
         rows,
         noun: "finding",
-        labelOf: (item) => item.title || (item.cve && item.cve.id) || `#${item.id}`,
+        labelOf: (item) => {
+          const name = item.title || (item.cve && item.cve.id) || `#${item.id}`;
+          if (FG.isGroup(item)) return `${name} ${FG.hostsText(item.group)}`;
+          return item.__groupOf && item.host ? `${name} on ${item.host}` : name; // one member of a group, in a failure report
+        },
         selectable: isBulkable,
         hint: "",
         afterRun: () => list.reload(),
         actions: [
           {
             select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
+            label: "Change status",
             verb: "Updating",
             done: "Updated",
+            // a selection holding a group asks first, saying how many hosts change and how many settled ones are left alone
+            confirm: (n, items, value) => FG.confirmText(items, value),
+            confirmTitle: (items) => `Change ${items.filter(FG.isGroup).length === 1 ? "a group of hosts" : "groups of hosts"}?`,
             runBatch: setStatusBatch,
-            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk)
-            prior: (item) => {
-              const was = item.status ?? item.remediation_status; // the unified list says status, the matches list says remediation_status
-              return STATUS_VALUES.includes(was) ? was : undefined;
-            },
-            restoreBatch: async (items, priorOf) => {
-              const byStatus = new Map();
-              items.forEach((i) => byStatus.set(priorOf(i), [...(byStatus.get(priorOf(i)) || []), i]));
-              const out = { ok: [], failed: [] };
-              for (const [was, group] of byStatus) {
-                const r = await setStatusBatch(group, was);
-                out.ok.push(...r.ok);
-                out.failed.push(...r.failed);
-              }
-              return out;
-            },
+            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk); the unified list
+            // says status, the matches list remediation_status, and a group row each member's own (FG.priorOf)
+            prior: FG.priorOf,
+            restoreBatch: restoreStatuses,
           },
         ],
       })
@@ -1849,7 +1868,7 @@ function findingPage(mount, cfg) {
     metaTools.append(
       exportButton({
         run: async (progress) => {
-          const { rows, truncated } = await collectAll((page, size) => api("GET", `${cfg.path}?${query({ ...cfg.params(), page, page_size: size })}`), progress);
+          const { rows, truncated } = await collectAll((page, size) => api("GET", `${cfg.path}?${query({ ...(cfg.exportParams || cfg.params)(), page, page_size: size })}`), progress);
           return { filename: `cvengine-${cfg.csv.name}-${ALL ? "all" : slug}-${stamp()}.csv`, columns: cfg.csv.columns, rows, truncated };
         },
       }),
@@ -1909,6 +1928,10 @@ function findingPage(mount, cfg) {
       if (mine !== token) return;
       pane.textContent = "";
       pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
+      if (FG.isGroup(row) && row.id === id && kind === "match") {
+        // a group row opens its hottest member: say so, and that every host keeps its own status
+        back.after(el("p", "note group-note", `This row groups the same client-side library file ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
+      }
       if (validate) {
         if (location.hash.includes("&validate")) history.replaceState(null, "", `${location.pathname}${location.search}#${ALL ? `${project}:${key}` : key}`); // a reload must not run it again
         const run = pane.querySelector("[data-validate]");
@@ -1962,29 +1985,37 @@ function findingPage(mount, cfg) {
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
+          const prior = FG.priorOf(item);
           const menu = [
             { section: "copy", label: "Copy title", run: () => copyValue(rowName, "title") },
             { section: "copy", label: "Copy link", run: () => copyValue(`${location.origin}${location.pathname}#${hashOf(item)}`, "link") },
             { section: "open", label: "Open in a new tab", run: () => window.open(`${location.pathname}${location.search}#${hashOf(item)}`, "_blank", "noopener") },
           ];
           if (isBulkable(item)) {
-            STATUS_LABELS.forEach(([value, label]) =>
-              menu.push({
-                section: "status",
-                label: `Mark as ${label}`,
-                disabled: was === value,
-                run: async () => {
-                  const r = await setStatusBatch([item], value);
-                  if (r.failed.length) return toast(r.failed[0].error, true);
-                  list.reload();
-                  if (STATUS_VALUES.includes(was)) {
-                    undoNotice(`Marked ${label.toLowerCase()}`, async () => {
-                      const back = await setStatusBatch([item], was);
-                      toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
-                      list.reload();
-                    });
-                  } else toast(`Marked ${label.toLowerCase()}`);
-                },
+            const group = FG.isGroup(item);
+            // a group: the plain entries change its open and in progress hosts only; when some are fixed, accepted or ruled out, a
+            // second set of entries includes them, and says so
+            const variants = [{ includeClosed: false }, ...(group && FG.closedCount(item.group) ? [{ includeClosed: true }] : [])];
+            variants.forEach((opts) =>
+              STATUS_LABELS.forEach(([value, label]) => {
+                const hosts = group ? FG.targetsOf(item.group, value, opts).ids.length : 0;
+                menu.push({
+                  section: opts.includeClosed ? "status-closed" : "status",
+                  label: group ? FG.menuLabel(item, value, label, opts) : `Mark as ${label}`,
+                  disabled: group ? hosts === 0 : was === value,
+                  run: async () => {
+                    const r = await setStatusBatch([item], value, opts);
+                    if (r.failed.length) return toast(r.failed[0].error, true);
+                    list.reload();
+                    if (prior !== undefined) {
+                      undoNotice(`Marked ${label.toLowerCase()}: ${r.summary}`, async () => {
+                        const back = await restoreStatuses(r.ok, () => prior);
+                        toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
+                        list.reload();
+                      });
+                    } else toast(`Marked ${label.toLowerCase()}: ${r.summary}`);
+                  },
+                });
               }),
             );
           }
@@ -1992,7 +2023,14 @@ function findingPage(mount, cfg) {
         });
         (r.notes || []).filter(Boolean).forEach((n) => row.append(n instanceof Node ? n : el("span", "note host-why", n)));
         row.onclick = (e) => {
-          if (e.target.closest("a")) return; // a link inside the row goes where it points
+          const member = e.target.closest("a[data-finding-key]"); // one host of a group: open its own finding here
+          if (member && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+            e.preventDefault();
+            history.replaceState(null, "", location.pathname + location.search + `#${ALL ? `${projectOf(item)}:` : ""}${member.dataset.findingKey}`);
+            show(member.dataset.findingKey, projectOf(item));
+            return;
+          }
+          if (e.target.closest("a, summary, details")) return; // a link inside the row goes where it points; a group's host list opens in place
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
         };
@@ -3619,7 +3657,23 @@ const pages = {
     const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
     const header = el("p", "note");
     mount.append(header);
-    const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
+    // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
+    let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
+    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
+    const params = () => FG.listParams(filtersNow(), groupMode);
+    const everyHost = el("button", "new-toggle every-host", "Show every host", {
+      type: "button",
+      "aria-pressed": String(groupMode === FG.EVERY_HOST),
+      title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
+    });
+    const setGroupMode = (mode) => {
+      groupMode = mode === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
+      everyHost.setAttribute("aria-pressed", String(groupMode === FG.EVERY_HOST));
+    };
+    everyHost.onclick = () => {
+      setGroupMode(groupMode === FG.EVERY_HOST ? FG.GROUPED : FG.EVERY_HOST);
+      reload();
+    };
     const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 0 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
@@ -3637,7 +3691,7 @@ const pages = {
       // the response already says how many of each type match the other filters: one request for the four chips
       async () => {
         const r = await api("GET", `${base}/findings?${query({ ...params(), type: "all", page_size: 0 })}`);
-        return { all: r.total, ...r.counts };
+        return FG.chipCounts(r); // rows when grouped, as the list shows them
       },
     );
     const sev = picker(
@@ -3660,7 +3714,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "" };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -3671,15 +3725,16 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }),
       apply: (v) => {
+        setGroupMode(v.group);
         setPicker(type, "type", v.type);
         setPicker(sev, "severity", v.severity);
         setPicker(status, "status", v.status);
@@ -3697,14 +3752,42 @@ const pages = {
       [type, sev, status].forEach((p) => p.refresh());
       list.reload();
     }
-    function describe({ counts = {}, total = 0, count = 0, truncated = false }) {
+    function describe(data) {
+      const { count = 0, truncated = false } = data;
       header.textContent = "";
       const link = (key, n) => el("a", "", `${n} ${{ cve: n === 1 ? "CVE match" : "CVE matches", scanner: n === 1 ? "scanner finding" : "scanner findings", hygiene: n === 1 ? "hygiene finding" : "hygiene findings" }[key]}`,
         { href: `/cve/${encodeURIComponent(slug)}/${{ cve: "matches", scanner: "vulns", hygiene: "hygiene" }[key]}/${key === "scanner" ? "?type=scanner" : ""}` });
-      header.append(`${total} finding${total === 1 ? "" : "s"}: `);
+      // the per-type numbers stay per host finding in both modes; grouped, the lead also says how many rows that is
+      const { lead, counts, grouped, truncated: truncatedNote } = FG.headerParts(data);
+      header.append(lead);
       ["cve", "scanner", "hygiene"].forEach((key, i) => header.append(...(i ? [" · "] : []), link(key, counts[key] || 0)));
+      if (grouped) header.append(`. ${grouped}`);
+      if (truncatedNote) header.append(" ", el("strong", "group-truncated", truncatedNote));
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }
+    // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)
+    const groupHosts = (f) => {
+      const g = f.group;
+      const box = el("details", "group-hosts");
+      const heat = FG.heatSplit(g);
+      box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}`));
+      const list = el("ul", "group-members");
+      FG.sortedMembers(g).forEach((m) => {
+        const li = el("li");
+        li.append(
+          ...[
+            el("a", "", m.host, { href: `#${FG.memberHash(m, projectOf(f), ALL)}`, "data-finding-key": `match-${m.id}`, title: `Open the finding on ${m.host}` }),
+            m.heat ? badge(m.heat, m.heat) : null,
+            badge(String(m.status).replace(/_/g, " ")),
+            m.classification ? badge(m.classification.replace(/_/g, " ")) : null,
+          ].filter(Boolean),
+        );
+        list.append(li);
+      });
+      if (g.members_truncated) list.append(el("li", "note", `and ${g.findings - g.members.length} more (Show every host lists them all)`));
+      box.append(list);
+      return box;
+    };
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
@@ -3729,8 +3812,9 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, scope, kev, type.node, sev.node, status.node],
+      filters: [views.node, q, scope, kev, type.node, sev.node, status.node, everyHost],
       params,
+      exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
       empty: () => {
         const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
         if (narrowed)
@@ -3767,9 +3851,11 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
-               f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
-        notes: [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+               !FG.isGroup(f) && f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
+        notes: FG.isGroup(f)
+          ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
+          : [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),
     });
     [type, sev, status].forEach((p) => p.refresh());

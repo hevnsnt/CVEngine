@@ -3,6 +3,7 @@
 import { detailDrawer, mountGraph } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
+import { dashboardNote } from "/staticfiles/cve/finding-groups-logic.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
@@ -229,6 +230,14 @@ async function pollStats() {
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
     paintMapCount();
+    const groupNote = $("s-match_groups_note");
+    if (groupNote) {
+      // one library file on several hosts of a site is one row of the Findings list: beside the per-host count, how many distinct findings
+      // that is (hidden when the grouping pass hit its cap: the number would not be exact)
+      const note = dashboardNote(s.matches, s.match_groups, s.match_groups_truncated);
+      groupNote.textContent = note.text;
+      groupNote.title = note.title;
+    }
     const certNote = $("s-certs_total_note");
     if (certNote) {
       // beside the count, like "of 299 hosts" on the Exposed hosts tile: short enough to fit the narrow tile
