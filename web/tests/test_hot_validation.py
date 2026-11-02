@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from unittest import mock
 
@@ -13,6 +14,19 @@ from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tenancy import roles
 
+
+
+# The lanes these tests drive rest on CVSS-rated CVEs (a 7.5 is smoke, a 9.8 fire): the legacy heat policy. Under the KEV rule (the default)
+# the lane is fire for a KEV or exploited CVE and ice otherwise (tests.test_heat_policy); the queueing, backoff and cap mechanics are the same.
+_LEGACY = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})
+
+
+def setUpModule():
+	_LEGACY.start()
+
+
+def tearDownModule():
+	_LEGACY.stop()
 
 class HotValidationTests(TestCase):
     def setUp(self):

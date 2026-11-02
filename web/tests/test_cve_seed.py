@@ -31,7 +31,8 @@ class SeedRoundTripTests(TestCase):
 		with tempfile.TemporaryDirectory() as directory:
 			path = os.path.join(directory, 'seed.jsonl.gz')
 			manifest = seed.export_seed(path)
-			self.assertEqual((manifest['count'], manifest['tiers']), (3, {'fire': 1, 'smoke': 1, 'ice': 1}))
+			# the tier under the KEV heat rule (the default): the CVSS 7.5 CVE that is neither on the KEV nor exploited is ice
+			self.assertEqual((manifest['count'], manifest['tiers']), (3, {'fire': 1, 'smoke': 0, 'ice': 2}))
 			self.assertEqual(manifest['with_detection'], 2)
 			self.assertEqual(json.load(open(path + '.manifest.json'))['sha256'], hashlib.sha256(open(path, 'rb').read()).hexdigest())
 			CVEEntry.objects.all().delete()

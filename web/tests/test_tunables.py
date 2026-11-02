@@ -321,13 +321,13 @@ class SavingTests(Isolated, TestCase):
     def test_configmaxxing_lists_the_cards_and_reset_all_clears_every_group(self):
         send(self.c, 'PUT', 'tunables', {'values': {'triage_max_per_day': 800, 'stage_parallel': 2, 'work_min_gap_hours': 5}})
         listing = send(self.c, 'GET', 'config_maxxing')[1]
-        self.assertEqual([c['id'] for c in listing['cards']], ['autotune', 'scan_concurrency', 'ai_spend', 'throughput', 'autotune_pace'])
+        self.assertEqual([c['id'] for c in listing['cards']], ['autotune', 'scan_concurrency', 'ai_spend', 'throughput', 'autotune_pace', 'heat'])
         status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
-        self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 0, 'ai_spend': 1, 'throughput': 2, 'autotune_pace': 0}))
+        self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 0, 'ai_spend': 1, 'throughput': 2, 'autotune_pace': 0, 'heat': 0}))
         self.assertEqual(TunableSettings.current().values, {})
         self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
         groups = AuditLog.objects.filter(action='config_maxxing.tunables_reset_all')
-        self.assertEqual(sorted(groups.values_list('target', flat=True)), ['ai_spend', 'autotune_pace', 'throughput'])
+        self.assertEqual(sorted(groups.values_list('target', flat=True)), ['ai_spend', 'autotune_pace', 'heat', 'throughput'])
         self.assertEqual(AuditLog.objects.filter(action='tunable.reset').count(), 3)
 
     def test_the_snapshot_carries_what_the_cards_need_for_warnings_usage_and_when_a_change_applies(self):

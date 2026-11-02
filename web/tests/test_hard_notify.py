@@ -40,8 +40,9 @@ class FeedAnnouncementTests(TestCase):
 		Notification.objects.create(send_to_slack=True, slack_hook_url='https://hooks.invalid/x')
 		# The host's only evidence is its nginx banner, a version-only match: since 1.3.2 that is smoke on the host, never paged as fire
 		# (test_version_only_heat). These tests are about the announcement's plumbing, so they run with the cap the owner can set to
-		# restore the old rating; test_with_the_default_cap_a_banner_version_alone_is_not_paged covers the default.
-		cap = mock.patch.dict(os.environ, {'CVENGINE_VERSION_ONLY_MAX_HEAT': 'fire'})
+		# restore the old rating; test_with_the_default_cap_a_banner_version_alone_is_not_paged covers the default. That cap is read under the
+		# legacy heat policy only (under the KEV rule a banner nmap did not probe is no proof: tests.test_heat_policy), so they run under it.
+		cap = mock.patch.dict(os.environ, {'CVENGINE_VERSION_ONLY_MAX_HEAT': 'fire', 'CVENGINE_HEAT_POLICY': 'legacy'})
 		cap.start()
 		self.addCleanup(cap.stop)
 

@@ -1738,6 +1738,11 @@ class HeatGateTests(Fixture, TestCase):
     def setUp(self):
         super().setUp()
         mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()  # the shipped default
+        # the ordering below rests on a CVSS 7.5 CVE reading smoke: the legacy heat policy. Under the KEV rule (the default) a CVE that is
+        # neither on the KEV nor exploited is ice and its host does not qualify (tests.test_heat_policy covers that gate)
+        legacy = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})
+        legacy.start()
+        self.addCleanup(legacy.stop)
         self.link.hosts, self.link.forced_hosts = [], []
         self.link.save()
         self.kev = CVEEntry.objects.create(cve_id='CVE-2024-0001', title='Exploited', published_at=timezone.now(), cvss=9.8, kev=True)

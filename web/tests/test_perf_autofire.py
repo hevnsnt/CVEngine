@@ -44,10 +44,14 @@ class HotCveSelectionTests(TestCase):
 		AutoFireRun.objects.create(cve_entry=done, tier='fire')
 		with CaptureQueriesContext(connection) as ctx:
 			found = hot_cves_without_run()
-			tiers = [c.threat_tier for c in found]
+			tiers = [c.attention_tier for c in found]
+			heat = [c.threat_tier for c in found]
+		# auto-fire acts on the attention rating (KEV, exploit, CVSS, EPSS) under either heat policy: a CVSS 7.5 CVE is still looked for,
+		# though under the KEV heat rule it is ice
 		self.assertEqual({c.id for c in found}, {fire.id, smoke.id})
 		self.assertEqual(len(ctx), 1)  # classifying the rows loads nothing more
 		self.assertEqual(sorted(tiers), [FIRE, SMOKE])
+		self.assertEqual(sorted(heat), [FIRE, 'ice'])
 
 	def test_a_run_that_errored_is_tried_again_for_two_days_then_left_alone(self):
 		failed = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, affected=[])
