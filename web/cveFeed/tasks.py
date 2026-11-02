@@ -1015,7 +1015,70 @@ def reconcile_invalid_correlations(limit=50):
     if closed:
         logger.info('reconcile_invalid_correlations closed %d of %d matches: %s', closed, len(batch),
                     ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
-    return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk}
+    library = reconcile_library_provenance()
+    return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk, 'library': library}
+
+
+LIBRARY_SWEEP_BATCH = 500   # open technology-scan matches looked at per run of the reconcile sweep (every five minutes)
+LIBRARY_SWEEP_SECONDS = 120  # and at most this long
+
+
+def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEEP_SECONDS, clock=None):
+    """Re-check stored JavaScript library matches against their host's own page (``correlation.library_closure``) without a rescan, in
+    every project: the OPEN technology-scan matches of the current inventory, ``limit`` a run in id order from a cursor of their own
+    (claimed, then worked outside the lock), at most ``seconds`` long. One query loads the batch, one the sightings' names, and each host's
+    page is read once (``HostLibraries.for_subdomain``) for all its matches. Closes with the stored reason (never shared, never one a person
+    or a check vouches for) and logs how many it closed for each reason. Returns the counts."""
+    import time as _time
+
+    from django.db import transaction
+    from cveFeed import correlation, js_libraries
+    from cveFeed.models import BackgroundCursor, CVEMatch
+    from startScan.models import Subdomain, Technology
+    clock = clock or _time.monotonic
+    started = clock()
+    size = max(1, min(int(limit), 2000))
+    base = (CVEMatch.objects.filter(correlation.latest_scan_q('subdomain__'), source='tech').exclude(ai_verdict='not_affected')
+            .order_by('pk'))
+    with transaction.atomic():
+        cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane='library_provenance')
+        batch = list(base.filter(pk__gt=cursor.last_pk).select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if not batch:
+            cursor.last_pk = 0
+            batch = list(base.select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if batch:
+            cursor.last_pk = batch[-1].pk
+        cursor.save(update_fields=['last_pk', 'updated_at'])
+    names = dict(Technology.objects.filter(pk__in={(m.evidence or {}).get('source_id') for m in batch if isinstance(m.evidence, dict)}
+                                                   - {None}).values_list('pk', 'name'))
+    candidates = []
+    for m in batch:
+        source_id = (m.evidence or {}).get('source_id') if isinstance(m.evidence, dict) else None
+        name = correlation.split_name_version(names[source_id])[0] if source_id in names else m.matched_product
+        if js_libraries.is_library(name) or js_libraries.is_library(m.matched_product):
+            candidates.append((m, name if js_libraries.is_library(name) else m.matched_product))
+    hosts = {sub.pk: sub for sub in Subdomain.objects.filter(pk__in={m.subdomain_id for m, _ in candidates})
+             .select_related('target_domain').prefetch_related('ip_addresses__ports')}
+    pages, closed, by_reason, looked = {}, 0, {}, 0
+    for m, name in candidates:
+        if clock() - started > seconds:  # out of time: the next run starts at the first match this one did not look at
+            BackgroundCursor.objects.filter(lane='library_provenance').update(last_pk=m.pk - 1)
+            break
+        looked += 1
+        sub = hosts.get(m.subdomain_id)
+        if sub is None:
+            continue
+        if sub.pk not in pages:
+            pages[sub.pk] = js_libraries.HostLibraries.for_subdomain(sub)
+        reason, _hold = correlation.library_closure(m, pages[sub.pk], name=name)
+        if reason and correlation.close_invalid_correlation(m, reason):
+            closed += 1
+            kind = js_libraries.closure_kind(reason)
+            by_reason[kind] = by_reason.get(kind, 0) + 1
+    if closed:
+        logger.info('reconcile_library_provenance closed %d of %d library matches (%d open tech matches looked at): %s', closed, looked,
+                    len(batch), ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    return {'reviewed': len(batch), 'libraries': looked, 'closed': closed, 'closed_by_reason': by_reason}
 
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')
