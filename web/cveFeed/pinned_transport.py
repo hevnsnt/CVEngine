@@ -61,9 +61,6 @@ def open_socket(addresses, timeout, project=None, host=None, proxy=_AUTO):
     ``proxy`` is the choice a caller already made, None for a direct connection)."""
     if proxy is _AUTO:
         proxy = _proxy_for(addresses, host)
-    for _family, address in addresses[:1]:
-        # the opt-in skip list and the egress governor (cveFeed.local_egress): raises PortHeld, an OSError, for a held port; counts the attempt
-        local_egress.check_connect(address[1], address=address[0])
     deadline = time.monotonic() + timeout
     last_error = OSError('no probe address available')
     for family, address in addresses:
@@ -73,6 +70,9 @@ def open_socket(addresses, timeout, project=None, host=None, proxy=_AUTO):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('probe connection timed out')
+        # after the vetting, for the address really tried: the opt-in skip list and the egress governor (cveFeed.local_egress) raise
+        # PortHeld, an OSError, for a held port; otherwise the attempt is counted and, for a logged port, logged with this address
+        local_egress.check_connect(address[1], address=str(ip))
         if proxy is not None:
             try:
                 return egress_proxy.open_tunnel(proxy, str(ip), address[1], remaining)

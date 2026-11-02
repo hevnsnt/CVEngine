@@ -110,6 +110,22 @@ def any_scanner_for(project, kind, internal=False):
     return sentinel_broker.any_scanner_for(project, kind, internal)
 
 
+def offline_fallback(project, kind, internal=False):
+    """Whether a stage of ``kind`` runs here although ``project`` has a Sentinel for it, because every such Sentinel is offline (called once
+    no live one was found). Such a run is a local fallback like a task nobody claimed: it is counted for the warning
+    (``cveFeed.local_egress.note_fallback``), and the nmap and naabu stages put it under their hourly cap. A project that never had a Sentinel
+    for ``kind`` runs here as its normal mode: never counted, never capped. Never raises."""
+    from agentapi import sentinel_broker
+    try:
+        configured = bool(sentinel_broker.eligible_sentinels(project, kind, internal=internal))
+    except Exception:  # noqa: BLE001 - bookkeeping never changes where a stage runs
+        return False
+    if configured:
+        from cveFeed.local_egress import note_fallback
+        note_fallback(kind, getattr(project, 'pk', project))
+    return configured
+
+
 def _label(host, ips):
     host = (host or '').strip()
     if host:
@@ -490,6 +506,7 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
     the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
     run is already one host:port per call, locally or dispatched."""
     if not any_scanner_for(project, 'testssl'):
+        offline_fallback(project, 'testssl')
         return None
     target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
     result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
@@ -508,6 +525,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     nmap output), so that is the one function - local or dispatched - that ever turns the XML into a record. Never
     chunked: one address per task, like testssl."""
     if not any_scanner_for(project, 'nmap_udp'):
+        offline_fallback(project, 'nmap_udp')
         return None
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
@@ -525,7 +543,17 @@ def wrap_naabu_runner(project, scan, timeout=None):
     naabu's own JSON output already means) are never scanned locally too; anything beyond one chunk, or left over on a
     timeout, falls back to the real, unmodified ``naabu_scan.run_naabu``."""
     if not any_scanner_for(project, 'naabu'):
-        return None
+        if not offline_fallback(project, 'naabu'):
+            return None  # no Sentinel configured for naabu: local is this project's normal mode, discover uses run_naabu as before
+
+        def offline_runner(ips):  # every Sentinel that could take it is offline: a local fallback, under the hourly cap
+            from cveFeed.local_egress import admit_fallback
+            from cveFeed.naabu_scan import PortMap, run_naabu
+            ips = list(ips)
+            if admit_fallback('naabu', getattr(project, 'pk', project)):
+                return run_naabu(ips)
+            return PortMap({}, deferred=ips)
+        return offline_runner
 
     def runner(ips):
         from cveFeed.naabu_scan import run_naabu
@@ -694,6 +722,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
+        offline_fallback(project, kind)
         return stream_nuclei
 
     def stream(targets_file, **kwargs):
@@ -760,6 +789,7 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
+        offline_fallback(project, 'wpscan')
         return run_wpscan_process
 
     def runner(url, token):

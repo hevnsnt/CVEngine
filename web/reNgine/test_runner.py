@@ -40,10 +40,45 @@ def isolate_redis(worker_id):
         redis.Redis.from_url(url).flushdb()
 
 
+# The egress governor and the local fallback caps (cveFeed.local_egress) keep shared state in Redis, which a test database does not roll back:
+# a bucket drained by one test would change the nmap and naabu command lines another test asserts. Outside tests.test_local_egress (which sets
+# what it needs) they are off, and that module's Redis keys are cleared before every test.
+EGRESS_TEST_ENV = {'CVENGINE_LOCAL_PORT_BUDGETS': '', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '0', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR': '0'}
+
+
+def clear_egress_state():
+    try:
+        from reNgine import resources
+        client = resources.redis_client()
+        if client is None:
+            return
+        keys = list(client.scan_iter('cvengine:egress:*', count=1000))
+        if keys:
+            client.delete(*keys)
+    except Exception:  # noqa: BLE001 - a test without Redis has no egress state to clear
+        pass
+
+
+def hermetic_egress():
+    """Pin the egress settings off for the test run and clear the egress Redis keys before each test (Django's SimpleTestCase and its subclasses)."""
+    os.environ.update(EGRESS_TEST_ENV)
+    from django.test import SimpleTestCase
+    if getattr(SimpleTestCase, '_egress_hermetic', False):
+        return
+    original = SimpleTestCase._setup_and_call
+
+    def setup_and_call(self, result, debug=False):
+        clear_egress_state()
+        return original(self, result, debug)
+    SimpleTestCase._setup_and_call = setup_and_call
+    SimpleTestCase._egress_hermetic = True
+
+
 def _init_isolated_worker(counter, *args, **kwargs):
     from django.test import runner
     _init_worker(counter, *args, **kwargs)
     isolate_redis(runner._worker_id)
+    hermetic_egress()
 
 
 class IsolatedRedisParallelSuite(ParallelTestSuite):
@@ -58,3 +93,7 @@ class IsolatedRedisRunner(DiscoverRunner):
         if self.parallel > MAX_WORKERS:
             print(f'--parallel {self.parallel} lowered to {MAX_WORKERS}: each worker needs two of Redis\'s 16 databases.')
             self.parallel = MAX_WORKERS
+
+    def setup_test_environment(self, **kwargs):
+        super().setup_test_environment(**kwargs)
+        hermetic_egress()

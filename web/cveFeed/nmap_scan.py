@@ -512,6 +512,21 @@ def _planned_ports(local_ports, flags):
     return ports
 
 
+def _keep_out(targets, plan_of, held):
+    """``{address: budgeted ports this pass must not probe on it}``: the ports the governor held back, and every budgeted port its own plan does
+    not include (it was not charged for one, so the chunk's union must not bring one in). Empty when no port has a budget."""
+    from cveFeed import local_egress
+    rules = set(local_egress.budgets())
+    if not rules:
+        return held
+    out = {}
+    for ip in targets:
+        keep = set(held.get(ip, ())) | (rules - set(plan_of(ip) or ()))
+        if keep:
+            out[ip] = frozenset(keep)
+    return out
+
+
 def _groups(targets, topped_up, held):
     """``(addresses, os_probe, held ports)`` groups of a pass, in a stable order: the plain and the topped-up addresses as before, each split
     by the ports the governor held back for them (none in the common case, which is then exactly the two groups of before)."""
@@ -583,12 +598,14 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                 with local_egress.context(kind='nmap', project=project, org_id=org_id, scan_id=scan.id):
                     effective_naabu_runner = naabu_runner
                     sentinel_targets, sentinel_totals = targets, {'ports': 0, 'hosts_with_os': 0}
-                    had_sentinel = False
+                    had_sentinel = offline = False
                     if dispatch:
                         from agentapi import sentinel_dispatch
                         if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
                             effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
                         had_sentinel = sentinel_dispatch.any_scanner_for(domain.project, 'nmap')
+                        # a project whose nmap Sentinels are all offline runs this stage here: a local fallback too (counted and capped)
+                        offline = not had_sentinel and sentinel_dispatch.offline_fallback(domain.project, 'nmap')
                     ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
                     local_ports = ports_by_ip
                     if dispatch:
@@ -602,11 +619,15 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                     # Addresses no Sentinel reported although one was eligible fall back to this server: at most so many such runs an hour
                     # (cveFeed.local_egress.admit_fallback); over it they are not scanned here and stay due. A top-up of a Sentinel's pass is not one.
                     fell_back = [ip for ip in sentinel_targets if ip not in topped_up]
-                    if had_sentinel and fell_back and not local_egress.admit_fallback('nmap', project):
+                    if (had_sentinel or offline) and fell_back and not local_egress.admit_fallback('nmap', project):
                         deferred, sentinel_targets = fell_back, [ip for ip in sentinel_targets if ip in topped_up]
-                    # The egress governor (cveFeed.local_egress): a budgeted port (25 by default) over its hourly budget is left out of this
-                    # pass for the addresses beyond the budget and probed later by the paced catch-up pass. Within budget nothing changes.
-                    held = local_egress.plan(sentinel_targets, _planned_ports(local_ports, flags), 'nmap')
+                    # The egress governor (cveFeed.local_egress): a budgeted port (25 by default) is charged for every address whose own plan
+                    # probes it; over the hourly budget it is left out of this pass for the addresses beyond the budget and probed later by the
+                    # paced catch-up pass. nmap scans one -p list per chunk (the union of the chunk's naabu ports, or the full list when one
+                    # address has no naabu answer), so an address that was not charged for a budgeted port goes in a group with that port
+                    # excluded: a chunk neighbour's open port 25 never makes nmap probe port 25 on an address nobody paid for.
+                    plan_of = _planned_ports(local_ports, flags)
+                    held = _keep_out(sentinel_targets, plan_of, local_egress.plan(sentinel_targets, plan_of, 'nmap'))
                     fast = {'ports': 0, 'hosts_with_os': 0}
                     for group, os_probe, keep in _groups(sentinel_targets, topped_up, held):
                         group_flags = local_egress.nmap_exclude(flags, keep) if keep else flags

@@ -4,6 +4,8 @@ One record per local outbound connection (or planned probe of an external tool) 
 destination address and port, whether it was sent, paced or skipped, whether the record is exact or estimated, and the source (tool, project,
 scan). It belongs to the whole instance, not to a project, so only an App Admin may read it; anyone else gets 403. Read-only.
 """
+import math
+import re
 from datetime import datetime, timezone
 
 from agentapi.services import ApiError
@@ -16,31 +18,42 @@ def _admin(ctx):
         raise ApiError(403, ADMIN_ONLY)
 
 
+LATEST = 4102444800  # 2100-01-01: no record is newer, and a bound beyond it is a mistake, not a query
+CURSOR = re.compile(r'\d{1,15}-\d{1,10}')
+
+
 def _time(value, name):
-    """Epoch seconds from an ISO 8601 time or a number, or None."""
+    """Epoch seconds from an ISO 8601 time or a number, or None. Not a number, infinite, negative or past 2100: 400."""
     if value in (None, ''):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
-        pass
+        try:
+            parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        except ValueError:
+            raise ApiError(400, f'{name} must be an ISO 8601 time or epoch seconds') from None
+        number = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+    if not math.isfinite(number) or not 0 <= number <= LATEST:
+        raise ApiError(400, f'{name} must be a time between 1970 and 2100')
+    return number
+
+
+def _whole(value, name, low, high, default=None):
+    if value in (None, ''):
+        return default
     try:
-        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-    except ValueError:
-        raise ApiError(400, f'{name} must be an ISO 8601 time or epoch seconds') from None
-    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ApiError(400, f'{name} must be a whole number') from None
+    if not low <= number <= high:
+        raise ApiError(400, f'{name} must be from {low} to {high}')
+    return number
 
 
 def _filters(args):
     from dashboard.models import Project
-    port = args.get('port')
-    if port not in (None, ''):
-        try:
-            port = int(port)
-        except (TypeError, ValueError):
-            raise ApiError(400, 'port must be a number') from None
-    else:
-        port = None
+    port = _whole(args.get('port'), 'port', 1, 65535)
     project = None
     slug = args.get('project')
     if slug not in (None, ''):
@@ -60,11 +73,11 @@ def list_connections(ctx, args):
     100) and cursor (the ``next`` of the previous page)."""
     from cveFeed import local_egress
     _admin(ctx)
-    try:
-        limit = int(args.get('limit') or 100)
-    except (TypeError, ValueError):
-        raise ApiError(400, 'limit must be a number') from None
-    page = local_egress.connection_log(limit=limit, cursor=args.get('cursor') or None, **_filters(args))
+    limit = _whole(args.get('limit'), 'limit', 1, 1000, default=100)
+    cursor = args.get('cursor') or None
+    if cursor is not None and not CURSOR.fullmatch(str(cursor)):
+        raise ApiError(400, 'cursor must be the next value of a previous page')
+    page = local_egress.connection_log(limit=limit, cursor=cursor, **_filters(args))
     names = _slugs()
     for record in page['records']:
         record['project'] = names.get(record['project'], record['project'])
