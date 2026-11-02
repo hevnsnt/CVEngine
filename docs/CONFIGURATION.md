@@ -161,6 +161,7 @@ See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) for the enrollment 
 | `CVENGINE_INTEL_SOURCES` | all | A subset of `cisa_kev,euvd,vulncheck_kev,epss,exploit_db,metasploit`. |
 | `CVENGINE_VULNCHECK_API_KEY` | none | A free VulnCheck community key adds VulnCheck KEV. |
 | `CVENGINE_INTEL_IMPORT`, `_IMPORT_PER_RUN` | `kev,metasploit,epss,exploit_db`, `2000` | Which missing CVEs are imported from the CVE List, in order, and how many per hourly run (`0` imports none). |
+| `CVENGINE_RANGE_REPAIR_PER_RUN` | `200` | How many stored CVEs each hourly threat-intel run may re-read from the CVE List to repair their version ranges (0 to 5000; `0` turns the repair off). It walks the stored CVEs in id order and resumes where the last run stopped; it only reads a record for an entry imported from the CVE List by an older conversion or one whose block states no range. Ranges in cve.now's "unspecified", wildcard or comma shapes are rewritten locally with no request and do not count against this number (each run looks at the next 1,000 candidates). A changed entry is correlated again. `manage.py repair_cve_ranges [--limit N --passes N --reset]` runs it by hand. |
 | `CVENGINE_INTEL_DIR` | `/usr/src/scan_results/.threat-intel` | Where downloaded source files are cached. |
 | `CVENGINE_BOUNTY_CATALOGUE` | `1` | `0` stops all fetching of public bug bounty program data. |
 
