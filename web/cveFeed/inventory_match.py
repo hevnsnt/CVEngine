@@ -240,8 +240,9 @@ def _row(inv, sub, component, ver, cve, product, details, local, fix_lookup):
 
 def _add_evidence(external, now):
     """Put the host's own evidence on current external matches of the same CVE and product: the version is confirmed from the machine, so its
-    confidence is at least that of a host-reported version. Returns the ids of the matches that gained the host's evidence (hard evidence: a
-    version-only match turns fire with it, ``notify.fire_confirmed``)."""
+    confidence is at least that of a host-reported version. Returns the ids of the matches that were version-only before the host's evidence
+    reached them (``match_policy.is_version_only``, read before the write): the ones it may have turned fire (``notify.fire_confirmed``)."""
+    from cveFeed import match_policy
     from cveFeed.models import CVEMatch
     gained = []
     for matches in external.values():
@@ -249,8 +250,9 @@ def _add_evidence(external, now):
             evidence = {**(match.evidence or {}), 'host_reported': {k: row['evidence'][k] for k in ('inventory_id', 'reported_at', 'component', 'raw_version')
                                                                   if k in row['evidence']}}
             if evidence != (match.evidence or {}) or match.confidence < row['confidence']:
+                was_version_only = match_policy.is_version_only(match)
                 CVEMatch.objects.filter(pk=match.pk).update(evidence=evidence, confidence=max(match.confidence, row['confidence']), updated_at=now)
-                if not (match.evidence or {}).get('host_reported'):
+                if was_version_only:
                     gained.append(match.pk)
     return gained
 

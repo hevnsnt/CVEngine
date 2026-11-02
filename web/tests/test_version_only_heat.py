@@ -366,26 +366,50 @@ class StoredJqueryMatchTests(Fixture):
 		Triage.objects.filter(match=self.match).update(validation_status='hit')  # e.g. a hit adopted from a sibling row
 		before = snapshot_cache.revision()
 		with mock.patch('cveFeed.notify._send', return_value=True) as send:
-			scoring.evidence_arrived([self.match.pk])
-			scoring.evidence_arrived([self.match.pk])  # a second worker, or the same evidence again: no second page
+			scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])
+			scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])  # a second worker, or the same evidence again: no second page
 		self.assertEqual(send.call_count, 1)
-		self.assertIn('confirmed on the host, now fire-tier', send.call_args.args[0])
+		self.assertIn('1 CVE match confirmed, now fire-tier, on 1 host', send.call_args.args[0])
 		self.assertIn('CVE-2020-11023', send.call_args.args[0])
 		self.assertIsNotNone(CVEMatch.objects.get(pk=self.match.pk).fire_notified_at)
 		self.assertEqual(Subdomain.objects.get(pk=self.sub.pk).score, scoring.CVE_POINTS[FIRE])  # rescored at once
 		self.assertNotEqual(snapshot_cache.revision(), before)
 
-	def test_a_runzero_report_pages_the_match_it_turns_fire(self):
+	def test_a_runzero_report_pages_the_current_match_it_turns_fire_once(self):
 		from cveFeed import runzero_sync
-		port = CVEMatch.objects.create(cve_entry=self.entry, subdomain=self.sub, source='port', matched_product='jquery-port', matched_version='3.4.1',
-									   version_in_range=True, evidence={'source': 'port', 'port': 443})
-		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=port.pk)), SMOKE)
+		# the host scanned again (twice): each scan's row of it has its own copy of the match; only the current one is named and counted
+		rows = [self.sub]
+		for _ in range(2):
+			scan = type(self.scan).objects.create(domain=self.domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+			row = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=scan)
+			row.ip_addresses.add(self.ip)
+			rows.append(row)
+		ports = [CVEMatch.objects.create(cve_entry=self.entry, subdomain=row, source='port', matched_product='jquery-port', matched_version='3.4.1',
+										 version_in_range=True, evidence={'source': 'port', 'port': 443}) for row in rows]
+		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=ports[-1].pk)), SMOKE)
 		IpAddress.objects.filter(pk=self.ip.pk).update(fingerprint={'runzero': {'vulns': [{'cve': 'CVE-2020-11023', 'port': 443}]}})
 		with mock.patch('cveFeed.notify._send', return_value=True) as send:
-			self.assertEqual(runzero_sync._corroborate_matches(self.project, [IpAddress.objects.get(pk=self.ip.pk)]), 1)
+			self.assertEqual(runzero_sync._corroborate_matches(self.project, [IpAddress.objects.get(pk=self.ip.pk)]), 3)
 		self.assertEqual(send.call_count, 1)
-		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=port.pk)), FIRE)
-		self.assertIn('Fire CVE match CVE-2020-11023', Subdomain.objects.get(pk=self.sub.pk).score_detail[0]['label'])
+		self.assertIn('1 CVE match confirmed, now fire-tier, on 1 host', send.call_args.args[0])
+		self.assertEqual(CVEMatch.objects.filter(pk__in=[p.pk for p in ports], fire_notified_at__isnull=False).count(), 3)  # older copies marked too
+		self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry').get(pk=ports[-1].pk)), FIRE)
+		self.assertIn('Fire CVE match CVE-2020-11023', Subdomain.objects.get(pk=rows[-1].pk).score_detail[0]['label'])
+
+	def test_a_match_that_was_already_fire_is_not_paged_when_more_evidence_arrives(self):
+		from cveFeed import inventory_match, runzero_sync
+		# fire before (the distribution lists the package), never marked (a match from before 1.3.2): runZero adds evidence, nothing is paged
+		port = CVEMatch.objects.create(cve_entry=self.entry, subdomain=self.sub, source='port', matched_product='jquery-port', matched_version='3.4.1',
+									   version_in_range=True, evidence={'source': 'port', 'port': 443}, distro_status='vulnerable')
+		IpAddress.objects.filter(pk=self.ip.pk).update(fingerprint={'runzero': {'vulns': [{'cve': 'CVE-2020-11023', 'port': 443}]}})
+		CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+		match = CVEMatch.objects.select_related('cve_entry').get(pk=self.match.pk)
+		row = {'confidence': 0.9, 'evidence': {'inventory_id': 7, 'reported_at': '2026-11-01', 'component': 'jquery', 'raw_version': '3.4.1'}}
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			self.assertEqual(runzero_sync._corroborate_matches(self.project, [IpAddress.objects.get(pk=self.ip.pk)]), 1)
+			self.assertEqual(inventory_match._add_evidence({'k': [(match, row)]}, timezone.now()), [])
+		self.assertEqual(send.call_count, 0)
+		self.assertIsNone(CVEMatch.objects.get(pk=port.pk).fire_notified_at)
 
 	def test_the_hosts_own_report_pages_the_external_match_it_confirms(self):
 		from cveFeed import inventory_match
@@ -403,9 +427,18 @@ class StoredJqueryMatchTests(Fixture):
 		self.validate()
 		with mock.patch('cveFeed.notify._send', return_value=True) as send:
 			self.assertTrue(notify.fire_matches(since))
-			scoring.evidence_arrived([self.match.pk])
+			scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])
 			self.assertFalse(notify.fire_matches(since))
 		self.assertEqual(send.call_count, 1)
+
+	def test_a_match_another_worker_claimed_is_not_sent_again(self):
+		since = timezone.now() - timedelta(hours=1)
+		self.validate()
+		self.assertIsNotNone(notify._claim([self.match.pk]))  # a concurrent fire_confirmed got it first
+		self.assertIsNone(notify._claim([self.match.pk]))
+		with mock.patch('cveFeed.notify._send', return_value=True) as send:
+			self.assertFalse(notify.fire_matches(since))
+		self.assertEqual(send.call_count, 0)
 
 	def test_a_template_hit_is_left_to_template_hits(self):
 		CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
@@ -424,19 +457,19 @@ class StoredJqueryMatchTests(Fixture):
 				mock.patch('cveFeed.scoring.rescore_for_matches', wraps=scoring.rescore_for_matches) as rescore:
 			row = triage.track(CVEMatch.objects.filter(pk=twin.pk).select_related('cve_entry', 'subdomain__target_domain'))[0][0]
 		self.assertEqual((row.validation_status, row.carried_from), ('hit', self.match.pk))
-		self.assertEqual(send.call_count, 0)
+		self.assertEqual(send.call_count, 0)  # the finding is not new
 		self.assertTrue(rescore.called)
-		self.assertIsNotNone(CVEMatch.objects.get(pk=twin.pk).fire_notified_at)  # marked: the finding is not new
 
-	def test_a_hit_adopted_from_a_sibling_row_rescores_and_pages(self):
+	def test_a_hit_adopted_from_a_sibling_row_rescores_and_is_not_paged_again(self):
 		from cveFeed import validation
 		row = Triage.objects.get(match=self.match)
 		older = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain)
+		# the sibling's hit is a real template hit: it was paged by notify.template_hits when it was found
 		sibling_match = CVEMatch.objects.create(cve_entry=self.entry, subdomain=older, source='tech', matched_product='jquery-old', matched_version='3.4.1',
-												version_in_range=True, evidence={'source': 'tech'})
-		check = {'kind': 'http_head', 'label': 'version banner', 'display': 'curl -I', 'target': self.sub.name, 'service': 'validate-http-head',
-				 'asset': self.sub.name, 'params': {}}
-		step = {'kind': 'http_head', 'target': self.sub.name, 'result': 'hit', 'summary': 'the banner names the vulnerable build'}
+												version_in_range=True, evidence={'source': 'tech'}, template_result='vulnerable')
+		check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': self.sub.name,
+				 'service': 'validate-nuclei', 'asset': self.sub.name, 'params': {'template': 'x.yaml'}}
+		step = {'kind': 'nuclei_template', 'target': self.sub.name, 'result': 'hit', 'summary': 'the template matched (version)'}
 		Triage.objects.create(project=self.project, domain=self.domain, host=row.host, kind='cve_match', match=sibling_match, signature=row.signature,
 							  validation_status='hit', validation_steps=[step], validated_at=timezone.now())
 		with mock.patch('cveFeed.validation.plan_checks', return_value=([check], [])), \
@@ -446,7 +479,8 @@ class StoredJqueryMatchTests(Fixture):
 			stats = validation.run_validation(self.project.id, [row.pk], template_for=lambda cve: ('', ''))
 		self.assertEqual(stats['reused'], 1)
 		self.assertEqual(Triage.objects.get(pk=row.pk).validation_status, 'hit')
-		self.assertEqual(send.call_count, 1)
+		self.assertEqual(threat.match_heat(self.fresh()), FIRE)
+		self.assertEqual(send.call_count, 0)
 		self.assertEqual(Subdomain.objects.get(pk=self.sub.pk).score, scoring.CVE_POINTS[FIRE])  # rescored at once (verdict still uncertain: no AI bonus)
 
 	def test_the_kev_filter_finds_it_whatever_its_heat(self):
@@ -461,6 +495,12 @@ class StoredJqueryMatchTests(Fixture):
 		self.assertEqual((row['heat'], row['kev'], row['heat_capped']), (SMOKE, True, True))
 		with mock.patch.dict(os.environ, {ENV: 'fire'}):  # not capped: the tooltip must not say it shows below fire
 			self.assertFalse(services._finding_row('cve', services._finding_sources(self.project, {'kev': '1'})['cve'].get())['heat_capped'])
+		from django.contrib.auth.models import User
+		ctx = services.Ctx(user=User.objects.create_user('kev-root', password='x', is_superuser=True))
+		body = services.list_findings(ctx, self.project.slug, {'kev': '1'})
+		self.assertEqual((body['total'], body['counts']), (1, {'cve': 1, 'scanner': 0, 'hygiene': 0}))  # every chip has a count, zero included
+		self.assertEqual(services.list_findings(ctx, self.project.slug, {'kev': '1', 'type': 'hygiene'})['counts'], {'cve': 0, 'scanner': 0, 'hygiene': 0})
+		self.assertEqual(services.list_matches(ctx, self.project.slug, {'kev': '1'})['count'], 1)
 
 
 class RescoreOnCapChangeTests(SimpleTestCase):
@@ -474,12 +514,15 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 		store = SimpleNamespace(r=Redis())
 		with mock.patch('reNgine.resources.get_store', return_value=store), \
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async') as queue:
-			self.assertTrue(scoring.rescore_if_heat_cap_changed())  # the upgrade: nothing seen yet
+			# first sight (the upgrade, or a Redis with no volume after docker compose down/up): recorded, no forced full rescore
+			self.assertFalse(scoring.rescore_if_heat_cap_changed())
+			self.assertEqual(Redis.value, SMOKE)
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())  # a second worker starting
 			with mock.patch.dict(os.environ, {ENV: 'fire'}):
-				self.assertTrue(scoring.rescore_if_heat_cap_changed())
+				self.assertTrue(scoring.rescore_if_heat_cap_changed())  # the owner changed it
+				self.assertFalse(scoring.rescore_if_heat_cap_changed())
 			self.assertTrue(scoring.rescore_if_heat_cap_changed())  # back to smoke
-		self.assertEqual(queue.call_count, 3)
+		self.assertEqual(queue.call_count, 2)
 		self.assertEqual(queue.call_args.kwargs['kwargs'], {'force': True})  # past another rescore's hour-long claim
 
 	def test_a_refused_task_leaves_the_change_for_the_next_worker(self):

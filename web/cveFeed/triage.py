@@ -775,9 +775,9 @@ def _track(findings):
         scoring.rescore_for_matches(reset_matches)
     if carried_hits:
         # a rescan's match carried its predecessor's validation hit (hard evidence): the score and the snapshots follow. Not paged: the
-        # finding is not new, so the match is only marked as announced
+        # finding is not new
         from cveFeed import scoring
-        scoring.evidence_arrived(carried_hits, announce=False)
+        scoring.evidence_arrived(carried_hits)
     return pairs
 
 

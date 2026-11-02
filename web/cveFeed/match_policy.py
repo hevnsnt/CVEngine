@@ -175,7 +175,7 @@ def version_unknown_q(prefix=''):
 def _has_other_evidence(match):
     """A match with hard evidence that does not depend on a version: it stays whatever the sighting says."""
     return (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
-            or bool((match.evidence or {}).get('runzero')))
+            or evidence_flag(match.evidence, 'runzero'))
 
 
 def sighting_of(match):
@@ -215,7 +215,7 @@ def unworked(qs):
 
     from cveFeed.models import FindingComment, OnDemandValidation
     return (qs.filter(remediation_status='open', assignee__isnull=True).exclude(source='host')
-            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').exclude(evidence__has_key='runzero')
+            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').exclude(evidence_flag_q('runzero'))
             .exclude(ai_verdict='affected')
             .exclude(Exists(FindingComment.objects.filter(finding_kind='match', finding_id=OuterRef('pk'))))
             .exclude(Exists(OnDemandValidation.objects.filter(match=OuterRef('pk'), source='manual').exclude(status='running'))))
@@ -237,7 +237,7 @@ def closable(qs):
     """Open, unworked, correlated matches that carry no evidence beyond a name (``unworked``, and not a branch-unlisted or unbounded KEV
     candidate, which are evidence by policy). A row already ruled out (by an earlier pass or by the AI) is left alone."""
     return (unworked(qs.filter(source__in=('tech', 'port')))
-            .exclude(evidence__has_key='branch_unlisted').exclude(evidence__has_key='unbounded')
+            .exclude(evidence_flag_q('branch_unlisted')).exclude(evidence_flag_q('unbounded'))
             .exclude(ai_verdict='not_affected'))
 
 

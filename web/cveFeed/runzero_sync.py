@@ -138,25 +138,28 @@ def _store(ip, block):
 def _corroborate_matches(project, ips):
     """Raise the confidence of the project's existing port-based CVE matches that runZero also reports, once each. Matches the AI
     ruled out or the distribution patched are left alone, and ``ai_verdict`` is never touched: this is evidence, not a verdict."""
-    from cveFeed import scoring
+    from cveFeed import match_policy, scoring
     from cveFeed.models import CVEMatch
-    gained = []
+    gained, turned = [], []
     for ip in ips:
         cves = {v['cve'] for v in ((ip.fingerprint or {}).get('runzero') or {}).get('vulns') or []}
         if not cves:
             continue
         matches = CVEMatch.objects.filter(subdomain__target_domain__project=project, subdomain__ip_addresses=ip, source='port',
                                           cve_entry__cve_id__in=cves).exclude(ai_verdict='not_affected').exclude(distro_status='patched')
-        for match in matches.select_related('cve_entry').distinct():
+        for match in matches.select_related('cve_entry', 'triage').distinct():
             evidence = dict(match.evidence or {})
             if evidence.get('runzero') or match.cve_entry.cve_id not in runzero.reported_cves(ip, evidence.get('port')):
                 continue
+            was_version_only = match_policy.is_version_only(match)  # read before the write: only a real smoke-to-fire change is paged
             match.confidence, match.evidence = runzero.boosted(match.confidence), {**evidence, 'runzero': True, 'confidence_before': match.confidence}
             match.save(update_fields=['confidence', 'evidence', 'updated_at'])
             gained.append(match.pk)
-    # a runZero report is hard evidence (match_policy.has_hard_evidence): a version-only match may have turned fire, so its host is rescored,
-    # the snapshots re-read and the match paged once
-    scoring.evidence_arrived(gained)
+            if was_version_only:
+                turned.append(match.pk)
+    # a runZero report is hard evidence (match_policy.has_hard_evidence): the hosts are rescored, the snapshots re-read, and a match that
+    # was version-only and is fire now is paged once
+    scoring.evidence_arrived(gained, confirmed=turned)
     return len(gained)
 
 

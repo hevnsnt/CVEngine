@@ -254,11 +254,12 @@ HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the version-only cap 
 
 
 def rescore_if_heat_cap_changed():
-    """Queue one full rescore when the version-only cap (``threat.version_only_max_heat``) differs from the one last seen: after the
-    upgrade that introduced it (stored scores still count a version-only KEV match as fire) or after the owner changed
-    CVENGINE_VERSION_ONLY_MAX_HEAT. Heat itself needs nothing (it is computed when read); a score is stored, so it follows here, or at the
-    next daily pass. One GETSET, so of several workers starting together only the first queues it (and the value goes back if the broker
-    refuses the task, so the next worker start tries again). The rescore it queues runs even when another full rescore holds the hour-long
+    """Queue one full rescore when the owner changed CVENGINE_VERSION_ONLY_MAX_HEAT: the cap differs from the one last recorded. Heat itself
+    needs nothing (it is computed when read); a score is stored, so it follows here, or at the next daily pass. The first time a cap is
+    seen (the upgrade that introduced it, or a Redis without a volume that came back empty after ``docker compose down``) it is only
+    recorded: a forced rescore of every host on each restart would cost far more than scores that catch up at the daily pass. One GETSET,
+    so of several workers starting together only the first queues it (and the value goes back if the broker refuses the task, so the next
+    worker start tries again). The rescore it queues runs even when another full rescore holds the hour-long
     sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
     the old cap until the next day. Returns whether it queued. Never raises."""
     from cveFeed.threat import version_only_max_heat
@@ -269,7 +270,7 @@ def rescore_if_heat_cap_changed():
             return False
         cap = version_only_max_heat()
         previous = client.getset(HEAT_CAP_KEY, cap)
-        if previous == cap:
+        if previous is None or previous == cap:
             return False
         from cveFeed.tasks import rescore_all_hosts
         try:
@@ -330,12 +331,13 @@ def rescore_subdomain_ids(subdomain_ids):
         logger.exception('could not rescore after a verdict reset')
 
 
-def evidence_arrived(match_ids, announce=True):
+def evidence_arrived(match_ids, confirmed=()):
     """Hard evidence (``match_policy.has_hard_evidence``) just reached these CVE matches without a template hit: the host's inventory report
     (``inventory_match``), runZero (``runzero_sync``), or a validation hit recorded, adopted from a sibling row or carried to a rescan's match
-    (``validation``, ``triage``). A version-only match may have turned fire with it, and heat is read live but the score is stored and the
-    dashboards and the graph serve a snapshot: rescore the hosts, make every snapshot re-read (``bump_stats_revision``) and page the matches
-    that turned fire (``notify.fire_confirmed``; ``announce=False`` only marks them). The one place every such path calls. Never raises."""
+    (``validation``, ``triage``). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
+    hosts and make every snapshot re-read (``bump_stats_revision``). ``confirmed`` are the matches among them that were version-only just
+    before the write (the caller checked, before it wrote): those that are fire now are paged once (``notify.fire_confirmed``). A hit adopted
+    from a sibling or carried to a rescan pages nothing: the finding and its hit were announced already. Never raises."""
     ids = sorted({int(i) for i in match_ids if i})
     if not ids:
         return
@@ -346,7 +348,8 @@ def evidence_arrived(match_ids, announce=True):
         for start in range(0, len(ids), CHUNK):
             rescore_for_matches(CVEMatch.objects.filter(pk__in=ids[start:start + CHUNK]).select_related('subdomain__target_domain'))
         bump_stats_revision()
-        notify.fire_confirmed(ids, announce=announce)
+        if confirmed:
+            notify.fire_confirmed(confirmed)
     except Exception:  # noqa: BLE001 - the evidence is recorded; the score, snapshots and message follow at the next pass
         logger.exception('could not follow up new evidence on %d CVE matches', len(ids))
 

@@ -105,7 +105,6 @@ def fire_matches(since, scan=None, cve_ids=None):
     distribution has patched are left out."""
     try:
         from django.db.models import Q
-        from django.utils import timezone
 
         from cveFeed import match_policy
         from cveFeed.models import CVEEntry, CVEMatch
@@ -121,14 +120,13 @@ def fire_matches(since, scan=None, cve_ids=None):
         # and fire on the host: a version-only match shows smoke by default (threat.version_only_max_heat), so it is not paged as fire;
         # when evidence later makes it fire it is paged by ``template_hits`` (a template hit) or ``fire_confirmed`` (anything else)
         rows = rows.annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).filter(fire_notified_at__isnull=True)
-        total = rows.count()
-        if not total:
+        # each match is paged as fire once (a guarded claim: what a concurrent call claimed first is not counted or sent here)
+        claimed = _claim(rows.values_list('pk', flat=True)[:MAX_MARK])
+        if claimed is None:
             return False
-        # each match is paged as fire once: ``fire_confirmed`` never announces these again when more evidence reaches them
-        ids = list(rows.values_list('pk', flat=True)[:MAX_MARK])
-        hosts = rows.values('subdomain_id').distinct().count()
-        sample = list(rows.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
-        CVEMatch.objects.filter(pk__in=ids).update(fire_notified_at=timezone.now())
+        total = claimed.count()
+        hosts = claimed.values('subdomain_id').distinct().count()
+        sample = list(claimed.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
         where = f' in {_name(scan.domain.name)}' if scan is not None else ''
         text = (f'CVEngine: {total} new fire-tier CVE match{"es" if total != 1 else ""} on {hosts} host{"s" if hosts != 1 else ""}'
                 f'{where}: {_listing([(_name(c), _name(h)) for c, h in sample], total)}')
@@ -138,15 +136,17 @@ def fire_matches(since, scan=None, cve_ids=None):
         return False
 
 
-def fire_confirmed(match_ids, announce=True):
-    """One message for the CVE matches that hard evidence just turned fire on the host (``threat.match_heat``): a version-only match is smoke,
-    so it was not paged when it was made, and it is paged here when the host's inventory report, runZero or one of cvENGINE's checks
-    confirms it (``scoring.evidence_arrived``). A template hit is announced by ``template_hits`` and is left out here. Each match is paged
-    as fire once (``CVEMatch.fire_notified_at``, claimed by a guarded UPDATE, so two workers never both send it); ``announce=False`` only
-    marks them (a rescan's match that carried an earlier row's validation: the finding is not new). Never raises."""
-    try:
-        from django.utils import timezone
+def fire_confirmed(match_ids):
+    """One message for the CVE matches that hard evidence just turned fire on the host (``threat.match_heat``). ``match_ids`` are only the
+    matches that were version-only (smoke at most) just before the evidence was written: the caller checks that before its write
+    (``scoring.evidence_arrived``), so a match that was already fire (a distribution listing, a template hit) is never paged again
+    because more evidence reached it. A template hit is announced by ``template_hits`` and is left out here.
 
+    Each match is paged as fire once: ``CVEMatch.fire_notified_at`` is claimed by a guarded UPDATE (WHERE it is NULL, one ``now``), so two
+    workers never both send it. Copies of the finding on older scans' host rows are claimed too but never announced: only the current
+    inventory's rows (``latest_scan_q``) are counted and named, and hosts are counted by name. Never raises."""
+    try:
+        from cveFeed.correlation import latest_scan_q
         from cveFeed.models import CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, match_heat_rank_expr
         ids = sorted({int(i) for i in match_ids if i})[:MAX_MARK]
@@ -155,22 +155,36 @@ def fire_confirmed(match_ids, announce=True):
         fire = list(CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).exclude(template_result='vulnerable')
                     .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
                     .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True))
-        if not fire:
+        claimed = _claim(fire)
+        if claimed is None:
             return False
-        now = timezone.now()
-        CVEMatch.objects.filter(pk__in=fire, fire_notified_at__isnull=True).update(fire_notified_at=now)
-        claimed = CVEMatch.objects.filter(pk__in=fire, fire_notified_at=now)
-        total = claimed.count()
-        if not total or not announce:
+        current = claimed.filter(latest_scan_q('subdomain__'))
+        total = current.count()
+        if not total:
             return False
-        sample = list(claimed.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
-        hosts = claimed.values('subdomain_id').distinct().count()
-        text = (f'CVEngine: {total} CVE match{"es" if total != 1 else ""} confirmed on the host, now fire-tier, on {hosts} '
+        sample = list(current.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
+        hosts = current.values('subdomain__name').distinct().count()
+        text = (f'CVEngine: {total} CVE match{"es" if total != 1 else ""} confirmed, now fire-tier, on {hosts} '
                 f'host{"s" if hosts != 1 else ""}: {_listing([(_name(c), _name(h)) for c, h in sample], total)}')
         return _send(text, 'send_vuln_notif')
     except Exception as exc:  # noqa: BLE001
         logger.warning('fire confirmation notification failed (%s)', type(exc).__name__)
         return False
+
+
+def _claim(ids):
+    """Mark these CVE matches as paged as fire, guarded (only rows not marked yet, all with one ``now``), and return the queryset of the
+    rows THIS call marked (None when it marked none): what another worker claimed first is never sent twice."""
+    from django.utils import timezone
+
+    from cveFeed.models import CVEMatch
+    ids = list(ids)
+    if not ids:
+        return None
+    now = timezone.now()
+    if not CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).update(fire_notified_at=now):
+        return None
+    return CVEMatch.objects.filter(pk__in=ids, fire_notified_at=now)
 
 
 def template_hits(hits, scan=None):
