@@ -54,6 +54,7 @@ CONFIRMED_QOD = 95  # the lowest QoD of a hard type when a result carries no typ
 HARD_QOD_TYPES = frozenset({'exploit', 'remote_vul', 'remote_app', 'remote_active', 'package', 'registry'})
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
 DEFAULT_MAX_HOSTS = 1  # hosts in one task: a run is slow (hours per host), so one host per task keeps what a stop or a failure costs to one host
+MAX_HOSTS_PER_TASK = 16  # the most CVENGINE_OPENVAS_MAX_HOSTS may give: the Sentinel client refuses an OpenVAS task of more hosts (client/openvas.py MAX_HOSTS)
 DEFAULT_MAX_HOURS = 24  # the time budget PER HOST: a task of n hosts gets n times this; when it runs out, what was found so far is kept
 DEFAULT_MAX_CHECKS = 4  # NVTs run at a time against a host (Greenbone's own default); CVENGINE_OPENVAS_MAX_CHECKS
 DEFAULT_MAX_INTERRUPTS = 3  # tasks in a row that gvmd reports Interrupted for a host before it waits three days; CVENGINE_OPENVAS_MAX_INTERRUPTS
@@ -96,8 +97,20 @@ def _env_int(name, default, low=1):
         return default
 
 
+_warned_max_hosts = set()  # the values of CVENGINE_OPENVAS_MAX_HOSTS already warned about, so a tick every 15 minutes does not repeat it
+
+
 def max_hosts():
-    return _env_int('CVENGINE_OPENVAS_MAX_HOSTS', DEFAULT_MAX_HOSTS)
+    """Hosts in one task (``CVENGINE_OPENVAS_MAX_HOSTS``, 1 to ``MAX_HOSTS_PER_TASK``). The same batch goes to gvmd here or to a Sentinel, and a
+    Sentinel refuses a task of more than 16 hosts, so a larger value is held to 16 (with a warning) rather than dispatching tasks that fail."""
+    value = _env_int('CVENGINE_OPENVAS_MAX_HOSTS', DEFAULT_MAX_HOSTS)
+    if value > MAX_HOSTS_PER_TASK:
+        if value not in _warned_max_hosts and len(_warned_max_hosts) < 100:
+            _warned_max_hosts.add(value)
+            logger.warning('CVENGINE_OPENVAS_MAX_HOSTS=%r is above %s, the most a Sentinel takes in one OpenVAS task: using %s',
+                           value, MAX_HOSTS_PER_TASK, MAX_HOSTS_PER_TASK)
+        value = MAX_HOSTS_PER_TASK
+    return value
 
 
 def max_hours():
@@ -1157,6 +1170,7 @@ def dispatch_to_sentinel(link, batch):
     from agentapi.models import SentinelTask
     from cveFeed import activity
     from cveFeed.models import OpenvasRun
+    batch = batch[:MAX_HOSTS_PER_TASK]  # a Sentinel refuses more; ``max_hosts`` already holds a batch to this, and the rest would stay due for the next tick
     hosts = {ip: host for host, ip, _domain in batch}
     task = SentinelTask.objects.create(project=link.project, kind='openvas', ips=sorted(hosts), host=', '.join(sorted(set(hosts.values())))[:500],
                                        target={'hosts': hosts, 'excluded_families': list(EXCLUDED_FAMILIES), 'max_hours': budget_hours(len(hosts)),
