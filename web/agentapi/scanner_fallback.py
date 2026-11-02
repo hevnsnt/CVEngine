@@ -22,10 +22,13 @@ logger = logging.getLogger(__name__)
 
 # Why a stage ran (or was allowed to run) locally, one row per task (or chunk task) that runs here. ``over_chunk`` is the one beyond the five a
 # dispatched task can name: a chunk of a stage that was never sent, because an earlier chunk of the same stage went unclaimed and the stage stopped
-# sending (``sentinel_dispatch.dispatch_many``), so it runs here. ``disabled_everywhere`` is a ``no_scanner`` with a cause: a
+# sending (``sentinel_dispatch.dispatch_many``), so it runs here (a chunk never sent because no live Sentinel was left is ``no_scanner``).
+# ``partial_result`` is the fingerprinting stage's leftover: a Sentinel finished the chunk but reported no host row for some addresses, or not
+# every port the port sweep found, and those run here (one row per stage, ``sentinel_dispatch.try_nmap``). ``disabled_everywhere`` is a ``no_scanner`` with a cause: a
 # live Sentinel has the kind and an administrator's capability policy (or its machine) keeps it off every one (``sentinel_policy``). The column is a plain
 # ``CharField(24)`` with no ``choices``, so a new value needs no migration.
-REASONS = ('no_scanner', 'not_claimed_in_time', 'slot_busy', 'failed_then_local', 'completion_timeout', 'over_chunk', 'disabled_everywhere')
+REASONS = ('no_scanner', 'not_claimed_in_time', 'slot_busy', 'failed_then_local', 'completion_timeout', 'over_chunk', 'partial_result',
+           'disabled_everywhere')
 RETENTION_DAYS = 30  # rows older than this are deleted by the weekly maintenance
 SOAK_HOURS = 72  # a kind is ready to delete after this many hours with no fallback (the maintainer's gate, with the fake-scanner tests)
 STATUS_DAYS = 7  # the window of the system status block

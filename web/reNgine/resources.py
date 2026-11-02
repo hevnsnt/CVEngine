@@ -73,10 +73,12 @@ class MemoryBusy(RuntimeError):
 class ScannerUnavailable(MemoryBusy):
     """The scan work needs a Sentinel and none could take it, and this kind may not run on this server (``CVENGINE_LOCAL_FALLBACK``). It is
     a ``MemoryBusy`` on purpose: every stage already treats that as "not the target's failure, it stays due", which is what waiting for
-    a scanner to come back must look like (nothing marked failed, nothing scanned locally)."""
+    a scanner to come back must look like (nothing marked failed, nothing scanned locally). ``done`` is what a Sentinel did finish of the
+    stage before it had to wait (the nmap stage's addresses a Sentinel fully covered, ``sentinel_dispatch.try_nmap``): the caller may mark
+    those done, and only the rest stays due. Empty everywhere else."""
 
     def __init__(self, kind, why=''):
-        self.kind, self.why = kind, why
+        self.kind, self.why, self.done = kind, why, []
         super().__init__(f'no scanner could run {kind} work{": " + why if why else ""}; it stays due until one can')
 
 

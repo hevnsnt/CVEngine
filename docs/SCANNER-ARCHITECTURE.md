@@ -158,7 +158,7 @@ the local run is allowed" is made, and when `CVENGINE_LOCAL_FALLBACK` allows the
 kind, project and a reason, never a target or an address. A kind that is off the list waits instead and records nothing, as does a Sentinel that answers and
 an internal task (which never had a local run). The reasons are `no_scanner` (nothing live could take it, including the last Sentinel leaving while the task
 queued), `not_claimed_in_time`, `slot_busy` (every slot stayed in use until the queue budget ran out), `failed_then_local`, `completion_timeout` (claimed, never
-reported), `over_chunk` (a chunk of an nmap, naabu or nuclei stage that was never sent to a Sentinel because an earlier chunk of the same stage went unclaimed, so the stage stopped sending and it runs here; each chunk that runs here is one row, every chunk of a stage now goes to a Sentinel side by side through `dispatch_many`) and `disabled_everywhere` (a `no_scanner` with a cause: a live Sentinel has the kind and the capability policy keeps it off every one; the column is a plain `CharField(24)` with no `choices`, so it needed no migration). Recording is one INSERT in its own savepoint, catches every error and logs the
+reported), `over_chunk` (a chunk of an nmap, naabu or nuclei stage that was never sent to a Sentinel because an earlier chunk of the same stage went unclaimed, so the stage stopped sending and it runs here; each chunk that runs here is one row, every chunk of a stage now goes to a Sentinel side by side through `dispatch_many`; a chunk never sent because no live Sentinel was left, including the last one leaving while an earlier chunk queued, is `no_scanner`), `partial_result` (the nmap stage's leftover: a Sentinel finished the chunk but reported no host row for some addresses, or did not report every port naabu found on one, so those are fingerprinted here; one row per stage) and `disabled_everywhere` (a `no_scanner` with a cause: a live Sentinel has the kind and the capability policy keeps it off every one; the column is a plain `CharField(24)` with no `choices`, so it needed no migration). Recording is one INSERT in its own savepoint, catches every error and logs the
 first failure of a process once; it can never fail or slow a scan. The weekly maintenance prunes rows older than 30 days.
 
 `python manage.py scanner_fallbacks --days N [--kind K]` prints the counts by kind and reason and when each kind last ran locally. The system status carries
@@ -166,8 +166,8 @@ first failure of a process once; it can never fail or slow a scan. The weekly ma
 `SOAK_HOURS` (72) hours and a live built-in scanner that declares the kind; anyone else sees the counts only. That is the gate, together with the fake-scanner
 tests: a kind in `ready_to_delete` has soaked and may have its local path deleted. Two things it does not see: the clock starts when the table is first deployed
 (an empty table says nothing about the days before it, so read the soak from the upgrade on), and the by-design local runs that are not a fallback from a
-Sentinel (a signed-in nuclei pass, and the remaining targets of an nmap chunk a Sentinel did not report) are not recorded, so those paths need their own
-migration before their kind is deleted.
+Sentinel (a signed-in nuclei pass) are not recorded, so that path needs its own migration before its kind is deleted. The addresses of an nmap chunk a
+Sentinel finished without covering them are a fallback like any other (`partial_result`): recorded when nmap may run here, left due when it may not.
 
 ## Risks
 
@@ -214,8 +214,9 @@ the card of the built-in scanner shows a Built-in chip and no Update now button.
 Unset (or `all`), every kind may still run on this server when no Sentinel takes it: nothing changes. `none` or a comma list of kinds
 (`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
 `resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
-nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released), the stage is not marked
-failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
+nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released; the one exception is the nmap fast scan,
+which marks `done` an address a Sentinel already fingerprinted in full, so only the rest stay due, an address a Sentinel finished without a host row
+or without every port naabu found among them: it is never fingerprinted here), the stage is not marked failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
 fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl and
 UDP. Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
 signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
