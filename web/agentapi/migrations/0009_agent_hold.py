@@ -11,6 +11,7 @@
 Additive and reversible (the reverse drops the three columns)."""
 import django.db.models.deletion
 from django.db import migrations, models
+from django.db.models.functions import Coalesce
 
 NOTE = 'another agent of this user is suspended or revoked; an administrator must reinstate this one'  # agent_broker.INHERITED_SUSPENSION_NOTE
 
@@ -25,9 +26,18 @@ def note_for(culprit):
 
 
 def backfill(apps, schema_editor):
+    # held_by is DEFERRABLE INITIALLY DEFERRED and was added in this transaction: a row updated more than once here (or given a held_by) queues
+    # a foreign key check until commit, and PostgreSQL then refuses the CREATE INDEX that Django runs at the end of this migration ("cannot
+    # CREATE INDEX ... because it has pending trigger events"). Check each statement's keys as it ends instead; this lasts for this
+    # migration's transaction only. (No schema editor: called directly, outside a migration.)
+    if schema_editor is not None and schema_editor.connection.vendor == 'postgresql':
+        schema_editor.execute('SET CONSTRAINTS ALL IMMEDIATE')
     Agent = apps.get_model('agentapi', 'Agent')
-    Agent.objects.filter(status__in=('suspended', 'revoked'), status_changed_at__isnull=True).update(status_changed_at=models.F('updated_at'))
-    Agent.objects.filter(status='suspended', status_note=NOTE).update(status_inherited=True)
+    # one update per row: date the decisions not dated yet, and mark the agents the old rule held back (all of them suspended)
+    held_back = models.Q(status='suspended', status_note=NOTE)
+    Agent.objects.filter(models.Q(status__in=('suspended', 'revoked'), status_changed_at__isnull=True) | held_back).update(
+        status_changed_at=Coalesce('status_changed_at', 'updated_at'),
+        status_inherited=models.Case(models.When(held_back, then=models.Value(True)), default=models.F('status_inherited')))
     # name the agent that most likely caused each of them: the user's most recent agent an administrator suspended or revoked (the note then
     # says which one and what to do, as a new hold does). None left (deleted or reinstated since): the old note stays.
     for held in Agent.objects.filter(status='suspended', status_inherited=True, held_by__isnull=True).select_related('token'):

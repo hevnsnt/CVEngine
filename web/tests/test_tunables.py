@@ -608,9 +608,12 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn(f'**{g.title}**', text, g.id)
 
     def test_the_changelog_mentions_it_in_its_newest_section(self):
-        # The newest section is '## Unreleased' between releases and '## vX.Y.Z (date)' once a release is cut, so read whichever comes first.
+        # The newest released section ('## vX.Y.Z (date)'): an '## Unreleased' section above it (the fixes collected for the next release) is
+        # skipped, so a fix noted there does not hide the release that shipped this.
         changelog = (ROOT / 'CHANGELOG.md').read_text()
-        newest = changelog.split('\n## ', 1)[1].split('\n## ', 1)[0]
+        sections = changelog.split('\n## ')[1:]
+        newest = next(s for s in sections if not s.startswith('Unreleased')).split('\n## ', 1)[0]
+        self.assertRegex(newest, r'^v\d')
         self.assertIn('configMaxxing', newest)
         self.assertIn('AI spend', newest)
 
