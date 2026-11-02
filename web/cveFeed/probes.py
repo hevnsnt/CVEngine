@@ -632,7 +632,8 @@ def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep):
     (tests). Returns ``{'pages': [...]}``, one per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were
     read), ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered`` or ``refused`` (the gate refused the
     address); a read page carries ``records`` (``js_libraries.resolve``), ``skipped`` (scripts it wanted and did not read, with why),
-    ``truncated`` (scripts read only up to the size cap),
+    ``truncated`` (scripts read only up to the size cap), ``read_whole`` (scripts whose file was read whole), ``capped`` (the parse could
+    not see every script), ``inline`` (``[library key, version]`` inline scripts state), ``inline_unread`` (inline code no rule reads),
     ``scripts`` (how many scripts with a source the page has) and ``lazy`` (libraries the page adds at run time)."""
     host = sub.name.lower().rstrip('.')
     own = {host}
@@ -666,16 +667,23 @@ def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep):
         elif 300 <= status < 400:
             page.update(outcome='redirect', location=urljoin(final, (first.get('location') or '').strip())[:500])
         elif 200 <= status < 300 and not served_by(first, base):
-            page.update(outcome='redirect', location=str(final)[:500])  # a test's fake followed it: the status of the hop is not known
+            # followed to another host (a caller's fetch that follows): the host's own answer, when fetch kept it, says which redirect it was
+            origin = first.get('redirected_from') or {}
+            page.update(outcome='redirect', location=urljoin(origin.get('final_url') or base, (origin.get('location') or '').strip())[:500]
+                        if origin.get('location') else str(final)[:500], status=origin.get('status') or status)
         elif not 200 <= status < 300:
             page['outcome'] = 'error_page'
         else:
             entries = js_libraries.parse_page(first.get('body', ''), final)
-            report = {}
+            report, coverage = {}, {}
             records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
-                                             budget, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project_id, report=report)
+                                             budget, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project_id, report=report,
+                                             coverage=coverage)
             page.update(outcome='read', records=records, skipped=list(report.get('skipped') or [])[:40], truncated=list(report.get('truncated') or [])[:20],
-                        scripts=sum(1 for e in entries if e.get('url')), lazy=lazy_libraries(first.get('body', ''), final, entries))
+                        scripts=sum(1 for e in entries if e.get('url')), read_whole=coverage.get('read', 0),
+                        capped=bool(getattr(entries, 'capped', False)), inline_unread=int(getattr(entries, 'inline_unread', 0)),
+                        inline=[list(pair) for pair in getattr(entries, 'inline', ())][:20],
+                        lazy=lazy_libraries(first.get('body', ''), final, entries))
         pages.append(page)
     return {'pages': pages}
 

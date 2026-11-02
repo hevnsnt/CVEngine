@@ -3,7 +3,6 @@
 version without calling it a hit, and closes only what is truly false: a host every root of which permanently redirects elsewhere, or one
 whose running copy was read in full and is fixed with every copy of the library read. A library a page no longer shows, a temporary redirect,
 a cut-short or unread copy, a run-time loader, a held-back host and a failed read all leave the match as it was."""
-import gzip
 import os
 import re
 import unittest
@@ -24,7 +23,7 @@ RANGES = [e['ranges'] for e in JQUERY_11023 if e.get('product') == 'jQuery' or e
 																									'org.webjars.npm:jquery')]
 PAGE = 'https://www.v.test/'
 JQ = 'https://www.v.test/js/jquery.min.js'
-FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures', 'bluegrace')
+FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures', 'js_provenance')  # live pages, host names replaced
 
 
 def script(version, pad=0):
@@ -95,7 +94,8 @@ def record(*copies, unresolved=False):
 
 
 def read_page(records=None, base='https://www.v.test', **kw):
-	return {'base': base, 'outcome': 'read', 'status': 200, 'records': records or {}, 'skipped': [], 'scripts': 3, 'lazy': [], **kw}
+	return {'base': base, 'outcome': 'read', 'status': 200, 'records': records or {}, 'skipped': [], 'scripts': 3, 'read_whole': 3, 'lazy': [],
+			'inline': [], 'capped': False, 'inline_unread': 0, **kw}
 
 
 class LibraryOutcomeTests(unittest.TestCase):
@@ -117,7 +117,7 @@ class LibraryOutcomeTests(unittest.TestCase):
 		# unrelated scripts the six-script budget left unread never stand in the way of a fixed copy that runs
 		budget = self.outcome(read_page(record(copy('3.6.0')), skipped=[('https://www.v.test/theme/a.js', 'page host limit')] * 30))
 		self.assertEqual(budget['status'], 'version_changed')
-		# a version another tool named closes on the running copy read in full too (BlueGrace's Wappalyzer "jQuery 1.0.4")
+		# a version another tool named closes on the running copy read in full too (a technology scan's "jQuery 1.0.4" from a theme's ?ver=)
 		other = self.outcome(read_page(record(copy('3.7.1'))), params={'version_source': 'other', 'script_url': ''})
 		self.assertEqual(other['status'], 'version_changed')
 		permanent = {'base': 'https://www.v.test', 'outcome': 'redirect', 'status': 301, 'location': 'https://www.other.test/'}
@@ -153,6 +153,11 @@ class LibraryOutcomeTests(unittest.TestCase):
 			'the match\'s script cut short': self.outcome(read_page({}), script={'status': 200, 'found': [['jquery', '3.6.0', 'banner']],
 																				   'truncated': True}),
 			'error page': self.outcome({'base': 'https://www.v.test', 'outcome': 'error_page', 'status': 403}),
+			'a page the parse could not see whole': self.outcome(read_page(record(copy('3.6.0')), capped=True)),
+			'an inline copy in range': self.outcome(read_page(record(copy('3.6.0')), inline=[['jquery', '1.12.4']])),
+			'only an inline fixed copy': self.outcome(read_page({}, inline=[['jquery', '3.6.0']])),
+			'the 404 exception on a page not read whole': self.outcome(read_page({}, read_whole=1), script={'status': 404, 'found': [],
+																										   'truncated': False}),
 		}
 		for name, result in cases.items():
 			self.assertNotIn('close_reason', result, name)
@@ -473,29 +478,35 @@ class HotLaneTests(Base):
 
 
 def _fixture(name):
-	with gzip.open(os.path.join(FIXTURES, name + '.gz'), 'rt', encoding='utf-8', errors='replace') as handle:
+	with open(os.path.join(FIXTURES, name), encoding='utf-8', errors='replace') as handle:
 		return handle.read()
 
 
-class BlueGrace(Site):
-	"""The BlueGrace hosts as they answered: five names that answer 301 to mybluegrace.com, mybluegrace.com (WordPress, jQuery 3.7.1 from
-	wp-includes, 30 theme and plugin scripts, a ``?ver=1.0.4`` theme and a ``?ver=3.2.1`` Gravity Forms that Wappalyzer read as jQuery), and
-	info.mybluegrace.com (HubSpot, jQuery 1.11.2)."""
-	ALIASES = ('www', 'blog', 'careers', 'bgu', 'givinggrace')
+GTM = ('<script>(function(w,d,s,l,i){w[l]=w[l]||[];var f=d.getElementsByTagName(s)[0],j=d.createElement(s);j.async=true;'
+	   "j.src='https://www.googletagmanager.com/gtm.js?id='+i;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','GTM-X');</script>")
+MOVED = '<html><head><title>301 Moved Permanently</title></head><body><center><h1>301 Moved Permanently</h1></center></body></html>'
+
+
+class AcmeSites(Site):
+	"""A live estate, names replaced: five names that answer 301 to acme.test; acme.test itself (WordPress, jQuery 3.7.1 from wp-includes,
+	30 theme and plugin scripts, a ``?ver=1.0.4`` theme and a ``?ver=3.2.1`` form plugin that a technology scan read as jQuery); and
+	info.acme.test (a hosted marketing site, jQuery 1.11.2)."""
+	ALIASES = ('www', 'blog', 'careers', 'learn', 'giving')
 
 	def __init__(self):
 		super().__init__()
-		self.main, self.info, self.infojq = _fixture('mybluegrace.com.html'), _fixture('info.mybluegrace.com.html'), _fixture('info-jq.js')
+		self.main = _fixture('wordpress-front-page.html').replace('<body></body>', '<body>' + GTM + '</body>')
+		self.info, self.infojq = _fixture('hosted-404-front-page.html'), _fixture('jquery-1.11.2-head.js')
 
 	def __call__(self, url, headers=None):
 		self.calls.append(url)
 		host, path = re.match(r'https?://([^/]+)(.*)', url).groups()
 		answer = {'status': 200, 'body': '!function(){var x=1}();'}
 		if host.split('.')[0] in self.ALIASES and path in ('', '/'):
-			answer = {'status': 301, 'location': 'https://mybluegrace.com/', 'body': _fixture('www.mybluegrace.com.html')}
-		elif host == 'mybluegrace.com' and path == '/':
+			answer = {'status': 301, 'location': 'https://acme.test/', 'body': MOVED}
+		elif host == 'acme.test' and path == '/':
 			answer = {'status': 200, 'body': self.main}
-		elif host == 'info.mybluegrace.com' and path == '/':
+		elif host == 'info.acme.test' and path == '/':
 			answer = {'status': 200, 'body': self.info}
 		elif 'jquery-1.11.2.js' in path:
 			answer = {'status': 200, 'body': self.infojq}
@@ -506,32 +517,32 @@ class BlueGrace(Site):
 		return {'final_url': url, 'raw_headers': {}, 'challenge': '', **answer}
 
 
-class BlueGraceOracleTests(Base):
-	"""The owner's BlueGrace hosts, the review's ground truth: the five redirect aliases close, mybluegrace.com's 3.2.1, 1.0.4 and 3.4.1 jQuery
-	matches (other tools' readings of ``?ver=`` strings) close on the running jQuery 3.7.1 read in full, and info.mybluegrace.com stays at
-	1.11.2, re-affirmed."""
+class EstateOracleTests(Base):
+	"""The review's ground truth on a live estate (names replaced): the five redirect aliases close, acme.test's 3.2.1, 1.0.4 and 3.4.1
+	jQuery matches (a technology scan's readings of ``?ver=`` strings) close on the running jQuery 3.7.1 read in full, and info.acme.test
+	stays at 1.11.2, re-affirmed."""
 
-	def test_bluegrace(self):
-		domain = Domain.objects.create(name='mybluegrace.com', project=self.project, insert_date=timezone.now())
+	def test_estate(self):
+		domain = Domain.objects.create(name='acme.test', project=self.project, insert_date=timezone.now())
 		cves = [self.cve] + [CVEEntry.objects.create(cve_id=c, title='jQuery XSS', kev=True, cvss=6.9, published_at=timezone.now(), affected=JQUERY_11023)
 							 for c in ('CVE-2020-11022', 'CVE-2019-11358')]
-		for alias in BlueGrace.ALIASES:
-			self.sub(f'{alias}.mybluegrace.com', domain)
-			self.match('3.2.1', name=f'{alias}.mybluegrace.com', version_source='other')
-		self.sub('mybluegrace.com', domain)
+		for alias in AcmeSites.ALIASES:
+			self.sub(f'{alias}.acme.test', domain)
+			self.match('3.2.1', name=f'{alias}.acme.test', version_source='other')
+		self.sub('acme.test', domain)
 		for cve, version in zip(cves, ('3.2.1', '1.0.4', '3.4.1')):
-			self.match(version, cve=cve, name='mybluegrace.com', version_source='other')
-		self.sub('info.mybluegrace.com', domain)
-		self.match('1.11.2', name='info.mybluegrace.com')
-		site = BlueGrace()
+			self.match(version, cve=cve, name='acme.test', version_source='other')
+		self.sub('info.acme.test', domain)
+		self.match('1.11.2', name='info.acme.test')
+		site = AcmeSites()
 		with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
 			self.validate(site)
 		got = {}
 		for m in CVEMatch.objects.select_related('subdomain'):
 			row = Triage.objects.get(match=m)
 			got[(m.subdomain.name, m.matched_version)] = (self.step(row)['result'], m.ai_verdict or '')
-		want = {(f'{a}.mybluegrace.com', '3.2.1'): ('version_changed', 'not_affected') for a in BlueGrace.ALIASES}
-		want.update({('mybluegrace.com', v): ('version_changed', 'not_affected') for v in ('3.2.1', '1.0.4', '3.4.1')})
-		want[('info.mybluegrace.com', '1.11.2')] = ('reaffirmed', '')
+		want = {(f'{a}.acme.test', '3.2.1'): ('version_changed', 'not_affected') for a in AcmeSites.ALIASES}
+		want.update({('acme.test', v): ('version_changed', 'not_affected') for v in ('3.2.1', '1.0.4', '3.4.1')})
+		want[('info.acme.test', '1.11.2')] = ('reaffirmed', '')
 		self.assertEqual(got, want)
-		self.assertEqual(site.calls.count('https://mybluegrace.com/'), 1)  # three matches, one read
+		self.assertEqual(site.calls.count('https://acme.test/'), 1)  # three matches, one read

@@ -623,12 +623,15 @@ def _library_records(reading, key):
 
 def _wants_script_refetch(params, reading):
     """Whether the one exception to "a library the page no longer shows is left to the next scan" applies: the match was made on a script's
-    own file (``version_source`` body, with its URL), every web base was read, none of the reads was cut short, the pages load scripts, and
-    none of them shows the library any more."""
+    own file (``version_source`` body, with its URL), every web base was read, every script of every page was read whole (none cut short,
+    no script the parse could not see, no inline code no rule reads), the pages load scripts, and none of them shows the library any more."""
     pages = reading.get('pages') or []
+    # as for every absence (cveFeed.js_libraries.complete_page): only a page known whole can show a library is not on it
     return bool(params.get('script_url') and params.get('version_source') == 'body' and pages
                 and all(p.get('outcome') == 'read' for p in pages) and any(p.get('scripts') for p in pages)
-                and not any(p.get('truncated') for p in pages)
+                and all(p.get('read_whole', 0) >= p.get('scripts', 0) for p in pages)
+                and not any(p.get('capped') or p.get('inline_unread') or p.get('truncated') for p in pages)
+                and not any(key == params['library'] for p in pages for key, _v in p.get('inline') or [])
                 and not any(c.get('truncated') for p in pages for r in (p.get('records') or {}).values() for c in r.get('copies') or [])
                 and not _library_records(reading, params['library']))
 
@@ -669,7 +672,7 @@ def _alias_of(params, reading):
         target = (urlparse(urljoin(url or '', location or '')).hostname or '').lower().rstrip('.')
         if not target or target == host:
             return ''
-    return redirect_alias_of(roots, host)
+    return redirect_alias_of(roots, host, [p.get('base') for p in pages if p.get('base')] or None)
 
 
 def library_outcome(params, reading):
@@ -723,8 +726,11 @@ def library_outcome(params, reading):
         return result('observed', 'the front page answered ' + ', '.join(str(p.get('status') or p.get('outcome')) for p in pages) +
                       f'; no script was read, so the {product} version could not be read again')
     every_base = len(read) == len(pages)
-    if not records:
-        script = reading.get('script')
+    # a copy pasted into the page itself (an inline script that states the library, cveFeed.js_libraries.PageScripts.inline) is on the page too
+    inline = [(page, {'url': f"{page.get('base')}/ (inline)", 'version': version, 'source': 'body', 'state': 'inline'})
+              for page in read for lib, version in page.get('inline') or [] if lib == key]
+    if not records and not inline:
+        script = reading.get('script') if _wants_script_refetch(params, reading) else None
         if script and script.get('status') in (404, 410):
             return result('version_changed', f"the script the match was made on ({params['script_url']}) is gone ({script['status']}) and no page "
                                              f'shows {product} any more',
@@ -739,6 +745,7 @@ def library_outcome(params, reading):
         return result('observed', f'no page read now shows {product}; a page that no longer shows a library (a maintenance or an access-denied '
                                   'page shows none) does not close the match: the next scan retires it if it is really gone')
     copies = [(page, c) for page, record in records for c in record.get('copies') or [] if isinstance(c, dict)]
+    copies += inline
     for page, record in records:
         effective = next((c for c in record.get('copies') or [] if c.get('state') == 'effective'), None)
         if effective and effective.get('source') == 'body' and _in_ranges(effective.get('version'), entries) is True:
@@ -751,6 +758,9 @@ def library_outcome(params, reading):
         return result('observed', f'{product} {inside[0].get("version")} inside the affected range is still on the page, as a {states} copy; '
                                   'whether it runs needs a person to look')
     blockers = []
+    capped = [p['base'] for p in read if p.get('capped')]
+    if capped:
+        blockers.append('the page has more scripts than the read can see, so another copy may be among them')
     unread = [c for _p, c in copies if c.get('source') != 'body']
     if unread:
         blockers.append(f"the file of a {product} copy ({unread[0].get('url')}) was not read ({unread[0].get('not_read') or 'not read'})")
@@ -758,6 +768,8 @@ def library_outcome(params, reading):
         blockers.append('the page does not show which copy runs (' + next((r.get('unresolved_reason') for _p, r in records
                                                                              if r.get('unresolved_reason')), 'copies unresolved') + ')')
     effective = [next((c for c in r.get('copies') or [] if c.get('state') == 'effective'), None) for _p, r in records]
+    if not records:
+        blockers.append(f'only a copy pasted into the page states {product}, and no script file of it was read')
     if any(c is None for c in effective) and not blockers:
         blockers.append(f'no copy of {product} is the one that runs on every page')
     if any(c and c.get('truncated') for c in effective):
