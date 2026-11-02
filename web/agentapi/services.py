@@ -3462,7 +3462,9 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     _rescore_hosts(hosts)  # once per host, not once per finding
-    activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
+    # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
+    activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
+                 hosts=len(hosts), failed=len(failed))
     return {'updated': updated, 'failed': failed}
 
 

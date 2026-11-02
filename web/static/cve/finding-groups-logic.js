@@ -44,35 +44,62 @@ export const sortedMembers = (group) =>
 // The hash that opens one member on the Findings page (#match-12, or #project:match-12 in the all-projects view).
 export const memberHash = (member, project, all) => `${all ? `${project}:` : ""}match-${member.id}`;
 
+// A member's own remediation status (open, in_progress, fixed, accepted_risk), from the full map the server sends with every group.
+const statusOfMember = (group, id) => (group.member_status && group.member_status[String(id)]) || ((group.members || []).find((m) => m.id === id) || {}).remediation_status;
+const ruledOut = (group, id) => (group.ruled_out_ids || []).includes(id);
+// Fixed or accepted-risk (or ruled out by the AI): someone already settled it. An action on a group leaves these alone unless the person
+// explicitly includes them.
+export const CLOSED = ["fixed", "accepted_risk"];
+const isClosedMember = (group, id) => CLOSED.includes(statusOfMember(group, id)) || ruledOut(group, id);
+
+// Which members of a group an action to `value` changes: only those whose status it actually changes, and by default only the open and
+// in progress ones. {ids, closed (settled members left as they are), same (already at value)}. Without a value (a plain expansion) every
+// member is a target.
+export function targetsOf(group, value, { includeClosed = false } = {}) {
+  const ids = [];
+  let closed = 0;
+  let same = 0;
+  group.member_ids.forEach((id) => {
+    if (value !== undefined && statusOfMember(group, id) === value && !ruledOut(group, id)) same += 1;
+    else if (!includeClosed && isClosedMember(group, id)) closed += 1;
+    else ids.push(id);
+  });
+  return { ids, closed, same };
+}
+export const closedCount = (group) => group.member_ids.filter((id) => isClosedMember(group, id)).length;
+
 // A plain finding item for one member, as setStatusBatch sends it: kind, id, project and enough to name it in a failure report.
-function memberItem(row, id, member) {
+function memberItem(row, id) {
+  const member = (row.group.members || []).find((m) => m.id === id);
   return {
     kind: "match",
     id,
     project: row.project,
     title: row.title,
     host: member ? member.host : undefined,
-    status: member ? member.remediation_status || member.status : undefined,
+    status: statusOfMember(row.group, id),
     __groupOf: row.group.id,
   };
 }
 
-// Every member of the selected items as its own finding item: a group becomes its members, anything else stays as it is.
-export function expandForBulk(items) {
+// The findings an action sends: a group becomes the members the action applies to (targetsOf), anything else stays as it is. Without a
+// value every member is sent (the members a retry or an Undo names are already narrowed).
+export function expandForBulk(items, value, opts = {}) {
   const out = [];
   items.forEach((item) => {
     if (!isGroup(item)) {
       out.push(item);
       return;
     }
-    const known = new Map((item.group.members || []).map((m) => [m.id, m]));
-    item.group.member_ids.forEach((id) => out.push(memberItem(item, id, known.get(id))));
+    const ids = value === undefined ? item.group.member_ids : targetsOf(item.group, value, opts).ids;
+    ids.forEach((id) => out.push(memberItem(item, id)));
   });
   return out;
 }
 
-// The members' results read back onto the selected rows. A group succeeded when every member did; otherwise it is reported failed with
-// only the members that failed left in it, so "Try the failed again" touches only those.
+// The members' results read back onto the selected rows. A group succeeded when every member it sent did (`__changedIds` names them, for
+// Undo; a group with nothing to change succeeds with none); otherwise it is reported failed with only the members that failed left in it,
+// so "Try the failed again" touches only those.
 export function foldResults(items, result, keyOf) {
   const failedByKey = new Map(result.failed.map((f) => [keyOf(f.item), f]));
   const okKeys = new Set(result.ok.map(keyOf));
@@ -85,9 +112,11 @@ export function foldResults(items, result, keyOf) {
       else if (okKeys.has(keyOf(item))) ok.push(item);
       return;
     }
-    const bad = item.group.member_ids.map((id) => failedByKey.get(keyOf({ kind: "match", id }))).filter(Boolean);
+    const memberKey = (id) => keyOf({ kind: "match", id });
+    const bad = item.group.member_ids.map((id) => failedByKey.get(memberKey(id))).filter(Boolean);
+    const changed = item.group.member_ids.filter((id) => okKeys.has(memberKey(id)));
     if (!bad.length) {
-      ok.push(item);
+      ok.push({ ...item, __changedIds: changed });
       return;
     }
     const badIds = bad.map((f) => f.item.id);
@@ -97,52 +126,113 @@ export function foldResults(items, result, keyOf) {
         ? { ...bad[0].item }
         : { ...item, group: { ...item.group, member_ids: badIds, members: (item.group.members || []).filter((m) => badIds.includes(m.id)) } };
     if (item.__bulkKey !== undefined) narrowed.__bulkKey = item.__bulkKey;
-    const n = item.group.member_ids.length;
-    failed.push({ item: narrowed, error: `${bad.length} of ${n} hosts not updated: ${bad[0].error}` });
+    failed.push({ item: narrowed, error: `${bad.length} of ${bad.length + changed.length} hosts not updated: ${bad[0].error}` });
   });
   return { ok, failed };
 }
 
-// What Undo puts back. A row: its own earlier status. A group: each member's own earlier status, known only when every member is listed
-// (a group of more than the server lists in full has no Undo: guessing would overwrite a status someone set on one host).
+// What Undo puts back. A row: its own earlier status. A group: each member's own earlier status (from member_status, complete however
+// many members the row lists); a member the AI ruled out has no status to put back and is left out.
 export function priorOf(item) {
   if (!isGroup(item)) {
     const was = item.status ?? item.remediation_status;
     return STATUS_VALUES.includes(was) ? was : undefined;
   }
   const g = item.group;
-  if (g.members_truncated || !g.members || g.members.length !== g.member_ids.length) return undefined;
   const byMember = {};
-  for (const m of g.members) {
-    const was = m.remediation_status || m.status;
-    if (!STATUS_VALUES.includes(was)) return undefined;
-    byMember[m.id] = was;
-  }
-  return { byMember };
+  g.member_ids.forEach((id) => {
+    const was = statusOfMember(g, id);
+    if (STATUS_VALUES.includes(was)) byMember[id] = was;
+  });
+  return Object.keys(byMember).length ? { byMember } : undefined;
 }
 
-// Undo as [status, items] batches: each member back to its own earlier status.
+// Undo as [status, items] batches: each member the action changed (`__changedIds`) back to its own earlier status.
 export function restoreBatches(items, prior) {
   const by = new Map();
   const add = (was, item) => by.set(was, [...(by.get(was) || []), item]);
   items.forEach((item) => {
     const was = prior(item);
     if (was === undefined) return;
-    if (typeof was === "string") add(was, item);
-    else expandForBulk([item]).forEach((m) => was.byMember[m.id] && add(was.byMember[m.id], m));
+    if (typeof was === "string") {
+      add(was, item);
+      return;
+    }
+    const changed = item.__changedIds ? new Set(item.__changedIds) : null;
+    expandForBulk([item]).forEach((m) => {
+      if ((!changed || changed.has(m.id)) && was.byMember[m.id]) add(was.byMember[m.id], m);
+    });
   });
   return [...by.entries()];
 }
 
-// The line above the list: what the counts mean in each mode.
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// What a confirmation says before a status change touches a group: how many hosts it changes, how many settled ones it leaves alone.
+// null when no group is selected (single findings are changed without asking, as before).
+export function confirmText(items, value, opts = {}) {
+  const groups = items.filter(isGroup);
+  if (!groups.length) return null;
+  let ids = 0;
+  let closed = 0;
+  let same = 0;
+  groups.forEach((item) => {
+    const t = targetsOf(item.group, value, opts);
+    ids += t.ids.length;
+    closed += t.closed;
+    same += t.same;
+  });
+  const singles = items.length - groups.length;
+  const notes = [];
+  if (closed) notes.push(`${closed} already fixed, accepted or ruled out left as they are`);
+  if (same) notes.push(`${same} already ${STATUS_WORD[value] || value}`);
+  return `Mark ${plural(ids, "host", "hosts")} in ${plural(groups.length, "group", "groups")}${singles ? ` and ${plural(singles, "other finding", "other findings")}` : ""} as ${STATUS_WORD[value] || value}${notes.length ? ` (${notes.join("; ")})` : ""}. Each host keeps its own history.`;
+}
+
+// The done message: findings (hosts) and sites, not rows. "214 findings on 6 sites".
+export function doneSummary(okItems) {
+  let findings = 0;
+  const sites = new Set();
+  okItems.forEach((item) => {
+    if (isGroup(item)) {
+      const n = item.__changedIds ? item.__changedIds.length : item.group.member_ids.length;
+      findings += n;
+      if (n) sites.add(item.group.registrable_domain);
+    } else {
+      findings += 1;
+      sites.add(item.host || `${item.kind}-${item.id}`);
+    }
+  });
+  return `${plural(findings, "finding", "findings")} on ${plural(sites.size, "site", "sites")}`;
+}
+
+// The menu label of a status change on a group row: what it changes and what it leaves.
+export function menuLabel(item, value, label, opts = {}) {
+  const t = targetsOf(item.group, value, opts);
+  const left = opts.includeClosed ? "" : t.closed ? `; ${t.closed} fixed or accepted left as they are` : "";
+  return `Mark as ${label}${opts.includeClosed ? ", including closed hosts" : ""} (${plural(t.ids.length, "host", "hosts")}${left})`;
+}
+
+export const TRUNCATED_NOTE = "Showing the first 20,000 matches grouped; narrow the filters or use Show every host.";
+
+// The line above the list: what the counts mean in each mode, and whether the grouping read every match.
 export function headerParts(r) {
   const counts = r.counts || {};
   const findings = r.findings_total ?? r.total ?? 0;
-  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  if (r.group !== GROUPED) return { lead: `${plural(findings, "finding", "findings")}: `, counts, grouped: "" };
+  if (r.group !== GROUPED) return { lead: `${plural(findings, "finding", "findings")}: `, counts, grouped: "", truncated: "" };
   const rows = r.total || 0;
   const grouped = r.groups
-    ? `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} on sibling hosts shown as ${plural(r.groups, "row", "rows")} (the same script on one site)`
+    ? `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} on sibling hosts shown as ${plural(r.groups, "row", "rows")} (the same library file on one site)`
     : "";
-  return { lead: `${plural(findings, "finding", "findings")} in ${plural(rows, "row", "rows")}: `, counts, grouped };
+  return { lead: `${plural(findings, "finding", "findings")} in ${plural(rows, "row", "rows")}: `, counts, grouped, truncated: r.group_scan_truncated ? TRUNCATED_NOTE : "" };
+}
+
+// The dashboard's "in N" beside the per-host CVE match count: shown only when grouping makes it smaller and the count is exact (a
+// truncated grouping pass hides it rather than print a wrong number).
+export function dashboardNote(matches, groups, truncated) {
+  if (truncated || groups == null || matches == null || !(groups < matches)) return { text: "", title: "" };
+  return {
+    text: `in ${groups}`,
+    title: `${matches} matches, one per host, are ${groups} distinct findings: the same client-side library file on sibling hosts of one site counts once (the Findings list shows them grouped)`,
+  };
 }

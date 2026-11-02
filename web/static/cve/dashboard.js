@@ -3,6 +3,7 @@
 import { detailDrawer, mountGraph } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
+import { dashboardNote } from "/staticfiles/cve/finding-groups-logic.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
@@ -231,11 +232,11 @@ async function pollStats() {
     paintMapCount();
     const groupNote = $("s-match_groups_note");
     if (groupNote) {
-      // one script on several hosts of a site is one row of the Findings list: beside the per-host count, how many distinct findings that is
-      const g = s.match_groups;
-      const fewer = g != null && s.matches != null && g < s.matches;
-      groupNote.textContent = fewer ? `in ${g}` : "";
-      groupNote.title = fewer ? `${s.matches} matches, one per host, are ${g} distinct findings: the same script on sibling hosts of one site counts once (the Findings list shows them grouped)` : "";
+      // one library file on several hosts of a site is one row of the Findings list: beside the per-host count, how many distinct findings
+      // that is (hidden when the grouping pass hit its cap: the number would not be exact)
+      const note = dashboardNote(s.matches, s.match_groups, s.match_groups_truncated);
+      groupNote.textContent = note.text;
+      groupNote.title = note.title;
     }
     const certNote = $("s-certs_total_note");
     if (certNote) {

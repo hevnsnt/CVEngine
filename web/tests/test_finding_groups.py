@@ -34,6 +34,26 @@ class RegistrableDomainTests(SimpleTestCase):
 	def test_an_unknown_suffix_uses_the_last_two_labels(self):
 		self.assertEqual(fg.registrable_domain('a.corp.local'), 'corp.local')
 
+	def test_each_tenant_of_a_hosting_provider_is_its_own_site(self):
+		for host in ('acme.blogspot.com', 'acme.ngrok.io', 'acme.trycloudflare.com', 'acme.herokuapp.com', 'acme.netlify.app',
+					 'acme.vercel.app', 'acme.pages.dev', 'acme.workers.dev', 'acme.web.app', 'acme.firebaseapp.com',
+					 'acme.azurewebsites.net', 'd1234.cloudfront.net', 'acme.s3.amazonaws.com'):
+			self.assertEqual(fg.registrable_domain(host), host, host)
+			self.assertNotEqual(fg.registrable_domain(host), fg.registrable_domain('other' + host[4:]), host)
+
+	def test_internationalised_names_are_one_site_in_either_spelling(self):
+		self.assertEqual(fg.registrable_domain('bücher.example.de'), fg.registrable_domain('xn--bcher-kva.example.de'))
+		self.assertEqual(fg.registrable_domain('www.bücher.de'), 'xn--bcher-kva.de')
+		self.assertEqual(fg.registrable_domain('shop.xn--bcher-kva.de'), 'xn--bcher-kva.de')
+
+	def test_only_client_side_libraries_are_groupable_products(self):
+		for product in ('jquery', 'jQuery UI', 'jquery-migrate', 'Bootstrap', 'AngularJS', 'react', 'vue.js', 'lodash', 'Moment.js',
+						'jquery:jquery', 'datatables'):
+			self.assertTrue(fg.is_client_side_library(product), product)
+		for product in ('nginx', 'apache', 'Apache HTTP Server', 'php', 'wordpress', 'drupal', 'microsoft iis', 'openssh', 'node.js',
+						'next.js', 'django', 'express', 'laravel', 'cloudflare', 'mysql', 'tomcat', 'something-new', ''):
+			self.assertFalse(fg.is_client_side_library(product), product)
+
 	def test_script_identity_prefers_the_hash_then_the_path_then_the_library(self):
 		row = {'script_sha256': SHA_A.upper(), 'script_url': 'https://www.x.com/js/jq.js'}
 		self.assertEqual(fg.script_identity(row, 'x.com'), ('sha256', SHA_A))
@@ -44,9 +64,10 @@ class RegistrableDomainTests(SimpleTestCase):
 		self.assertEqual(fg.script_identity({}, 'x.com'), ('library', ''))
 
 	def test_only_version_based_web_fingerprints_without_hard_evidence_group(self):
-		base = {'source': 'tech', 'matched_version': '3.2.1', 'subdomain__name': 'www.x.com', 'subdomain__target_domain__project_id': 1}
+		base = {'source': 'tech', 'matched_product': 'jquery', 'matched_version': '3.2.1', 'subdomain__name': 'www.x.com',
+				'subdomain__target_domain__project_id': 1}
 		self.assertTrue(fg.is_groupable(base))
-		for change in ({'source': 'port'}, {'source': 'host'}, {'source': 'cpe'}, {'matched_version': ''}, {'subdomain__name': ''},
+		for change in ({'matched_product': 'nginx'}, {'matched_product': 'wordpress'}, {'source': 'port'}, {'source': 'host'}, {'source': 'cpe'}, {'matched_version': ''}, {'subdomain__name': ''},
 					   {'template_result': 'vulnerable'}, {'triage__validation_status': 'hit'}, {'triage__classification': 'confirmed'}):
 			self.assertFalse(fg.is_groupable({**base, **change}), change)
 		for fine in ({'template_result': 'no_match'}, {'triage__validation_status': 'clean'}, {'triage__classification': 'needs_validation'}):
@@ -232,6 +253,47 @@ class GroupedFindingsTests(TestCase):
 		self.assertEqual(sum(len(r['group']['member_ids']) if r.get('group') else 1 for r in body['results']), 14)
 		self.assertTrue(set(read) <= {(r['type'], i) for r in body['results'] for i in (r['group']['member_ids'] if r.get('group') else [r['id']])})
 
+	def test_server_side_software_on_sibling_hosts_is_never_grouped(self):
+		# the same nginx/apache/php/wordpress version on two hosts of one site is two machines: one row each, even with a script url
+		products = {'nginx': '1.18.0', 'apache http server': '2.4.49', 'php': '7.4.3', 'wordpress': '5.8'}
+		made = []
+		for product, version in products.items():
+			for name in ('wwwx', 'mailx'):
+				sub = Subdomain.objects.get_or_create(name=f'{name}.mybluegrace.com', target_domain=self.da)[0]
+				made.append(CVEMatch.objects.create(cve_entry=self.c23, subdomain=sub, matched_product=product, matched_version=version,
+													source='tech', evidence={'source': 'tech', 'script_url': 'https://wwwx.mybluegrace.com/x.js'}).id)
+		boot = []
+		for name in ('www', 'blog', 'info'):
+			boot.append(CVEMatch.objects.create(cve_entry=self.c22, subdomain=self.hosts[name], matched_product='bootstrap',
+												matched_version='3.3.7', source='tech', evidence={'source': 'tech'}).id)
+		body = self.get(type='cve', group='cve', page_size=100)
+		singles = {r['id'] for r in body['results'] if not r.get('group')}
+		self.assertTrue(set(made) <= singles)
+		grouped = [sorted(r['group']['member_ids']) for r in self.groups(body)]
+		self.assertIn(sorted(boot), grouped)
+		self.assertFalse(any(set(made) & set(ids) for ids in grouped))
+
+	def test_every_member_status_is_sent_even_closed_ones(self):
+		CVEMatch.objects.filter(pk=self.m23['blog'].id).update(remediation_status='accepted_risk')
+		CVEMatch.objects.filter(pk=self.m23['info'].id).update(remediation_status='fixed')
+		CVEMatch.objects.filter(pk=self.m23['bgu'].id).update(ai_verdict='not_affected')
+		group = self.group_of(self.get(type='cve', group='cve', status='all'), 'CVE-2020-11023')
+		self.assertEqual(group['status_counts'], {'open': 3, 'accepted_risk': 1, 'fixed': 1, 'ruled out': 1})
+		self.assertEqual(group['member_status'][str(self.m23['blog'].id)], 'accepted_risk')
+		self.assertEqual(group['member_status'][str(self.m23['info'].id)], 'fixed')
+		self.assertEqual(len(group['member_status']), 6)
+		self.assertEqual(group['ruled_out_ids'], [self.m23['bgu'].id])
+		# the default (actionable) list leaves the settled ones out of the group altogether
+		self.assertEqual(self.group_of(self.get(type='cve', group='cve'), 'CVE-2020-11023')['findings'], 3)
+
+	def test_the_bulk_audit_line_counts_hosts(self):
+		from cveFeed.models import AgentActivity
+		group = self.group_of(self.get(type='cve', group='cve'), 'CVE-2020-11023')
+		call(self.token, 'POST', '/api/v1/projects/fg-a/findings/status',
+			 {'items': [{'kind': 'match', 'id': i} for i in group['member_ids']], 'status': 'in_progress'})
+		line = AgentActivity.objects.filter(kind='remediation').order_by('-id').first()
+		self.assertIn('6 finding(s) on 6 host(s) in_progress', line.message)
+
 	def test_bad_group_is_400(self):
 		self.assertEqual(call(self.token, 'GET', '/api/v1/projects/fg-a/findings?group=host')[0], 400)
 
@@ -300,3 +362,8 @@ class DashboardGroupCountTests(TestCase):
 		payload = stats_payload()
 		self.assertEqual(payload['matches'], 3)
 		self.assertEqual(payload['match_groups'], 1)
+		self.assertFalse(payload['match_groups_truncated'])
+		from unittest import mock
+		with mock.patch.object(fg, 'GROUP_SCAN_MAX', 2):
+			payload = stats_payload()
+		self.assertTrue(payload['match_groups_truncated'])  # the page then hides the grouped number rather than print a wrong one

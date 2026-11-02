@@ -205,8 +205,9 @@ def exposed_matches():
 
 
 def match_group_count():
-    """The exposed CVE matches (``exposed_matches``) counted as the grouped Findings list draws them: the same script on sibling hosts
-    of one site is one (``cveFeed.finding_groups``). One values() pass, capped like the list's."""
+    """``(rows, truncated)``: the exposed CVE matches (``exposed_matches``) counted as the grouped Findings list draws them, the same
+    client-side library file on sibling hosts of one site being one (``cveFeed.finding_groups``). One values() pass, capped like the
+    list's; ``truncated`` says the cap was reached, and the number is then not exact."""
     from cveFeed import finding_groups
     return finding_groups.row_count(exposed_matches())
 

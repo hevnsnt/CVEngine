@@ -1745,10 +1745,15 @@ function findingPage(mount, cfg) {
   // A group row (GET findings?group=cve) stands for several hosts' findings: it is sent as its members, each through the same route and
   // the same per-finding gates and audit, and the members' results are read back onto the row (finding-groups-logic.js).
   const resultKey = (i) => `${itemKind(i)}-${i.id}`;
-  async function setStatusBatch(items, value) {
-    const members = FG.expandForBulk(items);
-    if (members.length === items.length && !items.some(FG.isGroup)) return setStatusEach(items, value);
-    return FG.foldResults(items, await setStatusEach(members, value), resultKey);
+  // A group sends only the members the change applies to: by default the open and in progress ones whose status it changes (fixed,
+  // accepted and ruled-out hosts are left as they are unless `includeClosed`). The summary counts findings and sites, not rows.
+  async function setStatusBatch(items, value, opts = {}) {
+    if (!items.some(FG.isGroup)) {
+      const r = await setStatusEach(items, value);
+      return { ...r, summary: FG.doneSummary(r.ok) };
+    }
+    const r = FG.foldResults(items, await setStatusEach(FG.expandForBulk(items, value, opts), value), resultKey);
+    return { ...r, summary: FG.doneSummary(r.ok) };
   }
   // Undo: every finding (every member of a group) back to its own earlier status
   async function restoreStatuses(items, priorOf) {
@@ -1816,8 +1821,12 @@ function findingPage(mount, cfg) {
         actions: [
           {
             select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
+            label: "Change status",
             verb: "Updating",
             done: "Updated",
+            // a selection holding a group asks first, saying how many hosts change and how many settled ones are left alone
+            confirm: (n, items, value) => FG.confirmText(items, value),
+            confirmTitle: (items) => `Change ${items.filter(FG.isGroup).length === 1 ? "a group of hosts" : "groups of hosts"}?`,
             runBatch: setStatusBatch,
             // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk); the unified list
             // says status, the matches list remediation_status, and a group row each member's own (FG.priorOf)
@@ -1912,7 +1921,7 @@ function findingPage(mount, cfg) {
       pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
       if (FG.isGroup(row) && row.id === id && kind === "match") {
         // a group row opens its hottest member: say so, and that every host keeps its own status
-        back.after(el("p", "note group-note", `This row groups the same script ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
+        back.after(el("p", "note group-note", `This row groups the same client-side library file ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
       }
       if (validate) {
         if (location.hash.includes("&validate")) history.replaceState(null, "", `${location.pathname}${location.search}#${ALL ? `${project}:${key}` : key}`); // a reload must not run it again
@@ -1974,23 +1983,30 @@ function findingPage(mount, cfg) {
             { section: "open", label: "Open in a new tab", run: () => window.open(`${location.pathname}${location.search}#${hashOf(item)}`, "_blank", "noopener") },
           ];
           if (isBulkable(item)) {
-            STATUS_LABELS.forEach(([value, label]) =>
-              menu.push({
-                section: "status",
-                label: `Mark as ${label}`,
-                disabled: !FG.isGroup(item) && was === value, // a group's members can differ: any status may still apply to some
-                run: async () => {
-                  const r = await setStatusBatch([item], value);
-                  if (r.failed.length) return toast(r.failed[0].error, true);
-                  list.reload();
-                  if (prior !== undefined) {
-                    undoNotice(`Marked ${label.toLowerCase()}${FG.isGroup(item) ? ` ${FG.hostsText(item.group)}` : ""}`, async () => {
-                      const back = await restoreStatuses([item], () => prior);
-                      toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
-                      list.reload();
-                    });
-                  } else toast(`Marked ${label.toLowerCase()}`);
-                },
+            const group = FG.isGroup(item);
+            // a group: the plain entries change its open and in progress hosts only; when some are fixed, accepted or ruled out, a
+            // second set of entries includes them, and says so
+            const variants = [{ includeClosed: false }, ...(group && FG.closedCount(item.group) ? [{ includeClosed: true }] : [])];
+            variants.forEach((opts) =>
+              STATUS_LABELS.forEach(([value, label]) => {
+                const hosts = group ? FG.targetsOf(item.group, value, opts).ids.length : 0;
+                menu.push({
+                  section: opts.includeClosed ? "status-closed" : "status",
+                  label: group ? FG.menuLabel(item, value, label, opts) : `Mark as ${label}`,
+                  disabled: group ? hosts === 0 : was === value,
+                  run: async () => {
+                    const r = await setStatusBatch([item], value, opts);
+                    if (r.failed.length) return toast(r.failed[0].error, true);
+                    list.reload();
+                    if (prior !== undefined) {
+                      undoNotice(`Marked ${label.toLowerCase()}: ${r.summary}`, async () => {
+                        const back = await restoreStatuses(r.ok, () => prior);
+                        toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
+                        list.reload();
+                      });
+                    } else toast(`Marked ${label.toLowerCase()}: ${r.summary}`);
+                  },
+                });
               }),
             );
           }
@@ -3631,14 +3647,14 @@ const pages = {
     const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
     const header = el("p", "note");
     mount.append(header);
-    // grouped by default: the same script on sibling hosts of one site is one row; "Show every host" lists each host's finding
+    // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
     let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
     const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}) });
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
       "aria-pressed": String(groupMode === FG.EVERY_HOST),
-      title: "The same script on several hosts of one site is one row. Press to list every host's finding on its own row.",
+      title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
     });
     const setGroupMode = (mode) => {
       groupMode = mode === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
@@ -3728,10 +3744,11 @@ const pages = {
       const link = (key, n) => el("a", "", `${n} ${{ cve: n === 1 ? "CVE match" : "CVE matches", scanner: n === 1 ? "scanner finding" : "scanner findings", hygiene: n === 1 ? "hygiene finding" : "hygiene findings" }[key]}`,
         { href: `/cve/${encodeURIComponent(slug)}/${{ cve: "matches", scanner: "vulns", hygiene: "hygiene" }[key]}/${key === "scanner" ? "?type=scanner" : ""}` });
       // the per-type numbers stay per host finding in both modes; grouped, the lead also says how many rows that is
-      const { lead, counts, grouped } = FG.headerParts(data);
+      const { lead, counts, grouped, truncated: truncatedNote } = FG.headerParts(data);
       header.append(lead);
       ["cve", "scanner", "hygiene"].forEach((key, i) => header.append(...(i ? [" · "] : []), link(key, counts[key] || 0)));
       if (grouped) header.append(`. ${grouped}`);
+      if (truncatedNote) header.append(" ", el("strong", "group-truncated", truncatedNote));
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }
     // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)

@@ -11,7 +11,8 @@ const member = (id, host, extra = {}) => ({id, host, heat: 'ice', status: 'open'
 const groupRow = (members, extra = {}) => ({
   type: 'cve', kind: 'match', id: members[0].id, title: 'CVE-2020-11023', host: members[0].host, project: 'bluegrace', status: members[0].status,
   group: {id: 'gabc', hosts: members.length, findings: members.length, registrable_domain: 'mybluegrace.com', member_ids: members.map((m) => m.id),
-    members, members_truncated: false, status_counts: {open: members.length}, heat_counts: {ice: members.length}, ...extra},
+    members, members_truncated: false, status_counts: {open: members.length}, heat_counts: {ice: members.length},
+    member_status: Object.fromEntries(members.map((m) => [String(m.id), m.remediation_status])), ruled_out_ids: [], ...extra},
 });
 const keyOf = (i) => `${i.kind}-${i.id}`;
 const six = ['www', 'blog', 'info', 'careers', 'bgu', 'givinggrace'].map((h, i) => member(10 + i, `${h}.mybluegrace.com`));
@@ -47,7 +48,7 @@ test('a group succeeds when every member did, and a failure keeps only the membe
   const row = groupRow(six);
   const members = G.expandForBulk([row]);
   const all = G.foldResults([row], {ok: members, failed: []}, keyOf);
-  assert.deepEqual(all, {ok: [row], failed: []});
+  assert.deepEqual(all, {ok: [{...row, __changedIds: [10, 11, 12, 13, 14, 15]}], failed: []});
   const failedOne = members.find((m) => m.id === 12);
   const some = G.foldResults([row], {ok: members.filter((m) => m !== failedOne), failed: [{item: failedOne, error: 'finding not found'}]}, keyOf);
   assert.deepEqual(some.ok, []);
@@ -67,17 +68,61 @@ test('a group succeeds when every member did, and a failure keeps only the membe
   assert.deepEqual(G.foldResults([lone], {ok: [lone], failed: []}, keyOf), {ok: [lone], failed: []});
 });
 
-test('undo puts each member back to its own earlier status, and is not offered when not every member is known', () => {
+test('undo puts each member back to its own earlier status, from the full status map even past the listed members', () => {
   const mixed = groupRow([six[0], member(11, 'blog.mybluegrace.com', {status: 'in_progress', remediation_status: 'in_progress'}), six[2]]);
   const prior = G.priorOf(mixed);
   assert.deepEqual(prior, {byMember: {10: 'open', 11: 'in_progress', 12: 'open'}});
   const batches = new Map(G.restoreBatches([mixed], () => prior).map(([was, items]) => [was, items.map((i) => i.id)]));
   assert.deepEqual(Object.fromEntries(batches), {open: [10, 12], in_progress: [11]});
-  assert.equal(G.priorOf(groupRow(six, {members_truncated: true})), undefined);
-  assert.equal(G.priorOf(groupRow([six[0], member(11, 'b', {status: 'ruled out', remediation_status: ''})])), undefined);
+  // only the members the action changed go back
+  const changed = new Map(G.restoreBatches([{...mixed, __changedIds: [10, 11]}], () => prior).map(([was, items]) => [was, items.map((i) => i.id)]));
+  assert.deepEqual(Object.fromEntries(changed), {open: [10], in_progress: [11]});
+  // 150 members, 100 listed: member_status still knows every one
+  const many = Array.from({length: 150}, (_, i) => member(100 + i, `h${i}.x.com`));
+  const big = groupRow(many.slice(0, 100), {member_ids: many.map((m) => m.id), members_truncated: true,
+    member_status: Object.fromEntries(many.map((m, i) => [String(m.id), i === 149 ? 'fixed' : 'open']))});
+  assert.equal(Object.keys(G.priorOf(big).byMember).length, 150);
+  assert.equal(G.priorOf(big).byMember[249], 'fixed');
   assert.equal(G.priorOf({kind: 'match', id: 1, status: 'fixed'}), 'fixed');
   assert.equal(G.priorOf({kind: 'match', id: 1, remediation_status: 'accepted_risk'}), 'accepted_risk');
   assert.equal(G.priorOf({kind: 'match', id: 1, status: 'ruled out'}), undefined);
+});
+
+// the probe from the review: four open hosts, one accepted risk, one fixed
+const probe = () => {
+  const ms = [...six.slice(0, 4), member(14, 'bgu.mybluegrace.com', {status: 'accepted_risk', remediation_status: 'accepted_risk'}),
+    member(15, 'givinggrace.mybluegrace.com', {status: 'fixed', remediation_status: 'fixed'})];
+  return groupRow(ms, {status_counts: {open: 4, accepted_risk: 1, fixed: 1}});
+};
+
+test('a group action changes only the open and in progress hosts it actually changes, unless closed ones are included', () => {
+  const row = probe();
+  assert.deepEqual(G.targetsOf(row.group, 'in_progress'), {ids: [10, 11, 12, 13], closed: 2, same: 0});
+  assert.deepEqual(G.expandForBulk([row], 'in_progress').map((m) => m.id), [10, 11, 12, 13]);  // the accepted host is not reopened
+  assert.deepEqual(G.targetsOf(row.group, 'fixed'), {ids: [10, 11, 12, 13], closed: 1, same: 1});
+  assert.deepEqual(G.targetsOf(row.group, 'open'), {ids: [], closed: 2, same: 4});
+  assert.deepEqual(G.expandForBulk([row], 'in_progress', {includeClosed: true}).map((m) => m.id), [10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(G.expandForBulk([row], 'fixed', {includeClosed: true}).map((m) => m.id), [10, 11, 12, 13, 14]);
+  // a member the AI ruled out is left alone by default too
+  const ruled = groupRow(six, {ruled_out_ids: [15]});
+  assert.deepEqual(G.targetsOf(ruled.group, 'fixed').ids, [10, 11, 12, 13, 14]);
+  assert.equal(G.closedCount(probe().group), 2);
+});
+
+test('the confirmation says how many hosts change and how many settled ones are left as they are', () => {
+  assert.equal(G.confirmText([probe()], 'in_progress'),
+    'Mark 4 hosts in 1 group as in progress (2 already fixed, accepted or ruled out left as they are). Each host keeps its own history.');
+  assert.match(G.confirmText([probe(), {kind: 'vulnerability', id: 3}], 'fixed'), /^Mark 4 hosts in 1 group and 1 other finding as fixed \(1 already fixed, accepted or ruled out left as they are; 1 already fixed\)/);
+  assert.equal(G.confirmText([{kind: 'match', id: 3}], 'fixed'), null);  // no group: no question, as before
+  assert.equal(G.menuLabel(probe(), 'in_progress', 'In progress'), 'Mark as In progress (4 hosts; 2 fixed or accepted left as they are)');
+  assert.equal(G.menuLabel(probe(), 'in_progress', 'In progress', {includeClosed: true}), 'Mark as In progress, including closed hosts (6 hosts)');
+});
+
+test('the done message counts findings and sites, not rows', () => {
+  const a = {...probe(), __changedIds: [10, 11, 12, 13]};
+  const b = {...groupRow([member(30, 'www.other.org'), member(31, 'blog.other.org')]), group: {...groupRow([member(30, 'www.other.org'), member(31, 'blog.other.org')]).group, registrable_domain: 'other.org'}};
+  assert.equal(G.doneSummary([a, b, {kind: 'hygiene', id: 2, host: 'mail.x.com'}]), '7 findings on 3 sites');
+  assert.equal(G.doneSummary([{kind: 'match', id: 1, host: 'a.x'}]), '1 finding on 1 site');
 });
 
 test('the row says how many hosts and how their own states split, worst first', () => {
@@ -103,12 +148,30 @@ test('the header keeps findings per host and says what the rows are', () => {
   assert.equal(grouped.lead, '15 findings in 5 rows: ');
   assert.deepEqual(grouped.counts, {cve: 14, scanner: 1});
   assert.match(grouped.grouped, /^12 CVE matches on sibling hosts shown as 2 rows/);
+  assert.equal(grouped.truncated, '');
+  assert.equal(G.headerParts({group: 'cve', total: 5, group_scan_truncated: true}).truncated,
+    'Showing the first 20,000 matches grouped; narrow the filters or use Show every host.');
+  assert.equal(G.headerParts({total: 5, group_scan_truncated: true}).truncated, '');
+});
+
+test('the dashboard shows the grouped count only when it is smaller and exact', () => {
+  assert.equal(G.dashboardNote(14, 4, false).text, 'in 4');
+  assert.match(G.dashboardNote(14, 4, false).title, /^14 matches, one per host, are 4 distinct findings/);
+  assert.deepEqual(G.dashboardNote(14, 4, true), {text: '', title: ''});  // the pass hit its cap: no number rather than a wrong one
+  assert.deepEqual(G.dashboardNote(4, 4, false), {text: '', title: ''});
+  assert.deepEqual(G.dashboardNote(undefined, undefined, undefined), {text: '', title: ''});
 });
 
 test('the Findings page wires the grouping in', () => {
   assert.match(app, /import \* as FG from "\/staticfiles\/cve\/finding-groups-logic\.js"/);
   assert.match(app, /Show every host/);
-  assert.match(app, /FG\.expandForBulk\(items\)/);
+  assert.match(app, /FG\.expandForBulk\(items, value, opts\)/);
   assert.match(app, /exportParams: filtersNow/);  // the CSV stays one line per host
   assert.match(app, /data-finding-key/);
+  assert.match(app, /group-truncated/);  // the truncation note is drawn
+  assert.match(app, /confirm: \(n, items, value\) => FG\.confirmText\(items, value\)/);
+  const bulk = readFileSync(new URL('../static/cve/bulk.js', import.meta.url), 'utf8');
+  assert.match(bulk, /result\.summary \?/);
+  const dash = readFileSync(new URL('../static/cve/dashboard.js', import.meta.url), 'utf8');
+  assert.match(dash, /dashboardNote\(s\.matches, s\.match_groups, s\.match_groups_truncated\)/);
 });
