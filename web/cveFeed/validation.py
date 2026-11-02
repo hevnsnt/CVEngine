@@ -14,13 +14,14 @@ check exist.
 * ``fact_probe``: a version or identity probe from the catalogue in ``cveFeed.probes`` (a few GETs with the front page's headers, an
   error page signature, a framework script, or ``nmap -sV --version-all`` on one port). It finds the fact an advisory depends on (the
   version, which look-alike product runs, what answers behind a CDN) and records it; it never exploits anything.
-* ``script_read``: for a match on a client-side JavaScript library (``cveFeed.detection.client_libraries``), the html-libraries read of the
-  host's front page again (``probes.read_front_page_libraries``: the page, then its scripts through ``js_libraries``' vetter and budgets),
+* ``script_read``: for a match on a client-side JavaScript library (``cveFeed.detection.client_libraries``), the html-libraries read of every
+  web base's front page again (``probes.read_host_libraries``: the pages, then their scripts through ``js_libraries``' vetter and budgets),
   which states the version from the file itself and which copy runs. nmap and a HEAD cannot see a library inside a page, so for such a
-  match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page); a
-  fixed version, a library the page no longer loads or a front page that only redirects to another host closes the match through the
-  guarded closure (``correlation.close_invalid_correlation``), never one a person worked; a host the server may not read (internal, passive,
-  manual only, outside a bug bounty scope, script reading off) is left as it is, and says why.
+  match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page). Only
+  what is truly false closes the match, through the guarded closure (``correlation.close_invalid_correlation``, this host only), never one
+  a person worked: every root permanently redirecting to another host, or the running copy on every base read in full and fixed with every
+  copy of the library read (``library_outcome``). A library the page no longer shows is left to the next scan. A host the server may not
+  read (internal, passive, manual only, a one-host target, the bug bounty gate, script reading off) is left as it is, and says why.
 
 Everything is read-only; every host goes through the scannable-host filter and must belong to the finding's project; work is
 dispatched per project; each check waits its turn for memory (heavy_job), is kept off the ledger while fresh (CVENGINE_TTL_VALIDATE),
@@ -32,6 +33,7 @@ the finding never lowers it, and in particular never takes a finding with hard e
 (a WAF, a virtual host, a different path); a failure changes nothing and schedules a retry.
 """
 import ipaddress
+import json
 import hashlib
 import logging
 import os
@@ -39,7 +41,7 @@ import re
 import shlex
 import subprocess
 from datetime import timedelta
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import yaml
 from django.utils import timezone
@@ -327,22 +329,26 @@ def _probe_checks(subject, signature):
 
 
 def _script_read_check(subject, signature):
-    """The ``script_read`` check of a client-library match: the host's front page and the scripts it loads, read again by cvENGINE."""
+    """The ``script_read`` check of a client-library match: every web base's front page and the scripts it loads, read again by cvENGINE."""
     from cveFeed import js_libraries, probes
-    base = subject.get('url') or ''
-    parsed = urlparse(base)
-    if parsed.scheme not in ('http', 'https') or not _safe_host(parsed.hostname or ''):
+    bases = []
+    for base in subject.get('bases') or ([subject['url']] if subject.get('url') else []):
+        parsed = urlparse(base or '')
+        if parsed.scheme in ('http', 'https') and _safe_host(parsed.hostname or ''):
+            bases.append(f'{parsed.scheme}://{parsed.netloc}')
+    bases = list(dict.fromkeys(bases))
+    if not bases:
         return None
-    base = f'{parsed.scheme}://{parsed.netloc}'
     product = subject.get('library_product') or 'JavaScript library'
-    where = f'{base}/#script-read'
-    display = (probes.display_for('html-libraries', {'base': base}) +
-               f' (then up to {js_libraries.MAX_SCRIPTS_PER_HOST} of the scripts it loads, each read for its own version banner)')
-    return _check('script_read', f'Script read: the {product} version stated by the script files the page loads', ['probe', 'html-libraries', base],
-                  display, where, where, signature + 'script-read', 120, base=base, project_id=subject.get('project_id'),
+    where = f'{bases[0]}/#script-read'
+    display = ('; '.join(probes.display_for('html-libraries', {'base': base}) for base in bases) +
+               f' (then up to {js_libraries.MAX_SCRIPTS_PER_HOST} of the scripts they load, each read for its own version banner)')
+    return _check('script_read', f'Script read: the {product} version stated by the script files the page loads', ['probe', 'html-libraries', *bases],
+                  display, where, where, signature + 'script-read', 120, bases=bases, project_id=subject.get('project_id'),
                   domain_id=subject.get('domain_id'), host=subject.get('host'), library=subject['library'], product=product,
                   ranges=subject.get('library_ranges') or [], matched_version=subject.get('matched_version') or '',
-                  version_source=subject.get('version_source') or '')
+                  version_source=subject.get('version_source') or '', script_url=subject.get('script_url') or '',
+                  unattended=subject.get('unattended', True))
 
 
 def _http_check(url, signature):
@@ -397,7 +403,8 @@ def subject_for(row, finding):
             from cveFeed import detection
             subject.update(library=library, library_product=detection._libraries()[library][0],
                            library_ranges=detection.client_libraries(finding.cve_entry.affected)[library][:10],
-                           version_source=str(ev.get('version_source') or ''))
+                           version_source=str(ev.get('version_source') or ''), script_url=str(ev.get('script_url') or '')[:500],
+                           bases=route_auth.web_bases(finding.subdomain) if finding.subdomain is not None else [])
         elif finding.subdomain is not None and not subject['local_component_only']:
             subject['probe_plan'] = _probe_plan(finding, ev)
     elif row.kind == 'db_exposure':
@@ -509,14 +516,17 @@ def run_db_probe(check):
     return {'status': 'no_match', 'summary': 'the service did not answer without credentials at the time of the check'}
 
 
-def script_read_held_back(project_id, sub):
+def script_read_held_back(project_id, sub, unattended=True):
     """Why the server may not read ``sub``'s pages for a script read, or '': script reading is off, the target is passive or manual only, the
-    host is internal (only a Sentinel inside its network may read it: the server never fetches an internal page), its address must not be
-    scanned, it is outside the bug bounty scope, or the organization excluded or archived it."""
+    host is held only under a target set to exactly one other host, it is internal (only a Sentinel inside its network may read it: the server
+    never fetches an internal page), its address must not be scanned, the bug bounty gate refuses it (``unattended``: a run the system started
+    in a bug bounty project that has not confirmed automated testing; any run: a host outside the program's scope), or the organization
+    excluded or archived it."""
     from cveFeed import js_libraries, route_auth
     from cveFeed.archive_rediscovery import archived_names
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
+    from targetApp.models import narrowed_names
     from targetApp.target_types import sentinel_only_target
     target, host = getattr(sub, 'target_domain', None), sub.name.lower().rstrip('.')
     if not js_libraries.enabled():
@@ -524,22 +534,42 @@ def script_read_held_back(project_id, sub):
     held = js_libraries._held_back(target) if target is not None else ''
     if held:
         return f'the target is a {held}: cvENGINE does not read its pages'
+    if narrowed_names(project_id, [host]):
+        return 'its target is set to one host only: a name under it is not read (host_only_scope)'
     if (target is not None and sentinel_only_target(target.name, project_id)) or sentinel_only_target(host, project_id):
         return ('an internal host: only a Sentinel inside its network may read its pages, and this server never fetches an internal page '
                 '(a Sentinel script read is planned for 1.4)')
     if not route_auth.host_allowed(host, project_id):
         return 'the host resolves to an address that must not be scanned'
-    if Gate(blocked=()).refusal(project_id, host, unattended=False):
-        return 'the host is outside the bug bounty program\'s scope'
+    bounty = Gate().refusal(project_id, host, unattended=unattended)
+    if bounty:
+        return f'the bug bounty gate refuses it ({bounty})'
     if is_excluded(project_id, host) or host in archived_names(project_id):
         return 'the organization excluded or archived this host'
     return ''
 
 
+READ_REUSE_SECONDS = 600  # one fresh read of a host serves every library match of it validated within this window
+
+
+def _reading_key(project_id, host, bases):
+    import hashlib
+    return 'cvengine:script-read:v1:' + hashlib.sha256(json.dumps([project_id, host, sorted(bases)]).encode()).hexdigest()[:32]
+
+
+def _current_roots(project_id, host):
+    """``[(url, status, location)]`` of the host's current root routes (the route check's, http and https), as HostLibraries reads them."""
+    from cveFeed.models import RouteAuth
+    return [(row.url, row.http_status, row.redirect_to or '') for row in RouteAuth.objects.filter(
+        project_id=project_id, host=host, path='/', retired_at__isnull=True).only('url', 'http_status', 'redirect_to')]
+
+
 def run_script_read(check, get=None):
-    """Read the host's front page and the scripts it loads again (``probes.read_front_page_libraries``), past the script cache, and say what
-    that means for the match (``library_outcome``). Nothing is fetched for a host ``script_read_held_back`` refuses. ``get`` replaces the
-    network (tests)."""
+    """Read every web base's front page and the scripts it loads again (``probes.read_host_libraries``), past the script cache, and say what
+    that means for the match (``library_outcome``). Nothing is fetched for a host ``script_read_held_back`` refuses. One read of a host is
+    reused by every library match of it for READ_REUSE_SECONDS, so a host with several jQuery CVEs is read once. ``get`` replaces the network
+    (tests)."""
+    from django.core.cache import cache
     from cveFeed import probes
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
@@ -548,17 +578,28 @@ def run_script_read(check, get=None):
            .prefetch_related('technologies').select_related('target_domain').order_by('-id').first())
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
-    held = script_read_held_back(params['project_id'], sub)
+    held = script_read_held_back(params['project_id'], sub, unattended=params.get('unattended', True))
     if held:
         return {'status': 'blocked', 'summary': f'not read: {held}', 'library': {'held_back': held}}
+    bases = params.get('bases') or [params['base']]
+    key = _reading_key(params['project_id'], sub.name.lower(), bases)
     try:
-        reading = probes.read_front_page_libraries(params['project_id'], params['domain_id'], sub, params['base'], get=get)
-    except ValueError:
-        return {'status': 'blocked', 'summary': 'not read: the page\'s address is not allowed (a blocked address, an exclusion or an archived host)',
-                'library': {'held_back': 'address not allowed'}}
-    except OSError as exc:
-        return {'status': 'failed', 'summary': 'the front page did not answer', 'error': type(exc).__name__,
-                'library': {'outcome': 'unanswered'}}
+        reading = cache.get(key)
+    except Exception:  # noqa: BLE001 - no cache: read again
+        reading = None
+    reused = reading is not None
+    if not reused:
+        reading = probes.read_host_libraries(params['project_id'], sub, bases, get=get)
+        try:
+            cache.set(key, reading, READ_REUSE_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+    reading = {**reading, 'roots': _current_roots(params['project_id'], sub.name.lower()), 'reused': reused}
+    if _wants_script_refetch(params, reading):
+        try:
+            reading['script'] = probes.refetch_script(params['project_id'], sub, params['script_url'], get=get)
+        except (OSError, ValueError):
+            reading['script'] = None
     return library_outcome(params, reading)
 
 
@@ -574,81 +615,169 @@ def _in_ranges(version, entries):
     return False if all(r is False for r in results) else None
 
 
-def _library_evidence(reading, record):
-    """The fresh evidence a script read records on its step: what the page answered and, for the library, the version, where it came from,
-    how far it is trusted and every copy with its state."""
-    out = {'outcome': reading.get('outcome', ''), 'page_status': reading.get('status') or 0}
-    if reading.get('alias_of'):
-        out['alias_of'] = reading['alias_of']
-    if record:
+def _library_records(reading, key):
+    """``[(page, record)]``: the record of library ``key`` on every page that was read."""
+    return [(page, (page.get('records') or {}).get(key)) for page in reading.get('pages') or []
+            if page.get('outcome') == 'read' and (page.get('records') or {}).get(key)]
+
+
+def _wants_script_refetch(params, reading):
+    """Whether the one exception to "a library the page no longer shows is left to the next scan" applies: the match was made on a script's
+    own file (``version_source`` body, with its URL), every web base was read, none of the reads was cut short, the pages load scripts, and
+    none of them shows the library any more."""
+    pages = reading.get('pages') or []
+    return bool(params.get('script_url') and params.get('version_source') == 'body' and pages
+                and all(p.get('outcome') == 'read' for p in pages) and any(p.get('scripts') for p in pages)
+                and not any(p.get('truncated') for p in pages)
+                and not any(c.get('truncated') for p in pages for r in (p.get('records') or {}).values() for c in r.get('copies') or [])
+                and not _library_records(reading, params['library']))
+
+
+def _library_evidence(reading, records):
+    """The fresh evidence a script read records on its step: what each web base answered and, for the library, the version, where it came
+    from, how far it is trusted and every copy with its state."""
+    out = {'pages': [{k: page.get(k) for k in ('base', 'outcome', 'status', 'location', 'challenge') if page.get(k) not in (None, '')}
+                     for page in reading.get('pages') or []][:6]}
+    if reading.get('reused'):
+        out['reused'] = True  # the read another match of this host made moments ago
+    if records:
+        page, record = records[0]
         out.update({'version': record.get('version') or '', 'version_source': record.get('version_source') or '',
                     'version_confidence': record.get('version_confidence') or 0.0, 'script_url': (record.get('script_url') or '')[:300],
-                    'copies_unresolved': bool(record.get('copies_unresolved')),
-                    'copies': [{k: c.get(k) for k in ('url', 'version', 'source', 'state') if c.get(k) not in (None, '')}
-                               for c in record.get('copies') or [] if isinstance(c, dict)][:8]})
-    if reading.get('skipped'):
-        out['not_read'] = [{'url': url[:300], 'why': why} for url, why in reading['skipped'][:8]]
+                    'copies_unresolved': any(r.get('copies_unresolved') for _p, r in records)})
+        out['copies'] = [{'base': p.get('base'), **{k: c.get(k) for k in ('url', 'version', 'source', 'state', 'truncated') if c.get(k) not in (None, '')}}
+                         for p, r in records for c in r.get('copies') or [] if isinstance(c, dict)][:8]
+    skipped = [(url, why) for page in reading.get('pages') or [] for url, why in page.get('skipped') or []]
+    if skipped:
+        out['not_read'] = [{'url': url[:300], 'why': why} for url, why in skipped[:8]]
     return out
 
 
+def _alias_of(params, reading):
+    """The host every current root of this host permanently redirects to (301 or 308 to another host, on every web base read now and every
+    current root route), or ''. A temporary redirect (302, 307: a login page, a maintenance page) is never an alias."""
+    from cveFeed.js_libraries import redirect_alias_of
+    host = str(params.get('host') or '').lower().rstrip('.')
+    pages = reading.get('pages') or []
+    if not pages or any(p.get('outcome') != 'redirect' for p in pages):
+        return ''
+    roots = [(p.get('final_url') or p.get('base'), p.get('status'), p.get('location') or '') for p in pages]
+    roots += [tuple(r) for r in reading.get('roots') or []]
+    for url, status, location in roots:
+        if status not in (301, 308):
+            return ''
+        target = (urlparse(urljoin(url or '', location or '')).hostname or '').lower().rstrip('.')
+        if not target or target == host:
+            return ''
+    return redirect_alias_of(roots, host)
+
+
 def library_outcome(params, reading):
-    """The step result of a script read for a match on ``params['library']`` (pure). ``reaffirmed``: the copy that runs states, in its own
-    file, a version inside the range (never a hit: the version is on the page, the page is not shown to be exploitable). ``version_changed``
-    with a ``close_reason``: the front page only redirects to another host, the page loads the library no more (every script it wanted was
-    read), or every copy whose file was read states a fixed version and no copy is left unread. ``observed``: something is in the way (an
-    older copy shadowed by a fixed one, copies whose order is unknown, scripts not read, a page that answered an error). ``blocked``: an
-    edge challenged the request. ``failed``: the site answered a server error."""
+    """The step result of a script read for a match on ``params['library']`` (pure). Only what is truly false is closed:
+
+    - ``reaffirmed``: the copy that runs on a page states, in its own file, a version inside the range (never a hit: the version is on the page,
+      the page is not shown to be exploitable);
+    - closed (``version_changed`` with a ``close_reason``): every current root of the host answers 301 or 308 to another host (an alias); or
+      on every web base the copy that runs was read in full and states a fixed version, every copy of the library was read and none is
+      inside or unknown to the range, and no page adds the library at run time; or the match's own script, re-fetched, answers 404 or now
+      states a fixed version (``_wants_script_refetch``);
+    - ``observed`` otherwise: a library the pages no longer show (a maintenance or an "access denied" page shows none; the next scan retires
+      it), a temporary redirect, an older copy that is shadowed, an unread or cut-short copy, a page that loads scripts at run time, an
+      error page;
+    - ``blocked``: every base was refused or challenged; ``failed``: no base answered, or a server error."""
     from cveFeed.correlation import SCRIPT_READ
+    from cveFeed.js_libraries import MAX_SCRIPT_BYTES
     key, product, entries = params['library'], params['product'], params.get('ranges') or []
-    outcome = reading.get('outcome')
-    record = (reading.get('records') or {}).get(key) if outcome == 'read' else None
-    evidence = _library_evidence(reading, record)
+    pages = reading.get('pages') or []
+    records = _library_records(reading, key)
+    evidence = _library_evidence(reading, records)
 
     def result(status, summary, close=''):
         out = {'status': status, 'summary': summary[:300], 'output_excerpt': summary[:OUTPUT_CAP], 'library': evidence}
         if close:
             out['close_reason'] = f'{SCRIPT_READ}. {close} This closes this match only; a later scan that finds the library again matches it again.'
         return out
-    if outcome == 'challenged':
-        return result('blocked', f'the edge {reading.get("challenge")} answered instead of the site; no script was read')
-    if outcome == 'alias':
-        return result('version_changed', f'the front page only redirects to {reading.get("alias_of")}: its scripts are that host\'s',
-                      f'A fresh read shows the front page only redirects to {reading.get("alias_of")} (a redirect alias): this host serves no page '
-                      f'of its own, so the {product} version recorded for it is the other host\'s, which is judged on its own.')
-    if outcome != 'read':
-        status = reading.get('status') or 0
-        return result('failed' if status >= 500 or not status else 'observed',
-                      f'the front page answered {status or "nothing"}; no script was read, so the {product} version could not be read again')
-    skipped = reading.get('skipped') or []
-    unread = reading.get('unread') or []
-    if record is None:
-        if skipped or (params.get('version_source') in ('', 'other') and unread):
-            why = '; '.join(dict.fromkeys(w for _u, w in skipped)) or 'scripts on other hosts are never read'
-            return result('observed', f'no script read names {product}, but {len(skipped) or len(unread)} script(s) were not read ({why}): the '
-                                      'library may be in one of them')
-        return result('version_changed', f'the page no longer loads {product}: no script it loads names it or states its version',
-                      f'The page no longer loads {product}: a fresh read of the front page and every script it loads found no copy of it.')
-    copies = [c for c in record.get('copies') or [] if isinstance(c, dict)]
-    body = [(c, _in_ranges(c.get('version'), entries)) for c in copies if c.get('version') and c.get('source') == 'body']
-    effective = record.get('version') if record.get('version_source') == 'body' and not record.get('copies_unresolved') else ''
-    where = f" (read from the file {record.get('script_url')})" if record.get('script_url') else ''
-    if effective and _in_ranges(effective, entries) is True:
-        return result('reaffirmed', f'the page loads {product} {effective}{where}, the copy that runs; that version is inside the affected '
-                                    'range (the version is on the page; whether the page is exploitable depends on how it uses it)')
-    inside = [c for c, verdict in body if verdict is True]
+    alias = _alias_of(params, reading)
+    if alias:
+        return result('version_changed', f'every front page of the host permanently redirects to {alias}: its scripts are that host\'s',
+                      f'A fresh read shows every front page of this host answers a permanent redirect to {alias} (a redirect alias): it serves no '
+                      f'page of its own, so the {product} version recorded for it is the other host\'s, which is judged on its own.')
+    if not pages:
+        return result('failed', 'the host has no web page to read')
+    read = [p for p in pages if p.get('outcome') == 'read']
+    if not read:
+        outcomes = {p.get('outcome') for p in pages}
+        if outcomes <= {'refused', 'challenged'}:
+            return result('blocked', 'no front page could be read: ' + '; '.join(
+                f"{p['base']} {'was refused by the address gate' if p['outcome'] == 'refused' else 'was challenged by ' + str(p.get('challenge'))}" for p in pages))
+        if all(p.get('outcome') == 'unanswered' or (p.get('status') or 0) >= 500 for p in pages):
+            return result('failed', f'no front page answered, so the {product} version could not be read again')
+        redirects = [p for p in pages if p.get('outcome') == 'redirect']
+        if redirects:
+            hop = redirects[0]
+            how = ('a temporary redirect is not an alias' if hop.get('status') in (302, 303, 307) else
+                   'a redirect to the host itself is not an alias' if hop.get('status') in (301, 308) else
+                   'the status of the redirect is not known, so it is not taken for an alias')
+            return result('observed', f"the front page redirects ({hop.get('status')}) to {hop.get('location')}: {how}, unless every root "
+                                      'answers a permanent redirect to another host, and no script was read')
+        return result('observed', 'the front page answered ' + ', '.join(str(p.get('status') or p.get('outcome')) for p in pages) +
+                      f'; no script was read, so the {product} version could not be read again')
+    every_base = len(read) == len(pages)
+    if not records:
+        script = reading.get('script')
+        if script and script.get('status') in (404, 410):
+            return result('version_changed', f"the script the match was made on ({params['script_url']}) is gone ({script['status']}) and no page "
+                                             f'shows {product} any more',
+                          f"The script the match was made on ({params['script_url']}) now answers {script['status']}, and a fresh read of every "
+                          f'web base and the scripts they load finds no {product}.')
+        if script and not script.get('truncated'):
+            versions = [v for k, v, _how in script.get('found') or [] if k == key]
+            if versions and all(_in_ranges(v, entries) is False for v in versions):
+                return result('version_changed', f"the script the match was made on now states {product} {versions[0]}, outside the affected range",
+                              f"The script the match was made on ({params['script_url']}) now states {product} {versions[0]}, at or above the fixed "
+                              'release, and no page shows an older copy.')
+        return result('observed', f'no page read now shows {product}; a page that no longer shows a library (a maintenance or an access-denied '
+                                  'page shows none) does not close the match: the next scan retires it if it is really gone')
+    copies = [(page, c) for page, record in records for c in record.get('copies') or [] if isinstance(c, dict)]
+    for page, record in records:
+        effective = next((c for c in record.get('copies') or [] if c.get('state') == 'effective'), None)
+        if effective and effective.get('source') == 'body' and _in_ranges(effective.get('version'), entries) is True:
+            where = f" (read from the file {effective.get('url')})" if effective.get('url') else ''
+            return result('reaffirmed', f"the page loads {product} {effective.get('version')}{where}, the copy that runs; that version is inside "
+                                        'the affected range (the version is on the page; whether the page is exploitable depends on how it uses it)')
+    inside = [c for _p, c in copies if c.get('source') == 'body' and _in_ranges(c.get('version'), entries) is True]
     if inside:
         states = ', '.join(dict.fromkeys(c.get('state') or 'unresolved' for c in inside))
         return result('observed', f'{product} {inside[0].get("version")} inside the affected range is still on the page, as a {states} copy; '
                                   'whether it runs needs a person to look')
-    unread_copies = [c for c in copies if c.get('source') != 'body']
-    if body and all(verdict is False for _c, verdict in body) and not unread_copies and not skipped:
-        versions = ', '.join(dict.fromkeys(c.get('version') for c, _v in body))
-        return result('version_changed', f'the page now loads {product} {versions}{where}, outside the affected range',
-                      f'A fresh read of the page\'s scripts shows {product} {versions}{where}, at or above the fixed release: the version the '
-                      'match was made on is no longer on the page.')
-    if unread_copies or skipped:
-        return result('observed', f'{product} is on the page, but not every copy\'s file could be read, so its version is not settled')
-    return result('observed', f'{product} is on the page, but the version its file states cannot be placed against the affected range')
+    blockers = []
+    unread = [c for _p, c in copies if c.get('source') != 'body']
+    if unread:
+        blockers.append(f"the file of a {product} copy ({unread[0].get('url')}) was not read ({unread[0].get('not_read') or 'not read'})")
+    if any(r.get('copies_unresolved') for _p, r in records):
+        blockers.append('the page does not show which copy runs (' + next((r.get('unresolved_reason') for _p, r in records
+                                                                             if r.get('unresolved_reason')), 'copies unresolved') + ')')
+    effective = [next((c for c in r.get('copies') or [] if c.get('state') == 'effective'), None) for _p, r in records]
+    if any(c is None for c in effective) and not blockers:
+        blockers.append(f'no copy of {product} is the one that runs on every page')
+    if any(c and c.get('truncated') for c in effective):
+        blockers.append(f'the file of the copy that runs was cut at {MAX_SCRIPT_BYTES // 1024} KB, so a second copy further in was not seen')
+    if any(_in_ranges(c.get('version'), entries) is None for _p, c in copies if c.get('source') == 'body'):
+        blockers.append('a version the file states cannot be placed against the affected range')
+    if not every_base:
+        blockers.append('not every web base of the host was read (' + ', '.join(f"{p['base']}: {p.get('outcome')}" for p in pages
+                                                                                   if p.get('outcome') != 'read') + ')')
+    lazy = [p['base'] for p in read if key in (p.get('lazy') or [])]
+    if lazy:
+        blockers.append(f'the page adds {product} at run time (a loader or inline code), which the read does not see')
+    versions = ', '.join(dict.fromkeys(c.get('version') for c in effective if c))
+    if blockers:
+        return result('observed', f'the copy that runs states {product} {versions or "no version"}, but ' + '; '.join(blockers))
+    where = f" (read from the file {effective[0].get('url')})" if effective and effective[0] and effective[0].get('url') else ''
+    return result('version_changed', f'the page now loads {product} {versions}{where}, outside the affected range',
+                  f"A fresh read of every web base shows the copy of {product} that runs is {versions}{where}, read in full and at or above the "
+                  f"fixed release, and every copy on the page was read: the version the match was made on ({params.get('matched_version') or 'unknown'}) "
+                  'is not what the page runs.')
 
 
 RUNNERS = {'nuclei_template': run_nuclei_template, 'nmap_sv': run_nmap_sv, 'http_head': run_http_head, 'db_probe': run_db_probe,

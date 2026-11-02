@@ -161,7 +161,7 @@ def _job_current(job, now):
         reason = (job.result or {}).get('reason')
         if reason in ('no_longer_eligible', 'historical'):
             return False  # a replaced match's job says nothing about the match that replaced it
-        if reason in ('out_of_scope', 'host_only_scope'):
+        if reason in ('out_of_scope', 'host_only_scope', 'bounty_not_confirmed'):
             return when > now - timedelta(minutes=30)
         return True
     result = job.result or {}

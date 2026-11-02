@@ -599,8 +599,8 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
     dict; called as ``fetch(url, headers={'If-None-Match': etag})`` to revalidate a cached reading) and return ``resolve``'s records. ``vet``
     is ``vetter``'s; ``budget`` is ``{'left': n}``, shared by every page of one host; ``reader`` is the scan's ``Reader`` (one is made when
     none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop). ``report`` (a dict), when given, is
-    filled with ``read`` (the script URLs whose file was read or revalidated) and ``skipped`` (``[(url, reason)]`` of those it wanted to read
-    and did not), so a caller can tell "the page loads no such library" from "not every script was read"."""
+    filled with ``read`` (the script URLs whose file was read or revalidated), ``skipped`` (``[(url, reason)]`` of those it wanted to read
+    and did not) and ``truncated`` (those read only up to MAX_SCRIPT_BYTES), so a caller can tell "the page loads no such library" from "not every script was read"."""
     reader = reader if reader is not None else Reader(project)
     project = project if project is not None else reader.project
     entries = [dict(e) for e in entries or []]
@@ -653,6 +653,7 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
     if report is not None:
         report['read'] = [e['url'] for e in wanted if e.get('read') is not None]
         report['skipped'] = [(e['url'], e['skipped']) for e in wanted if e.get('read') is None and e.get('skipped')]
+        report['truncated'] = [e['url'] for e in wanted if (e.get('read') or {}).get('truncated')]
     return resolve(entries)
 
 
@@ -691,6 +692,8 @@ def _copies(entries):
                 copy['filename_version'] = entry['filename_version']  # the name said otherwise: the file wins
             if source == 'body' and read.get('sha256'):
                 copy['sha256'] = read['sha256']
+            if read is not None and read.get('truncated'):
+                copy['truncated'] = True  # only the first MAX_SCRIPT_BYTES were read: a second copy later in the file was not seen
             if source != 'body':
                 copy['not_read'] = entry.get('skipped') or ('no version in the file' if read is not None else 'not read')
             out.setdefault(key, []).append(copy)

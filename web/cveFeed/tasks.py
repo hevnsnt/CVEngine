@@ -751,7 +751,8 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
 
     text = {'historical': 'the match was replaced by a newer scan before the request ran',
             'out_of_scope': 'the host is outside the scannable project scope',
-            'host_only_scope': HOST_ONLY_SCOPE_TEXT}[reason]
+            'host_only_scope': HOST_ONLY_SCOPE_TEXT,
+            'bounty_not_confirmed': 'the bug bounty engagement has not confirmed automated testing: only a person\'s own request runs'}[reason]
     result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason, 'next_action': text}
     OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
         status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
@@ -794,12 +795,17 @@ def validate_match_on_demand(request_id):
         from targetApp.models import narrowed_names
         if narrowed_names(job.project_id, [match.subdomain.name]):  # held only under a target that is now exactly one host
             return _skip_on_demand_validation(job, progress, cve_id, 'host_only_scope')
+        from cveFeed.conductor import bounty_blocked_projects
+        if job.source != 'manual' and job.project_id in bounty_blocked_projects():  # only a person's own request runs in a bug bounty project that has not confirmed automated testing
+            return _skip_on_demand_validation(job, progress, cve_id, 'bounty_not_confirmed')
         invalid_reason = correlation.invalid_identity_reason(match)
         if invalid_reason:
             correlation.close_invalid_correlation(match, invalid_reason)
+            note = ('An earlier validation re-read the page\'s scripts and closed this match: ' + correlation.closure_summary(invalid_reason) + '.'
+                    if validation.closed_by_script_read(match) else 'The product recorded for this host is not the software this advisory covers.')
             result = {'check_state': 'no_check', 'checks': {'ran': 0, 'reused': 0}, 'ai_state': 'not_needed',
                       'assessment_status': 'closed_not_applicable', 'assessment_reason': invalid_reason,
-                      'check_notes': ['The product recorded for this host is not the software this advisory covers.']}
+                      'check_notes': [note]}
             OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
                 status='completed', result=result, finished_at=timezone.now())
             activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(invalid_reason)})',
@@ -810,6 +816,7 @@ def validate_match_on_demand(request_id):
         row, _ = triage.track(triage.with_cves([match]))[0]
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(evidence_signature=row.signature)
         subject = validation.subject_for(row, match)
+        subject['unattended'] = job.source != 'manual'  # the bug bounty gate holds a run the system started to the project's confirmation
         template = validation.resolve_template(match.cve_entry.cve_id)
         available_checks, plan_notes = validation.plan_checks(subject, row.signature, template)
         available_checks = [check for check in available_checks if check]

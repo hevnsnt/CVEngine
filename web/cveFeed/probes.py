@@ -14,6 +14,7 @@ finds the product states no version records that too (``hidden``): the AI is tol
 
 ``plan_for_host`` picks the probes for a host's leads without any AI, so this works with no AI key; the AI, when configured, may choose
 among the ones this module offers (cveFeed.validation_plan) and reason over what they found."""
+import itertools
 import logging
 import os
 import re
@@ -592,54 +593,92 @@ def _library_records_observations(records):
     return out
 
 
-def read_front_page_libraries(project_id, domain_id, sub, base, get=None, sleep=time.sleep):
-    """The html-libraries read of ``sub``'s front page for a validation re-test (``cveFeed.validation.run_script_read``): the page through the
-    same gated, pinned GET as every probe, then its scripts through ``js_libraries`` (its vetter, a fresh ``Reader`` with the usual budgets,
-    the per-host script limit), past the script cache. ``get(url,
-    headers=None)`` replaces the network (tests). Returns ``{'outcome', 'status', 'final_url', 'alias_of', 'challenge', 'records', 'skipped',
-    'unread', 'observations'}``: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were read), ``alias`` (the front
-    page only sends visitors to another host, ``alias_of``), ``redirect`` (a redirect that could not be followed), ``challenged`` (an edge
-    answered instead of the site) or ``error_page`` (any other status). ``skipped`` are the scripts it wanted to read and did not (with why),
-    ``unread`` the page's other scripts no file of which was read (third-party hosts are never read). Raises what ``fetch`` raises (a refused
-    destination is a ValueError, a network failure an OSError). What it read is stored as the html-libraries observation (the host's newest
-    library reading, which correlation reads); it is not applied to the host row here, so the match under validation keeps the evidence its
-    row was validated for: the next scan applies it (``apply_known``) and correlates."""
-    allowed = allowed_names(sub)
+_JS_STRING = re.compile(r'''["']([^"'\s<>]{1,300}?\.js(?:\?[^"'\s<>]{0,200})?)["']''')
+
+
+def lazy_libraries(body, page_url, entries):
+    """The library keys a page names in a script file path that is not one of its ``<script src>`` tags (``parse_page`` ``entries``): a loader,
+    a consent manager or inline code that adds the script at run time (``createElement('script')``, a ``src`` set later, an import map). Such a
+    copy is not read by the page read, so it can never be ruled out."""
+    seen = {e['url'] for e in entries or [] if e.get('url')}
+    out = set()
+    for found in itertools.islice(_JS_STRING.finditer((body or '').replace('\\/', '/')), 2000):
+        url = js_libraries._absolute(found.group(1), page_url)
+        key = js_libraries.identify(url)['library'] if url else ''
+        if key and url not in seen:
+            out.add(key)
+    return sorted(out)
+
+
+def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep):
+    """The html-libraries read of every web base of ``sub`` for a validation re-test (``cveFeed.validation.run_script_read``): each base's front
+    page through the same gated, pinned GET as every probe (a redirect is followed only on the host itself, so a redirect to another host is
+    seen as it is), then the scripts of every page through ``js_libraries`` (its vetter, one fresh ``Reader`` with the usual budgets, the
+    per-host script limit shared by the bases), past the script cache. Nothing is stored. ``get(url, headers=None)`` replaces the network
+    (tests). Returns ``{'pages': [...]}``, one per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were
+    read), ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered`` or ``refused`` (the gate refused the
+    address); a read page carries ``records`` (``js_libraries.resolve``), ``skipped`` (scripts it wanted and did not read, with why),
+    ``truncated`` (scripts read only up to the size cap),
+    ``scripts`` (how many scripts with a source the page has) and ``lazy`` (libraries the page adds at run time)."""
+    host = sub.name.lower().rstrip('.')
+    own = {host}
     if get is not None:
         page_get, script_get = (lambda url: get(url)), (lambda url, headers=None: get(url, headers=headers))
     else:
-        page_get = lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project_id)  # noqa: E731
+        allowed = allowed_names(sub)
+        page_get = lambda url: fetch(url, allowed=own, sleep=sleep, project=project_id)  # noqa: E731
         script_get = lambda url, headers=None: fetch(url, allowed=allowed, sleep=sleep, project=project_id,  # noqa: E731
                                                      max_bytes=js_libraries.MAX_SCRIPT_BYTES, headers=headers)
-    host = (urlsplit(base).hostname or '').lower().rstrip('.')
-    first = page_get(base.rstrip('/') + '/') or {}
-    status = first.get('status') or 0
-    final = first.get('final_url') or first.get('url') or base
-    out = {'outcome': '', 'status': status, 'final_url': str(final)[:500], 'alias_of': '', 'challenge': first.get('challenge') or '',
-           'records': {}, 'skipped': [], 'unread': [], 'observations': []}
-    if out['challenge']:
-        out['outcome'] = 'challenged'
-    elif 300 <= status < 400:
-        out['alias_of'] = js_libraries.redirect_alias_of([(final, status, first.get('location') or '')], host)
-        out['outcome'] = 'alias' if out['alias_of'] else 'redirect'
-    elif 200 <= status < 300 and not served_by(first, base):
-        out['outcome'], out['alias_of'] = 'alias', (urlsplit(final).hostname or '').lower().rstrip('.')
-    elif not 200 <= status < 300:
-        out['outcome'] = 'error_page'
-    if out['outcome']:
-        return out
-    entries = js_libraries.parse_page(first.get('body', ''), final)
-    report = {}
-    records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
-                                     {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP),
-                                     reader=js_libraries.Reader(project_id, fresh=True), project=project_id, report=report)
-    tried = set(report.get('read') or []) | {url for url, _why in report.get('skipped') or []}
-    out.update(outcome='read', records=records, skipped=list(report.get('skipped') or []),
-               unread=[e['url'] for e in entries if e.get('url') and e['url'] not in tried
-                       and js_libraries.kind_of(e['url'], final) != 'analytics'][:20])
-    out['observations'] = _library_records_observations(records)
-    record(project_id, domain_id, sub.name, 'html-libraries', out['observations'])
-    return out
+    reader = js_libraries.Reader(project_id, fresh=True)
+    budget = {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
+    pages = []
+    for base in bases:
+        page = {'base': base, 'outcome': '', 'status': 0}
+        try:
+            first = page_get(base.rstrip('/') + '/') or {}
+        except ValueError:
+            page['outcome'] = 'refused'
+            pages.append(page)
+            continue
+        except OSError as exc:
+            page.update(outcome='unanswered', error=type(exc).__name__)
+            pages.append(page)
+            continue
+        status = first.get('status') or 0
+        final = first.get('final_url') or first.get('url') or base
+        page.update(status=status, final_url=str(final)[:500])
+        if first.get('challenge'):
+            page.update(outcome='challenged', challenge=first['challenge'])
+        elif 300 <= status < 400:
+            page.update(outcome='redirect', location=urljoin(final, (first.get('location') or '').strip())[:500])
+        elif 200 <= status < 300 and not served_by(first, base):
+            page.update(outcome='redirect', location=str(final)[:500])  # a test's fake followed it: the status of the hop is not known
+        elif not 200 <= status < 300:
+            page['outcome'] = 'error_page'
+        else:
+            entries = js_libraries.parse_page(first.get('body', ''), final)
+            report = {}
+            records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
+                                             budget, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project_id, report=report)
+            page.update(outcome='read', records=records, skipped=list(report.get('skipped') or [])[:40], truncated=list(report.get('truncated') or [])[:20],
+                        scripts=sum(1 for e in entries if e.get('url')), lazy=lazy_libraries(first.get('body', ''), final, entries))
+        pages.append(page)
+    return {'pages': pages}
+
+
+def refetch_script(project_id, sub, url, get=None, sleep=time.sleep):
+    """The script a match was made on, fetched again (a vetted same-host script only): ``{'status', 'found', 'truncated'}`` with what its
+    file states, or None when it may not be read."""
+    if js_libraries.kind_of(url, f'https://{sub.name}/') != 'same-host':
+        return None
+    getter = get or (lambda u, headers=None: fetch(u, allowed={sub.name.lower()}, sleep=sleep, project=project_id,
+                                                    max_bytes=js_libraries.MAX_SCRIPT_BYTES))
+    got = getter(url) or {}
+    text = got.get('body') or ''
+    raw = got.get('bytes')
+    size = raw if isinstance(raw, int) else len(text.encode('utf-8', 'replace'))
+    return {'status': got.get('status') or 0, 'found': [list(f) for f in js_libraries.read_body(text)] if 200 <= (got.get('status') or 0) < 300 else [],
+            'truncated': size >= js_libraries.MAX_SCRIPT_BYTES}
 
 
 def observations_from_nmap(inventory, port):

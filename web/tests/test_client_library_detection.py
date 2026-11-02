@@ -59,8 +59,9 @@ class ClientLibraryRecordTests(TestCase):
 		self.assertEqual(check['how']['tool'], 'html-libraries probe')
 		decide = check['how']['decide']
 		for words in ('from the file itself', '?ver=', 'file name', 'effective', 'shadowed', 'not that the page is exploitable',
-					  'attacker-controlled HTML'):
+					  'attacker-controlled HTML', 'up to 300 KB'):
 			self.assertIn(words, decide)
+		self.assertNotIn('head -c', decide)
 		profile = strategy['validation']
 		self.assertEqual(profile['recommended_tools'], ['html-libraries probe', 'package manager'])
 		self.assertEqual((profile['remote_determinable'], profile['max_remote_state']), ('partial', 'likely'))
@@ -123,12 +124,37 @@ class ClientLibraryRecordTests(TestCase):
 		for name, (cve, templates) in cases.items():
 			self.assertEqual(json.dumps(record(cve, templates), sort_keys=True), golden[name], name)
 
+	def test_a_package_of_one_bootstrap_line_is_checked_only_for_a_range_of_that_line(self):
+		def packages(ranges):
+			cve = CVEEntry(cve_id='CVE-2099-11', title='Bootstrap XSS', affected=[{'product': 'Bootstrap', 'ranges': ranges}])
+			return {c['params']['package']: c['params']['affected_below'] for c in record(cve)['local_checks']}
+		self.assertEqual(packages([{'introduced': '4.0.0', 'fixed': '4.3.1'}]), {'libjs-bootstrap4': '4.3.1'})
+		self.assertEqual(packages([{'fixed': '3.4.1'}]), {'libjs-bootstrap': '3.4.1'})
+		self.assertEqual(packages([{'introduced': '3.0.0', 'fixed': '3.4.1'}, {'introduced': '4.0.0', 'fixed': '4.3.1'}]),
+						 {'libjs-bootstrap': '3.4.1', 'libjs-bootstrap4': '4.3.1'})
+		self.assertEqual(packages([{'introduced': '5.0.0', 'fixed': '5.3.0'}]), {'libjs-bootstrap5': '5.3.0', 'node-bootstrap': '5.3.0'})
+		ui = record(CVEEntry(cve_id='CVE-2099-12', title='x', affected=[{'product': 'jQuery UI', 'ranges': [{'fixed': '1.13.0'}]}]))
+		self.assertEqual([(c['params']['ecosystem'], c['params']['package']) for c in ui['local_checks']],
+						 [('dpkg', 'libjs-jquery-ui'), ('rpm', 'js-jquery-ui')])
+
+	def test_a_separate_package_named_after_the_library_keeps_its_own_checks(self):
+		# CVE-2019-10744: lodash and lodash.merge / lodash.defaultsdeep are separate npm packages with their own versions
+		affected = [{'package': 'lodash', 'ranges': [{'fixed': '4.17.12'}]}, {'package': 'lodash.merge', 'ranges': [{'fixed': '4.6.2'}]},
+					{'package': 'lodash.defaultsdeep', 'ranges': [{'fixed': '4.6.1'}]}]
+		strategy = record(CVEEntry(cve_id='CVE-2019-10744', title='lodash prototype pollution', affected=affected))
+		self.assertEqual([c['kind'] for c in strategy['remote_checks']], ['script_version', 'version_banner', 'version_banner'])
+		self.assertEqual({c['params']['package'] for c in strategy['local_checks']} & {'lodash.merge', 'lodash.defaultsdeep'},
+						 {'lodash.merge', 'lodash.defaultsdeep'})
+		self.assertIn('lodash.merge', strategy['identify'])
+
 	def test_a_library_cve_that_also_names_another_product_keeps_that_products_checks(self):
 		affected = JQUERY_11023[:1] + [{'vendor': 'oracle', 'product': 'WebLogic Server', 'package': 'weblogic', 'ranges': [{'fixed': '14.1.2'}]}]
 		strategy = record(CVEEntry(cve_id='CVE-2099-10', title='x', affected=affected))
 		self.assertEqual([c['kind'] for c in strategy['remote_checks']], ['script_version', 'version_banner'])
 		self.assertEqual(strategy['remote_checks'][1]['params']['product'], 'WebLogic Server')
 		self.assertIn('weblogic', [c['params']['package'] for c in strategy['local_checks']])
+		self.assertIn('WebLogic Server', strategy['identify'])
+		self.assertTrue(any('WebLogic Server' in step for step in strategy['confirm_steps']))
 
 	def test_the_schema_takes_the_new_kind_and_refuses_what_is_not_a_library(self):
 		check = {'id': 'script-jquery', 'kind': 'script_version', 'description': 'd', 'confidence': 'medium',

@@ -44,19 +44,26 @@ TLS_PROPERTIES = ('protocol', 'cipher', 'cert_expiry', 'cert_key_bits')
 VERSION_SOURCES = ('service_banner', 'http_header', 'technology', 'any')
 
 
-# The system-wide packages that ship a client-side library (cveFeed.js_libraries.LIBRARIES key -> [(ecosystem, package)]): the only host check
-# that means anything for such a library. A copy a website bundles is not a package; only reading the page's scripts finds it. Debian and
-# Ubuntu package the libraries as libjs-* (and node-* for the npm copy); Fedora and EPEL ship jQuery as js-jquery. Alpine packages none of them.
+# The system-wide packages that ship a client-side library (cveFeed.js_libraries.LIBRARIES key -> [(ecosystem, package, major)]): the only host
+# check that means anything for such a library. A copy a website bundles is not a package; only reading the page's scripts finds it. Checked
+# against the Debian and Fedora package indexes: Debian and Ubuntu package the libraries as libjs-* (node-* for the npm copy), Fedora and EPEL
+# as js-*; Alpine packages none of them. ``major`` names the one major release line a package ships (Debian's libjs-bootstrap is Bootstrap 3,
+# libjs-bootstrap4 is 4.x, libjs-bootstrap5 and node-bootstrap are 5.x): such a package is checked only against a range of its own line,
+# because a package check compares with the fixed release alone and would flag a 3.x package for a 4.x-only flaw.
 SYSTEM_PACKAGES = {
-    'jquery': (('dpkg', 'libjs-jquery'), ('dpkg', 'node-jquery'), ('rpm', 'js-jquery')),
-    'jquery-ui': (('dpkg', 'libjs-jquery-ui'),),
-    'bootstrap': (('dpkg', 'libjs-bootstrap'), ('dpkg', 'libjs-bootstrap4')),
-    'angularjs': (('dpkg', 'libjs-angularjs'),),
-    'lodash': (('dpkg', 'node-lodash'),),
-    'underscore': (('dpkg', 'libjs-underscore'), ('dpkg', 'node-underscore')),
-    'moment': (('dpkg', 'node-moment'),),
-    'datatables': (('dpkg', 'libjs-jquery-datatables'),),
+    'jquery': (('dpkg', 'libjs-jquery', None), ('dpkg', 'node-jquery', None), ('rpm', 'js-jquery', None)),
+    'jquery-ui': (('dpkg', 'libjs-jquery-ui', None), ('rpm', 'js-jquery-ui', None)),
+    'bootstrap': (('dpkg', 'libjs-bootstrap', 3), ('dpkg', 'libjs-bootstrap4', 4), ('dpkg', 'libjs-bootstrap5', 5), ('dpkg', 'node-bootstrap', 5)),
+    'angularjs': (('dpkg', 'libjs-angularjs', None),),
+    'lodash': (('dpkg', 'libjs-lodash', None), ('dpkg', 'node-lodash', None)),
+    'underscore': (('dpkg', 'libjs-underscore', None), ('dpkg', 'node-underscore', None), ('rpm', 'js-underscore', None)),
+    'moment': (('dpkg', 'libjs-moment', None), ('dpkg', 'node-moment', None)),
+    'datatables': (('dpkg', 'libjs-jquery-datatables', None),),
 }
+# Packages, by their exact name, that vendor a library into an application (a Rails gem, a Sass port): their versions are the package's own,
+# and the copy they put on a page is the one the script read finds. Anything else an advisory names (lodash.merge, a separate npm package with
+# its own versions) keeps its own checks.
+BUNDLED_BY = {'jquery': ('jquery-rails',), 'jquery-ui': ('jquery-ui-rails',), 'bootstrap': ('bootstrap-sass',)}
 LIBRARY_TOOL = 'html-libraries probe'
 
 
@@ -83,12 +90,11 @@ def library_key(name):
 
 
 def _bundles(name, keys):
-    """Whether ``name`` (an advisory entry that is not the library itself) is a package that ships one of the libraries ``keys`` (the same
-    advisory names both: ``jquery-rails`` in a jQuery advisory). Its version is the package's, not the library's, and the copy it puts on a page
-    is found by the script read."""
-    token = _token(name)
-    names = {_token(n) for key in keys for n in (key, _libraries()[key][0])}
-    return bool(token) and any(n in token for n in names)
+    """Whether ``name`` (an advisory entry that is not the library itself) is, by its exact name, a package that vendors one of the libraries
+    ``keys`` (BUNDLED_BY: ``jquery-rails`` in a jQuery advisory). Its version is the package's, not the library's, and the copy it puts on a
+    page is found by the script read. A package merely named after the library (``lodash.merge``) is not one."""
+    name = str(name or '').strip().lower()
+    return bool(name) and any(name in BUNDLED_BY.get(key, ()) for key in keys)
 
 
 def client_libraries(affected):
@@ -413,9 +419,31 @@ def rules_strategy(cve, template_ids=()):
     return strategy
 
 
+def _major(version):
+    found = re.match(r'(\d+)', str(version or ''))
+    return int(found.group(1)) if found else None
+
+
+def _package_bound(ranges, major):
+    """The one fixed release a package check compares with: for a package of every release line (``major`` None) the advisory's only fix;
+    for a package of one line, the only fix of the ranges that cover that line (introduced, or 0, at or below it; fixed at or above it).
+    None when there is none, or more than one."""
+    fixes = set()
+    for rng in ranges:
+        if not rng.get('fixed'):
+            continue
+        if major is not None:
+            low, high = _major(rng.get('introduced') or '0'), _major(rng['fixed'])
+            if low is None or high is None or not low <= major <= high:
+                continue
+        fixes.add(rng['fixed'])
+    return fixes.pop() if len(fixes) == 1 else None
+
+
 def _library_checks(libraries):
     """``(remote, local)``: one ``script_version`` check per library the advisory names, with its ranges as matching reads them (each range
-    once), and a package check for each system-wide package that ships the library, when the advisory gives one fixed release for it."""
+    once), and a package check for each system-wide package that ships the library, against the one fixed release of its release line
+    (``_package_bound``)."""
     from cveFeed.correlation import prepared_ranges
     remote, local = [], []
     for key, entries in list(libraries.items())[:4]:
@@ -430,11 +458,10 @@ def _library_checks(libraries):
         remote.append({'id': f'script-{key}', 'kind': 'script_version', 'confidence': 'medium',
                        'description': f'a script the page loads states a {product} version inside an affected range (read from the file itself)',
                        'params': {'library': key, 'ranges': ranges[:10]}})
-        fixed = {r['fixed'] for r in ranges if r.get('fixed')}
-        if len(fixed) != 1:
-            continue  # several branches, each with its own fix: no one bound fits a package whose release is not known yet
-        fixed = fixed.pop()
-        for ecosystem, package in SYSTEM_PACKAGES.get(key, ()):
+        for ecosystem, package, major in SYSTEM_PACKAGES.get(key, ()):
+            fixed = _package_bound(ranges, major)
+            if not fixed:
+                continue  # no range of this package's release line, or several fixes: no one bound fits a package whose release is not known yet
             local.append({'id': f'pkg-{package}'[:40], 'kind': 'package_version', 'confidence': 'medium',
                           'description': f'the system-wide {package} package is older than {fixed} (a distribution may backport the fix; '
                                          'a copy a website bundles is not a package)',
@@ -483,12 +510,15 @@ def rules_guidance(remote, local, has_template):
 
 def library_guidance(remote, local, has_template):
     """``rules_guidance`` for a client-side JavaScript library: the version is read from the script files a page loads, which copy runs
-    decides, and a vulnerable version is not yet an exploitable page."""
+    decides, and a vulnerable version is not yet an exploitable page. An advisory that also names another product (CVE-2020-11022 names
+    maximebf/debugbar beside jQuery) says how to check that one too."""
     scripts = [c for c in remote if c['kind'] == 'script_version']
+    others = [c for c in remote if c['kind'] == 'version_banner']
     products = list(dict.fromkeys(_libraries()[c['params']['library']][0] for c in scripts))
     product = products[0]
     fixed = next((r['fixed'] for c in scripts for r in c['params']['ranges'] if r.get('fixed')), None)
     identify = '; '.join(f"{_libraries()[c['params']['library']][0]} {_range_text(c['params']['ranges'][0])}" for c in scripts[:2])
+    also = '; '.join(f"{c['params']['product']} {_range_text(c['params']['ranges'][0])}" for c in others[:2])
     steps = [f'Read the {product} version from the script files the page loads: the html-libraries probe (Validate now runs it) reads each '
              'file\'s own banner or code, never a ?ver= query string or the file name alone.',
              'When the page loads several copies, look at the one that runs (effective): a copy shadowed by a later one, or a fallback that '
@@ -496,6 +526,9 @@ def library_guidance(remote, local, has_template):
              'Compare that version with the affected range' + (f' and the fixed release {fixed}.' if fixed else '.'),
              f'Check how the page uses {product}: the flaw needs attacker-controlled input (for an XSS flaw, HTML) to reach the affected '
              'functions, so a vulnerable version alone does not make the page exploitable.']
+    if others:
+        steps.append(f"For {', '.join(dict.fromkeys(c['params']['product'] for c in others[:2]))}, which the advisory also names, find the exact "
+                     'version on the host (the Services tab shows what cvENGINE saw) and compare it with its own range.')
     if has_template:
         steps.append('Run Validate now: the nuclei template for this CVE checks it from outside.')
     if local:
@@ -503,7 +536,7 @@ def library_guidance(remote, local, has_template):
                      'package, and only the script read finds it.')
     return {
         'identify': (f'Affects {identify}, wherever a web page loads it (a copy bundled with the site or served from a CDN), or a '
-                     'system-wide package ships it.'),
+                     'system-wide package ships it.' + (f' Also {also}.' if also else '')),
         'confirm_steps': steps[:6],
         'true_positive_signs': (['The nuclei template for this CVE matches.'] if has_template else []) + [
             f'The {product} file the page loads states a version inside the affected range (its banner or code), and it is the copy that runs.',
