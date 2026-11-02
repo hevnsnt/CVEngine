@@ -58,6 +58,18 @@ class LightNucleiPolicyTests(DispatchBase):
         target = self.dispatched('nuclei_targeted', tags=['wordpress', 'cms'], severities=['high', 'critical'])
         self.assertEqual((target['tags'], target['severities']), (['cms', 'wordpress'], ['high', 'critical']))
 
+    def test_a_pass_with_no_severities_sends_the_local_default_not_an_empty_list(self):
+        # An empty list makes the client run every severity, ``unknown`` included; the local run's default is info to critical.
+        self.assertEqual(nuclei_scan.SEVERITIES, 'info,low,medium,high,critical')
+        target = self.dispatched('nuclei_targeted', tags=['wordpress'])
+        self.assertEqual((target['tags'], target['severities']), (['wordpress'], ['info', 'low', 'medium', 'high', 'critical']))
+        for severities in (None, []):
+            with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
+                target = dispatch._nuclei_target('nuclei_deep', ['www.example.test'], {'tags': ['cve'], 'severities': severities})
+            self.assertEqual(target['severities'], ['info', 'low', 'medium', 'high', 'critical'], severities)
+            self.assertNotIn('unknown', target['severities'])
+        self.assertEqual(dispatch._nuclei_target('nuclei_light', ['www.example.test'], {})['severities'], ['info'])  # the light pass is unchanged
+
     def test_every_nuclei_task_carries_the_servers_excluded_tags_and_template_policy(self):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             for kind in ('nuclei_light', 'nuclei_targeted'):
