@@ -650,7 +650,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.3.1'
+HOW_REVIEWED_VERSION = '1.3.2'
 
 
 def how_page(request):

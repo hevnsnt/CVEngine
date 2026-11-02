@@ -607,11 +607,12 @@ class DocumentationTests(unittest.TestCase):
         for g in tunables.GROUPS:
             self.assertIn(f'**{g.title}**', text, g.id)
 
-    def test_the_changelog_mentions_it_under_unreleased(self):
+    def test_the_changelog_mentions_it_in_its_newest_section(self):
+        # The newest section is '## Unreleased' between releases and '## vX.Y.Z (date)' once a release is cut, so read whichever comes first.
         changelog = (ROOT / 'CHANGELOG.md').read_text()
-        unreleased = changelog.split('## Unreleased', 1)[1].split('\n## ', 1)[0]
-        self.assertIn('configMaxxing', unreleased)
-        self.assertIn('AI spend', unreleased)
+        newest = changelog.split('\n## ', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('configMaxxing', newest)
+        self.assertIn('AI spend', newest)
 
 
 if __name__ == '__main__':
