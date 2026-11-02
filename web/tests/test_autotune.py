@@ -881,6 +881,124 @@ class ReviewFixTests(Isolated, TestCase):
                 self.assertGreaterEqual(info['target'], m.setting.default, key)
 
 
+class FollowUpPolicyTests(SimpleTestCase):
+    """The 1.3.3 follow-ups of the auto-tuner's rules: the quick restore after an emergency happens once a day, and a probe never overshoots."""
+
+    def test_a_second_emergency_within_a_day_of_a_quick_restore_is_remembered_and_not_restored_quickly_again(self):
+        # The restored 22 ran the database out of connections again: without a memory the pool would flap 22 -> 16 -> 22 every hour.
+        flap = [change(6 * 3600, 8, 22, 'aim_high'), change(4 * 3600, 22, 16, 'emergency'), change(3 * 3600, 16, 22, 'recover'),
+                change(30 * 60, 22, 16, 'emergency')]
+        plan = decide(DISCOVERY32, 16, 8, history(), past=flap, target=22)
+        self.assertNotEqual(plan['phase'], 'recover')
+        self.assertIsNone(plan['new'])
+        self.assertEqual(plan['ceiling'], 20)  # one step under the restored level, like a level that caused trouble
+        self.assertIn('below the level that last caused trouble', decide(DISCOVERY32, 20, 8, history(), past=flap, target=22)['why_not_raised'])
+        self.assertEqual(decide(DISCOVERY32, 20, 8, history(), past=flap, target=22, now=NOW + 25 * 3600)['ceiling'], 22)  # for a day
+        # A restore more than a day ago does not count: the next emergency is again treated as a transient outage.
+        old = [change(30 * 3600, 8, 22, 'aim_high'), change(28 * 3600, 22, 16, 'emergency'), change(27 * 3600, 16, 22, 'recover'),
+               change(30 * 60, 22, 16, 'emergency')]
+        again = decide(DISCOVERY32, 16, 8, history(), past=old, target=22)
+        self.assertEqual((again['phase'], again['new'], again['ceiling']), ('recover', 22, 22))
+
+    def test_a_probe_never_overshoots_the_target_the_remembered_level_or_the_memory_cap(self):
+        busy = history(13)
+        probed = 0
+        with mock.patch.object(policy, 'room', return_value=None), mock.patch.object(policy, 'demand', return_value=None):
+            for setting in SETTINGS:
+                for value in range(setting.low, setting.high + 1):
+                    for target in range(setting.low, setting.high + 1):
+                        bad = change(4 * 3600, target, policy.backoff(setting, target), 'back_off', pressure=True)
+                        for past, hard_cap in ((SETTLED, None), (SETTLED + [bad], None), (SETTLED, target)):
+                            if hard_cap is not None and not setting.kind.startswith('heavy:'):
+                                continue
+                            plan = decide(setting, value, value, busy, past=past, target=target, hard_cap=hard_cap)
+                            if plan['phase'] != 'probe':
+                                continue
+                            probed += 1
+                            where = (setting.key, value, target, len(past), hard_cap)
+                            self.assertEqual(plan['new'], policy.towards(setting, value, 'more'), where)  # one step, never more
+                            for limit in (plan['ceiling'], target, hard_cap):
+                                if limit is not None:
+                                    self.assertFalse(policy._beyond(setting, plan['new'], limit), where)
+                                    self.assertFalse(any(policy._beyond(setting, n, limit) for n in plan['ai_range']), where)
+        self.assertGreater(probed, 100)
+        # A step that would land past the target is not taken (the setting holds one short of it, it does not overshoot)
+        held = decide(DISCOVERY32, 21, 8, busy, past=SETTLED, target=22)
+        self.assertIsNone(held['new'])
+        self.assertIn('target for this machine', held['why_not_raised'])
+
+
+TWO_SENTINELS = {'sentinel': {'live': 2, 'slots': 9}}
+SENTINEL_BLIP = {'sentinel': {'live': 1, 'slots': 4}}  # one of the two missed its heartbeat window at this measurement
+
+
+class FollowUpRunTests(Isolated, TestCase):
+    """The 1.3.3 follow-ups end to end: a Sentinel blip does not undo the aim, and the emergency back-off respects pins."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = User.objects.create_superuser('follow_root', 'fu@x.io', 'x')
+
+    run_with = RunTests.run_with
+    db_down_run = ReviewFixTests.db_down_run
+    def tuned(self):
+        values = AutoTuneSettings.current().values
+        return values['discovery_concurrency'], values['stage_parallel'], values['assess_batch'], values['work_depth']
+
+    def test_a_sentinel_that_misses_a_heartbeat_does_not_pull_the_aimed_numbers_down(self):
+        start = timezone.now()
+        self.run_with(TWO_SENTINELS, n=1, now=start)
+        self.assertEqual(self.tuned(), (22, 9, 18, 7))  # aimed high for two Sentinels with nine slots
+        for minutes, over in ((10, SENTINEL_BLIP), (20, SENTINEL_BLIP), (30, TWO_SENTINELS)):
+            summary = self.run_with(over, n=1, now=start + timedelta(minutes=minutes))
+            self.assertEqual(summary['changes'], [], minutes)
+            self.assertEqual(summary['facts']['sentinel_slots'], 9, minutes)
+        self.assertEqual(self.tuned(), (22, 9, 18, 7))  # nothing to climb back
+        self.assertFalse(TuningDecision.objects.filter(phase='cap').exists())
+
+    def test_a_sentinel_gone_for_three_measurements_in_a_row_is_gone(self):
+        start = timezone.now()
+        self.run_with(TWO_SENTINELS, n=1, now=start)
+        for minutes in (10, 20):
+            self.assertEqual(self.run_with(SENTINEL_BLIP, n=1, now=start + timedelta(minutes=minutes))['changes'], [], minutes)
+        summary = self.run_with(SENTINEL_BLIP, n=1, now=start + timedelta(minutes=30))
+        self.assertEqual({c['setting']: (c['from'], c['to']) for c in summary['changes']},
+                         {'discovery_concurrency': (22, 12), 'stage_parallel': (9, 4), 'assess_batch': (18, 8), 'work_depth': (7, 5)})
+        self.assertEqual(set(TuningDecision.objects.filter(phase='cap').values_list('setting', flat=True)),
+                         {'discovery_concurrency', 'stage_parallel', 'assess_batch', 'work_depth'})
+
+    def emergency(self):
+        start = timezone.now()
+        self.db_down_run(start)
+        return self.db_down_run(start + timedelta(minutes=10))
+
+    def test_the_emergency_back_off_leaves_a_saved_pin_alone(self):
+        row = AutoTuneSettings.current()
+        row.values = {'discovery_concurrency': 24, 'work_depth': 8}  # tuned before a person pinned the pool on the page
+        row.save()
+        autotune.publish(row)
+        sc.update({'discovery_concurrency': 30}, self.root)
+        summary, resize = self.emergency()
+        resize.assert_not_called()  # the discovery workers keep the 30 a person saved
+        self.assertEqual({c['setting']: (c['from'], c['to']) for c in summary['changes']}, {'work_depth': (8, 6)})
+        self.assertEqual(summary['settings']['discovery_concurrency']['state'], 'pinned')
+        self.assertEqual(autotune.pending_emergency(), {'work_depth': 6})
+        resources.invalidate_auto()
+        resources.invalidate_saved()
+        self.assertEqual(sc.resolve('discovery_concurrency'), {'value': 30, 'source': 'admin'})
+
+    def test_the_emergency_back_off_leaves_an_environment_pin_alone(self):
+        os.environ['CVENGINE_WORK_DEPTH'] = '5'  # the operator's own number
+        row = AutoTuneSettings.current()
+        row.values = {'discovery_concurrency': 24, 'work_depth': 8}
+        row.save()
+        autotune.publish(row)
+        summary, resize = self.emergency()
+        resize.assert_called_once_with(18)
+        self.assertEqual({c['setting']: (c['from'], c['to']) for c in summary['changes']}, {'discovery_concurrency': (24, 18)})
+        self.assertEqual(autotune.pending_emergency(), {'discovery_concurrency': 18})
+
+
 class PrecedenceTests(Isolated, TestCase):
     def setUp(self):
         super().setUp()
