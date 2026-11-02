@@ -153,12 +153,18 @@ def version_only_q(prefix=''):
 # ----------------------------------------------------------------------------- proof: what turns a KEV match fire (the heat policy)
 
 PROVEN_LIBRARY_CONFIDENCE = 0.8  # js_libraries.CONFIDENCE: a file's comment banner 0.9, a code signature 0.8; a file name 0.4
+# the template_result a version-class template hit is recorded as (PR #384, templategen.VERSION_ONLY_RESULT): a template that only reads a
+# static page or a banner matched the version string on the host. It proves the version, not the flaw.
+VERSION_TEMPLATE_RESULT = 'version_only'
 
 
-def version_read_from_component(evidence, distro_status=''):
-    """Whether a match's version was read from the component itself, at a confidence that proves it (the second half of
-    ``version_proven``; the first is ``has_hard_evidence``). Two readings qualify, each written by correlation into the match's evidence:
+def version_read_from_component(evidence, distro_status='', template_result=''):
+    """Whether a match's version was read from the component itself, at a confidence that proves it: "version proven", the second half of
+    ``version_proven`` (the first, "vulnerability confirmed", is ``has_hard_evidence``). It proves the version is there, not that the flaw is,
+    so it never lifts triage, creates a finding or counts as a validation hit; it is what the heat rule needs. Three readings qualify:
 
+      * a version-class template hit on this host (``template_result`` version_only): a template that only reads a static page or a banner
+        read the version from the service or the file itself and found it inside the range;
       * a JavaScript library whose OWN FILE states the version: ``evidence.source`` tech, ``version_source`` body (the file's comment banner
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
         ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set);
@@ -173,7 +179,11 @@ def version_read_from_component(evidence, distro_status=''):
     quality bar, a version inherited from another host or a redirect (correlation records none of those as a file or probe reading), a
     nmap row from before the method was kept, and an AI verdict. To tighten it, drop a clause here (and in ``version_read_from_component_q``):
     the heat, lists, counts, scores, alerts and API all follow."""
-    if not isinstance(evidence, dict) or distro_status == 'patched':
+    if distro_status == 'patched':
+        return False
+    if template_result == VERSION_TEMPLATE_RESULT:
+        return True
+    if not isinstance(evidence, dict):
         return False
     source = evidence.get('source')
     if source == 'tech':
@@ -193,7 +203,8 @@ def version_read_from_component_q(prefix=''):
     library = (Q(**{p + 'evidence__source': 'tech', p + 'evidence__version_source': 'body', p + 'evidence__copy_state': 'effective',
                     p + 'evidence__version_confidence__gte': PROVEN_LIBRARY_CONFIDENCE}) & ~evidence_flag_q('copies_unresolved', p))
     service = Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & ~evidence_flag_q('distro', p)
-    return (library | service) & ~Q(**{p + 'distro_status': 'patched'})
+    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})
+    return (template | library | service) & ~Q(**{p + 'distro_status': 'patched'})
 
 
 def version_proven(match, validation_status=None):
@@ -202,16 +213,17 @@ def version_proven(match, validation_status=None):
 
       * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, testssl), the distribution
         tracker listing the package as vulnerable, the host's own inventory report, runZero reporting the CVE, a validation hit; or
-      * the version read from the component itself at high confidence (``version_read_from_component``): a JavaScript library's own file
-        (banner 0.9 or code signature 0.8, the copy that runs), or a service banner nmap's probe read from a service that is not
-        distribution-packaged.
+      * the version read from the component itself at high confidence (``version_read_from_component``): a version-class template hit, a
+        JavaScript library's own file (banner 0.9 or code signature 0.8, the copy that runs), or a service banner nmap's probe read from a
+        service that is not distribution-packaged.
 
     Everything else (``version_read_from_component`` lists it) is a version we only THINK is there: smoke when hot. ``validation_status``
     overrides the Triage row's (``''``: as if no validation had hit yet)."""
     status = _validation_status(match) if validation_status is None else validation_status
     return (has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
                               getattr(match, 'distro_status', '') or '', status)
-            or version_read_from_component(getattr(match, 'evidence', None), getattr(match, 'distro_status', '') or ''))
+            or version_read_from_component(getattr(match, 'evidence', None), getattr(match, 'distro_status', '') or '',
+                                           getattr(match, 'template_result', '') or ''))
 
 
 def version_proven_q(prefix=''):
@@ -233,6 +245,8 @@ def proof_of(match):
         return 'version proven: runZero reports it'
     if _validation_status(match) == 'hit':
         return 'version proven: a validation check reproduced it'
+    if (getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched':
+        return 'version proven: a version check read it on the host'
     if version_read_from_component(evidence, getattr(match, 'distro_status', '') or ''):
         return ('version proven: read from the library file itself' if evidence.get('source') == 'tech'
                 else 'version proven: read from the service banner by nmap')

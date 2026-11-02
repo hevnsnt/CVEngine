@@ -19,6 +19,7 @@ from agentapi import services
 from cveFeed import hot_validation, match_policy, notify, openvas_scan, scoring, threat, tunables
 from cveFeed.models import CVEEntry, CVEMatch, Triage
 from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE
+from startScan.models import Vulnerability
 from tests.test_match_policy import Fixture
 
 POLICY = threat.HEAT_POLICY_ENV
@@ -50,6 +51,9 @@ EVIDENCE = {
 	'library code signature': ({'source': 'tech', 'version_in_range': True, 'evidence': {**FILE_BANNER, 'version_confidence': 0.8}}, '', True),
 	'nmap probed service banner': ({'source': 'port', 'version_in_range': True,
 									'evidence': {'source': 'port', 'method': 'probed', 'raw_version': '2.4.49'}}, '', True),
+	# proven: a version-class template (PR #384) read the version on the host
+	'version-class template hit': ({'source': 'tech', 'version_in_range': True, 'evidence': {'source': 'tech'}, 'template_result': 'version_only'},
+								   '', True),
 	# never proven
 	'library file name or ?ver= hint': ({'source': 'tech', 'version_in_range': True,
 										 'evidence': {**FILE_BANNER, 'version_source': 'filename', 'version_confidence': 0.4}}, '', False),
@@ -181,6 +185,16 @@ class OwnerRuleTests(Policy, SimpleTestCase):
 		self.assertEqual(threat.heat_reason(fake('nmap probed service banner', 'kev, medium score')),
 						 'on the KEV; version proven: read from the service banner by nmap')
 		self.assertEqual(threat.heat_reason(fake('template hit', 'exploit only, low score')), 'a public exploit is known; version proven: template hit')
+		self.assertEqual(threat.heat_reason(fake('version-class template hit', 'kev, medium score')),
+						 'on the KEV; version proven: a version check read it on the host')
+
+	def test_version_proven_and_vulnerability_confirmed_are_two_notions(self):
+		m = fake('version-class template hit', 'kev, medium score')
+		self.assertTrue(match_policy.version_proven(m))  # the version is proven: fire on a KEV CVE
+		self.assertFalse(match_policy.has_hard_evidence(m.source, m.evidence, m.template_result, m.distro_status, ''))  # the flaw is not shown
+		self.assertTrue(match_policy.is_version_only(m))  # so triage stays at needs validation
+		m.distro_status = 'patched'
+		self.assertFalse(match_policy.version_proven(m))
 
 	def test_the_score_follows(self):
 		smoke = {'id': 'CVE-2020-11023', 'temp': SMOKE, 'ai_verdict': 'uncertain'}
@@ -278,8 +292,23 @@ class DatabaseFormTests(Policy, Fixture):
 			notify.fire_confirmed([pk])
 			notify.fire_confirmed([pk])
 		self.assertEqual(sent.call_count, 1)
+		version = next(pk for pk, v in self.rows.items() if v == ('library read by another tool', 'kev, medium score'))
+		vm = CVEMatch.objects.select_related('cve_entry', 'triage').get(pk=version)
+		self.assertTrue(threat.unproven(vm))
+		CVEMatch.objects.filter(pk=version).update(template_result='version_only')  # a version-class template proved the version
+		with mock.patch.object(notify, '_send', return_value=True) as sent:
+			notify.fire_confirmed([version])
+			notify.fire_confirmed([version])
+		self.assertEqual(sent.call_count, 1)  # proven by a version check: paged once as fire
+		self.assertIn('confirmed, now fire-tier', sent.call_args.args[0])
+		self.assertFalse(Vulnerability.objects.exists())  # and no finding: the flaw itself was not shown
 		cold = next(pk for pk, v in self.rows.items() if v == ('technology detection (Wappalyzer)', 'critical score and epss, not hot'))
 		CVEMatch.objects.filter(pk=cold).update(evidence={'source': 'tech', 'runzero': True})
 		with mock.patch.object(notify, '_send', return_value=True) as sent:
 			notify.fire_confirmed([cold])
 		sent.assert_not_called()  # proof on a CVE that is not hot leaves it ice: no page
+		cold_cve = CVEMatch.objects.select_related('cve_entry').get(pk=cold).cve_entry.cve_id
+		with mock.patch.object(notify, '_send', return_value=True) as sent:
+			self.assertFalse(notify.template_hits([(cold_cve, self.sub.name)]))  # a confirmed hit on an ice CVE is not announced
+			self.assertTrue(notify.template_hits([('CVE-2099-77', 'unknown.example.test')]))  # an unknown CVE is never held back
+		self.assertEqual(sent.call_count, 1)

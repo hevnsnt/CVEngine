@@ -192,16 +192,17 @@ def _claim(ids):
 
 
 def _hot_only(hits):
-    """The (CVE id, host) pairs whose CVE can be fire on a host under the heat policy: all of them under ``legacy``, those of a KEV or
-    exploited CVE under ``kev``. A lookup that fails keeps every pair (a message too many beats a missed one)."""
+    """The (CVE id, host) pairs whose CVE can be fire on a host under the heat policy: all of them under ``legacy``; under ``kev`` every
+    pair but those of a stored CVE that is neither on the KEV nor exploited (ice). A CVE that is not stored, or a lookup that fails, keeps
+    the pair: a genuine hit is never held back for want of data (a message too many beats a missed one)."""
     try:
         from cveFeed.models import CVEEntry
         from cveFeed.threat import LEGACY_POLICY, heat_policy, hot_q
         if not hits or heat_policy() == LEGACY_POLICY:
             return hits
         wanted = {str(cve).upper() for cve, _host in hits}
-        hot = {c.upper() for c in CVEEntry.objects.filter(hot_q(), cve_id__in=wanted).values_list('cve_id', flat=True)}
-        return [(cve, host) for cve, host in hits if str(cve).upper() in hot]
+        cold = {c.upper() for c in CVEEntry.objects.filter(cve_id__in=wanted).exclude(hot_q()).values_list('cve_id', flat=True)}
+        return [(cve, host) for cve, host in hits if str(cve).upper() not in cold]
     except Exception as exc:  # noqa: BLE001
         logger.warning('could not read which template hits are hot (%s)', type(exc).__name__)
         return hits
