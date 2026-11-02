@@ -717,7 +717,7 @@ def _track(findings):
     order given; a finding with no owning project is skipped (nothing is stored without a tenancy scope)."""
     from cveFeed.models import CVEMatch, Triage
     now = timezone.now()
-    pairs, reset_matches = [], []
+    pairs, reset_matches, carried_hits = [], [], []
     findings = [f for f in findings if f is not None]
     for start in range(0, len(findings), CHUNK):
         described = [(f, describe(f)) for f in findings[start:start + CHUNK]]
@@ -754,6 +754,7 @@ def _track(findings):
                 row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
             changed.append(row)
         if new_rows:
+            carried_hits.extend(r.match_id for r in new_rows if r.match_id and r.validation_status == 'hit')
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
             for fk in set(KIND_FK[d['kind']] for _, d in described):
                 existing[fk].update(_fetch(fk, [f.pk for f, d in described if KIND_FK[d['kind']] == fk and f.pk not in existing[fk]]))
@@ -772,6 +773,11 @@ def _track(findings):
             m.ai_verdict = m.ai_reason = m.ai_model = ''
         from cveFeed import scoring
         scoring.rescore_for_matches(reset_matches)
+    if carried_hits:
+        # a rescan's match carried its predecessor's validation hit (hard evidence): the score and the snapshots follow. Not paged: the
+        # finding is not new
+        from cveFeed import scoring
+        scoring.evidence_arrived(carried_hits)
     return pairs
 
 
@@ -1090,7 +1096,8 @@ def recap_version_only():
     version = Q(match__version_in_range=True) | Q(match__version_in_range__isnull=True, match__evidence__has_key='branch_unlisted')
     rows = (Triage.objects.filter(version, kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'))
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
-            .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
+            .exclude(match__source='host').exclude(match_policy.evidence_flag_q('host_reported', 'match__'))
+            .exclude(match_policy.evidence_flag_q('runzero', 'match__')))  # the key is removed when runZero stops reporting it
     ids = list(rows.values_list('pk', flat=True))
     changed = 0
     now = timezone.now()

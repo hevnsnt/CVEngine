@@ -1314,22 +1314,26 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
 
 # --- inventory and findings ----------------------------------------------------
 
-def _heat_reasons(sub):
-    """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first."""
+def _heat_reasons(sub, capped=True):
+    """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first. ``capped=False``
+    rates each CVE match by ``threat.validation_heat`` (no version-only cap): what a confirmer (OpenVAS) orders hosts by."""
     from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.distro import label_for
-    from cveFeed.threat import SEVERITY_HEAT, classify_threat_tier, match_temperature
+    from cveFeed.threat import SEVERITY_HEAT, match_heat, validation_heat
     reasons = []
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out by the AI, fixed or an accepted risk: not a reason for the host's colour
             continue
         c = m.cve_entry
-        tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
+        uncapped = validation_heat(m)
+        temp = match_heat(m) if capped else uncapped
+        held = temp != uncapped  # a version-only match held below its CVE's tier: say so, so KEV is never hidden
         reasons.append({'kind': 'cve', 'label': c.cve_id, 'description': _cve_description(c, 180),
                         'detail': (f'CVSS {c.cvss}' if c.cvss is not None else 'no score') +
                         (', listed as exploited' if c.kev else '') + (', AI confirmed' if m.ai_verdict == 'affected' else '') +
-                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else ''),
-                        'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)),
+                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else '') +
+                        (f', version only: shown as {temp} until a check confirms it' if held else ''),
+                        'temp': temp, 'kev': bool(c.kev), 'heat_capped': held,
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
     for v in sub.vulnerability_set.all():
         if finding_is_live(v) and v.severity in SEVERITY_HEAT:
@@ -1384,9 +1388,10 @@ def _merge_group(sub, others):
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
     score and the web routes, which are both read by name."""
     from cveFeed.counts import finding_is_live, match_is_live
+    from cveFeed.threat import HEAT_RANK
     from startScan.models import open_services
     ips, seen_ports = {}, set()
-    reasons, seen_reasons = [], set()
+    reasons, seen_reasons = [], {}
     vulns, seen_vulns = {}, set()
     cves = set()
     for row in [sub, *others]:
@@ -1402,8 +1407,12 @@ def _merge_group(sub, others):
         for r in _heat_reasons(row):
             key = (r['kind'], r['finding'], r['label'] if r['kind'] == 'cve' else r['id'])
             if key not in seen_reasons:
-                seen_reasons.add(key)
+                seen_reasons[key] = len(reasons)
                 reasons.append(r)
+            elif HEAT_RANK.get(r['temp'], 0) > HEAT_RANK.get(reasons[seen_reasons[key]]['temp'], 0):
+                # one CVE on two copies (or two products) of the host: the hotter one speaks for it, so a validated copy is not hidden
+                # behind a version-only one that the cap holds at smoke
+                reasons[seen_reasons[key]] = r
         for m in row.cve_matches.all():
             if match_is_live(m):
                 cves.add(m.cve_entry.cve_id)
@@ -3011,12 +3020,14 @@ def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
 
 def _match(m):
     from cveFeed.distro import label_for
-    from cveFeed.threat import match_temperature
+    from cveFeed.threat import match_heat, validation_heat
     sub = m.subdomain
     cve = _cve(m.cve_entry, brief=True)
     cve['feed_tier'] = cve['tier']
-    cve['tier'] = match_temperature(cve['tier'], m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m))  # rated as it applies to this host
-    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None,
+    cve['tier'] = match_heat(m)  # rated as it applies to this host: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT
+    cve['validation_tier'] = validation_heat(m)  # the same without that cap: what orders validation
+    cve['heat_capped'] = cve['tier'] != cve['validation_tier']
+    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None, 'version_only': match_policy.is_version_only(m),
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
             'confidence': m.confidence, 'source': m.source, 'host_reported': m.source == 'host',
             'ai_verdict': m.ai_verdict, 'ai_reason': m.ai_reason,
@@ -3077,6 +3088,8 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(subdomain__name__icontains=params['host'])
     if params.get('cve'):  # one CVE id: where a CVE named in free text (an activity line) links to
         qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
+    if _kev_only(params):
+        qs = qs.filter(cve_entry__kev=True)
     return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
@@ -3085,6 +3098,12 @@ def list_matches(ctx, slug, params):
 FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
+
+
+def _kev_only(params):
+    """``kev=1`` (or true, yes): only CVE matches of a CVE listed as exploited. Heat no longer says KEV (a version-only KEV match is smoke,
+    ``threat.match_heat``), so this is how a person or an agent finds them all. Any other value is ignored."""
+    return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _finding_sources(project, params):
@@ -3102,6 +3121,9 @@ def _finding_sources(project, params):
     wanted = params.get('type') or 'all'
     if wanted != 'all' and wanted not in FINDING_TYPES:
         raise ApiError(400, f'type must be all or one of {", ".join(FINDING_TYPES)}')
+    kev = _kev_only(params)
+    if kev:
+        wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
     status = params.get('status') or 'actionable'
     if status not in ('actionable', 'all'):
         raise ApiError(400, 'status must be actionable or all')
@@ -3117,6 +3139,8 @@ def _finding_sources(project, params):
     sources = {}
     if wanted in ('all', 'cve'):
         qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        if kev:
+            qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
             qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
@@ -3170,7 +3194,10 @@ def _finding_row(kind, obj):
         if obj.source == 'host':
             note += ' (reported by the host)'
         status = 'ruled out' if obj.ai_verdict == 'not_affected' else obj.remediation_status
-        extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
+        # KEV is shown on the row whatever the heat: a version-only match of a known-exploited CVE shows smoke, not fire
+        from cveFeed.threat import validation_heat
+        extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160), 'kev': bool(cve.kev), 'version_only': match_policy.is_version_only(obj),
+                 'heat_capped': heat != validation_heat(obj)}  # the version-only cap lowered it (CVENGINE_VERSION_ONLY_MAX_HEAT)
     elif kind == 'scanner':
         title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
         status, extra = ('closed' if not obj.open_status else obj.remediation_status), {}
@@ -3200,7 +3227,7 @@ GROUP_MODES = ('none', 'cve')  # group=cve: the same script on sibling hosts is 
 def list_findings(ctx, slug, params):
     """Every finding of the project in one list, hottest first: CVE matches, scanner findings and hygiene findings. Facets:
     type (all|cve|scanner|hygiene), heat (all|fire|smoke|ice), severity (all|critical|high|medium|low|info), status
-    (actionable, the default, or all) and host. ``counts`` holds the total of each type under the same facets; the list itself
+    (actionable, the default, or all), host, and kev=1 (CVE matches of a CVE listed as exploited only, whatever their heat). ``counts`` holds the total of each type under the same facets; the list itself
     pages through at most MAX_FINDINGS rows (``truncated`` says when there are more).
 
     ``group=cve`` folds the CVE matches of one script on sibling hosts into one row (``_grouped_findings``); the default

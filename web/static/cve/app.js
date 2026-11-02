@@ -68,6 +68,15 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
+// a CVE listed as exploited in the wild, shown on its row whatever the heat: a match that rests on its version alone is held at
+// smoke (CVENGINE_VERSION_ONLY_MAX_HEAT) until a check confirms it, and KEV must still be visible at a glance
+const kevBadge = (heatCapped) => {
+  const b = badge("KEV", "critical");
+  b.title = heatCapped
+    ? "Listed as exploited in the wild. The match rests on a version alone, so it shows below fire until a check confirms it; it is validated first."
+    : "Listed as exploited in the wild";
+  return b;
+};
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
 const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
@@ -3338,6 +3347,7 @@ const pages = {
             ? el("a", "", text, { href: `/cve/${encodeURIComponent(projectOf(h))}/${r.finding === "match" ? "matches" : "vulns"}/#${r.id}` })
             : el("span", "", text);
           line.append(badge(r.temp, r.temp), label, el("span", "note", r.detail));
+          if (r.kev) line.append(kevBadge(r.heat_capped));
           if (r.kind === "cve") line.append(el("span", "note host-why", r.description || "Description unavailable in the CVE feed."));
           if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }, { project: projectOf(h), kind: r.finding === "match" ? "match" : "vulnerability", id: r.id }));
           why.append(line);
@@ -3649,7 +3659,7 @@ const pages = {
     mount.append(header);
     // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
     let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
-    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}) });
+    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
@@ -3670,6 +3680,9 @@ const pages = {
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
     const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
+    // KEV whatever the heat: a match that rests on its version alone is smoke at most, so heat alone no longer finds every exploited CVE
+    const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
+    kev.value = wanted.get("kev") === "1" ? "1" : "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -3701,7 +3714,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", group: FG.GROUPED };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -3712,14 +3725,14 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, group: groupMode }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, group: groupMode }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }),
       apply: (v) => {
         setGroupMode(v.group);
         setPicker(type, "type", v.type);
@@ -3727,6 +3740,7 @@ const pages = {
         setPicker(status, "status", v.status);
         q.value = v.host;
         scope.value = v.internal || "";
+        kev.value = v.kev || "";
         reload();
       },
     });
@@ -3798,11 +3812,11 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, scope, type.node, sev.node, status.node, everyHost],
+      filters: [views.node, q, scope, kev, type.node, sev.node, status.node, everyHost],
       params,
       exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
       empty: () => {
-        const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value;
+        const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
         if (narrowed)
           return {
             icon: "search",
@@ -3815,6 +3829,7 @@ const pages = {
                   setPicker(sev, "severity", "all");
                   q.value = "";
                   scope.value = "";
+                  kev.value = "";
                   reload();
                 },
               },
@@ -3836,7 +3851,7 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) && f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
@@ -3890,13 +3905,19 @@ const pages = {
         ["fixed", "Fixed"],
         ["accepted_risk", "Accepted risk"],
       ],
-      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, page_size: 0 })}`)).count,
+      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );
     const cls = select("AI classification", CLASS_OPTIONS, () => {
       status.refresh();
       list.reload();
     });
+    // KEV whatever the heat: a match that rests on its version alone is smoke at most
+    const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => {
+      status.refresh();
+      list.reload();
+    });
+    kev.value = urlq.get("kev") === "1" ? "1" : "";
     const statusControl = matchStatusControl;
     const list = findingPage(mount, {
       bulk: true,
@@ -3905,10 +3926,10 @@ const pages = {
       noun: "match",
       plural: "matches",
       path: `${base}/matches`,
-      filters: [cveNote, q, status.node, cls, verdict],
-      params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
+      filters: [cveNote, q, status.node, cls, verdict, kev],
+      params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value }),
       empty: () =>
-        q.value.trim() || status.value || cls.value || cveOnly || verdict.value !== "active"
+        q.value.trim() || status.value || cls.value || cveOnly || kev.value || verdict.value !== "active"
           ? { icon: "search", title: "No match for these filters" }
           : {
               icon: "match",
@@ -3921,7 +3942,7 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
+        meta: [badge(m.cve.tier, m.cve.tier), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

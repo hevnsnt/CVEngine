@@ -57,6 +57,7 @@ Every poller on the live pages (the dashboard, the graph page and its SOC highli
 
 ## Working in lists
 
+- **KEV is shown whatever the heat.** A CVE match of a CVE listed as exploited carries a red **KEV** badge on the Findings and Matches rows and in the host's **Why** list (its tooltip says the match shows below fire only when the version-only cap actually lowered it), and both lists have a **Known exploited** filter (`?kev=1`, kept in the URL and saved views of Findings). A version-only match is held at smoke (see [Fire, smoke, and ice](FIRE-SMOKE-ICE.md#from-the-feed-to-your-hosts)), so the badge, its tooltip and the reason "version only: shown as smoke until a check confirms it" are where a known-exploited version-only match shows; fire means a check or another source confirmed it on the host.
 - **URL carries the view.** Hosts reads `?q=`, `sort=name`, `heat=fire|smoke|ice|clean|unscanned`, `internal=0|1`, `view=gallery`, and `host=<name>`. Defaults stay out of the link, so a bookmark is short.
 - **CSV export** on Hosts and Findings downloads the current filter (UTF-8 with a BOM, 20,000 rows at most, 2,000 for Findings). A leading `=`, `+`, `-`, or `@` is escaped so spreadsheets do not run it.
 - **Row menu**: the `...` button on a row, or `.` on a focused row. Copy name or link, open in a new tab, pin, archive, or set a status.

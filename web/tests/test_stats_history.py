@@ -30,7 +30,8 @@ class ComputeSnapshotTests(TestCase):
 		cls.clean = Subdomain.objects.create(name='clean.snap.example', target_domain=cls.domain)
 		kev = CVEEntry.objects.create(cve_id='CVE-2099-8001', kev=True, cvss=9.8, title='t', published_at=NOW)
 		mild = CVEEntry.objects.create(cve_id='CVE-2099-8002', cvss=5.0, title='t', published_at=NOW)
-		cls.fire_match = CVEMatch.objects.create(cve_entry=kev, subdomain=cls.www, matched_product='nginx')
+		# a template hit: fire on the host needs hard evidence (1.3.2: a version-only KEV match is smoke)
+		cls.fire_match = CVEMatch.objects.create(cve_entry=kev, subdomain=cls.www, matched_product='nginx', template_result='vulnerable')
 		cls.ice_match = CVEMatch.objects.create(cve_entry=mild, subdomain=cls.api, matched_product='php')
 		cls.fixed_match = CVEMatch.objects.create(cve_entry=mild, subdomain=cls.www, matched_product='openssl',
 												  remediation_status='fixed', remediation_updated_at=NOW)
