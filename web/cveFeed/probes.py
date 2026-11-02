@@ -578,12 +578,67 @@ def _library_observations(first, get, sleep, project=None, reader=None, target=N
     entries = js_libraries.parse_page(first.get('body', ''), page)
     records = js_libraries.read_page(entries, page, get, js_libraries.vetter(page, project, target=target),
                                      {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project)
+    return _library_records_observations(records)
+
+
+def _library_records_observations(records):
+    """One ``version`` observation per library record (``js_libraries.resolve``), carrying the record in ``evidence['library']``."""
     out = []
     for record in records.values():
         version = record['version']
         out.append(_observation('version', record['product'], version, source='script:body' if record['version_source'] == 'body' else 'script:filename',
                                 confidence=record['version_confidence'] if version else 0.7, outcome='found' if version else 'hidden', url='/',
                                 evidence={'library': record}))
+    return out
+
+
+def read_front_page_libraries(project_id, domain_id, sub, base, get=None, sleep=time.sleep):
+    """The html-libraries read of ``sub``'s front page for a validation re-test (``cveFeed.validation.run_script_read``): the page through the
+    same gated, pinned GET as every probe, then its scripts through ``js_libraries`` (its vetter, a fresh ``Reader`` with the usual budgets,
+    the per-host script limit), past the script cache. ``get(url,
+    headers=None)`` replaces the network (tests). Returns ``{'outcome', 'status', 'final_url', 'alias_of', 'challenge', 'records', 'skipped',
+    'unread', 'observations'}``: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were read), ``alias`` (the front
+    page only sends visitors to another host, ``alias_of``), ``redirect`` (a redirect that could not be followed), ``challenged`` (an edge
+    answered instead of the site) or ``error_page`` (any other status). ``skipped`` are the scripts it wanted to read and did not (with why),
+    ``unread`` the page's other scripts no file of which was read (third-party hosts are never read). Raises what ``fetch`` raises (a refused
+    destination is a ValueError, a network failure an OSError). What it read is stored as the html-libraries observation (the host's newest
+    library reading, which correlation reads); it is not applied to the host row here, so the match under validation keeps the evidence its
+    row was validated for: the next scan applies it (``apply_known``) and correlates."""
+    allowed = allowed_names(sub)
+    if get is not None:
+        page_get, script_get = (lambda url: get(url)), (lambda url, headers=None: get(url, headers=headers))
+    else:
+        page_get = lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project_id)  # noqa: E731
+        script_get = lambda url, headers=None: fetch(url, allowed=allowed, sleep=sleep, project=project_id,  # noqa: E731
+                                                     max_bytes=js_libraries.MAX_SCRIPT_BYTES, headers=headers)
+    host = (urlsplit(base).hostname or '').lower().rstrip('.')
+    first = page_get(base.rstrip('/') + '/') or {}
+    status = first.get('status') or 0
+    final = first.get('final_url') or first.get('url') or base
+    out = {'outcome': '', 'status': status, 'final_url': str(final)[:500], 'alias_of': '', 'challenge': first.get('challenge') or '',
+           'records': {}, 'skipped': [], 'unread': [], 'observations': []}
+    if out['challenge']:
+        out['outcome'] = 'challenged'
+    elif 300 <= status < 400:
+        out['alias_of'] = js_libraries.redirect_alias_of([(final, status, first.get('location') or '')], host)
+        out['outcome'] = 'alias' if out['alias_of'] else 'redirect'
+    elif 200 <= status < 300 and not served_by(first, base):
+        out['outcome'], out['alias_of'] = 'alias', (urlsplit(final).hostname or '').lower().rstrip('.')
+    elif not 200 <= status < 300:
+        out['outcome'] = 'error_page'
+    if out['outcome']:
+        return out
+    entries = js_libraries.parse_page(first.get('body', ''), final)
+    report = {}
+    records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
+                                     {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP),
+                                     reader=js_libraries.Reader(project_id, fresh=True), project=project_id, report=report)
+    tried = set(report.get('read') or []) | {url for url, _why in report.get('skipped') or []}
+    out.update(outcome='read', records=records, skipped=list(report.get('skipped') or []),
+               unread=[e['url'] for e in entries if e.get('url') and e['url'] not in tried
+                       and js_libraries.kind_of(e['url'], final) != 'analytics'][:20])
+    out['observations'] = _library_records_observations(records)
+    record(project_id, domain_id, sub.name, 'html-libraries', out['observations'])
     return out
 
 

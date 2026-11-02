@@ -42,6 +42,9 @@ def _range_text(ranges):
 def render_remote(check):
     """``{'tool', 'invocation', 'decide'}`` for one remote check, or None for a kind with no rendering."""
     kind, p = check['kind'], check['params']
+    from cveFeed.detection import is_script_read
+    if is_script_read(check):
+        return _render_script_read(p)
     if kind == 'version_banner':
         return {'tool': 'nmap', 'invocation': f'nmap -Pn -sV --version-intensity 5 -p {PORT} {TARGET}',
                 'decide': f"The reported {p['product']} version is inside {_range_text(p['ranges'])}. A banner can hide a backported "
@@ -78,6 +81,23 @@ def render_remote(check):
         return {'tool': 'nmap', 'invocation': f'nmap -Pn -sV -p {port} {TARGET}',
                 'decide': f'Port {port} is open{service}.'}
     return None
+
+
+def _render_script_read(p):
+    """A client-side JavaScript library (``script_version``, or a banner check whose product is one): read from the script files the page
+    loads by cvENGINE's own html-libraries read (``cveFeed.js_libraries``), which nmap cannot do."""
+    from cveFeed.detection import _script_product
+    from cveFeed.js_libraries import MAX_SCRIPTS_PER_HOST
+    product = _script_product({'kind': 'script_version', 'params': p})
+    return {'tool': 'html-libraries probe',
+            'invocation': f'curl -sS --max-time 15 https://{TARGET}/',
+            'decide': (f"cvENGINE's html-libraries read (Validate now) fetches the page and up to {MAX_SCRIPTS_PER_HOST} of the scripts it loads; "
+                       'by hand, fetch each script the page names (curl -sS <script URL> | head -c 4096). Vulnerable version when the '
+                       f"{product} file the page loads states a version inside {_range_text(p['ranges'])}. The version is read from the file "
+                       'itself (its banner or code), never from a ?ver= query string or the file name alone. When the page loads several '
+                       'copies, the one that runs last is effective and the earlier ones are shadowed: the effective copy decides. A hit '
+                       'proves the version is present on the page, not that the page is exploitable: that depends on how the page uses '
+                       f'{product} (an XSS flaw needs attacker-controlled HTML to reach its DOM-manipulation functions).')}
 
 
 # --- local ------------------------------------------------------------------------------------------------------------------

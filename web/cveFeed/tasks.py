@@ -832,7 +832,7 @@ def validate_match_on_demand(request_id):
             plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
         if not checks:
             plan_notes.append(plan['reason'])
-        if not any(check['kind'] == 'fact_probe' for check in available_checks):
+        if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
             from cveFeed import probes
             plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
                               'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
@@ -843,6 +843,19 @@ def validate_match_on_demand(request_id):
         row.save(update_fields=['validation_status', 'attempts', 'next_attempt_at', 'updated_at'])
         require_authority(job)
         check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected)
+        match.refresh_from_db()
+        if validation.closed_by_script_read(match):
+            # the script read showed the library fixed, gone, or the host an alias, and closed the match through the guarded closure: the
+            # AI review has nothing left to judge, as for a different-product closure above
+            result = {'check_state': 'checked', 'checks': check_result, 'ai_state': 'not_needed', 'plan': plan, 'plans': plans,
+                      'assessment_status': 'closed_not_applicable', 'assessment_reason': match.ai_reason[:700],
+                      'check_notes': plan_notes + ['A fresh read of the page\'s scripts closed this match.'],
+                      'classification': 'not_applicable', 'validation_status': Triage.objects.filter(pk=row.pk).values_list(
+                          'validation_status', flat=True).first()}
+            OnDemandValidation.objects.filter(pk=job.pk, status='running').update(status='completed', result=result, finished_at=timezone.now())
+            activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(match.ai_reason)})',
+                            check_state='checked', ai_state='not_needed', assessment_status='closed_not_applicable')
+            return result
         # One bounded second decision uses observations from the first checks. A banner cannot end
         # the request while another already-approved, scoped check remains available.
         remaining = [check for check in available_checks if check['kind'] not in selected]
@@ -1738,6 +1751,7 @@ def build_cve_seed():
         while detection_author.author_rules(batch=5000):
             pass
         detection_author.refresh_rules(batch=5000)
+        detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
         os.makedirs(seed_dir(), exist_ok=True)
         manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
         activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")

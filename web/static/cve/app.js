@@ -1266,7 +1266,8 @@ const guidanceBox = (det, cveId) => {
   };
   const profile = strategy.validation || {};
   if (profile.remote_determinable) {
-    const text = { yes: "cvENGINE can decide this from outside.", partial: "From outside cvENGINE can only see the reported version or the exposed service; a backported fix can fool it.", no: "This cannot be decided from outside; it needs a check on the host." }[profile.remote_determinable];
+    // a client-side library's record says how its version is read (from the page's script files) and what a hit means
+    const text = profile.remote_note || { yes: "cvENGINE can decide this from outside.", partial: "From outside cvENGINE can only see the reported version or the exposed service; a backported fix can fool it.", no: "This cannot be decided from outside; it needs a check on the host." }[profile.remote_determinable];
     box.append(el("p", "note", `${text}${profile.recommended_tools?.length ? ` Tools: ${profile.recommended_tools.join(", ")}.` : ""}`));
   }
   const remote = strategy.remote_checks || [];

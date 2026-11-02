@@ -594,18 +594,21 @@ def _order_to_read(entries, page_url):
     return named + other + fallback
 
 
-def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None):
+def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None, report=None):
     """Read the scripts of a parsed page (``parse_page``) through ``fetch(url)`` (the caller's pinned, bounded GET returning the route probe
     dict; called as ``fetch(url, headers={'If-None-Match': etag})`` to revalidate a cached reading) and return ``resolve``'s records. ``vet``
     is ``vetter``'s; ``budget`` is ``{'left': n}``, shared by every page of one host; ``reader`` is the scan's ``Reader`` (one is made when
-    none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop)."""
+    none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop). ``report`` (a dict), when given, is
+    filled with ``read`` (the script URLs whose file was read or revalidated) and ``skipped`` (``[(url, reason)]`` of those it wanted to read
+    and did not), so a caller can tell "the page loads no such library" from "not every script was read"."""
     reader = reader if reader is not None else Reader(project)
     project = project if project is not None else reader.project
     entries = [dict(e) for e in entries or []]
     for entry in entries:
         if entry.get('url'):
             entry.update(identify(entry['url']))
-    for entry in _order_to_read(entries, page_url):
+    wanted = _order_to_read(entries, page_url)
+    for entry in wanted:
         url = entry['url']
         if stop is not None and stop():
             entry['skipped'] = 'scan stopped'
@@ -647,6 +650,9 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             continue
         entry['read'] = read
         _remember(url, read, project)
+    if report is not None:
+        report['read'] = [e['url'] for e in wanted if e.get('read') is not None]
+        report['skipped'] = [(e['url'], e['skipped']) for e in wanted if e.get('read') is None and e.get('skipped')]
     return resolve(entries)
 
 
