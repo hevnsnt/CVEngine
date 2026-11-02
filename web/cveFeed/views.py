@@ -330,6 +330,9 @@ def stats_payload():
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': CVEEntry.objects.count(),
         'matches': counts.exposed_matches().count(),
+        # the same matches as the Findings list draws them grouped: one script on sibling hosts is one row (cveFeed.finding_groups).
+        # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
+        **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
