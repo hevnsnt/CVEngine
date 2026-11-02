@@ -326,16 +326,53 @@ def describe_cve_match(m):
     guidance = detection.prompt_guidance(cve)  # earlier notes on what makes this CVE apply or not: a hint, the evidence above decides
     if guidance:
         payload['cve']['guidance'] = guidance
+    library = library_brief(evidence, names)
+    if library:
+        payload['library'] = library
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',
               **({'version_unknown': True} if facts['version_unknown'] else {}),
+              **({'library': hashlib.sha1(json.dumps(library, sort_keys=True).encode()).hexdigest()[:16]} if library else {}),
               'intelligence': hashlib.sha1(json.dumps([cve.affected, cve.cvss, cve.kev, cve.epss_reached, cve.exploit_db,
                                                        cve.original_description or cve.summary], sort_keys=True, default=str).encode()).hexdigest()[:16]}
     cvss = cve.cvss
     base = 4 if cvss and cvss >= 9 else 3 if cvss and cvss >= 7 else 2 if cvss and cvss >= 4 else 1 if cvss else 0
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
             'priority': (9, 0) if facts['version_unknown'] else (0 if floor else 3, -base)}
+
+
+LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',
+                   'filename': 'only the script\'s file name or CDN path; the file could not be read or states no version',
+                   'other': 'another fingerprinting tool; the page\'s own scripts were read and are listed under copies'}
+
+
+def library_brief(evidence, names=()):
+    """What a JavaScript library match's evidence says about where its version came from and the other copies on the page
+    (cveFeed.js_libraries), for the prompt: paths only, no host. Empty for any other match."""
+    source = evidence.get('version_source')
+    copies = [c for c in evidence.get('copies') or [] if isinstance(c, dict)]
+    if not source and not copies:
+        return {}
+    out = {'version_source': _s(LIBRARY_SOURCES.get(source, source or ''), 140),
+           'version_confidence': evidence.get('version_confidence') if isinstance(evidence.get('version_confidence'), (int, float)) else None}
+    if evidence.get('script_url'):
+        out['script'] = _path_only(evidence['script_url'], names)
+    if evidence.get('copy_state'):
+        out['this_copy'] = _s(evidence['copy_state'], 20)
+    if copies:
+        out['copies_on_page'] = [{'script': _path_only(c.get('url'), names), 'version': _s(c.get('version'), 40, names) or 'unknown',
+                                  'version_from': _s(c.get('source') or 'nothing readable', 20), 'state': _s(c.get('state'), 20),
+                                  **({'loaded_after_noconflict': True} if c.get('loaded_after_noconflict') else {})} for c in copies[:8]]
+        out['note'] = ('Scripts run in document order and a later full copy of a library takes over the global an earlier one set, so the '
+                       'effective copy is the one most page code uses; a shadowed copy may still be used by older code or closures that '
+                       'captured it, and a fallback runs only when its condition is met.')
+    if evidence.get('copies_unresolved'):
+        out['copies_unresolved'] = True
+        out['note'] = 'The page does not show which copy runs (async loading or jQuery.noConflict(true)): each copy is only a candidate.'
+    if evidence.get('version_note'):
+        out['version_note'] = _s(evidence['version_note'], 200)
+    return out
 
 
 def _status_of(response):

@@ -438,7 +438,8 @@ def run_fact_probe(check):
            .prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('-id').first())
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
-    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']})
+    # a validation re-test reads past the script cache (sending the stored ETag), so a fixed library is seen as fixed now
+    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']}, fresh=True)
     product = re.sub(r'[^a-z0-9]', '', params.get('product', '').lower())
     versions = [o for o in found if o['kind'] == 'version' and o['outcome'] == 'found' and o['version']]
     pick = next((o for o in versions if product and (product in re.sub(r'[^a-z0-9]', '', o['product'].lower())

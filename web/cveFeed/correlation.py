@@ -15,6 +15,7 @@ from functools import cmp_to_key
 
 from cveFeed import cms
 from cveFeed import distro as distro_lib
+from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
 
@@ -813,7 +814,7 @@ def port_distro(port):
 
 def _record_matches(subdomain, name, version, token, source, product_index,
                     cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None,
-                    corroborated=(), leads=None):
+                    corroborated=(), leads=None, confidence_cap=None):
     """Work out the CVEMatch rows for one discovered product on a subdomain and append them to ``rows``
     (written in a batch by ``save_matches``). Returns the number of matches found. ``leads``, when given, is a dict that receives
     ``{cve.id: {(domain id, host name)}}`` for the CVEs a product seen without a version could be about."""
@@ -834,6 +835,8 @@ def _record_matches(subdomain, name, version, token, source, product_index,
     for cve, matched_product, in_range in _match_candidates(
             name, ver, token, product_index, cve_by_id, cpe=cpe, details=details):
         confidence = confidence_for(ver, in_range, cve.kev)
+        if confidence_cap is not None and confidence > 0.0:
+            confidence = min(confidence, confidence_cap)  # how far the version itself can be trusted (a library's file-name hint)
         if confidence < min_confidence or confidence <= 0.0:
             continue
         unbounded = False
@@ -1167,6 +1170,8 @@ def close_stale(current, covered):
             continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it
         if m.remediation_status != 'open' and m.version_in_range is None:
             continue  # worked by a person before the evidence policy, with no version behind it: their decision stands, it is not ours to close
+        if m.remediation_status != 'open' and m.source == 'tech' and js_libraries.is_library(m.matched_product):
+            continue  # a JavaScript library match a person worked: a script read differently (cveFeed.js_libraries) never closes it for them
         if m.ai_verdict == 'not_affected' and (m.ai_reason or '').startswith('Closed automatically:'):
             continue
         stale_keep.append(m)
@@ -1202,6 +1207,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # WordPress's) is kept on the host as evidence and not matched.
     technologies = list(subdomain.technologies.all())
     wrong = cms.superseded(subdomain, technologies)
+    # a JavaScript library's version stands on what its file states (cveFeed.js_libraries): a copy a later one replaces, or a string a
+    # script's query or name carried where the file says otherwise, is not matched; a file-name-only version is matched at low confidence
+    libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -1209,10 +1217,15 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
             continue
+        library, cap = {}, None
+        if libraries is not None and version:
+            skip, library, cap = libraries.judge(name, version)
+            if skip:
+                continue
         _record_matches(
             subdomain, name, version, token, "tech",
-            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id},
-            leads=leads)
+            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library},
+            leads=leads, confidence_cap=cap)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services
