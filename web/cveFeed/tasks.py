@@ -1261,7 +1261,8 @@ def watch_certificates_all():
     # nor on a bare shared provider domain (jfrog.com): a tenant's host under it is watched, the provider's whole tree is not
     from cveFeed.conductor import bounty_blocked_projects
     blocked = bounty_blocked_projects()  # a bug bounty project that has not confirmed automated testing is not watched on its own
-    rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
+    # nor on a target added as exactly one host (=example.com, scope_mode 'host'): no name under it would be taken, so there is nothing to look for
+    rows = [r for r in Domain.objects.exclude(scope_mode=Domain.SCOPE_HOST).values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
     failed = ct_queue.recently_failed(due)

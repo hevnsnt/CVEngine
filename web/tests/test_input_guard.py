@@ -40,6 +40,16 @@ class InspectTests(TestCase):
 		self.assertEqual(self.hits('targets', 'a.com\nb.com>x'), ['strict_field'])
 		self.assertEqual(self.hits('text', 'https://h&x.example.com/ok'), ['strict_field'])  # junk in the host part still counts
 
+	def test_a_host_only_mark_is_allowed_in_front_of_a_target_value_only(self):
+		self.assertEqual(self.hits('value', '=example.com'), [])  # "=example.com": exactly that host (Add targets)
+		self.assertEqual(self.hits('value', ' =app.example.com '), [])
+		self.assertEqual(self.hits('targets', '=a.com\n=b.com, c.com'), [])
+		self.assertEqual(self.hits('text', '##Org\n#P\n=a.com'), [])
+		self.assertEqual(self.hits('value', '==example.com'), ['strict_field'])  # one mark, then the usual host characters
+		self.assertEqual(self.hits('value', '=exa$mple.com'), ['strict_field'])
+		self.assertEqual(self.hits('host', '=example.com'), ['strict_field'])  # no other strict field takes the mark
+		self.assertEqual(self.hits('project', '=p'), ['strict_field'])
+
 
 class ClientIpTests(TestCase):
 	def req(self, remote, xff=None):

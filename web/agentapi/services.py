@@ -305,12 +305,14 @@ def get_target(ctx, slug, target_id):
 
 
 def set_target_scope(ctx, slug, target_id, scope_mode):
-    """Set how far a target's scope reaches: ``auto`` (the shared-domain list decides), ``host`` (this host only, never its
-    parent domain) or ``parent`` (the registrable domain is owned, even on the shared list: use with care)."""
+    """Set how far a target's scope reaches: ``auto`` (the shared-domain list decides), ``host`` (exactly this host: never its parent
+    domain, and no name under it is discovered, kept or scanned) or ``parent`` (the registrable domain is owned, even on the shared list: use
+    with care). The same choice can be made when the target is added (``scope_mode``, or ``=example.com`` in Add targets)."""
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
-    if not isinstance(scope_mode, str) or scope_mode not in {m for m, _label in Domain.SCOPE_MODES}:
+    if scope_mode in (None, ''):
         raise ApiError(400, 'scope_mode must be auto, host or parent')
+    scope_mode = _scope_mode(scope_mode)
     d = Domain.objects.filter(project=project, id=target_id).first()
     if not d:
         raise ApiError(404, 'target not found')
@@ -426,11 +428,34 @@ def _discovery_mode(mode):
     return mode
 
 
-def _create_domains(project, names, description='', excluded=None, discovery_mode='standard'):
+def _scope_mode(value):
+    """The scope to store on new targets: ``value`` (auto, host or parent), auto when none is given. Anything else is refused, with the
+    same message as ``set_target_scope``."""
+    from targetApp.models import Domain
+    if value in (None, ''):
+        return Domain.SCOPE_AUTO
+    if not isinstance(value, str) or value not in {m for m, _label in Domain.SCOPE_MODES}:
+        raise ApiError(400, 'scope_mode must be auto, host or parent')
+    return value
+
+
+HOST_ONLY_MARK = '='  # "=example.com" in Add targets: exactly this host (scope_mode 'host'), no subdomain discovered, kept or scanned
+
+
+def split_scope_mark(entry):
+    """``(entry without its leading '=', whether it had one)``. The mark is what a person types to add exactly one host: ``=example.com``."""
+    entry = entry if isinstance(entry, str) else ''
+    if entry.startswith(HOST_ONLY_MARK):
+        return entry[len(HOST_ONLY_MARK):], True
+    return entry, False
+
+
+def _create_domains(project, names, description='', excluded=None, discovery_mode='standard', scopes=None):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
     names are unique within an organization, so a name another project of the same organization holds counts as existing (another
     organization's record of the same name is a different, separate record). A name the project's organization
-    excluded for good ("Remove & exclude") is never created; it is appended to ``excluded`` when a list is given."""
+    excluded for good ("Remove & exclude") is never created; it is appended to ``excluded`` when a list is given. ``scopes`` maps a name to the
+    scope_mode it is created with (auto when it is not named); a name that already exists keeps its own."""
     from cveFeed.exclusions import excluded_names, normalize
     from targetApp.models import Domain, org_domains
     from startScan.ip_rows import org_id_of_project
@@ -452,29 +477,35 @@ def _create_domains(project, names, description='', excluded=None, discovery_mod
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
         Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now,
-                                                      discovery_mode=discovery_mode) for n in part],
+                                                      discovery_mode=discovery_mode, scope_mode=(scopes or {}).get(n, Domain.SCOPE_AUTO)) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)
     return created, [n for n in names if n in existing]
 
 
-def add_target(ctx, slug, value, description='', discover=False, mode=None):
+def add_target(ctx, slug, value, description='', discover=False, mode=None, scope_mode=None):
     """Add a domain, IP, CIDR or range as target(s); ranges expand to individual IPs (capped). Every address of a range is
-    queued for discovery, in order."""
+    queued for discovery, in order. ``scope_mode`` (auto, host or parent; auto when omitted) is stored on a new domain target, and a
+    leading ``=`` (``=example.com``) means host: exactly that host. An address target has no subdomains and keeps auto."""
     from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
     if not isinstance(value, str):
         raise ApiError(400, 'value must be text')
     stored = _discovery_mode(mode)
+    scope = _scope_mode(scope_mode)
+    value, exact = split_scope_mark(value.strip())
     kind, names = _expand_target(value, project.id)
+    scope = Domain.SCOPE_HOST if exact else scope
+    scopes = {n: scope for n in names} if kind == DOMAIN else {}
     excluded = []
-    created, existing = _create_domains(project, names, description, excluded, stored)
+    created, existing = _create_domains(project, names, description, excluded, stored, scopes)
     if excluded and not created and not existing:
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
-    if kind == DOMAIN and created:  # every domain target is "subscribed": watched for new certificates going forward
+    if kind == DOMAIN and created and not created[0].exact_host_only():  # every domain target is "subscribed": watched for new certificates going
+        # forward, except one that is exactly one host (no name under it would be taken)
         from cveFeed import ct_queue
         ct_queue.queue_lookups([created[0].id], ct_queue.ADD_LIFETIME)  # one marker per domain: adding it twice queues one lookup
     scan_ids = []
@@ -824,11 +855,12 @@ def rescan_hosts(ctx, slug, target_id, hosts):
     if not isinstance(hosts, (list, tuple)) or not hosts:
         raise ApiError(400, 'hosts must be a non-empty list of host names')
     hosts = hosts[:RESCAN_MAX_HOSTS * 10]  # what is read is bounded; the first RESCAN_MAX_HOSTS that qualify are queued
-    suffix = domain.name.lower()
     names = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in hosts if str(h).strip()))
     from cveFeed.exclusions import drop_excluded
-    inside = drop_excluded(project.id, [n for n in names if n == suffix or n.endswith('.' + suffix)])  # excluded hosts are never scanned
+    inside = drop_excluded(project.id, [n for n in names if domain.includes_host(n)])  # excluded hosts are never scanned
     if not inside:
+        if domain.exact_host_only():
+            raise ApiError(400, f'{domain.name} is scoped to that host only: none of the hosts is {domain.name}')
         raise ApiError(400, f'none of the hosts is {domain.name} or under it')
     inside = inside[:RESCAN_MAX_HOSTS]
     host_pipeline.delay(domain.id, inside, by_person=True)
@@ -1004,13 +1036,17 @@ _HOST_PORT_RE = re.compile(r'^(.+):(\d{1,5})$')
 def normalize_target(token):
     """Reduce one pasted token to the thing to scan: a URL (any scheme: http://, https://, ssh://, ...) becomes its host,
     with credentials, port, path, query and fragment dropped; ``*.example.com`` and ``example.com.`` lose the wildcard and
-    the trailing dot; a single-address CIDR (/32, /128) becomes the bare IP. Domains, IPs, CIDRs and ranges pass through."""
+    the trailing dot; a single-address CIDR (/32, /128) becomes the bare IP. Domains, IPs, CIDRs and ranges pass through. A leading ``-``
+    (exclude) or ``=`` (exactly this host) is kept in front of the normalized rest."""
     t = (token or '').strip().strip('"\'<>`,;')
     if not t:
         return ''
     if t.startswith('-') and len(t) > 1:  # "-example.com": exclude it (see _add_targets)
         rest = normalize_target(t[1:])
         return '-' + rest if rest and not rest.startswith('-') else ''
+    if t.startswith(HOST_ONLY_MARK) and len(t) > 1:  # "=example.com": add exactly this host (see add_entries); "==x" or "=-x" stays invalid
+        rest = normalize_target(t[1:])
+        return HOST_ONLY_MARK + rest if rest else ''
     if _SCHEME_RE.match(t):
         t = _SCHEME_RE.sub('', t, count=1)
     elif not _CIDR_LIKE_RE.match(t) and '/' in t:
@@ -1155,18 +1191,20 @@ def _audit(user, action, target, org):
     AuditLog.objects.create(actor=user, actor_name=user.username, action=action, target=target[:300], org_id=org.pk, detail={'via': 'bulk'})
 
 
-def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None):
+def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None, scope_mode=None):
     """Bulk add across one organization's projects from the ``##Org`` / ``#Project`` paste format. Missing
     projects are created (needs the org admin role); every project's targets are added with that project's own
     write check, so one forbidden or invalid section never blocks the others. With no ``##Org`` (or one that does not
     exist) the caller's current organization is used; ``current_project`` is the project they are viewing, which
-    also receives any targets that appear above the first ``#Project`` header."""
+    also receives any targets that appear above the first ``#Project`` header. ``scope_mode`` is the scope of every new domain target, and an
+    ``=example.com`` line is exactly that host (see ``add_entries``)."""
     from django.utils.text import slugify
     from dashboard.models import Project
     require_write_token(ctx)
     if not isinstance(text, str):
         raise ApiError(400, 'text must be pasted text')
     manual = _discovery_mode(mode) == 'manual'
+    batch_scope = _scope_mode(scope_mode)
     org, current = _current_org(ctx.user, current_project)
     if org is None:  # authorize before the paste is read: a caller with no organization gets nothing parsed
         raise ApiError(403, 'you are not a member of any organization')
@@ -1181,7 +1219,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     scan_ids, deferred = [], 0
     for pname, entries in groups:
         res = {'project': pname, 'slug': None, 'project_created': False, 'received': len(entries), 'created': 0,
-               'already_exists': [], 'invalid': [], 'excluded': [], 'error': None}
+               'already_exists': [], 'invalid': [], 'excluded': [], 'error': None, 'scope_modes': {}}
         results.append(res)
         try:
             project = Project.objects.filter(org=org, name__iexact=pname).first()
@@ -1202,8 +1240,9 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             res['slug'] = project.slug
             if not entries:
                 continue
-            added = _add_targets(ctx, project.slug, entries, False, used)  # the mode is stored with the targets; discovery is queued below
-            res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
+            added = _add_targets(ctx, project.slug, entries, False, used, batch_scope)  # the mode and scope are stored with the targets; discovery is queued below
+            res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'],
+                       scope_modes=added['scope_modes'])
             if discover and not manual and added['domains']:
                 scans, left = _discover_new(added['domains'], used, project.id, initiated_by=ctx.user)
                 scan_ids += [scan.id for scan in scans]
@@ -1212,11 +1251,12 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             res['error'] = exc.message
     return {'organization': org.name, 'organization_note': org_note, 'projects': results, 'created': sum(r['created'] for r in results),
             'projects_created': sum(r['project_created'] for r in results), 'invalid': errors,
-            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
+            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note,
+            'scope_mode': batch_scope}
 
 
-def add_targets(ctx, slug, values, discover=True, mode=None):
-    out = _add_targets(ctx, slug, values, discover, mode)
+def add_targets(ctx, slug, values, discover=True, mode=None, scope_mode=None):
+    out = _add_targets(ctx, slug, values, discover, mode, scope_mode)
     out.pop('domains')
     return out
 
@@ -1238,12 +1278,13 @@ def _exclude_patterns(ctx, slug, patterns):
     return done, refused
 
 
-def _add_targets(ctx, slug, values, discover, mode):
+def _add_targets(ctx, slug, values, discover, mode, scope_mode=None):
     """Add many targets at once. ``values`` is a list or pasted text. Each entry is validated on its own, so one
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
-    queued for discovery, first in, first out."""
+    queued for discovery, first in, first out. ``scope_mode`` is the batch's scope; an ``=example.com`` entry is host whatever it says."""
     project, _ = get_project(ctx, slug, write=True)
     _discovery_mode(mode)  # before the exclusions below, which cannot be undone
+    batch_scope = _scope_mode(scope_mode)
     if values is not None and not isinstance(values, (str, list)):
         raise ApiError(400, 'targets must be a list or pasted text')
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
@@ -1258,22 +1299,35 @@ def _add_targets(ctx, slug, values, discover, mode):
     excluded, refused = _exclude_patterns(ctx, slug, patterns)  # first, so nothing added below can land inside what was just excluded
     if not entries:
         return {'received': len(patterns), 'created': 0, 'created_names': [], 'domains': [], 'already_exists': [], 'invalid': refused,
-                'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None}
-    return add_entries(project, entries, discover, mode, excluded, refused, initiated_by=ctx.user)
+                'excluded': excluded, 'discovery_started': 0, 'scan_ids': [], 'mode': mode, 'mode_note': None,
+                'scope_mode': batch_scope, 'scope_modes': {}}
+    return add_entries(project, entries, discover, mode, excluded, refused, initiated_by=ctx.user, scope_mode=batch_scope)
 
 
-def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=(), initiated_by=None):
+def add_entries(project, entries, discover=True, mode=None, excluded=(), refused=(), initiated_by=None, scope_mode=None):
     """Add already-normalized targets to ``project``: the part of Add targets that does not depend on who is asking, so an automated
     source (the runZero import) goes through the same expansion, private-range policy, organization exclusions, organization-wide
     uniqueness and discovery queueing. The caller has already checked that it may write to ``project``.
 
     ``initiated_by`` is recorded on the ``ScanHistory`` rows discovery queues for the newly-created targets; left unset (as the
-    runZero import leaves it) for a source with no asking user."""
+    runZero import leaves it) for a source with no asking user.
+
+    ``scope_mode`` (auto when omitted, what every target was created with before it existed) is stored on each new domain target; an entry
+    written ``=example.com`` is created as host (exactly that host) whatever the batch says, and wins over the same name written without it.
+    An address, CIDR or range has no subdomains: the mark and the batch scope are ignored for it."""
     from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
     stored = _discovery_mode(mode)  # kept on every target this creates: the mode its later automatic scans use
+    batch_scope = _scope_mode(scope_mode)
+    marked, plain = set(), []
+    for entry in entries:
+        name, exact = split_scope_mark(entry)
+        if exact:
+            marked.add(name)
+        plain.append(name)
+    entries = list(dict.fromkeys(plain))  # "=example.com" and "example.com" in one paste are one target, created as exactly that host
     names, domain_names, invalid, seen = [], [], [], set()
     for entry in entries:
         if len(names) >= BULK_MAX_EXPANDED:
@@ -1294,13 +1348,14 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             if kind == DOMAIN:
                 domain_names.append(name)
     skipped = []
-    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored)
+    scopes = {n: (Domain.SCOPE_HOST if n in marked else batch_scope) for n in domain_names}
+    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored, scopes=scopes)
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
         from cveFeed import ct_queue
         names_wanted = set(domain_names)
-        wanted = [d for d in created if d.name in names_wanted]
+        wanted = [d for d in created if d.name in names_wanted and not d.exact_host_only()]  # exactly one host: no name under it would be taken
         ct_queue.queue_lookups([d.id for d in wanted], ct_queue.ADD_LIFETIME)  # spaced out (crt.sh blocks a burst), marked, and expiring
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
@@ -1309,7 +1364,8 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
         scan_ids = [scan.id for scan in scans]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
             'domains': created, 'already_exists': existing, 'invalid': invalid, 'excluded': excluded,
-            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note}
+            'discovery_started': len(scan_ids), 'discovery_deferred': deferred, 'scan_ids': scan_ids, 'mode': used, 'mode_note': note,
+            'scope_mode': batch_scope, 'scope_modes': {d.name: d.scope_mode for d in created[:200]}}
 
 
 # --- inventory and findings ----------------------------------------------------

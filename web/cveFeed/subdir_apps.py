@@ -241,7 +241,8 @@ def web_hosts(project_id):
                   .order_by('host', 'product'))
     carried = {o.host for o in vhosts}
     out = []
-    reps = host_reps(domain_ids=domain_ids).filter(target_domain__project_id=project_id)
+    from targetApp.models import in_target_scope_q
+    reps = host_reps(domain_ids=domain_ids).filter(target_domain__project_id=project_id).filter(in_target_scope_q())  # =example.com: only that host
     for sub in reps.prefetch_related('ip_addresses__ports').select_related('target_domain').order_by('name'):
         name = sub.name.strip().lower()
         if sub.scan_history_id is None and name in carried:

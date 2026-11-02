@@ -159,8 +159,9 @@ def web_addresses(project_id):
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     found = {}
-    from targetApp.models import Domain
+    from targetApp.models import Domain, in_target_scope_q
     rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+            .filter(in_target_scope_q())  # a name kept under a target that is now exactly one host names no address to ask
             .prefetch_related('ip_addresses__ports').order_by('id'))  # a manual only target's hosts name no address to ask
     for sub in rows:
         for ip in sub.ip_addresses.all():

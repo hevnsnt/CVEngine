@@ -2232,12 +2232,12 @@ const pages = {
       const box = el("div", "scope-cell");
       const note = el("span", "note", "");
       const show = () => {
-        note.textContent = t.host_scoped ? "provider domain: scanning this host only" : "";
+        note.textContent = t.scope_mode === "host" ? "exactly this host: no subdomains" : t.host_scoped ? "provider domain: scanning this host only" : "";
       };
       const pick = el("select", "", null, { "aria-label": `Scope of ${t.name}` });
       for (const [value, label] of [
         ["auto", "Scope: auto"],
-        ["host", "Scope: this host only"],
+        ["host", "Scope: this host only (no subdomains)"],
         ["parent", "Scope: include parent domain"],
       ]) {
         const o = el("option", "", label, { value });

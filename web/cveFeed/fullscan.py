@@ -76,10 +76,11 @@ def active_attached(ip):
     from django.db.models import Exists, OuterRef
     from cveFeed.models import HostState
     from startScan.models import Subdomain
-    from targetApp.models import Domain
+    from targetApp.models import Domain, in_target_scope_q
     archived = HostState.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'),
                                         archived_at__isnull=False)
     return (Subdomain.objects.filter(ip_addresses=ip, target_domain__project__isnull=False).filter(~Exists(archived))
+            .filter(in_target_scope_q())  # a name kept under a target that is now exactly one host does not hold its address in scope
             .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL))
 
 def candidates():

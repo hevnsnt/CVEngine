@@ -207,6 +207,8 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
     from startScan.models import Subdomain
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
+    if domain.exact_host_only():  # added as exactly this host (=example.com): no name under it would be taken, so crt.sh is not asked
+        return {'checked': 0, 'new': 0, 'skipped': 'exact host'}
     known = set(Subdomain.objects.filter(target_domain=domain).values_list('name', flat=True))
     if fetch is fetch_ct_names:  # the real lookup: tell "unreachable" apart from "nothing found" so the task can try again later
         entries = _fetch(domain.name)
@@ -218,6 +220,7 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
     from cveFeed import ledger
     ledger.record('ct-watch', [domain.name], domain.project_id)  # the sweep skips targets checked in the last 24 hours
     from cveFeed.exclusions import drop_excluded
+    found = {n for n in found if domain.includes_host(n)}  # a target added as exactly this host (=example.com) takes no name under it
     new_names = drop_excluded(domain.project_id, sorted(found - known))[:MAX_NEW_PER_RUN]  # an excluded host is never re-created
     if not new_names:
         return {'checked': len(found), 'new': 0}

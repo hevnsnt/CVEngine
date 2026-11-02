@@ -148,7 +148,9 @@ class Domain(models.Model):
 	domain_info = models.ForeignKey(DomainInfo, on_delete=models.CASCADE, null=True, blank=True)
 	project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=False)
 	# How far this target's scope reaches: 'auto' uses the shared-domain list (a tenant under a provider's domain is host-only,
-	# an owned name may be promoted to its apex), 'host' forces host-only, 'parent' treats the registrable domain as owned.
+	# an owned name may be promoted to its apex), 'host' is exactly this host (never its parent domain, and no name under it is
+	# discovered, kept or scanned under this target), 'parent' treats the registrable domain as owned. Chosen when the target is added
+	# (``=example.com`` in Add targets, or ``scope_mode``) or later (POST targets/<id>/scope).
 	SCOPE_AUTO, SCOPE_HOST, SCOPE_PARENT = 'auto', 'host', 'parent'
 	SCOPE_MODES = ((SCOPE_AUTO, 'auto'), (SCOPE_HOST, 'host'), (SCOPE_PARENT, 'parent'))
 	scope_mode = models.CharField(max_length=8, choices=SCOPE_MODES, default=SCOPE_AUTO)
@@ -186,6 +188,23 @@ class Domain(models.Model):
 		from targetApp.shared_domains import effective_apex
 		return effective_apex(self.name)[1]
 
+	def exact_host_only(self):
+		"""True when the target was set to 'host' (``=example.com`` at add time, or the scope selector): exactly this host. No name under it
+		is enumerated, kept under this target or scanned through it. An 'auto' tenant of a shared provider domain is host scoped too
+		(bbot strict scope, never its parent), but keeps its own tree as before: only an explicit 'host' narrows it to the one name."""
+		return self.scope_mode == self.SCOPE_HOST
+
+	def includes_host(self, name):
+		"""Whether ``name`` belongs under this target: the target itself, or a name under it (dot boundary) unless the target is exactly
+		one host (``exact_host_only``). An address target holds only itself."""
+		target = (self.name or '').strip().lower().rstrip('.')
+		host = str(name or '').strip().lower().rstrip('.')
+		if not host or not target:
+			return False
+		if host == target:
+			return True
+		return not self.exact_host_only() and host.endswith('.' + target)
+
 	def get_recent_scan_id(self):
 		ScanHistory = apps.get_model('startScan.ScanHistory')
 		obj = ScanHistory.objects.filter(domain__id=self.id).order_by('-id')
@@ -194,6 +213,27 @@ class Domain(models.Model):
 
 	def __str__(self):
 		return str(self.name)
+
+
+def in_target_scope_q(prefix=''):
+	"""A filter for Subdomain rows (``prefix`` reaches the Subdomain from another model, e.g. ``'subdomain__'``) that leaves out every name
+	under a target set to exactly one host (``Domain.exact_host_only``): a row kept from before the target was narrowed is never swept or
+	scanned through it. The target's own name, and every row of any other target, pass unchanged."""
+	from django.db.models import F, Q
+	return ~Q(**{prefix + 'target_domain__scope_mode': Domain.SCOPE_HOST}) | Q(**{prefix + 'name__iexact': F(prefix + 'target_domain__name')})
+
+
+def narrowed_names(project_id, names):
+	"""The names among ``names`` that ``project_id`` holds only as rows under a target set to exactly one host (``in_target_scope_q``
+	leaves every row of theirs out): a sweep that starts from something other than the inventory (an old screenshot, say) skips them. Empty,
+	at the cost of one query, for a project with no such target."""
+	names = {str(n).strip().lower().rstrip('.') for n in names if n}
+	if not names or not Domain._base_manager.filter(project_id=project_id, scope_mode=Domain.SCOPE_HOST).exists():
+		return set()
+	from django.db.models.functions import Lower
+	from startScan.models import Subdomain
+	rows = Subdomain.objects.filter(target_domain__project_id=project_id).annotate(lname=Lower('name')).filter(lname__in=names)
+	return set(rows.exclude(in_target_scope_q()).values_list('lname', flat=True)) - set(rows.filter(in_target_scope_q()).values_list('lname', flat=True))
 
 
 def org_domains(project):
