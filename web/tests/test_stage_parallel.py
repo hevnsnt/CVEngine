@@ -281,6 +281,31 @@ class FallbackTests(StageBase):
         self.assertTrue(all(result is None for i, result in got.items() if i >= sent))  # the unsent ones are the caller's, in order
         self.assertEqual(self.active_tasks(), 0)
 
+    def test_the_last_sentinel_leaving_while_chunks_queue_records_the_chunks_never_sent_as_no_scanner(self):
+        # the loop sees the Sentinels gone at a reap (each queued chunk task expires as vanished) before a refill does: the chunks it never sent
+        # are no_scanner, as the queued ones are, not over_chunk (which is for a chunk left behind one that went unclaimed while a Sentinel was live)
+        from agentapi.models import ScannerFallback
+        fake = FakeSentinels(self.two_agents(), chunks_of(8), claim=False)
+
+        def go_quiet():
+            fake.heartbeating = False
+            Agent.objects.update(last_seen=fake.wall() - timedelta(hours=1))
+        fake.hooks.append((1, go_quiet))
+        with mock.patch.dict(os.environ, {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '60'}), mock.patch.object(dispatch, 'REFILL_EVERY', 10_000):
+            got = dict(self.fan_out(fake))
+        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 4)  # one window went out, the other four chunks were never sent
+        self.assertEqual(sorted(got), list(range(8)))
+        self.assertTrue(all(result is None for result in got.values()))
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('nmap', 'no_scanner')] * 8)
+        self.assertEqual(self.active_tasks(), 0)
+
+    def test_a_chunk_left_behind_one_nobody_claimed_while_a_sentinel_is_live_is_still_over_chunk(self):
+        from agentapi.models import ScannerFallback
+        fake = FakeSentinels(self.two_agents(), chunks_of(10), claim=False)
+        self.fan_out(fake)
+        reasons = list(ScannerFallback.objects.values_list('reason', flat=True))
+        self.assertEqual(sorted(reasons), ['not_claimed_in_time'] * 4 + ['over_chunk'] * 6)
+
     def test_a_sentinel_that_never_claims_stops_the_fan_out_after_the_first_window(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(10), claim=False)
         got = dict(self.fan_out(fake))

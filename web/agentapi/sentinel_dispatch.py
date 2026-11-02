@@ -345,7 +345,7 @@ class _Dispatch:
 
 
 def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None,
-                     internal=False):
+                     internal=False, outcome=None):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
     timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
@@ -356,11 +356,17 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     ``redact_target``, when given, is called with ``target`` once the task reaches a terminal state (done, failed or
     expired) and its return value replaces the stored ``target`` in the database - for a kind whose target carries a
     secret the Sentinel needed only for this one run (today, only WPScan's API token), so the secret does not sit in
-    the database for the rest of the task's retention window once nothing needs it there any more."""
+    the database for the rest of the task's retention window once nothing needs it there any more.
+
+    ``outcome``, when given, is a dict that is told why a ``None`` came back: ``outcome['no_scanner']`` is True when no live, eligible Sentinel
+    was there, or the last one went away while the task queued (the serial loop of ``dispatch_many`` records the chunks it then never sends
+    by it)."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
+        if outcome is not None:
+            outcome['no_scanner'] = True
         if not internal:  # an internal task never had a local run to fall back to: its caller already fails it
             _no_scanner(kind, project, capacity=capacity)
         return None
@@ -380,6 +386,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             break
         time.sleep(work.pause(now))
     work.settle()
+    if outcome is not None:
+        outcome['no_scanner'] = work.vanished
     if redact_target is not None:
         SentinelTask.objects.filter(pk=work.task.pk).update(target=redact_target(target))
     work.no_local()
@@ -506,6 +514,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
                     d.settle()
                     if d.never_claimed:
                         halted = True  # no Sentinel takes work right now: the chunks not sent yet are not tried one by one
+                        none_halt = none_halt or d.vanished  # the last live Sentinel went away while it queued: the unsent ones are no_scanner too
                     try:
                         d.no_local()
                     except resources.ScannerUnavailable as exc:
@@ -539,12 +548,14 @@ def _unsent(project, kind, none_left):
 
 
 def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none):
-    """``dispatch_many`` with a window of one: the chunks one after another through ``dispatch_or_none``, as a stage always did."""
-    ended = False
+    """``dispatch_many`` with a window of one: the chunks one after another through ``dispatch_or_none``, as a stage always did. The chunks
+    never sent once one went undone are recorded as the parallel loop records them: ``no_scanner`` when that one found no live, eligible
+    Sentinel (none at all, or the last one went away while it queued), ``over_chunk`` when it went undone with a Sentinel live."""
+    ended = none_left = False
     for index, chunk in enumerate(chunks):
         if ended:
             if not internal:
-                _unsent(project, kind, False)
+                _unsent(project, kind, none_left)
             yield index, None
             continue
         prepared = prepare(chunk)
@@ -553,6 +564,9 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
             continue
         target, ips = prepared
         kwargs = {'internal': True} if internal else {}
+        outcome = {}
+        if stop_on_none and not internal:
+            kwargs['outcome'] = outcome
         if created_by is not None:
             kwargs['created_by'] = created_by
         if priority != 1:
@@ -560,6 +574,7 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
         result = dispatch_or_none(project, kind, target, ips=ips, scan=scan, timeout=timeout, **kwargs)
         if result is None and stop_on_none:
             ended = True  # the first chunk no Sentinel took ends the dispatching: it and the rest run here
+            none_left = bool(outcome.get('no_scanner'))
         yield index, result
 
 
@@ -570,7 +585,14 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
 
     An address is covered only when the Sentinel reports a host row. When naabu found ports that the Sentinel did not
     report scanning, the local pass fingerprints just those ports. An absent host row keeps the whole local fallback.
+
+    Those addresses (a Sentinel finished their chunk and left part of the work undone) go through ``_no_local`` once, like every other local
+    fallback: one ``partial_result`` row of fallback telemetry when nmap may run here, and ``ScannerUnavailable`` when it may not, so they stay
+    due instead of running here. A chunk no Sentinel did has been through ``_no_local`` already (``dispatch_many``). Whenever this raises
+    ``ScannerUnavailable`` after a Sentinel finished part of the work, the exception's ``done`` lists the addresses a Sentinel fully covered
+    (persisted already), so the caller marks only those done and the rest stay due.
     """
+    from reNgine.resources import ScannerUnavailable
     targets = list(targets)
     zero = {'ports': 0, 'hosts_with_os': 0}
     local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
@@ -580,30 +602,49 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     from cveFeed.nmap_scan import persist_inventory
     # every chunk of MAX_ADDRESSES goes to a Sentinel (a batch of hosts has more addresses than one task takes), several at once when there are
     # free slots; a chunk no Sentinel did is simply not reported, and what the caller fingerprints here is every address without a report
-    totals, reported = None, {}
+    totals, reported, finished = None, {}, set()
+
+    def missing_ports(ip):  # the ports naabu found on an address the Sentinel reported that the Sentinel did not report scanning
+        if local_ports is None or ip not in local_ports:
+            return []
+        return sorted(set(local_ports[ip]) - reported[ip])
+
     chunks = _chunks(targets)
-    with contextlib.closing(dispatch_many(project, 'nmap', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
-        for index, result in results:
-            if result is None:
-                continue
-            chunk = chunks[index]
-            inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                         for host in result.get('hosts', []) if host.get('ip') in chunk]
-            done = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
-            totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
-            for host in inventory:
-                reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    try:
+        with contextlib.closing(dispatch_many(project, 'nmap', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
+            for index, result in results:
+                if result is None:
+                    continue
+                chunk = chunks[index]
+                finished.update(chunk)
+                inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
+                             for host in result.get('hosts', []) if host.get('ip') in chunk]
+                done = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
+                totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
+                for host in inventory:
+                    reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
+    except ScannerUnavailable as exc:  # a chunk nobody did may not run here: what a Sentinel fully covered is done, the rest stays due
+        exc.done = [ip for ip in targets if ip in reported and not missing_ports(ip)]
+        raise
     if totals is None:
         return targets, zero, local_ports
     remaining = []
     for ip in targets:
         if ip not in reported:
             remaining.append(ip)
-        elif local_ports is not None and ip in local_ports:
-            missing = sorted(set(local_ports[ip]) - reported[ip])
+        else:
+            missing = missing_ports(ip)
             if missing:
                 local_ports[ip] = missing
                 remaining.append(ip)
+    partial = [ip for ip in remaining if ip in finished]  # a Sentinel finished the chunk but did not report the host, or every port naabu found
+    if partial:
+        try:
+            _no_local('nmap', f'a Sentinel finished {len(partial)} address(es) without reporting the host or every port naabu found',
+                      'partial_result', project)
+        except ScannerUnavailable as exc:
+            exc.done = [ip for ip in targets if ip not in remaining]
+            raise
     return remaining, totals, local_ports
 
 

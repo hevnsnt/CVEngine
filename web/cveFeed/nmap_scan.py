@@ -538,9 +538,15 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
                 fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except resources.ScannerUnavailable as exc:  # no scanner can take it and this kind may not run here: not the targets' failure, they stay due
                 logger.warning('nmap fast scan of scan %s is waiting for a scanner: %s', scan_id, exc)
+                finished = set(exc.done)
+                covered = [ip for ip in targets if ip in finished]  # a Sentinel fingerprinted these in full (persisted already)
+                if covered:
+                    ledger.record('nmap-fast', covered, project, scan)
+                due = len(targets) - len(covered)
+                note = f' ({len(covered)} fingerprinted by a Sentinel)' if covered else ''
                 activity.settle(fast_running, 'done', message=(
                     f'nmap for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '
-                    f'the {_plural(len(targets), "IP")} stay due until one can'))
+                    f'the {_plural(due, "IP")} stay due until one can{note}'))
                 return {**result, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due'}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
