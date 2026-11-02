@@ -82,14 +82,39 @@ def _root_route(sub, project_id):
     return chosen
 
 
-def _technologies(sub, names, observed):
-    from cveFeed import fingerprint
+def library_copies(record, names=(), limit=6):
+    """The copies of one JavaScript library the front page loads (cveFeed.js_libraries), cleaned: path, version, where the version came
+    from and which copy runs. Shared by the AI's host context and the host record."""
+    from urllib.parse import urlsplit
+    out = []
+    for copy in (record or {}).get('copies') or []:
+        if not isinstance(copy, dict):
+            continue
+        try:
+            path = urlsplit(str(copy.get('url') or '')).path or '/'
+        except ValueError:
+            path = '/'
+        out.append({'path': _s(path, 120, names), 'version': _s(copy.get('version'), 40, names), 'version_source': _s(copy.get('source'), 12),
+                    'state': _s(copy.get('state'), 12), **({'loaded_after_noconflict': True} if copy.get('loaded_after_noconflict') else {})})
+    return out[:limit]
+
+
+def _technologies(sub, names, observed, libraries=None):
+    from cveFeed import fingerprint, js_libraries
     from cveFeed.correlation import split_name_version
+    by_product = {str(r.get('product', '')).lower(): r for r in (libraries or {}).values() if isinstance(r, dict)}
     out = []
     for tech in sub.technologies.all()[:200]:
         base, version = split_name_version(tech.name or '')
-        out.append({'name': _s(base or tech.name, 60, names), 'version': _s(version, 40, names), 'category': fingerprint.categorize(tech.name or ''),
-                    'source': observed.get(tech.name, 'scan')})
+        row = {'name': _s(base or tech.name, 60, names), 'version': _s(version, 40, names), 'category': fingerprint.categorize(tech.name or ''),
+               'source': observed.get(tech.name, 'scan')}
+        record = by_product.get((base or '').lower()) if js_libraries.is_library(tech.name) else None
+        if record:  # where the version came from and every copy on the page, with the one that runs
+            row['version_source'] = _s(record.get('version_source'), 12)
+            row['copies'] = library_copies(record, names)
+            if record.get('copies_unresolved'):
+                row['copies_unresolved'] = True
+        out.append(row)
     return sorted(out, key=lambda t: t['name'].lower())[:MAX_TECHS]
 
 
@@ -246,7 +271,7 @@ def host_context(sub, project_id=None, focus=None):
            'redirects': bool(root and root.redirect_to),
            'kept_response_headers': [_s(f'{k}: {v}', 140, names) for k, v in list(route_headers.items())[:30]]}
     context = {
-        'technologies': _technologies(sub, names, observed),
+        'technologies': _technologies(sub, names, observed, evidence.get('libraries') if isinstance(evidence.get('libraries'), dict) else None),
         'unversioned_products': [{k: _s(v, 80, names) for k, v in lead.items() if k in ('name', 'source', 'port', 'service')}
                                  for lead in probes.leads_for(sub)][:20],
         'ports': _ports(sub, names), 'web': web,

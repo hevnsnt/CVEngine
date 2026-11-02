@@ -19,7 +19,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint, soft404, versions
+from cveFeed import fingerprint, js_libraries, soft404, versions
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ CONNECT_TIMEOUT, READ_TIMEOUT = 3, 6
 PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeouts alone let a host that trickles bytes hold a worker thread for good
 ROUTE_SAMPLE_BYTES = 64 * 1024
 MAX_PROBE_BYTES = 256 * 1024  # the most a version probe may ask for (a JavaScript bundle names its framework version deep inside)
+MAX_READ_BYTES = 300 * 1024  # the most any probe reads of one decoded body: a library file (cveFeed.js_libraries.MAX_SCRIPT_BYTES)
 # what an ordinary browser sends. Some CDNs answer an obvious scanner request with a challenge page instead of the site, so the version
 # probes (never the route check) present as a browser; the headers say nothing a browser would not, and no cookie or credential is sent.
 BROWSER_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
@@ -206,13 +207,17 @@ def classify(probe):
         if probe.get(field):
             evidence[key] = str(probe[field])[:100]
     page_url = probe.get('url', '')
-    scripts, local = fingerprint.script_sources(body, page_url) if (urlparse(page_url).path or '/') == '/' else ([], [])
+    root = (urlparse(page_url).path or '/') == '/'
+    scripts = fingerprint.script_sources(body, page_url)[0] if root else []
+    # the script names are hints only (a library and a version a file name carries, never a query string); _read_scripts replaces them
+    # with what the files themselves state
     found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts,
                                       headers=probe.get('headers'))
-    if probe.get('headers') and (urlparse(page_url).path or '/') == '/':
+    if probe.get('headers') and root:
         evidence['headers'] = probe['headers']  # the root page's kept response headers: host metadata for the AI and the host page
-    if local:
-        evidence['local_scripts'] = local  # read by run_route_auth, which removes it before anything is stored
+    page_scripts = js_libraries.parse_page(body, page_url) if root and 200 <= (probe.get('status') or 0) < 300 else []
+    if any(entry['url'] for entry in page_scripts):
+        evidence['page_scripts'] = {'page': page_url, 'scripts': page_scripts}  # read by _read_scripts, which removes it before anything is stored
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
@@ -352,28 +357,35 @@ def _against_missing_page(answer, url, probe, known):
 
 # ----------------------------------------------------------------------------- network
 
-def _read_scripts(result, probe, scan_id):
-    """Read the first bytes of up to four scripts the front page loads from its own host and add the libraries their comment banners
-    name (jQuery, Bootstrap, AngularJS ...) to the page's fingerprints. The same bounded, pinned, anonymous GET as every route
-    check, with the same gap between requests; a script that cannot be read is skipped."""
+def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None):
+    """Read the scripts the front page loads and record the libraries their own files state (cveFeed.js_libraries): the page's own host,
+    the same site and public library CDNs only, each other host vetted (address, exclusions, bug bounty scope), at most
+    ``budget['left']`` scripts for the host (js_libraries.MAX_SCRIPTS_PER_HOST over all its web bases) and MAX_SCRIPT_BYTES each, through
+    the same bounded, pinned, anonymous GET as every route check with the same gap between requests. Every copy of a library is kept in
+    ``evidence['libraries']`` with the one that runs marked; the fingerprints name the libraries by what the files say, a file name only
+    when the file could not be read, a query string never."""
     from reNgine import resources
     evidence = result.get('evidence') or {}
-    local = evidence.pop('local_scripts', None) or []
-    pairs = []
-    for src in local:
-        if resources.abort_requested(scan_id):
-            break
-        time.sleep(PER_REQUEST_GAP)
-        try:
-            got = probe(src)
-        except Exception:  # noqa: BLE001
-            continue
-        if 200 <= (got.get('status') or 0) < 300:
-            pairs += fingerprint.from_script_body(got.get('body') or '')
-    if pairs:
-        found = fingerprint.extend(evidence.get('fingerprints'), pairs)
+    page = evidence.pop('page_scripts', None) or {}
+    entries, page_url = page.get('scripts') or [], page.get('page') or ''
+    if not entries:
+        return
+    budget = budget if budget is not None else {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
+    if isinstance(probe, functools.partial) and probe.func is probe_url:
+        probe = functools.partial(probe, max_bytes=js_libraries.MAX_SCRIPT_BYTES)  # a library file is read further than a page
+    records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate), budget,
+                                     before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id))
+    hints = {f['name'] for f in evidence.get('fingerprints') or [] if f.get('source') == 'script:filename' and js_libraries.is_library(f['name'])}
+    kept = [f for f in evidence.get('fingerprints') or [] if f['name'] not in hints]
+    found = fingerprint.extend(kept, js_libraries.names_of(records))
+    if records:
+        evidence['libraries'] = records
+    if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]
+    else:
+        evidence.pop('fingerprints', None)
+        evidence.pop('fingerprint_names', None)
 
 
 class UntrustedCertificate(ValueError):
@@ -396,7 +408,7 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
 
     if method not in ('GET', 'HEAD'):
         raise ValueError('route probes are read-only: GET or HEAD')
-    max_bytes = min(int(max_bytes), MAX_PROBE_BYTES)
+    max_bytes = min(int(max_bytes), MAX_READ_BYTES)
     if max_bytes < 0:
         raise ValueError('invalid probe byte limit')
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) == 127 for c in url):
@@ -609,11 +621,14 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         for url in won_urls:
             by_host.setdefault(host_of[url], []).append(url)
         probed, errors, blocked = {}, {}, 0
+        from cveFeed.bounty_gate import Gate
+        gate = Gate(blocked=())  # a script on another host of the same site is read only when the program's scope names that host
 
         def probe_host(host, urls):
             if not host_allowed(host, project):
                 return host, None
             out = []
+            scripts_left = {'left': js_libraries.MAX_SCRIPTS_PER_HOST}  # the host's scripts read, over both its web bases
             missing_pages = {}  # web base -> the answer to a path that cannot exist, read once if a route came out open
             for i, url in enumerate(urls):
                 if resources.abort_requested(scan_id):
@@ -622,7 +637,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
                     time.sleep(PER_REQUEST_GAP)
                 try:
                     result = _against_missing_page(analyse(probe(url)), url, probe, missing_pages)
-                    _read_scripts(result, probe, scan_id)
+                    _read_scripts(result, probe, scan_id, budget=scripts_left, project=project, gate=gate)
                     out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
                     out.append((url, exc))

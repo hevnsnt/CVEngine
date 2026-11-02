@@ -927,7 +927,15 @@ const technologyTable = (h) => {
       if (t.version) line.append(el("span", "chip", t.version));
       if (t.category) line.append(badge(t.category, "queued"));
       line.append(el("span", "note", t.source ? `seen via ${t.source}` : ""));
+      if (t.version_source === "filename") line.append(badge("version from the file name only", "ice"));
+      if (t.copy_state === "shadowed") line.append(badge("replaced by a later copy", "ice"));
       box.append(line);
+      // a JavaScript library the page loads more than once: every copy, and the one that runs (textContent only)
+      const copies = Array.isArray(t.copies) ? t.copies : [];
+      if (copies.length > 1 || t.copies_unresolved) {
+        const where = copies.map((c) => `${c.version || "version unknown"} (${c.state || "?"}${c.version_source === "filename" ? ", from the file name" : ""}) ${c.path || ""}`).join("; ");
+        box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others."}`));
+      }
     });
   }
   if (unverified.length) {

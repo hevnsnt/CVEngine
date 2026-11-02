@@ -102,11 +102,8 @@ def from_response(server="", powered_by="", body="", content_type="", scripts=()
     return out[:MAX_FINGERPRINTS]
 
 
-# JavaScript libraries, read from the names of the scripts a page loads (no request) and from the comment banner at the top of a
-# script the same host serves. Old versions of these are among the most common findings on a public site.
-LIB_NAMES = {"jquery": "jQuery", "bootstrap": "Bootstrap", "angular": "AngularJS", "angularjs": "AngularJS", "react": "React",
-             "react-dom": "React", "vue": "Vue.js", "lodash": "Lodash", "moment": "Moment.js", "underscore": "Underscore.js",
-             "swiper": "Swiper", "datatables": "DataTables"}
+# JavaScript libraries: which library a script is and the version its own file states (cveFeed.js_libraries). Old versions of these are
+# among the most common findings on a public site.
 _SCRIPT_TAG_RE = re.compile(r"<script\b[^<>]{0,2000}>", re.IGNORECASE)
 _SRC_ATTR_RE = re.compile(r"""\bsrc=["']([^"'>\s]{1,300})["']""", re.IGNORECASE)
 
@@ -119,20 +116,6 @@ def script_srcs(body):
         if src:
             found.append(src.group(1))
     return found
-_LIB_FILE = re.compile(r"(?:^|[/@._-])(jquery|bootstrap|angular(?:js)?|react(?:-dom)?|vue|lodash|moment|underscore|swiper|datatables)"
-                       r"(?:[.-]min|[.-]slim|[.-]bundle)*?[-@./ ]v?(\d+\.\d+(?:\.\d+)?)", re.IGNORECASE)
-_LIB_QUERY = re.compile(r"/(jquery|bootstrap|angular(?:js)?|react|vue|lodash|moment|underscore)[^/?]*\.js\?(?:[^#]*&)?(?:ver|v|version)=(\d+\.\d+(?:\.\d+)?)",
-                        re.IGNORECASE)
-_BANNER = (
-    (re.compile(r"jQuery(?: JavaScript Library)? v(\d+\.\d+(?:\.\d+)?)"), "jQuery"),
-    (re.compile(r"Bootstrap v(\d+\.\d+\.\d+)"), "Bootstrap"),
-    (re.compile(r"AngularJS v(\d+\.\d+\.\d+)"), "AngularJS"),
-    (re.compile(r"@license React v(\d+\.\d+\.\d+)|React v(\d+\.\d+\.\d+)"), "React"),
-    (re.compile(r"Vue\.js v(\d+\.\d+\.\d+)"), "Vue.js"),
-    (re.compile(r"(?:lodash|Lodash)[^\n]{0,40}?(\d+\.\d+\.\d+)"), "Lodash"),
-    (re.compile(r"//! version\s*:\s*(\d+\.\d+\.\d+)[^\n]{0,80}\n//! (?:license|locale)|Moment\.js[^\n]{0,20}?(\d+\.\d+\.\d+)"), "Moment.js"),
-    (re.compile(r"Underscore\.js (\d+\.\d+\.\d+)"), "Underscore.js"),
-)
 ANGULAR_ATTR = re.compile(r"ng-version=[\"'](\d+\.\d+\.\d+)[\"']")
 
 
@@ -157,29 +140,25 @@ def script_sources(body, page_url, limit=4):
 
 
 def from_script_urls(urls):
-    """``[(name, source)]`` from the names of the scripts a page loads: ``jquery-3.4.1.min.js``, ``/ajax/libs/vue/3.3.4/vue.js``,
-    ``jquery.min.js?ver=3.4.1``."""
+    """``[(name, 'script:filename')]`` from the names of the scripts a page loads: the library each file name is (one script, one library)
+    with the version its file name or CDN path carries (``jquery-3.4.1.min.js``, ``/ajax/libs/vue/3.3.4/vue.js``). A hint only, used
+    when the file itself cannot be read (cveFeed.js_libraries); a query string (``jquery.min.js?ver=3.4.1``, a WordPress asset's
+    cache-buster) never gives a version."""
+    from cveFeed import js_libraries
     out = []
     for url in urls:
-        match = _LIB_FILE.search(url) or _LIB_QUERY.search(url)
-        if match:
-            name = LIB_NAMES.get(match.group(1).lower())
-            if name:
-                out.append((_versioned(name, match.group(2)), "script:name"))
+        hint = js_libraries.identify(url)
+        if hint['library']:
+            name = js_libraries.LIBRARIES[hint['library']][0]
+            out.append((_versioned(name, hint['filename_version']), "script:filename"))
     return out
 
 
 def from_script_body(text):
-    """``[(name, source)]`` from the comment banner at the top of one script (first 4 KB)."""
-    head = (text or "")[:4096]
-    out = []
-    for pattern, name in _BANNER:
-        match = pattern.search(head)
-        if match:
-            version = next((g for g in match.groups() if g), "")
-            if version:
-                out.append((_versioned(name, version), "script:banner"))
-    return out
+    """``[(name, source)]`` a script's own text states: its comment banner or, for jQuery and a few others, code only the library's file
+    has (cveFeed.js_libraries.read_body)."""
+    from cveFeed import js_libraries
+    return [(_versioned(js_libraries.LIBRARIES[key][0], version), "script:body") for key, version, _how in js_libraries.read_body(text)]
 
 
 def extend(found, pairs):
