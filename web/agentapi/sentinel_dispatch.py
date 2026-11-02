@@ -608,7 +608,9 @@ def _nuclei_target(kind, targets, kwargs):
     cached, else on the first policy request)."""
     from agentapi import template_bundle
     from cveFeed import nuclei_scan
-    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or [])
+    # no severities given: the local run's own default (``nuclei_scan.SEVERITIES``, info to critical), sent as a list, since a client given none
+    # would run every severity, ``unknown`` included, and the two runs of one pass would not agree
+    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or nuclei_scan.SEVERITIES.split(','))
     if kind == 'nuclei_light' or kwargs.get('tech'):
         tags, severities = ['tech'], ['info']
     flags = nuclei_scan.BASE_FLAGS
