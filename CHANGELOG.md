@@ -8,6 +8,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 - **The 1.3.2 upgrade no longer fails on an install with an agent held back by the old suspension rule.** Migration `agentapi` 0009 aborted with `cannot CREATE INDEX "agentapi_agent" because it has pending trigger events` on any database with a suspended agent carrying the old "another agent of this user is suspended or revoked" note: its backfill updated those rows in the same transaction that added the deferred `held_by` foreign key, so a key check was still pending when Django created that column's index. The backfill now checks keys as each statement ends (PostgreSQL) and updates each row once before naming the agent that held it back; what it fills in is unchanged, and so is the schema. An install that already applied 0009 is unaffected; one where it failed can run the update again.
 
+### Security
+
+- **Pillow's lowest allowed version is now 13.0.0 (was 10).** `web/requirements.txt` gives Pillow as a range, `>=10,<14`, so an environment that already had Pillow 10 to 12 kept it on `pip install -r`, and every release before 13.0.0 is affected by the Pillow advisories published in October 2026 (among them GHSA-8g5g-8vmr-9782, GHSA-332p-7hrc-92wf and GHSA-5x8w-8jj5-q52h, critical heap buffer overflows in the JPEG, TIFF and FlashPix decoders, and GHSA-xvh5-g6gv-559v and GHSA-78g4-xqwv-q3g8, high). The range is now `>=13.0.0,<14`. A fresh image build already installed 13.0.0, the newest release under the cap, so a rebuilt image is unchanged; the floor protects other installs. Pillow opens the web and RDP screenshots (the comparison hash and the blank-frame check). Dependabot cannot report on Pillow because the line is a range, not a pin. The three high Dependabot alerts on `master` (GHSA-mfr5-77xh-9j7h, GHSA-cggf-277g-3q54 and GHSA-5849-834g-hvw5, in pypdf 6.21.3) were already fixed in 1.3.2 by pypdf 6.21.4.
+
 ## v1.3.2 (2026-11-01)
 
 ### Upgrade notes
