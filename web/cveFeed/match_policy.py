@@ -70,24 +70,93 @@ def hard_version_evidence(in_range, detail=None):
     return in_range is True or bool((detail or {}).get('branch_unlisted'))
 
 
+# the JSON values Python reads as false (``bool(evidence.get(key))``): an evidence key holding one of them is no evidence at all
+FALSY_JSON = (False, None, {}, [], '', 0)
+
+
+def evidence_flag(evidence, key):
+    """Whether ``evidence`` (a match's evidence dict) holds ``key`` with a true value: a key holding ``False``, ``None``, ``{}``, ``[]``, ``''`` or
+    ``0`` is no evidence. ``evidence_flag_q`` is the database form, so the two never disagree."""
+    return isinstance(evidence, dict) and bool(evidence.get(key))
+
+
+def evidence_flag_q(key, prefix=''):
+    """The database form of ``evidence_flag``: the key is present and its value is none of ``FALSY_JSON``."""
+    from django.db.models import Q
+    q = Q(**{prefix + 'evidence__has_key': key})
+    for value in FALSY_JSON:
+        q &= ~Q(**{f'{prefix}evidence__{key}': value})
+    return q
+
+
 def is_version_unknown(evidence, version_in_range, template_result='', distro_status=''):
     """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``): kept
     for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
     report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
-    evidence = evidence or {}
-    return bool(evidence.get('unbounded')) and version_in_range is None and template_result != 'vulnerable' \
-        and distro_status != 'vulnerable' and not evidence.get('runzero')
+    return evidence_flag(evidence, 'unbounded') and version_in_range is None and template_result != 'vulnerable' \
+        and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
+
+
+# ----------------------------------------------------------------------------- hard evidence: the one definition
+
+def has_hard_evidence(source, evidence, template_result='', distro_status='', validation_status=''):
+    """Whether a CVE match rests on evidence about *this host* beyond a version string. The one definition, used by triage's ceiling, the
+    match heat (``threat.match_heat``) and its database form (``hard_evidence_q``). Hard evidence is any of:
+
+      * a template hit (``template_result`` vulnerable: a nuclei CVE template, or a confirmed OpenVAS test);
+      * the distribution's tracker listing the host's package as vulnerable (``distro_status`` vulnerable);
+      * the host's own inventory report: the match was made from it (source ``host``) or it confirmed an external match
+        (``evidence.host_reported``);
+      * a runZero report of the same CVE on the host (``evidence.runzero``);
+      * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
+
+    Everything else is *version-only*: a version read by nmap or a banner, by technology detection (a script name, a page generator), by
+    WPScan, an OpenVAS test below its quality bar, or a CVE's version range read against any of those. An AI verdict is not evidence
+    (text never confirms), and a version re-read by another tool is the same evidence again."""
+    return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
+            or evidence_flag(evidence, 'host_reported') or evidence_flag(evidence, 'runzero') or validation_status == 'hit')
+
+
+def hard_evidence_q(prefix=''):
+    """The database form of ``has_hard_evidence`` over CVEMatch rows (``prefix`` reaches the match from another model). The validation hit is
+    read through the match's Triage row (a one-to-one, so the join never multiplies rows)."""
+    from django.db.models import Q
+    p = prefix
+    return (Q(**{p + 'template_result': 'vulnerable'}) | Q(**{p + 'distro_status': 'vulnerable'}) | Q(**{p + 'source': 'host'})
+            | evidence_flag_q('host_reported', p) | evidence_flag_q('runzero', p) | Q(**{p + 'triage__validation_status': 'hit'}))
+
+
+def _validation_status(match):
+    """The validation status of a CVEMatch's Triage row ('' when it has none). Uses the row a ``select_related``/``prefetch_related`` of
+    ``triage`` loaded; otherwise one query."""
+    from django.core.exceptions import ObjectDoesNotExist
+    try:
+        row = match.triage
+    except (ObjectDoesNotExist, AttributeError):
+        return ''
+    return getattr(row, 'validation_status', '') or ''
+
+
+def is_version_only(match):
+    """Whether a CVEMatch is *version-only*: it has no hard evidence (``has_hard_evidence``). Such a match never shows the highest heat by
+    default (``threat.version_only_max_heat``), KEV or not; validation is how it earns it."""
+    return not has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
+                                 getattr(match, 'distro_status', '') or '', _validation_status(match))
+
+
+def version_only_q(prefix=''):
+    """The database form of ``is_version_only``."""
+    return ~hard_evidence_q(prefix)
 
 
 def version_only(source, evidence, version_in_range, template_result='', distro_status=''):
     """Whether a match stands on nothing but a version string inside an advisory's range (or older than every branch it fixes, which
-    correlation records as ``branch_unlisted`` with no range result: the same string, read against the advisory's branches): no template
-    hit, no distribution tracker listing, no host-reported inventory (source ``host``), no runZero report. A banner version is the
+    correlation records as ``branch_unlisted`` with no range result: the same string, read against the advisory's branches) and has no hard
+    evidence (``has_hard_evidence``; a validation hit is weighed by the caller, on the Triage row). A banner version is the
     weakest evidence there is (a distribution backports fixes without changing it, a proxy answers for another server), so such a match
     is a lead to check, never a finding the AI can call affected (``triage.ceiling``)."""
-    on_version = version_in_range is True or (version_in_range is None and bool((evidence or {}).get('branch_unlisted')))
-    return (on_version and template_result != 'vulnerable' and distro_status != 'vulnerable'
-            and source != 'host' and not (evidence or {}).get('runzero'))
+    on_version = version_in_range is True or (version_in_range is None and evidence_flag(evidence, 'branch_unlisted'))
+    return on_version and not has_hard_evidence(source, evidence, template_result, distro_status)
 
 
 def version_unknown(match):
@@ -98,15 +167,15 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return (Q(**{prefix + 'evidence__has_key': 'unbounded'}) & Q(**{prefix + 'version_in_range__isnull': True})
+    return (evidence_flag_q('unbounded', prefix) & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
-            & ~Q(**{prefix + 'evidence__has_key': 'runzero'}))
+            & ~evidence_flag_q('runzero', prefix))
 
 
 def _has_other_evidence(match):
     """A match with hard evidence that does not depend on a version: it stays whatever the sighting says."""
     return (match.template_result == 'vulnerable' or match.distro_status == 'vulnerable'
-            or bool((match.evidence or {}).get('runzero')))
+            or evidence_flag(match.evidence, 'runzero'))
 
 
 def sighting_of(match):
@@ -146,7 +215,7 @@ def unworked(qs):
 
     from cveFeed.models import FindingComment, OnDemandValidation
     return (qs.filter(remediation_status='open', assignee__isnull=True).exclude(source='host')
-            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').exclude(evidence__has_key='runzero')
+            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').exclude(evidence_flag_q('runzero'))
             .exclude(ai_verdict='affected')
             .exclude(Exists(FindingComment.objects.filter(finding_kind='match', finding_id=OuterRef('pk'))))
             .exclude(Exists(OnDemandValidation.objects.filter(match=OuterRef('pk'), source='manual').exclude(status='running'))))
@@ -168,7 +237,7 @@ def closable(qs):
     """Open, unworked, correlated matches that carry no evidence beyond a name (``unworked``, and not a branch-unlisted or unbounded KEV
     candidate, which are evidence by policy). A row already ruled out (by an earlier pass or by the AI) is left alone."""
     return (unworked(qs.filter(source__in=('tech', 'port')))
-            .exclude(evidence__has_key='branch_unlisted').exclude(evidence__has_key='unbounded')
+            .exclude(evidence_flag_q('branch_unlisted')).exclude(evidence_flag_q('unbounded'))
             .exclude(ai_verdict='not_affected'))
 
 

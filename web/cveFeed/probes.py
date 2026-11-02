@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, versions
+from cveFeed import cms, fingerprint, js_libraries, versions
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +85,9 @@ PROBES = (
      )},
     {'id': 'nextjs-version', 'label': 'Next.js version from the framework script the page loads', 'family': 'http', 'leads': r'nextjs',
      'requests': (('GET', '/'),), 'handler': 'nextjs', 'safety': 'the front page and up to three of its own framework scripts'},
-    {'id': 'html-libraries', 'label': 'JavaScript library versions from script names and banners', 'family': 'http',
+    {'id': 'html-libraries', 'label': 'JavaScript library versions from the script files themselves', 'family': 'http',
      'leads': r'jquery|bootstrap|angular|lodash|moment|underscore|vue|react|swiper|datatables', 'requests': (('GET', '/'),),
-     'handler': 'libraries', 'safety': 'the front page and up to four of its own scripts'},
+     'handler': 'libraries', 'safety': 'the front page and up to six of the scripts it loads (its own site or a public library CDN, 300 KB each)'},
     {'id': 'drupal-changelog', 'label': 'Drupal version from its change log', 'family': 'http', 'leads': r'drupal',
      'requests': (('GET', '/core/CHANGELOG.txt'), ('GET', '/CHANGELOG.txt')), 'safety': 'two GETs', 'rules': (
          {'request': 0, 'where': 'body', 'regex': r'(?m)^Drupal (\d+\.\d+(?:\.\d+)?)', 'product': 'Drupal', 'version': 1, 'kind': 'version',
@@ -265,7 +265,7 @@ def _permitted(host, project):
     return not (project and (is_excluded(project, host) or host.lower().rstrip('.') in archived_names(project)))
 
 
-def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None):
+def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_bytes=None, headers=None):
     """One probe GET with browser-like headers, following at most MAX_REDIRECTS redirects that stay inside ``allowed`` (the names of this host's
     group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop. A "try later" (429, 503) is
     asked again once after a pause; an edge challenge is never retried and never pushed against: it is returned with ``challenge`` naming the
@@ -279,7 +279,8 @@ def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None):
         while True:
             if not _permitted(urlsplit(current).hostname or '', project):
                 raise ValueError('probe destination is not allowed')
-            response = probe(current, max_bytes=route_auth.MAX_PROBE_BYTES, browser=True, project=project)
+            response = probe(current, max_bytes=max_bytes or route_auth.MAX_PROBE_BYTES, browser=True, project=project,
+                             **({'headers': headers} if headers else {}))
             location = response.get('location') or ''
             if 300 <= (response.get('status') or 0) < 400 and location and hops < MAX_REDIRECTS:
                 nxt = urljoin(current, location)
@@ -346,8 +347,9 @@ def observations_from_page(response, source_prefix='page'):
         if (base.lower(), version) in seen:
             return
         seen.add((base.lower(), version))
-        out.append(_observation('version', base, version, outcome='found' if version else 'hidden', confidence=0.9 if version else 0.7,
-                                source=source, url='/'))
+        hint = source == 'script:filename'  # a library version a script's file name carries: a hint (cveFeed.js_libraries)
+        out.append(_observation('version', base, version, outcome='found' if version else 'hidden',
+                                confidence=(js_libraries.CONFIDENCE['filename'] if hint else 0.9) if version else 0.7, source=source, url='/'))
     found = fingerprint.from_response(response.get('server', ''), response.get('powered_by', ''), response.get('body', ''),
                                       response.get('content_type', ''), scripts=fingerprint.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0],
                                       headers=headers)
@@ -456,9 +458,12 @@ def allowed_names(sub):
     return names
 
 
-def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=None):
+def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=None, reader=None, target=None):
     """Run one http probe against ``base`` and return its observations. ``get(url)`` replaces the network (tests)."""
     probe = BY_ID[probe_id]
+    # a script is read further than a page (cveFeed.js_libraries.MAX_SCRIPT_BYTES); a test's ``get`` reads both
+    script_get = None if get else (lambda url, headers=None: fetch(url, allowed=allowed, sleep=sleep, project=project,
+                                                                   max_bytes=js_libraries.MAX_SCRIPT_BYTES, headers=headers))
     get = get or (lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project))
     handler = probe.get('handler')
     if handler == 'wordpress':
@@ -479,7 +484,7 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
     elif handler == 'nextjs' and first:
         out += _nextjs_observations(first, get, sleep)
     elif handler == 'libraries' and first:
-        out += _library_observations(first, get, sleep)
+        out += _library_observations(first, script_get or get, sleep, project, reader=reader, target=target)
     out += apply_rules(probe, responses)
     if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
         out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
@@ -549,23 +554,22 @@ def _nextjs_observations(first, get, sleep):
     return []
 
 
-def _library_observations(first, get, sleep):
+def _library_observations(first, get, sleep, project=None, reader=None, target=None):
+    """The library versions the front page's scripts state (cveFeed.js_libraries): one observation per library, its effective copy's
+    version, with every copy and which one runs in ``evidence['library']``. A version from a file name only (the file could not be read or
+    states none) is kept at low confidence; a query string is never a version."""
+    if not 200 <= (first.get('status') or 0) < 300 or first.get('challenge'):
+        return []  # an error page or an edge's challenge is not the site's page: its scripts say nothing (as for the route check)
     page = first.get('final_url') or first.get('url') or ''
-    every, local = fingerprint.script_sources(first.get('body', ''), page)
-    pairs = fingerprint.from_script_urls(every)
-    for url in local:
-        sleep(REQUEST_GAP)
-        try:
-            got = get(url)
-        except (OSError, ValueError):
-            continue
-        pairs += fingerprint.from_script_body(got.get('body') or '')
-    out, seen = [], set()
-    for name, source in pairs:
-        base, _, version = name.partition(':')
-        if (base, version) not in seen:
-            seen.add((base, version))
-            out.append(_observation('version', base, version, source=source, confidence=0.85, outcome='found' if version else 'hidden', url='/'))
+    entries = js_libraries.parse_page(first.get('body', ''), page)
+    records = js_libraries.read_page(entries, page, get, js_libraries.vetter(page, project, target=target),
+                                     {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project)
+    out = []
+    for record in records.values():
+        version = record['version']
+        out.append(_observation('version', record['product'], version, source='script:body' if record['version_source'] == 'body' else 'script:filename',
+                                confidence=record['version_confidence'] if version else 0.7, outcome='found' if version else 'hidden', url='/',
+                                evidence={'library': record}))
     return out
 
 
@@ -628,7 +632,10 @@ def technology_names(observations):
     that is a product of its own. A hidden version adds nothing (the lead stays a lead), and an edge is a hosting fact, not a technology."""
     names = []
     for o in observations:
-        if o['kind'] == 'version' and o['outcome'] == 'found' and o['version']:
+        library = (o.get('evidence') or {}).get('library') if isinstance(o.get('evidence'), dict) else None
+        if o['kind'] == 'version' and isinstance(library, dict) and library.get('tech_names'):
+            names += [str(n)[:500] for n in library['tech_names'] if ':' in str(n)]  # the effective copy, or each copy of an unresolved set
+        elif o['kind'] == 'version' and o['outcome'] == 'found' and o['version']:
             names.append(f"{o['product']}:{o['version']}")
         elif o['kind'] == 'wordpress' and o['outcome'] == 'found':
             names.append(f"WordPress:{o['version']}" if o['version'] else 'WordPress')
@@ -664,7 +671,7 @@ def apply_known(scan):
     # only what a probe read (not the candidate signals or WPScan's state rows): a hint is never turned into a technology
     for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff, probe__in=list(BY_ID)):
         by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
-                                                 'outcome': row.outcome})
+                                                 'outcome': row.outcome, 'evidence': row.evidence or {}})
     added = 0
     for sub in Subdomain.objects.filter(scan_history=scan, name__in=list(by_host)).prefetch_related('technologies'):
         added += apply_to_subdomain(sub, by_host.get(sub.name.lower(), []))
@@ -727,7 +734,7 @@ def max_hosts():
     return _int_env('CVENGINE_PROBE_MAX_HOSTS', 60)
 
 
-def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep=time.sleep):
+def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep=time.sleep, reader=None, fresh=False):
     """Run one planned probe (``plan_for_host`` entry) on ``sub``, store what it found, apply it, and return the observations."""
     probe_id, target = entry['probe'], entry['target']
     if BY_ID[probe_id]['family'] == 'nmap':
@@ -741,7 +748,9 @@ def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep
         found, inventory = run_nmap_probe(target['ip'], target['port'], target.get('service', ''), runner=nmap_runner)
         nmap_scan.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
     else:
-        found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id)
+        reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
+        found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id, reader=reader,
+                               target=getattr(sub, 'target_domain', None))
     record(project_id, domain_id, sub.name, probe_id, found)
     if apply_to_subdomain(sub, found):
         recorrelate(sub)
@@ -797,6 +806,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     due = due[:max_hosts()]
     if not due:
         return stats
+    reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget, shared by every host's library probe
     running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
                            status='running', scan_id=scan.id)
     for sub, todo in due:
@@ -805,7 +815,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
         ran = False
         for asset, entry in todo.items():
             try:
-                found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep)
+                found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
                 logger.warning('probe %s failed on host %s: %s', entry['probe'], sub.pk, type(exc).__name__)
                 ledger.record(SERVICE, [asset], project, scan, 'failed')

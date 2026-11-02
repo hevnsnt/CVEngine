@@ -326,16 +326,53 @@ def describe_cve_match(m):
     guidance = detection.prompt_guidance(cve)  # earlier notes on what makes this CVE apply or not: a hint, the evidence above decides
     if guidance:
         payload['cve']['guidance'] = guidance
+    library = library_brief(evidence, names)
+    if library:
+        payload['library'] = library
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',
               **({'version_unknown': True} if facts['version_unknown'] else {}),
+              **({'library': hashlib.sha1(json.dumps(library, sort_keys=True).encode()).hexdigest()[:16]} if library else {}),
               'intelligence': hashlib.sha1(json.dumps([cve.affected, cve.cvss, cve.kev, cve.epss_reached, cve.exploit_db,
                                                        cve.original_description or cve.summary], sort_keys=True, default=str).encode()).hexdigest()[:16]}
     cvss = cve.cvss
     base = 4 if cvss and cvss >= 9 else 3 if cvss and cvss >= 7 else 2 if cvss and cvss >= 4 else 1 if cvss else 0
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
             'priority': (9, 0) if facts['version_unknown'] else (0 if floor else 3, -base)}
+
+
+LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',
+                   'filename': 'only the script\'s file name or CDN path; the file could not be read or states no version',
+                   'other': 'another fingerprinting tool; the page\'s own scripts were read and are listed under copies'}
+
+
+def library_brief(evidence, names=()):
+    """What a JavaScript library match's evidence says about where its version came from and the other copies on the page
+    (cveFeed.js_libraries), for the prompt: paths only, no host. Empty for any other match."""
+    source = evidence.get('version_source')
+    copies = [c for c in evidence.get('copies') or [] if isinstance(c, dict)]
+    if not source and not copies:
+        return {}
+    out = {'version_source': _s(LIBRARY_SOURCES.get(source, source or ''), 140),
+           'version_confidence': evidence.get('version_confidence') if isinstance(evidence.get('version_confidence'), (int, float)) else None}
+    if evidence.get('script_url'):
+        out['script'] = _path_only(evidence['script_url'], names)
+    if evidence.get('copy_state'):
+        out['this_copy'] = _s(evidence['copy_state'], 20)
+    if copies:
+        out['copies_on_page'] = [{'script': _path_only(c.get('url'), names), 'version': _s(c.get('version'), 40, names) or 'unknown',
+                                  'version_from': _s(c.get('source') or 'nothing readable', 20), 'state': _s(c.get('state'), 20),
+                                  **({'loaded_after_noconflict': True} if c.get('loaded_after_noconflict') else {})} for c in copies[:8]]
+        out['note'] = ('Scripts run in document order and a later full copy of a library takes over the global an earlier one set, so the '
+                       'effective copy is the one most page code uses; a shadowed copy may still be used by older code or closures that '
+                       'captured it, and a fallback runs only when its condition is met.')
+    if evidence.get('copies_unresolved'):
+        out['copies_unresolved'] = True
+        out['note'] = 'The page does not show which copy runs (async loading or jQuery.noConflict(true)): each copy is only a candidate.'
+    if evidence.get('version_note'):
+        out['version_note'] = _s(evidence['version_note'], 200)
+    return out
 
 
 def _status_of(response):
@@ -717,7 +754,7 @@ def _track(findings):
     order given; a finding with no owning project is skipped (nothing is stored without a tenancy scope)."""
     from cveFeed.models import CVEMatch, Triage
     now = timezone.now()
-    pairs, reset_matches = [], []
+    pairs, reset_matches, carried_hits = [], [], []
     findings = [f for f in findings if f is not None]
     for start in range(0, len(findings), CHUNK):
         described = [(f, describe(f)) for f in findings[start:start + CHUNK]]
@@ -754,6 +791,7 @@ def _track(findings):
                 row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
             changed.append(row)
         if new_rows:
+            carried_hits.extend(r.match_id for r in new_rows if r.match_id and r.validation_status == 'hit')
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
             for fk in set(KIND_FK[d['kind']] for _, d in described):
                 existing[fk].update(_fetch(fk, [f.pk for f, d in described if KIND_FK[d['kind']] == fk and f.pk not in existing[fk]]))
@@ -772,6 +810,11 @@ def _track(findings):
             m.ai_verdict = m.ai_reason = m.ai_model = ''
         from cveFeed import scoring
         scoring.rescore_for_matches(reset_matches)
+    if carried_hits:
+        # a rescan's match carried its predecessor's validation hit (hard evidence): the score and the snapshots follow. Not paged: the
+        # finding is not new
+        from cveFeed import scoring
+        scoring.evidence_arrived(carried_hits)
     return pairs
 
 
@@ -1090,7 +1133,8 @@ def recap_version_only():
     version = Q(match__version_in_range=True) | Q(match__version_in_range__isnull=True, match__evidence__has_key='branch_unlisted')
     rows = (Triage.objects.filter(version, kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'))
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
-            .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
+            .exclude(match__source='host').exclude(match_policy.evidence_flag_q('host_reported', 'match__'))
+            .exclude(match_policy.evidence_flag_q('runzero', 'match__')))  # the key is removed when runZero stops reporting it
     ids = list(rows.values_list('pk', flat=True))
     changed = 0
     now = timezone.now()

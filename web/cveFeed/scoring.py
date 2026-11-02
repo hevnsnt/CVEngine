@@ -6,7 +6,7 @@ the Hosts page, search and the graph already read.
 
 | Component | Points | Cap |
 | --- | --- | --- |
-| CVE matches (not ruled out): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
+| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: a version-only match is smoke at most): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
 | Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
@@ -156,16 +156,13 @@ def _chunks(items, size=CHUNK):
 def _cve_inputs(sub):
     from cveFeed.counts import match_is_live
     from cveFeed.match_policy import version_unknown
-    from cveFeed.threat import classify_threat_tier, match_temperature
+    from cveFeed.threat import match_heat
     out = []
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out, fixed or an accepted risk
             continue
-        c = m.cve_entry
-        tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
-        unknown = version_unknown(m)
-        out.append({'id': c.cve_id, 'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status, unknown), 'ai_verdict': m.ai_verdict,
-                    'version_unknown': unknown})
+        # the heat the host card shows: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT (smoke), KEV or not
+        out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
     return out
 
 
@@ -211,7 +208,7 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
     for chunk in _chunks(names):
         newest = (usable_rows(Subdomain.objects.filter(target_domain__project_id=project_id, name__in=chunk))
                   .order_by('name', *row_preference(scan_id)).distinct('name')
-                  .prefetch_related('ip_addresses', Prefetch('cve_matches', queryset=CVEMatch.objects.select_related('cve_entry')),
+                  .prefetch_related('ip_addresses', Prefetch('cve_matches', queryset=CVEMatch.objects.select_related('cve_entry', 'triage')),
                                     'vulnerability_set'))  # a score reads a CVE's tier fields
         subs = {s.name.lower(): s for s in newest}
         routes, recent, zombies, hygiene = {}, {}, {}, {}
@@ -251,6 +248,43 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         HostState.objects.bulk_update(states, ['score'], batch_size=CHUNK)
         scored += len(scores)
     return scored
+
+
+HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the version-only cap the stored scores were last asked to follow
+
+
+def rescore_if_heat_cap_changed():
+    """Queue one full rescore when the owner changed CVENGINE_VERSION_ONLY_MAX_HEAT: the cap differs from the one last recorded. Heat itself
+    needs nothing (it is computed when read); a score is stored, so it follows here, or at the next daily pass. The first time a cap is
+    seen (the upgrade that introduced it, or a Redis without a volume that came back empty after ``docker compose down``) it is only
+    recorded: a forced rescore of every host on each restart would cost far more than scores that catch up at the daily pass. One GETSET,
+    so of several workers starting together only the first queues it (and the value goes back if the broker refuses the task, so the next
+    worker start tries again). The rescore it queues runs even when another full rescore holds the hour-long
+    sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
+    the old cap until the next day. Returns whether it queued. Never raises."""
+    from cveFeed.threat import version_only_max_heat
+    from reNgine import resources
+    try:
+        client = getattr(resources.get_store(), 'r', None)
+        if client is None:
+            return False
+        cap = version_only_max_heat()
+        previous = client.getset(HEAT_CAP_KEY, cap)
+        if previous is None or previous == cap:
+            return False
+        from cveFeed.tasks import rescore_all_hosts
+        try:
+            rescore_all_hosts.apply_async(kwargs={'force': True}, countdown=120)
+        except Exception:
+            if previous is None:
+                client.delete(HEAT_CAP_KEY)
+            else:
+                client.set(HEAT_CAP_KEY, previous)
+            raise
+        return True
+    except Exception:  # noqa: BLE001 - the next worker start or the daily pass tries again
+        logger.exception('could not queue the rescore for the version-only heat cap')
+        return False
 
 
 def rescore_quietly(project_id, names, scan_id=None):
@@ -295,6 +329,29 @@ def rescore_subdomain_ids(subdomain_ids):
                                 .values_list('name', 'target_domain__project_id'))
     except Exception:  # noqa: BLE001
         logger.exception('could not rescore after a verdict reset')
+
+
+def evidence_arrived(match_ids, confirmed=()):
+    """Hard evidence (``match_policy.has_hard_evidence``) just reached these CVE matches without a template hit: the host's inventory report
+    (``inventory_match``), runZero (``runzero_sync``), or a validation hit recorded, adopted from a sibling row or carried to a rescan's match
+    (``validation``, ``triage``). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
+    hosts and make every snapshot re-read (``bump_stats_revision``). ``confirmed`` are the matches among them that were version-only just
+    before the write (the caller checked, before it wrote): those that are fire now are paged once (``notify.fire_confirmed``). A hit adopted
+    from a sibling or carried to a rescan pages nothing: the finding and its hit were announced already. Never raises."""
+    ids = sorted({int(i) for i in match_ids if i})
+    if not ids:
+        return
+    try:
+        from cveFeed import notify
+        from cveFeed.models import CVEMatch
+        from cveFeed.views import bump_stats_revision
+        for start in range(0, len(ids), CHUNK):
+            rescore_for_matches(CVEMatch.objects.filter(pk__in=ids[start:start + CHUNK]).select_related('subdomain__target_domain'))
+        bump_stats_revision()
+        if confirmed:
+            notify.fire_confirmed(confirmed)
+    except Exception:  # noqa: BLE001 - the evidence is recorded; the score, snapshots and message follow at the next pass
+        logger.exception('could not follow up new evidence on %d CVE matches', len(ids))
 
 
 def rescore_for_matches(matches, seen=None):

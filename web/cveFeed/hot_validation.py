@@ -4,7 +4,9 @@ The sweep only selects findings already in an owned inventory. The worker rechec
 evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual), 6 (Smoke) and
 9 (Ice, every other CVE match) on the reserved validation worker; a duplicate delivery after
 promotion is harmless. A CVE match of any confidence is queued by itself, hottest first; the
-per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave.
+per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave. A CVE match's lane is its
+``threat.validation_heat``, the heat without the version-only cap: a known-exploited match that rests on its version alone shows Smoke
+but is still validated in the Fire lane, because a validation hit is the evidence that makes it Fire.
 """
 import os
 from datetime import timedelta
@@ -16,7 +18,7 @@ from django.utils import timezone
 from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, match_temperature
+from cveFeed.threat import FIRE, ICE, SMOKE, validation_heat
 
 PAGE = 100
 MAX_ENQUEUE = 20
@@ -64,14 +66,15 @@ def next_attempt_number(previous, signature, signature_of):
 
 
 def tier_for(row):
-    """The canonical asset finding tier, or None when this finding is no longer current/open."""
+    """The validation lane of a finding (fire, smoke or ice), or None when this finding is no longer current/open. For a CVE match it is
+    ``threat.validation_heat``: the heat the match would have without the version-only cap, so KEV still decides how soon it is checked."""
     if row.kind == 'cve_match' and row.match_id:
         match = row.match
         if match.ai_verdict == 'not_affected' or match.distro_status == 'patched' or not match.subdomain_id:
             return None
-        cve = match.cve_entry
-        return match_temperature(classify_threat_tier(cve.kev, cve.epss_reached, cve.exploit_db, cve.cvss),
-                                 cve.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
+        # the validation lane, not the heat shown: a known-exploited match that rests on its version alone shows smoke
+        # (threat.version_only_max_heat) but is validated in the fire lane, first, because a validation hit is how it earns fire
+        return validation_heat(match)
     if row.vulnerability_id:
         vuln = row.vulnerability
         if not vuln.open_status:

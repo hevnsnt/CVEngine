@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import discovery, notify
-from cveFeed.models import CVEEntry, CVEMatch
+from cveFeed.models import CVEEntry, CVEMatch, Triage
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType, Notification
 from startScan.models import ScanHistory, Subdomain
@@ -47,7 +47,9 @@ class NotifyTests(TestCase):
 		entry = CVEEntry.objects.create(**fields)
 		for i in range(count):
 			sub = Subdomain.objects.create(scan_history=scan, target_domain=self.domain, name=f'h{i}_x.example.test')
-			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True)
+			# a template hit: since 1.3.2 a match on its version alone is smoke on the host, never paged as fire
+			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True,
+									template_result='vulnerable')
 		return entry
 
 	def test_send_says_whether_any_channel_took_the_message(self):
@@ -115,18 +117,22 @@ class NotifyTests(TestCase):
 			return CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, **fields)
 		match('no-version.example.test')  # the product is named but no version supports it
 		match('ai-doubt.example.test', version_in_range=True, ai_verdict='uncertain')  # the AI called it a likely false positive
+		# 1.3.2: a version in the range is not enough, even for KEV and a likely verdict: it is smoke on the host until a check confirms it
+		match('version.example.test', version_in_range=True, ai_verdict='affected')
 		self.enable()
 		self.assertFalse(notify.fire_matches(self.since, scan))
 		self.assertEqual(self.sent, [])
 		match('proven.example.test', ai_verdict='uncertain', template_result='vulnerable')  # a template hit proves it
 		match('distro.example.test', distro_status='vulnerable')
-		match('version.example.test', version_in_range=True, ai_verdict='affected')
+		validated = match('validated.example.test', version_in_range=True, ai_verdict='affected')  # one of cvENGINE's checks reproduced it
+		Triage.objects.create(project=self.domain.project, domain=self.domain, host='validated.example.test', kind='cve_match', match=validated,
+							  classification='confirmed', status='triaged', validation_status='hit')
 		self.assertTrue(notify.fire_matches(self.since, scan))
 		text = [t for n, t in self.sent if n == 'send_slack_message'][0]
 		self.assertIn('3 new fire-tier CVE matches on 3 hosts', text)
-		for name in ('proven', 'distro', 'version'):
+		for name in ('proven', 'distro', 'validated'):
 			self.assertIn(name, text)
-		for name in ('no-version', 'ai-doubt'):
+		for name in ('no-version', 'ai-doubt', 'version.example'):
 			self.assertNotIn(name, text)
 
 	def test_a_feed_sync_reports_the_matches_of_its_own_cves_whatever_scan_row_they_sit_on(self):
@@ -134,7 +140,7 @@ class NotifyTests(TestCase):
 		entry = self.matches(scan, 1)  # a match on a scan's host row, made by the same feed correlation
 		other = CVEEntry.objects.create(cve_id='CVE-2099-2', kev=True, cvss=9.8, published_at=timezone.now())
 		sub = Subdomain.objects.create(scan_history=scan, target_domain=self.domain, name='sync.example.test')
-		CVEMatch.objects.create(cve_entry=other, subdomain=sub, scan_history=None, version_in_range=True)
+		CVEMatch.objects.create(cve_entry=other, subdomain=sub, scan_history=None, version_in_range=True, template_result='vulnerable')
 		self.enable()
 		self.assertTrue(notify.fire_matches(self.since, cve_ids=[other.pk]))  # the other CVE's match is not this sync's
 		texts = [t for n, t in self.sent if n == 'send_slack_message']
@@ -147,7 +153,7 @@ class NotifyTests(TestCase):
 		scan = self.scan()
 		entry = CVEEntry.objects.create(cve_id='CVE-2099-1', kev=True, published_at=timezone.now())
 		sub = Subdomain.objects.create(scan_history=scan, target_domain=self.domain, name='a<!channel>*[x](http://e).example.test')
-		CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, version_in_range=True)
+		CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, version_in_range=True, template_result='vulnerable')
 		self.enable()
 		notify.fire_matches(self.since, scan)
 		text = self.sent[0][1]
