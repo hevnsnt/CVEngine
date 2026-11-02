@@ -692,6 +692,8 @@ class ReviewFixTests(Isolated, TestCase):
         data = send(client_for(self.root), 'GET', 'scan_concurrency')[1]
         nmap = next(f['autotune'] for f in data['fields'] if f['key'] == 'heavy.nmap')
         self.assertEqual((nmap['pinned'], nmap['pinned_env'], nmap['pinned_by']), (True, 'HEAVY_MAX_NMAP=1', None))
+        gap = next(f['autotune'] for f in send(client_for(self.root), 'GET', 'tunables')[1]['fields'] if f['key'] == 'work_min_gap_hours')
+        self.assertEqual((gap['pinned'], gap['pinned_env']), (True, 'CVENGINE_WORK_MIN_GAP_HOURS=24'))
 
     def test_apply_tuned_checks_mode_kill_switch_and_pins_under_the_lock(self):
         m = autotune.by_key()['heavy.nmap']
@@ -918,3 +920,32 @@ class ApiTests(Isolated, TestCase):
         rows = {f['key']: f['autotune'] for f in data['fields']}
         self.assertEqual(rows['triage_max_per_day'], {'managed': False})
         self.assertTrue(rows['stage_parallel']['managed'])
+
+
+class DocumentationTests(SimpleTestCase):
+    """docs/CONFIGURATION.md says what pins an auto-tuned setting, on the setting's own row and in the section."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from pathlib import Path
+        cls.text = (Path(__file__).resolve().parents[2] / 'docs' / 'CONFIGURATION.md').read_text()
+        cls.rows = [line for line in cls.text.splitlines() if line.startswith('|')]
+
+    def test_every_auto_tuned_variable_row_says_what_pins_it(self):
+        envs = {m.env_name for m in autotune.managed() if not m.key.startswith('heavy.')} | {'HEAVY_MAX_<KIND>'}
+        for env in envs:
+            row = next((r for r in self.rows if r.startswith(f'| `{env}` |')), None)
+            self.assertIsNotNone(row, env)
+            self.assertIn('(#auto-tuning)', row, env)
+            self.assertIn('anything other than', row, env)
+            self.assertIn('pins', row, env)
+
+    def test_the_section_states_the_environment_pin_and_the_warm_up(self):
+        section = self.text.split('### Auto-tuning', 1)[1].split('\n### ', 1)[0]
+        self.assertIn('Pinned by the environment (NAME=value): remove it from .env, or save a value here', section)
+        self.assertIn('`.env` when it is not the default > tuned', section)
+        self.assertIn('ten minutes', section)
+        self.assertIn('max_connections=100', section)
+        self.assertIn('cpu.max', section)
+        self.assertNotIn('no warm-up', section)

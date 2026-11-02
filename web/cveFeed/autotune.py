@@ -7,11 +7,13 @@ out the same changes and shows each with its reason and an Apply button; nothing
 tuning). ``CVENGINE_AUTOTUNE=0`` in the environment forces ``off`` whatever is saved (the kill switch). Leaving Auto drops the tuned numbers at
 once: every setting goes back to what a person saved, else the environment, else the default.
 
-**Pins.** A number a person saves for a setting pins it: the saved value always wins and the tuner never moves it. "Let auto-tune manage this"
-removes the saved value and hands the same number to the tuner, so nothing jumps. Only settings whose registry entry says ``auto_tunable=True``
+**Pins.** A number a person saves for a setting pins it: the saved value always wins and the tuner never moves it. An environment variable set
+to anything other than the built-in default pins its setting too (``env_pin`` of each registry; a value equal to the default is not a pin, since
+the compose files pass ``DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}`` and the like to every container). "Let auto-tune manage this"
+removes the saved value and hands the same number to the tuner, so nothing jumps (the hand-over is a row in the history and counts as a change). Only settings whose registry entry says ``auto_tunable=True``
 are ever tuned (``cveFeed.scan_concurrency.FIELDS``, ``cveFeed.tunables.TUNABLES``); AI spend caps and anything that guards safety say False.
 
-**Precedence** for a tunable setting: saved by a person > tuned (mode Auto) > environment > default. The tuned numbers are a row in the
+**Precedence** for a tunable setting: saved by a person > environment when not the default > tuned (mode Auto) > environment > default. The tuned numbers are a row in the
 database (the truth), published to Redis (``reNgine.resources.AUTO_VALUES_KEY``) on every change and every 30 seconds, and read by the workers
 the same way as the saved values, so a change takes effect within seconds with no restart (the discovery pool is resized live, as for a save).
 
@@ -129,8 +131,13 @@ def pin_of(m, rows):
     field = module.BY_KEY[m.key]
     env = module.env_value(field)
     if module.env_pin(field, env):
-        return f'the environment ({m.env_name}={env:g})' if isinstance(env, float) else f'the environment ({m.env_name}={env})', 'environment'
+        return f'the environment ({m.env_name}={_number_text(env)})', 'environment'
     return None
+
+
+def _number_text(number):
+    """24.0 as 24, 0.5 as 0.5, 3 as 3."""
+    return f'{number:g}' if isinstance(number, float) else str(number)
 
 
 # --- mode and the published copy ----------------------------------------------------------------------------------------
@@ -979,7 +986,7 @@ def annotate(fields):
         env_pinned = f.get('source') == 'environment' and _registry(m.registry).env_pin(_registry(m.registry).BY_KEY[m.key])
         item = {'managed': True, 'pinned': f.get('source') == 'admin' or env_pinned,
                 'pinned_by': f.get('set_by') if f.get('source') == 'admin' else None,
-                'pinned_env': f'{f.get("env_name")}={f.get("env_value")}' if env_pinned else None,
+                'pinned_env': f'{f.get("env_name")}={_number_text(f.get("env_value"))}' if env_pinned else None,
                 'tuned': f.get('source') == 'auto', 'min': m.setting.low, 'max': m.setting.high, 'step': m.setting.step,
                 'why_not_raised': (last.get(f['key']) or {}).get('why_not_raised') or None,
                 'target': (last.get(f['key']) or {}).get('target'), 'target_reason': (last.get(f['key']) or {}).get('target_reason'),

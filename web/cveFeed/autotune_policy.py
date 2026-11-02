@@ -11,8 +11,9 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
    discovery pool that keeps them busy (twice their slots plus headroom), not the page's maximum. A fact nobody reported yet is replaced by the
    setting's documented optimistic value (``auto_optimistic`` in the registry), never by the minimum: the memory gate keeps holding work back
    meanwhile.
-2. **Aim high**: on its first decision after each restart or update, every setting goes straight to that target (lower than the target only
-   while the level that last caused trouble is remembered, below).
+2. **Aim high**: once a restart or update is ``AIM_WARMUP_SECONDS`` old and memory and the Sentinels have reported (``facts_ready``; or after
+   ``AIM_FALLBACK_SECONDS`` with the optimistic values for what is missing), every setting goes straight up to that target (lower than the
+   target only while the level that last caused trouble is remembered, below). The jump only goes up.
 3. **Scale back on evidence, at once**: memory pressure or a memory kill, scanner time-outs and kills, the database above ``DB_PRESSURE`` of its
    connections, a CPU overload, a worker that stopped answering, Sentinel waits that time out and run locally, runs of a kind that wait with
    nothing of the kind running. A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
@@ -22,7 +23,8 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
    in the last ``HEALTHY_SAMPLES`` measurements, after the probe cooldown since the setting's last change, at most ``DAILY_PROBES`` a day, and
    never above the target or the remembered bad level. The thresholds that allow a probe are far from the ones that force a back-off
    (hysteresis).
-5. A scanner kind above what the memory budget holds at its real peak is brought down to that at once (a hard cap).
+5. A setting above its ceiling (a target sized from facts that reported, a remembered bad level, or for a scanner kind what the memory
+   budget holds at its real peak) is brought down to it at once, with no cooldown (phase ``cap``).
 
 The AI advisor's answer is untrusted: ``validate_advice`` keeps only a number for a setting it was offered, inside the range the controller
 gives for that setting right now (from one step down up to the controller's own target).
