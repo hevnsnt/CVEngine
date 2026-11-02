@@ -2050,3 +2050,11 @@ section.internal[hidden]{display:none}
 .ai-warns:not(:empty){margin-top:12px}
 .ai-warn{margin:6px 0 0;padding:8px 10px;border-radius:var(--r);background:var(--smoke-bg);color:var(--smoke-ink)}
 .ai-warn-err{background:var(--fire-bg);color:var(--fire-ink);font-weight:600}
+/* Findings: the same script on sibling hosts is one row (finding-groups-logic.js); its hosts open in place, each to its own finding */
+.every-host{align-self:flex-start;margin:4px 0}
+.group-hosts{margin-top:4px;font-size:12px}
+.group-hosts>summary{cursor:pointer;color:var(--muted)}
+.group-members{list-style:none;margin:4px 0 0;padding:0;display:grid;gap:3px}
+.group-members li{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.group-members a{overflow-wrap:anywhere}
+.group-note{margin:6px 0}

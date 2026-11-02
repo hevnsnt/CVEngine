@@ -3194,15 +3194,26 @@ def _finding_project(kind, obj):
             'hygiene': lambda o: o.domain.project}[kind](obj)
 
 
+GROUP_MODES = ('none', 'cve')  # group=cve: the same script on sibling hosts is one row (cveFeed.finding_groups)
+
+
 def list_findings(ctx, slug, params):
     """Every finding of the project in one list, hottest first: CVE matches, scanner findings and hygiene findings. Facets:
     type (all|cve|scanner|hygiene), heat (all|fire|smoke|ice), severity (all|critical|high|medium|low|info), status
     (actionable, the default, or all) and host. ``counts`` holds the total of each type under the same facets; the list itself
-    pages through at most MAX_FINDINGS rows (``truncated`` says when there are more)."""
+    pages through at most MAX_FINDINGS rows (``truncated`` says when there are more).
+
+    ``group=cve`` folds the CVE matches of one script on sibling hosts into one row (``_grouped_findings``); the default
+    (``group=none``) is one row per host, as it always was."""
     project, _ = get_project(ctx, slug)
     page, size = page_args(params, zero_ok=True)  # page_size=0: the counts alone
+    group = str(params.get('group') or 'none').strip().lower()
+    if group not in GROUP_MODES:
+        raise ApiError(400, 'group must be none or cve')
     sources = _finding_sources(project, params)
     counts = {key: qs.count() for key, qs in sources.items()}
+    if group == 'cve':
+        return _grouped_findings(project, sources, counts, page, size)
     total = sum(counts.values())
     start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
     merged = []
@@ -3220,6 +3231,68 @@ def list_findings(ctx, slug, params):
         results.append(row)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
+
+
+def _grouped_findings(project, sources, counts, page, size):
+    """``list_findings`` with ``group=cve``: the same facets and order, but the CVE matches of one script on sibling hosts are one row
+    (the rule is in ``cveFeed.finding_groups``). A group row is its hottest member's ordinary row (its id and kind open that member)
+    plus ``group``: every member's id, host and own status, and the split of heat, status, classification and validation.
+
+    ``counts`` stays per host finding, as without grouping; ``row_counts`` is the rows of each type the grouped list has, ``total`` and
+    ``count`` count rows (they page the list), ``findings_total`` is the host findings behind them, ``groups`` the rows that stand for
+    more than one host and ``grouped_findings`` the host findings inside those. Queries: the counts, one values() pass over the
+    filtered CVE matches (at most GROUP_SCAN_MAX, ``group_scan_truncated`` past that: the rest stay one row each), the top of the
+    scanner and hygiene lists, and one query for the representatives on the page."""
+    from cveFeed import finding_groups
+    cve_qs = sources.get('cve')
+    built, scanned = finding_groups.read(cve_qs) if cve_qs is not None else ([], 0)
+    overflow = max(0, counts.get('cve', 0) - scanned)
+    row_counts = {key: counts.get(key, 0) for key in FINDING_TYPES}
+    if cve_qs is not None:
+        row_counts['cve'] = len(built) + overflow
+    multi = [g for g in built if len(g['members']) > 1]
+    total = sum(row_counts.values())
+    start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
+    epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+    merged = []
+    if stop > start:
+        merged += [('cve', g) for g in built[:stop]]
+        if overflow and len(built) < stop:  # past the pass's cap: the remaining matches, one row each, in the list's order
+            merged += [('cve-obj', obj) for obj in cve_qs[scanned:scanned + stop - len(built)]]
+        for key in ('scanner', 'hygiene'):
+            if key in sources:
+                merged += [(key, obj) for obj in sources[key][:stop]]
+
+    def order(pair):
+        key, item = pair
+        if key == 'cve':
+            return finding_groups.sort_key(item['rep'])
+        return (item.heat_rank, item.sev, item.when or epoch, item.id)
+    merged.sort(key=order, reverse=True)
+    page_items = merged[start:stop]
+    rep_ids = [item['rep']['id'] for key, item in page_items if key == 'cve']
+    reps = {obj.id: obj for obj in cve_qs.filter(id__in=rep_ids).select_related('subdomain__target_domain')} if rep_ids else {}
+    everywhere = _is_all(project)
+    results = []
+    for key, item in page_items:
+        if key == 'cve':
+            obj = reps.get(item['rep']['id'])
+            if obj is None:  # gone between the two reads (a rescan retired it): the next page load settles it
+                continue
+            row = _finding_row('cve', obj)
+            if len(item['members']) > 1:
+                row['group'] = finding_groups.summary(item, _iso)
+        else:
+            key, obj = ('cve' if key == 'cve-obj' else key), item
+            row = _finding_row(key, obj)
+        if everywhere:
+            owner = _finding_project(key, obj)
+            row['project'], row['project_name'] = (owner.slug, owner.name) if owner else (None, None)
+        results.append(row)
+    return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page, 'page_size': size,
+            'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': 'cve', 'row_counts': row_counts,
+            'findings_total': sum(counts.values()), 'groups': len(multi), 'grouped_findings': sum(len(g['members']) for g in multi),
+            'group_scan_truncated': overflow > 0, 'results': results}
 
 
 def _host_of(obj):
@@ -3389,7 +3462,9 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     _rescore_hosts(hosts)  # once per host, not once per finding
-    activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
+    # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
+    activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
+                 hosts=len(hosts), failed=len(failed))
     return {'updated': updated, 'failed': failed}
 
 
