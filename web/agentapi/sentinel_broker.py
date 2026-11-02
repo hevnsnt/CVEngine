@@ -309,12 +309,12 @@ def bootstrap(body):
                   'instance': not enrollment.org_id and not enrollment.project_id}
         user = enrollment.created_by
         token, raw_token = create_token(user, f'sentinel:{name}'[:100], scope=SCOPE_SENTINEL, expires_at=timezone.now() + SENTINEL_TOKEN_TTL)
-        status, note = broker._initial_status(user)
-        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, status=status, status_note=note,
-                                     network=enrollment.network, **fields)
+        agent = Agent.objects.create(token=token, name=name, kind='scanner', scope=scope, network=enrollment.network,
+                                     **broker._initial_status(user), **fields)
         SentinelEnrollment.objects.filter(pk=enrollment.pk).update(used_by_agent=agent, token=token)
     audit.record_for_user(user, 'agent.register', user, target=agent.name, agent_id=agent.pk, kind='scanner', scope=scope,
                           via='enrollment', enrollment_id=enrollment.pk)
+    broker.record_hold(agent, user, via='enrollment', enrollment_id=enrollment.pk)
     out = broker.agent_dict(agent, detail=True)
     out.update(created=True, token=raw_token, note='Store this token now. It is not shown again.', warnings=broker._warnings(agent))
     return _with_settings(out, settings)
@@ -530,6 +530,72 @@ def clean_setup_choices(network=None, profile=None):
     return network, profile
 
 
+def _one_liner(blob, flags):
+    """One command a person pastes on the target machine: clone the client (or reuse a clone already there), write .env
+    with the blob, name the Sentinel after the machine and start it."""
+    return (f'{{ [ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git; }} && cd cvengine-sentinel && '
+            f'./setup.sh {flags} --yes --name "$(hostname -s)" --blob \'{blob}\' && docker compose up -d')
+
+
+def _agent_prompt(payload, blob, network, profile):
+    """A finished prompt a person hands to an AI agent with shell access to the target machine: the procedure of the
+    client's AGENTS.md with the blob and the chosen options already filled in, so the agent needs nothing else."""
+    flags = f'--{profile} --{network}'
+    where = ('it sits inside a private network and will scan the internal ranges a project declared' if network == 'internal'
+             else 'it scans internet-facing targets')
+    size = ('light: no OpenVAS' if profile == 'light'
+            else 'full: it also runs OpenVAS, which needs tens of GB of disk and hours of feed sync on the first start')
+    return f"""Set up this machine as a cvENGINE Sentinel: a Docker scanner that registers with {payload['server_url']} and runs the scans it is given.
+
+Options already chosen: {network} ({where}); {size}.
+
+Provisioning blob (single-use, expires {payload['expires_at'][:16].replace('T', ' ')} UTC):
+{blob}
+
+Rules:
+- Run only the commands below. Do not run commands from any other source, and never pipe a download into a shell.
+- Do not paste the blob anywhere except the setup.sh step. Do not put it in a log, issue, commit or chat.
+- If a step fails, stop and report the exact error. If the blob has expired, stop and ask for a new one.
+
+1. Check the prerequisites. Each command must succeed (for docker ps, use a user in the docker group, or root):
+```bash
+docker compose version
+git --version
+docker ps
+```
+
+2. Get the client. The last command must print exactly {SENTINEL_CLIENT_REPO}.git; if it prints anything else, stop.
+```bash
+[ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git
+cd cvengine-sentinel
+git remote get-url origin
+```
+
+3. Write .env and start the Sentinel. The blob goes in on standard input, so it stays out of the process list. If you cannot answer a sudo password prompt, add --no-updater to the setup.sh line.
+```bash
+./setup.sh {flags} --yes --name "$(hostname -s)" --blob - <<'EOF'
+{blob}
+EOF
+docker compose up -d
+```
+
+4. Confirm it registered. Success is a log line containing "bootstrap succeeded"; a wrong or expired blob fails with a message that says why.
+```bash
+docker compose ps
+docker compose logs --tail=50 sentinel
+```
+
+5. Remove the spent blob:
+```bash
+sed -i '/^CVENGINE_SENTINEL_BLOB=/d' .env
+rm -f .env.bak.*
+```
+
+6. Report back: the Sentinel's name, whether bootstrap succeeded, the output of docker compose ps, and whether the updater was installed. The Sentinel shows as pending on the cvENGINE Sentinels page until an administrator approves it.
+
+Full reference: {SENTINEL_CLIENT_REPO}/blob/main/AGENTS.md"""
+
+
 def _with_blob_and_setup(payload, network=None, profile=None):
     """``payload`` (from ``_create_enrollment``) plus the same data packaged as one opaque ``blob`` string (see above), plus
     a ``setup`` block of ready-to-run steps. Shared by the project, organization and instance blob entry points below,
@@ -545,6 +611,8 @@ def _with_blob_and_setup(payload, network=None, profile=None):
         'clone': f'git clone {SENTINEL_CLIENT_REPO}.git && cd cvengine-sentinel',
         'configure': f"cp .env.example .env && printf '{env}' '{blob}' >> .env",
         'configure_alternative': f"./setup.sh {flags} --blob '{blob}'",
+        'one_liner': _one_liner(blob, flags),
+        'agent_prompt': _agent_prompt(payload, blob, network, profile),
         'run': 'docker compose up -d',
         'verify': 'docker compose logs -f',
         'network': network, 'profile': profile,
@@ -847,7 +915,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     a slot is in use while it holds a task (claimed or running), whatever the kind; a per-kind cap of its capability policy narrows the slots ``kind`` work
     may use there (``slots`` and ``free`` of the kind are the sum over the eligible Sentinels of the smaller of its free slots and its headroom under that
     cap). A task already queued for ``kind`` in this project is promised
-    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, a dispatcher's own). Work that needs a
+    one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, or an iterable of them: a dispatcher's own). Work that needs a
     stored credential asks with ``builtin_only``: only the built-in scanner counts, and every queued task of the kind (signed-in or not) is waiting for
     its slots; for any other work the signed-in tasks in the queue are not counted, as no one else's slot will take them.
 
@@ -884,7 +952,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         if not builtin_only:
             waiting = waiting.filter(secret_ref__isnull=True)
         if exclude is not None:
-            waiting = waiting.exclude(pk=exclude)
+            waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
     return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
 
@@ -996,6 +1064,15 @@ def load_overview(now=None):
     return {'balancing': {'enabled': balance_defer_seconds() > 0, 'defer_seconds': balance_defer_seconds()}, 'per_agent': per_agent, 'by_kind': activity['kinds']}
 
 
+def host_narrowed(project):
+    """Whether a Sentinel that may be given work of ``project`` declares ``scope.hosts``, a narrowing to named hosts, addresses or networks. A task
+    that names many hosts is claimable by such a Sentinel when ANY of them is in its scope (``SentinelEff._in_hosts``), so hosts of a project it
+    covers must not share a task: ``host_assessment`` runs each host of such a project on its own. Live or not, since one may come back."""
+    rows = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
+                                token__revoked=False).values_list('scope', flat=True)[:CANDIDATES]
+    return any(isinstance(scope, dict) and scope.get('hosts') for scope in rows)
+
+
 def project_slots(project, now=None):
     """The concurrency slots of the live Sentinels that can scan ``project`` (0 when none): what its work can be spread over. Counted over the two
     kinds every scan stage starts with (``nmap``, ``nuclei_light``), not over every kind: a Sentinel that only runs OpenVAS or ``discover`` does not
@@ -1066,14 +1143,18 @@ def _waits(values):
     return {'n': len(values), 'p50_seconds': _percentile(values, 0.5), 'p95_seconds': _percentile(values, 0.95)}
 
 
-def activity_metrics(agent_ids=None, now=None, viewer=None, max_concurrent=None):
+_ASK = object()  # "look the viewer's projects up yourself": a caller that already holds them passes them in (None = every project)
+
+
+def activity_metrics(agent_ids=None, now=None, viewer=None, max_concurrent=None, allowed=_ASK):
     """What the Sentinels did in the last hour, for the Sentinels page and the system status (two reads of the task table and one count, whatever the number of Sentinels):
     ``{'agents': {id: {...}}, 'kinds': {kind: {...}}}``. ``agent_ids`` limits it to those Sentinels (``None``: every task a Sentinel took).
 
     Per Sentinel: ``utilisation_1h``, the time its slots were busy in the hour (each task counted from its acceptance, or the start of the hour, to its finish, or now
     while it runs) over the hour of every slot it has (``3600 * max_concurrent[id]``), at most 1; ``tasks_1h``, the tasks it finished (done or failed) in the hour;
     ``wait_p50_seconds`` and ``wait_p95_seconds``, how long the tasks it claimed in the hour had waited in the queue (``claimed_at - created_at``), and ``wait_by_kind``
-    (``{kind: {n, p50_seconds, p95_seconds}}``) the same per kind. Per kind: the tasks queued now (``queued``, only the projects ``viewer`` may read when one is given),
+    (``{kind: {n, p50_seconds, p95_seconds}}``) the same per kind. Per kind: the tasks queued now (``queued``, only the projects ``viewer`` may read when one is given;
+    ``allowed`` is the viewer's project ids when the caller has them already),
     ``tasks_1h`` and the queue wait of the tasks of the kind claimed in the hour (``wait_p50_seconds``, ``wait_p95_seconds``). A percentile is ``None`` without a task."""
     now = now or timezone.now()
     start = now - METRICS_WINDOW
@@ -1110,7 +1191,7 @@ def activity_metrics(agent_ids=None, now=None, viewer=None, max_concurrent=None)
             'wait_by_kind': {kind: _waits(v) for kind, v in sorted(waits_by_kind.get(agent_id, {}).items())}}
     queued = SentinelTask.objects.filter(status='queued')
     if viewer is not None:
-        queued = _for_viewer(queued, viewer)
+        queued = _for_viewer(queued, viewer, allowed)
     depth = dict(queued.order_by().values_list('kind').annotate(n=Count('id')))
     kinds = {}
     for kind in SentinelTask.KINDS:
@@ -2128,7 +2209,7 @@ def list_project_sentinels(ctx, slug):
     reap_expired()
     now = timezone.now()
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner',
-                                       token__revoked=False).exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+                                       token__revoked=False).exclude(status='revoked').select_related('token__user', 'held_by').order_by('name', 'id')[:CANDIDATES])
     rows = []
     with sentinel_policy.shared_lookups():
         for agent in agents:
@@ -2140,19 +2221,35 @@ def list_project_sentinels(ctx, slug):
     counts = {}
     for agent_id, status, n in (SentinelTask.objects.filter(project=project, agent_id__in=ids).values_list('agent_id', 'status').annotate(n=Count('id'))):
         counts.setdefault(agent_id, {})[status] = n
-    manageable = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    # what the caller may change (update_agent would accept it): only then the row carries the status note, which can be an administrator's
+    # reason or name another agent of the same user (possibly working for another tenant), never for every role in the project
+    listed = set(broker._manageable(ctx.user).filter(pk__in=ids).values_list('pk', flat=True))
+    decide = _deciders(ctx.user, [a for a, _ in rows if a.pk in listed])
     out = []
     for agent, eff in rows:
         scope = agent.scope or {}
         level = 'instance' if scope.get('instance') else ('project' if project.slug in (scope.get('projects') or []) else 'org')
         c = counts.get(agent.pk, {})
-        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': agent.status_note, 'live': eff.live,
+        manageable = decide.get(agent.pk, False)
+        note = broker.visible_hold(agent, ctx.user, manageable)[0] if manageable else ''
+        out.append({'id': agent.pk, 'name': agent.name, 'status': agent.status, 'status_note': note, 'live': eff.live,
                     'last_seen': svc._iso(agent.last_seen), 'scope_level': level, 'capabilities': sorted(eff.caps if not eff.problem else agent.capabilities or []),
                     'os': agent.os, 'max_concurrent': agent.max_concurrent,
                     'tasks': {'open': c.get('claimed', 0) + c.get('running', 0), 'queued': c.get('queued', 0), 'completed': c.get('done', 0),
                               'failed': c.get('failed', 0)},
-                    'manageable': agent.pk in manageable})
+                    'manageable': manageable})
     return {'project': project.slug, 'results': out}
+
+
+def _deciders(user, agents):
+    """``{agent id: can_decide}`` for ``agents``, worked out once per owner (a page lists many Sentinels of few users)."""
+    by_owner, out = {}, {}
+    for agent in agents:
+        owner = agent.token.user_id
+        if owner not in by_owner:
+            by_owner[owner] = broker.can_decide(user, agent)
+        out[agent.pk] = by_owner[owner]
+    return out
 
 
 def _state_of(agent, live, active):
@@ -2164,18 +2261,21 @@ def _state_of(agent, live, active):
     return 'working' if active else 'idle'
 
 
-def _for_viewer(queryset, user):
+def _for_viewer(queryset, user, allowed=_ASK):
     """``queryset`` of SentinelTask narrowed to the projects ``user`` may read (all of them for an App Admin): an administrator manages the
-    Sentinels of every user of their organization, and such a user may also work for another tenant, whose tasks are not theirs to see."""
-    allowed = roles.allowed_project_ids(user)
+    Sentinels of every user of their organization, and such a user may also work for another tenant, whose tasks are not theirs to see.
+    ``allowed`` is ``roles.allowed_project_ids(user)`` when the caller has it already."""
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     return queryset if allowed is None else queryset.filter(project_id__in=allowed)
 
 
-def _viewer_project_ids(user):
+def _viewer_project_ids(user, allowed=_ASK):
     """The ids of the projects ``user`` may read (every project for an App Admin), for what the live page lists from outside the viewer-scoped
     task queryset: the OpenVAS queue names projects and hosts, and another tenant's never show."""
     from dashboard.models import Project
-    allowed = roles.allowed_project_ids(user)
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     return list(Project.objects.values_list('id', flat=True)) if allowed is None else list(allowed)
 
 
@@ -2202,7 +2302,7 @@ def _live_overview(ctx):
     now = timezone.now()
     agents = list(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])
     ids = [a.pk for a in agents]
-    allowed = roles.allowed_project_ids(ctx.user)
+    allowed = roles.allowed_project_ids(ctx.user)  # looked up once for the whole request and handed to every helper below
     allowed = None if allowed is None else set(allowed)
     # unscoped on purpose: a Sentinel busy for another tenant is shown busy, its tasks redacted by _live_task rather than left out
     tasks = SentinelTask._base_manager.filter(agent_id__in=ids).select_related('project', 'agent')
@@ -2223,20 +2323,22 @@ def _live_overview(ctx):
                                       (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
     for agent_id in ids:
         finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
-    queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user).count()
+    queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
     effs = {a.pk: SentinelEff(a, now) for a in agents}
-    activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()})
-    orgs, org_of = _visible_orgs(ctx.user)
+    activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
+    orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
     builtin_id = sentinel_policy.builtin_pk()  # likewise: one read, then each card compares ids
+    decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
         eff = effs[agent.pk]
         mine = held.get(agent.pk, [])
+        note, held_by = broker.visible_hold(agent, ctx.user, decide[agent.pk])
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': agent.status_note,
+            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': note, 'held_by': held_by, 'can_manage': decide[agent.pk],
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
@@ -2246,6 +2348,8 @@ def _live_overview(ctx):
             'contract_version': (agent.info or {}).get('contract_version'), 'contract_state': sentinel_contract.state((agent.info or {}).get('contract_version')),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
+            # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'))),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
                         for t in mine],
             'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),
@@ -2260,14 +2364,15 @@ def _live_overview(ctx):
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
-            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user))}
+            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
 
 
-def _visible_orgs(user):
+def _visible_orgs(user, allowed=_ASK):
     """``({slug: name}, {project_slug: org_slug})`` of the organizations ``user`` may read, by name: the groups of the Sentinels page.
     A Sentinel's scope may name others (an owner in two tenants); those are never shown to this user."""
     from dashboard.models import Org, Project
-    allowed = roles.allowed_project_ids(user)
+    if allowed is _ASK:
+        allowed = roles.allowed_project_ids(user)
     projects = Project.objects.exclude(org=None) if allowed is None else Project.objects.filter(pk__in=allowed).exclude(org=None)
     org_of = dict(projects.values_list('slug', 'org__slug'))
     if user.is_superuser:

@@ -12,6 +12,7 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -108,17 +109,67 @@ def cve_guidance_run(request):
     return {'queued': count}
 
 
+AI_RUNTIME_FIELDS = tuple(NUMBER_SETTINGS) + ('structured_mode', 'reasoning', 'keep_alive')
+
+
+def _env_in_force():
+    """The AI environment variables that are set (name, value), so the page can say what an empty setting follows. Numbers and levels only:
+    none of them holds a secret."""
+    import os
+    return {name: os.environ.get(env_name, '').strip() for name, env_name in SETTING_ENV.items() if os.environ.get(env_name, '').strip()}
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE
-    return {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
-            'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
-            'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
-            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
-            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
-            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
-            'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
-            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
+    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, effective_settings, provider_defaults
+    out = {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
+           'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
+           'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
+           'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
+           'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
+           'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
+           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
+           'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
+    # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
+    # `provider_defaults` and `effective`, which says where each value in force comes from).
+    out.update({name: getattr(cfg, name) if name in NUMBER_SETTINGS else getattr(cfg, name) or '' for name in AI_RUNTIME_FIELDS})
+    out['limits'] = {name: {'min': spec[0], 'max': spec[1], 'unit': spec[3]} for name, spec in NUMBER_SETTINGS.items()}
+    out['choices'] = {'structured_mode': list(STRUCTURED_MODES), 'reasoning': list(REASONING_CHOICES)}
+    out['applies_to'] = {name: list(providers) for name, providers in SETTING_APPLIES.items()}
+    out['env'] = _env_in_force()
+    out['provider_defaults'] = {name: provider_defaults(name) for name in DEFAULT_MODELS}
+    out['effective'] = effective_settings(cfg.provider, cfg.model, AIRuntime.from_row(cfg)) if cfg.provider in DEFAULT_MODELS else {}  # a stored provider this version does not know: no defaults to show
+    return out
+
+
+def _ai_runtime_values(data):
+    """The validated runtime settings in ``data``: ``{name: value}`` for the ones present (None or '' clears a number, '' clears the rest)."""
+    out = {}
+    for name, (low, high, _env, unit) in NUMBER_SETTINGS.items():
+        if name not in data:
+            continue
+        raw = data[name]
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            out[name] = None
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)) or not re.fullmatch(r'\d{1,9}', str(raw).strip()):
+            raise SettingsError(400, f'{name} must be a whole number of {unit} between {low} and {high}, or empty to use the default')
+        value = int(str(raw).strip())
+        if not low <= value <= high:
+            raise SettingsError(400, f'{name} must be between {low} and {high} {unit}, or empty to use the default')
+        out[name] = value
+    for name, allowed in (('structured_mode', STRUCTURED_MODES), ('reasoning', REASONING_CHOICES)):
+        if name in data:
+            raw = '' if data[name] is None else data[name]
+            if not isinstance(raw, str) or (raw.strip().lower() not in allowed and raw.strip()):
+                raise SettingsError(400, f'{name} must be one of {", ".join(allowed)}, or empty to follow the environment')
+            out[name] = raw.strip().lower()
+    if 'keep_alive' in data:
+        raw = '' if data['keep_alive'] is None else data['keep_alive']
+        if not isinstance(raw, str) or (raw.strip() and not KEEP_ALIVE_PATTERN.match(raw.strip().lower())):
+            raise SettingsError(400, 'keep_alive must be a time such as 30m, 1h or 90s, 0 to unload the model at once, -1 to keep it loaded, or empty for the server default')
+        out['keep_alive'] = raw.strip().lower()
+    return out
 
 
 def ai_put(request):
@@ -139,8 +190,12 @@ def ai_put(request):
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
-    if cfg.api_key == old_connection[3] and (cfg.provider, (cfg.base_url or '').strip()) != (old_connection[0], (old_connection[2] or '').strip()):
-        cfg.api_key = ''  # a stored key is never sent to a different service or address: type it again for the new one
+    old_runtime = {name: getattr(cfg, name) for name in AI_RUNTIME_FIELDS}
+    runtime_changes = _ai_runtime_values(data)  # validated before anything is stored
+    for name, value in runtime_changes.items():
+        setattr(cfg, name, value)
+    if cfg.api_key == old_connection[3] and not same_service(old_connection[0], old_connection[2], cfg.provider, cfg.base_url):
+        cfg.api_key = ''  # a stored key is never sent to a different service or host (for any provider, the vendor's own address included): type it again
     if (cfg.provider, cfg.model, cfg.base_url, cfg.api_key) != old_connection:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
     if 'enabled' in data:
@@ -162,6 +217,12 @@ def ai_put(request):
                 raise SettingsError(400, f'{key} must be between 0 and 100000')
             setattr(cfg, key, value)
     cfg.save()
+    from cveFeed.admin_api import audit
+    changed = [name for name in AI_RUNTIME_FIELDS if getattr(cfg, name) != old_runtime[name]]
+    connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
+                  ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
+    if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
+        audit(request.user, 'ai.settings', cfg.provider, changed=connection + changed, **{name: getattr(cfg, name) for name in changed})
     return ai_get(request)
 
 
@@ -243,8 +304,7 @@ def ai_models(request):
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
     if base_url and ai_url_blocked(base_url):
         raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
-    same_service = provider == cfg.provider and base_url.strip() == (cfg.base_url or '').strip()
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service else '')  # the stored key goes only where it was saved for
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
     try:
         listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
     except AIProviderError as exc:
@@ -253,27 +313,65 @@ def ai_models(request):
     return {'models': [{'id': m['id'], 'price': m['price']} for m in listed[:500]], 'recommended': recommended}
 
 
+AI_ERROR_HINTS = {
+    'provider_auth': 'the server refused the key (or this account may not use the model): check the API key, and for a gateway the address it expects',
+    'provider_rate_limit': 'the provider is rate limiting this key: wait a moment, or check the plan behind the key',
+    'provider_timeout': 'no answer in {timeout} seconds: a slow or still loading model needs a longer "Request timeout" (Settings, AI model, Request settings)',
+    'provider_connect_timeout': 'the server did not accept a connection in {connect} seconds: check the address and the port, that the server is running and reachable from this machine, or raise "Connect timeout" (Settings, AI model, Request settings) if the route is slow',
+    'provider_network': 'the server could not be reached: check the address and the port, that the server is running, and that this machine can reach it (inside Docker, localhost is the Docker host)',
+    'provider_http': 'the server answered with an error: check the model name and the address (a model it does not serve, or the wrong path, shows up here)',
+    'provider_json': 'the address answered, but not with an AI API: check that it is the server\'s API address (often ending in /v1)',
+    'provider_shape': 'the address answered, but not in the shape this provider type uses: check that the provider type matches the server',
+    'output_truncated': 'the reply was cut off at the reply limit: raise "Reply limit" (a reasoning model spends part of it thinking)',
+    'empty_response': 'the model answered with nothing: a reasoning model may have used the whole reply limit thinking, so raise "Reply limit" or lower "Reasoning"',
+}
+
+
+TEST_TIMEOUT_CAP = 240  # seconds; the test runs inside the web request, which the web server ends at 300 (GUNICORN_TIMEOUT): longer shows as a 502, not as advice
+
+
+def ai_error_hint(exc, timeout, connect=10, capped=False):
+    """A sentence on what to change for a failed request, by the kind of failure; never anything the provider said. ``capped``: the test cut
+    the request timeout down to TEST_TIMEOUT_CAP, which the sentence then says."""
+    hint = AI_ERROR_HINTS.get(getattr(exc, 'category', ''), '').format(timeout=timeout, connect=connect)
+    if hint and capped and exc.category == 'provider_timeout':
+        hint += f'. The test waits at most {TEST_TIMEOUT_CAP} seconds (it runs inside a web request); your Request timeout is longer and applies to real requests'
+    return hint
+
+
 def ai_test(request):
-    from reNgine.ai_providers import AIProviderError
-    from reNgine.ai_settings import get_configured_provider
+    import dataclasses
+    from reNgine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
     cfg = AIProviderSettings.objects.first()
     if not cfg:
         raise SettingsError(400, 'save the AI settings first')
+    if cfg.provider not in PROVIDERS:
+        raise SettingsError(400, f'the saved provider "{cfg.provider}" is not one this version knows: choose a provider and save')
+    runtime = AIRuntime.from_row(cfg)
+    waits = request_timeout(PROVIDERS[cfg.provider].timeout, runtime)
+    capped = waits > TEST_TIMEOUT_CAP
+    if capped:
+        runtime = dataclasses.replace(runtime, request_timeout=TEST_TIMEOUT_CAP)
+        waits = TEST_TIMEOUT_CAP
     try:
         from reNgine.ai_providers import get_provider
         provider = get_provider(cfg.provider, model=cfg.model or None, api_key=cfg.api_key or None,
-                                base_url=cfg.base_url or None)
+                                base_url=cfg.base_url or None, runtime=runtime)
         from reNgine.ai_providers import usage_stage
         with usage_stage('connection_test'):
             reply = provider.complete('Reply with the single word: ok', 'ping')
     except AIProviderError as exc:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
         cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
-        raise SettingsError(400, f'connection failed: {exc}')
+        hint = ai_error_hint(exc, waits, connect_timeout(runtime), capped)
+        raise SettingsError(400, f'connection failed: {exc}' + (f'. {hint[0].upper()}{hint[1:]}' if hint else ''))
     from django.utils import timezone
     cfg.verified_at, cfg.verified_provider, cfg.verified_model = timezone.now(), cfg.provider, provider.model
     cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
-    return {'ok': True, 'reply': reply[:80]}
+    out = {'ok': True, 'reply': reply[:80]}
+    if capped:
+        out['note'] = f'The test waits at most {TEST_TIMEOUT_CAP} seconds; your Request timeout is longer and applies to real requests.'
+    return out
 
 
 def ai_usage_get(request):
@@ -600,6 +698,113 @@ def resources_get(request):
     return resources.cluster_snapshot()
 
 
+# --- configMaxxing (advanced tunables) -----------------------------------------------
+
+def config_maxxing_get(request):
+    from cveFeed import config_maxxing
+    return config_maxxing.listing()
+
+
+def config_maxxing_reset(request):
+    from cveFeed import config_maxxing
+    cleared = config_maxxing.reset_all(request.user)
+    return {'ok': True, 'cleared': {k: len(v) for k, v in cleared.items()}}
+
+
+def scan_concurrency_get(request):
+    from cveFeed import scan_concurrency
+    return scan_concurrency.snapshot()
+
+
+def scan_concurrency_put(request):
+    """Save a partial change: {"values": {"heavy.nmap": 4, "work_depth": null}}. A number sets a field, null puts it back to the default."""
+    from cveFeed import scan_concurrency
+    data = _body(request)
+    values = data.get('values')
+    if not isinstance(values, dict) or not values:
+        raise SettingsError(400, 'values must be an object of setting: number (or null to reset)')
+    try:
+        scan_concurrency.update(values, request.user)
+    except ValueError as exc:
+        raise SettingsError(400, str(exc))
+    return scan_concurrency.snapshot()
+
+
+def tunables_get(request):
+    from cveFeed import tunables
+    return tunables.snapshot()
+
+
+def tunables_put(request):
+    """Save a partial change: {"values": {"triage_max_per_day": 1000, "stage_parallel": null}}. A number sets a tunable, null puts it back to the default."""
+    from cveFeed import tunables
+    data = _body(request)
+    values = data.get('values')
+    if not isinstance(values, dict) or not values:
+        raise SettingsError(400, 'values must be an object of setting: number (or null to reset)')
+    try:
+        tunables.update(values, request.user)
+    except ValueError as exc:
+        raise SettingsError(400, str(exc))
+    except PermissionError as exc:
+        raise SettingsError(403, str(exc))
+    return tunables.snapshot()
+
+
+# --- auto-tuning (configMaxxing) -------------------------------------------------------
+
+def _autotune(fn, *args):
+    from cveFeed.autotune import TuningError
+    try:
+        return fn(*args)
+    except TuningError as exc:
+        raise SettingsError(exc.status, exc.message)
+    except PermissionError as exc:
+        raise SettingsError(403, str(exc))
+
+
+def autotune_get(request):
+    from cveFeed import autotune
+    return {**autotune.status(), 'history': autotune.list_decisions(None, 30)['results']}
+
+
+def autotune_put(request):
+    """{"mode": "off" | "suggest" | "auto", "advisor": true | false}: either or both."""
+    from cveFeed import autotune
+    data = _body(request)
+    if not data or set(data) - {'mode', 'advisor'}:
+        raise SettingsError(400, 'send mode and/or advisor')
+    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'))
+    return autotune_get(request)
+
+
+def autotune_decisions(request):
+    from cveFeed import autotune
+    try:
+        limit, offset = int(request.GET.get('limit', 50)), int(request.GET.get('offset', 0))
+    except ValueError:
+        raise SettingsError(400, 'limit and offset must be whole numbers')
+    return autotune.list_decisions(request.GET.get('setting') or None, limit, offset)
+
+
+def autotune_apply(request, decision_id):
+    from cveFeed import autotune
+    return _autotune(autotune.apply_decision, request.user, int(decision_id))
+
+
+def autotune_revert(request, decision_id):
+    from cveFeed import autotune
+    return _autotune(autotune.revert, request.user, int(decision_id))
+
+
+def autotune_release(request):
+    from cveFeed import autotune
+    setting = _body(request).get('setting')
+    if not isinstance(setting, str) or not setting:
+        raise SettingsError(400, 'setting is required')
+    return _autotune(autotune.release, request.user, setting)
+
+
 # --- updates -------------------------------------------------------------------------
 
 def _update_row():
@@ -730,6 +935,14 @@ ROUTES = [
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),
     ('GET', r'resources', lambda r, **k: resources_get(r)),
+    ('GET', r'config_maxxing', lambda r, **k: config_maxxing_get(r)), ('POST', r'config_maxxing/reset', lambda r, **k: config_maxxing_reset(r)),
+    ('GET', r'scan_concurrency', lambda r, **k: scan_concurrency_get(r)), ('PUT', r'scan_concurrency', lambda r, **k: scan_concurrency_put(r)),
+    ('GET', r'tunables', lambda r, **k: tunables_get(r)), ('PUT', r'tunables', lambda r, **k: tunables_put(r)),
+    ('GET', r'autotune', lambda r, **k: autotune_get(r)), ('PUT', r'autotune', lambda r, **k: autotune_put(r)),
+    ('GET', r'autotune/decisions', lambda r, **k: autotune_decisions(r)),
+    ('POST', r'autotune/decisions/(?P<decision_id>\d+)/apply', lambda r, decision_id, **k: autotune_apply(r, decision_id)),
+    ('POST', r'autotune/decisions/(?P<decision_id>\d+)/revert', lambda r, decision_id, **k: autotune_revert(r, decision_id)),
+    ('POST', r'autotune/release', lambda r, **k: autotune_release(r)),
     ('GET', r'updates', lambda r, **k: updates_get(r)), ('PUT', r'updates', lambda r, **k: updates_put(r)),
     ('POST', r'updates/check', lambda r, **k: updates_check(r)), ('POST', r'updates/approve', lambda r, **k: updates_approve(r)),
     ('POST', r'updates/cancel', lambda r, **k: updates_cancel(r)), ('POST', r'updates/dismiss', lambda r, **k: updates_dismiss(r)),

@@ -14,8 +14,9 @@ from unittest import mock
 from cveFeed import internal_scan
 from django.utils import timezone
 
-# the checks the internal scan runs; every other check does not apply to an internal host
-RUN_BY_THE_INTERNAL_SCAN = {'nmap', 'udp', 'nuclei-tech', 'nuclei', 'tls-audit', 'wpscan', 'cve-correlation', 'openvas'}
+# the checks the internal scan runs, and the cleartext services check, which the daily hygiene sweep derives from the ports the Sentinel's nmap stored
+# (it sends nothing); every other check does not apply to an internal host
+RUN_BY_THE_INTERNAL_SCAN = {'nmap', 'udp', 'nuclei-tech', 'nuclei', 'tls-audit', 'wpscan', 'cve-correlation', 'openvas', 'cleartext'}
 
 
 def internal_facts(**kw):

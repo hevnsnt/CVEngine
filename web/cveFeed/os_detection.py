@@ -28,7 +28,10 @@ import re
 
 logger = logging.getLogger(__name__)
 
-KERNEL_MARKERS = ('linuxkit', 'microsoft', 'wsl2', 'orbstack')
+# kernel names of VMs that sit behind NAT: Docker Desktop (linuxkit; moby, the name of the kernel it was first built with), WSL 2, OrbStack, and
+# boot2docker (docker-machine, Docker Toolbox). Colima, Podman machine and Rancher Desktop on macOS run a distribution kernel with no name of its
+# own, so only the daily path measurement can tell: a marker for them would also match hosts that are on the LAN.
+KERNEL_MARKERS = ('linuxkit', 'moby', 'microsoft', 'wsl2', 'orbstack', 'boot2docker')
 PATH_CACHE_KEY = 'cvengine:os-path'
 PATH_TTL = 8 * 86400  # a verdict is kept this long; the daily check renews it
 
@@ -85,6 +88,18 @@ def unreliable():
 
 def reason():
     return REASONS.get(cause() or 'docker-desktop', REASON)
+
+
+def guess_believed(ip):
+    """Whether the operating system guess stored on an address (an ``IpAddress``) can be believed. Where this server's own scanners can be
+    believed, every guess. Otherwise only one that did not cross that path: a Sentinel's (``os_source`` is ``sentinel``, set when its result is
+    stored: it measured from its own network) or the machine's own report. ``CVENGINE_OS_DETECTION=distrust`` believes none."""
+    if not unreliable():
+        return True
+    if cause() == 'override':
+        return False
+    fingerprint = getattr(ip, 'fingerprint', None) or {}
+    return fingerprint.get('os_source') == 'sentinel' or bool(fingerprint.get('host_reported'))
 
 
 def record_path(result, now=None):
@@ -178,8 +193,8 @@ def clear_stored_guesses():
     rows = IpAddress.objects.exclude(os_guess='').filter(os_accuracy__isnull=False)
     for ip in rows.prefetch_related('ports').iterator(chunk_size=500):
         fingerprint = ip.fingerprint or {}
-        if fingerprint.get('host_reported'):
-            continue  # the machine's own report, not a measurement
+        if fingerprint.get('host_reported') or fingerprint.get('os_source') == 'sentinel':
+            continue  # the machine's own report, or measured by a Sentinel on its own network: not made through this path
         fingerprint = {k: v for k, v in fingerprint.items() if k != 'os_matches'}
         ip.os_guess, ip.os_accuracy, ip.fingerprint = '', None, fingerprint
         ip.save(update_fields=['os_guess', 'os_accuracy', 'fingerprint'])

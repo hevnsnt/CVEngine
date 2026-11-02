@@ -130,6 +130,21 @@ COPY ./requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r /tmp/requirements.txt
 
+# Web screenshots (web/cveFeed/web_shot.py): Playwright's own headless Chromium, installed with the operating system libraries it needs on this release.
+# Playwright 1.64 knows Ubuntu 26.04 on amd64 and arm64 (the library names changed with the release, which is what bbot's own Chromium installer gets wrong
+# here, and why screenshots never worked through it). The browser is fixed by the Playwright pin in requirements.txt: PLAYWRIGHT_CHROMIUM_VERSION is the
+# build that release drives, and the build fails if it launches anything else, so a Playwright bump that moves the browser is read before it ships. Only the
+# headless shell is installed (it is what a screenshot needs, and about 100 MB smaller than the full browser). It is launched as root and as the unprivileged
+# account the screenshot worker runs it as (nobody), against about:blank (there is no checksum of the download to pin: Playwright fetches its own pinned revision, and this launch check is what verifies it), so a missing library or an unreadable install stops the build instead of the first scan.
+ARG PLAYWRIGHT_CHROMIUM_VERSION=156.0.8078.4
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN set -e; playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/pw-browsers \
+    && CHECK="import sys; from playwright.sync_api import sync_playwright as sp; p = sp().start(); b = p.chromium.launch(args=['--disable-dev-shm-usage']); pg = b.new_page(); pg.goto('about:blank'); v = b.version; b.close(); p.stop(); print('chromium', v); sys.exit(0 if v == '${PLAYWRIGHT_CHROMIUM_VERSION}' else 1)" \
+    && python3 -c "$CHECK" \
+    && runuser -u nobody -- env HOME=/tmp python3 -c "$CHECK"
+
 # bbot (isolated venv so its dependency pins cannot clash with the application's)
 RUN python3 -m venv /opt/bbot-venv && \
     /opt/bbot-venv/bin/pip install --no-cache-dir bbot==${BBOT_VERSION} tzdata==${TZDATA_VERSION} && \

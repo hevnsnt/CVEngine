@@ -65,6 +65,7 @@ SCOPES = {
     'cveFeed.HostMove': 'project_id',
     'cveFeed.InternalRange': 'project_id',
     'cveFeed.RdpScreenshot': 'project_id',
+    'cveFeed.HostScreenshot': 'project_id',
     'cveFeed.TriageCall': 'project_id',
     'cveFeed.DeferredRetest': 'project_id',
     'cveFeed.OnDemandValidation': 'project_id',

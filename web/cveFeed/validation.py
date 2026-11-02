@@ -73,11 +73,10 @@ DB_EQUIVALENT = {
 
 
 def cap(name):
-    """A validation cap, overridable by CVENGINE_<NAME> in the environment."""
-    try:
-        return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
-    except ValueError:
-        return DEFAULT_CAPS[name]
+    """A validation cap: what an App Admin saved on Settings, configMaxxing, else CVENGINE_<NAME> in the environment, else the default
+    (``cveFeed.tunables``; read on every use, so a change applies within seconds)."""
+    from cveFeed import tunables
+    return tunables.value(name.lower(), DEFAULT_CAPS[name])
 
 
 # ----------------------------------------------------------------------------- templates (read-only by their own text)
@@ -439,7 +438,8 @@ def run_fact_probe(check):
            .prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('-id').first())
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
-    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']})
+    # a validation re-test reads past the script cache (sending the stored ETag), so a fixed library is seen as fixed now
+    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']}, fresh=True)
     product = re.sub(r'[^a-z0-9]', '', params.get('product', '').lower())
     versions = [o for o in found if o['kind'] == 'version' and o['outcome'] == 'found' and o['version']]
     pick = next((o for o in versions if product and (product in re.sub(r'[^a-z0-9]', '', o['product'].lower())
@@ -554,6 +554,7 @@ def apply_validation(row, check, result, now=None, save=True):
     can never clear a finding with hard evidence), and a failure schedules a retry and is never treated as clean."""
     now = now or timezone.now()
     status = result['status']
+    hit_before = row.validation_status == 'hit'
     step = {'kind': check['kind'], 'label': check['label'], 'display': check['display'], 'target': check['target'],
             'ran_at': now.isoformat(), 'result': status, 'summary': _trim(result.get('summary'), 300),
             'output_excerpt': _trim(result.get('output_excerpt'), OUTPUT_CAP), 'error': _trim(result.get('error'), 200)}
@@ -596,6 +597,15 @@ def apply_validation(row, check, result, now=None, save=True):
         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at', 'attempts',
                                 'next_attempt_at', 'confidence_adjust', 'classification', 'reason', 'status', 'verdict', 'signature', 'evidence_key',
                                 'hard_evidence', 'updated_at'])
+        if status == 'hit' and row.match_id and check['kind'] != 'nuclei_template':
+            # a validation hit is hard evidence: the score and snapshots follow, and a match that was version-only before this hit (read
+            # with the row's earlier status) and is fire now is paged once. A template hit rescored in _record_template_hit and is
+            # announced by notify.template_hits.
+            from cveFeed import match_policy, scoring
+            match = row.match
+            was_version_only = not hit_before and not match_policy.has_hard_evidence(
+                match.source, match.evidence, match.template_result or '', match.distro_status or '')
+            scoring.evidence_arrived([row.match_id], confirmed=[row.match_id] if was_version_only else ())
     return row
 
 
@@ -636,14 +646,19 @@ def resync(row):
 
 def record_template_outcomes(cve, outcomes, project, template_path):
     """Feed the template tests auto-fire runs (templategen.run_cve_tests) into the same record: each tested host's Triage rows for this
-    CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result."""
+    CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result.
+
+    Only the rows of the host's CURRENT matches are written (``latest_scan_q``): a superseded match's row is history, and writing its
+    ``validated_at`` and ``updated_at`` made it look like the freshest record of the finding to the next rescan's twin lookup (issue 338)."""
     from cveFeed import templategen
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.models import Triage
     if project is None or not outcomes:
         return 0
     by_host = {templategen._host_key(o['host']): o for o in outcomes}
     done = 0
-    rows = Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host)).select_related('match')
+    rows = (Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host))
+            .filter(latest_scan_q('match__subdomain__')).select_related('match'))
     for row in rows:
         outcome = by_host.get(row.host)
         if outcome is None:
@@ -827,10 +842,16 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                     stats['blocked'] += 1
                     continue
                 if ledger.fresh(check['service'], [check['asset']], project_id):
+                    was_hit = row.validation_status == 'hit'
                     if _adopt(row, check) or any((s.get('kind'), s.get('target')) == (check['kind'], check['target'])
                                                  for s in row.validation_steps or []):
                         row.save(update_fields=['validation_steps', 'validation_evidence', 'validation_status', 'validated_at',
                                                 'classification', 'reason', 'updated_at'])
+                        if row.validation_status == 'hit' and not was_hit and row.match_id:
+                            # a sibling's hit adopted: the heat is read live, the stored score and the snapshots follow here. Not paged:
+                            # the sibling's hit was announced when it was found (a template hit by notify.template_hits)
+                            from cveFeed import scoring
+                            scoring.evidence_arrived([row.match_id])
                         stats['reused'] += 1
                         continue
                 if state['run'] >= cap('VALIDATE_MAX_PER_RUN') or not _reserve_validation_check(project_id):

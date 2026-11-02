@@ -57,12 +57,16 @@ def clean_pattern(value):
 
 
 def _profile(p):
-    return {'host': p.host, 'owner': p.owner, 'purpose': p.purpose, 'criticality': p.criticality,
+    return {'host': p.host, 'owner': p.owner, 'purpose': p.purpose, 'criticality': p.criticality, 'alias': p.alias, 'note': p.note,
             'updated': p.updated_at.isoformat() if p.updated_at else None}
 
 
-def update_host_profile(ctx, slug, host, owner=None, purpose=None, criticality=None):
-    """Set the owner, purpose and/or criticality of a host of this project (only the fields given change)."""
+def update_host_profile(ctx, slug, host, owner=None, purpose=None, criticality=None, alias=None, note=None):
+    """Set the owner, purpose, criticality, alias (a short display name) and/or note of a host of this project (only the fields given change;
+    an empty alias or note clears it). The alias and note are kept per host name and project, so they outlast rescans; they are display
+    only, the address and the names a scan found never change."""
+    from agentapi.services import clean_alias_note
+    from cveFeed.admin_api import audit
     from cveFeed.models import HostProfile
     project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
@@ -80,14 +84,18 @@ def update_host_profile(ctx, slug, host, owner=None, purpose=None, criticality=N
         if level not in HostProfile.CRITICALITY:
             raise ApiError(400, f'criticality must be one of {", ".join(HostProfile.CRITICALITY)}')
         fields['criticality'] = level
+    fields.update(clean_alias_note(alias, note))
     from startScan.models import Subdomain
     if not Subdomain.objects.filter(target_domain__project=project, name__iexact=name).exists():  # as host_archive: no rows for names the project lacks
         raise ApiError(404, 'host not found in this project')
     profile, _ = HostProfile.objects.get_or_create(project=project, host=name)
+    changed = [key for key, value in fields.items() if getattr(profile, key) != value]
     for key, value in fields.items():
         setattr(profile, key, value)
     if fields:
         profile.save()
+    if {'alias', 'note'} & set(changed):
+        audit(ctx.user, 'host.profile', f'{name} in {slug}', project.org, project=slug, host=name, fields=[k for k in changed if k in ('alias', 'note')])
     return _profile(profile)
 
 
@@ -201,7 +209,7 @@ def _purge(project, name, subtree=False):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
-                                HostInventory, HostLabel, HostProfile, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
+                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
                                 RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
@@ -230,13 +238,17 @@ def _purge(project, name, subtree=False):
     # evidence kept per host name: a screenshot's file goes with its row
     shots = RdpScreenshot.objects.filter(_host_q('host', name, subtree), project=project)
     shot_files = [path for path in shots.values_list('image_path', flat=True) if path]
+    web_shots = HostScreenshot.objects.filter(_host_q('host', name, subtree), project=project)  # the browser's captures: the picture, its thumbnail and the one before
+    for row in web_shots.values('image_path', 'thumb_path', 'previous_image_path'):
+        shot_files += sorted({os.path.dirname(path) for path in (row['image_path'], row['thumb_path'], row['previous_image_path']) if path})  # a host's own directory: pictures, thumbnails and the one before
     for label, model, flt in (
             ('states', HostState, {'project': project}), ('labels', HostLabel, {'project': project}),
             ('routes', RouteAuth, {'project': project}), ('changes', AssetChange, {'project': project}),
             ('profiles', HostProfile, {'project': project}), ('triage', Triage, {'project': project}),
             ('inventories', HostInventory, {'project': project}),
             ('probes', ProbeObservation, {'project': project}), ('archives', HostArchive, {'project': project}),
-            ('screenshots', RdpScreenshot, {'project': project}), ('assessments', HostAssessment, {'project': project}),
+            ('screenshots', RdpScreenshot, {'project': project}), ('web_screenshots', HostScreenshot, {'project': project}),
+            ('assessments', HostAssessment, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):

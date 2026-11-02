@@ -134,7 +134,8 @@ def add_first_target(request):
         starting = list(Domain.objects.filter(id__in=[d['id'] for d in domains]).order_by('id')) or again
         if starting:
             try:
-                scan_id = discovery.start_discoveries(starting)[0].id
+                scans = discovery.start_in_stored_modes(starting)  # a target that already exists keeps the mode it was given; a manual only one is not scanned
+                scan_id = scans[0].id if scans else None
             except RuntimeError:  # no scan engine yet (a fresh install is still setting itself up)
                 raise WelcomeError(503, 'The scanner is still starting up. Your target is saved; try again in a few seconds.')
     return {'created': names, 'already_exists': result['already_exists'], 'scan_id': scan_id, 'project': slug}

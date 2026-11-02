@@ -182,15 +182,29 @@ class WrapperPolicyTests(DispatchBase):
             self.assertIsNone(dispatch.wrap_naabu_runner(self.project, self.scan))
 
     def test_naabu_never_runs_the_remainder_beyond_one_task_locally(self):
+        # the addresses beyond one task go to the Sentinel in further chunk tasks (sentinel_dispatch.dispatch_many): nothing runs here
         self.make_sentinel(['naabu'])
         many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
         local = mock.Mock(return_value={})
         result = {'outcome': 'done', 'ports': {}}
-        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', local):
-            runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
-            with self.assertRaises(resources.ScannerUnavailable):
-                runner(many)
+        for parallel in ('1', '4'):
+            with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
+                    mock.patch('cveFeed.naabu_scan.run_naabu', local), mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
+                runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
+                self.assertEqual(runner(many), {})
+        local.assert_not_called()
+        self.assertEqual(SentinelTask.objects.filter(kind='naabu', status='done').count(), 4)
+
+    def test_naabu_remainder_after_an_unclaimed_chunk_waits_instead_of_running_here(self):
+        self.make_sentinel(['naabu'])
+        many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
+        local = mock.Mock(return_value={})
+        for parallel in ('1', '4'):
+            with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+                    mock.patch('cveFeed.naabu_scan.run_naabu', local), mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
+                runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
+                with self.assertRaises(resources.ScannerUnavailable):
+                    runner(many)
         local.assert_not_called()
 
     def test_nuclei_does_not_run_unresolvable_targets_locally(self):

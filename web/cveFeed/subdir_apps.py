@@ -236,7 +236,7 @@ def web_hosts(project_id):
     from cveFeed.models import ProbeObservation
     from startScan.models import Subdomain
     from targetApp.models import Domain
-    domain_ids = list(Domain._base_manager.filter(project_id=project_id).values_list('id', flat=True))
+    domain_ids = list(Domain._base_manager.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL).values_list('id', flat=True))  # manual only: not asked on a schedule
     vhosts = list(ProbeObservation.objects.filter(project_id=project_id, probe=vhost_scan.PROBE, kind=vhost_scan.KIND, outcome='found')
                   .order_by('host', 'product'))
     carried = {o.host for o in vhosts}
@@ -253,7 +253,7 @@ def web_hosts(project_id):
         scheme, port = parts.scheme, parts.port or (443 if parts.scheme == 'https' else 80)
         out.append({'name': name, 'sub': sub, 'scheme': scheme, 'port': port, 'connect_ip': None, 'asset': f'{name}|{scheme}://{slow_web.authority(name, port, scheme)}'})
     for obs in vhosts:
-        sub = Subdomain.objects.filter(target_domain__project_id=project_id, name=obs.host).order_by('-id').first()
+        sub = Subdomain.objects.filter(target_domain_id__in=domain_ids, name=obs.host).order_by('-id').first()
         scheme = (obs.evidence or {}).get('scheme') or ('https' if obs.port == 443 else 'http')
         if sub is not None:
             out.append({'name': obs.host, 'sub': sub, 'scheme': scheme, 'port': obs.port, 'connect_ip': obs.product,

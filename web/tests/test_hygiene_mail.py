@@ -184,6 +184,7 @@ class MtaStsFetchTests(SimpleTestCase):
 	def conn(self, status, body=b''):
 		resp = mock.Mock(status=status)
 		resp.read.side_effect = lambda n: body[:n]
+		resp.getheader.return_value = None  # no Content-Encoding
 		connection = mock.Mock()
 		connection.getresponse.return_value = resp
 		return connection
@@ -207,6 +208,38 @@ class MtaStsFetchTests(SimpleTestCase):
 			factory.return_value = self.conn(302)  # redirects are not followed
 			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
 			factory.return_value = self.conn(200, b'x' * (mf.MAX_POLICY_BYTES + 1))
+			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
+
+	POLICY = b'version: STSv1\nmode: enforce\nmx: mail.acme.example\nmax_age: 86400\n'
+
+	def compressed(self, body, encoding='gzip', status=200):
+		from tests.test_pinned_transport import FakeResponse
+		resp = FakeResponse(body, encoding)
+		resp.status = status
+		connection = mock.Mock()
+		connection.getresponse.return_value = resp
+		return connection
+
+	def test_a_policy_a_server_sends_gzipped_despite_identity_is_read(self):
+		import gzip
+		import zlib
+		for body, encoding in ((gzip.compress(self.POLICY), 'gzip'), (zlib.compress(self.POLICY), 'deflate')):
+			with mock.patch('cveFeed.pinned_transport.resolve', return_value=self.ADDRS), \
+					mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
+				factory.return_value = self.compressed(body, encoding)
+				text = mf.fetch_mta_sts_policy('acme.example')
+			self.assertIn('mode: enforce', text or '', encoding)
+			self.assertEqual(mf.parse_mta_sts_mode(text), 'enforce')
+
+	def test_a_compressed_policy_past_the_cap_or_in_an_unreadable_encoding_is_no_policy(self):
+		import gzip
+		with mock.patch('cveFeed.pinned_transport.resolve', return_value=self.ADDRS), \
+				mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
+			factory.return_value = self.compressed(gzip.compress(b'x' * 10_000_000, compresslevel=9))  # a bomb stops at the cap and is refused
+			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
+			factory.return_value = self.compressed(b'garbage', 'gzip')
+			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
+			factory.return_value = self.compressed(self.POLICY, 'br')
 			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
 
 

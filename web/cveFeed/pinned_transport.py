@@ -12,6 +12,7 @@ import http.client
 import ipaddress
 import socket
 import time
+import zlib
 
 from cveFeed import egress_proxy
 from targetApp.target_types import is_scannable_ip
@@ -150,3 +151,45 @@ class HTTPConnection(http.client.HTTPConnection):
             response.close()
             raise OSError('the proxy refused the login or asked for one')
         return response
+
+
+COMPRESSED_SLACK = 4096  # compressed bytes read beyond the decoded cap (headers and framing of a small page, never a larger allowance)
+
+
+def read_body(response, max_bytes):
+    """At most ``max_bytes`` of a response body, decoded. Every in-process reader asks for ``Accept-Encoding: identity`` (``http.client`` adds
+    it by itself) and some embedded servers (printers, relays, cameras) answer gzip or deflate anyway, so a body with that
+    ``Content-Encoding`` is decompressed here instead of the page being dropped or read as binary. The cap is on the DECOMPRESSED output (a
+    compressed bomb stops at it: ``decompress`` is asked for no more than what is left) and the compressed input is bounded too, so neither
+    side can be made to grow. ``deflate`` is a zlib stream per the RFC, but some devices send a raw deflate stream with no header; both are
+    read. Raises ``ValueError`` for another content encoding, for a stream that does not decode and for one that ends early."""
+    max_bytes = max(0, int(max_bytes))
+    encoding = (response.getheader('Content-Encoding') or 'identity').strip().lower()
+    if encoding in ('', 'identity'):
+        return response.read(max_bytes) or b''
+    if encoding not in ('gzip', 'deflate'):
+        raise ValueError('unsupported probe content encoding')
+    decoder, parts, remaining = None, [], max_bytes
+    compressed_budget = max_bytes + COMPRESSED_SLACK
+    while remaining and compressed_budget and not (decoder and decoder.eof):
+        chunk = response.read(min(4096, compressed_budget))
+        if not chunk:
+            break
+        compressed_budget -= len(chunk)
+        if decoder is None:
+            if encoding == 'gzip':
+                wbits = 16 + zlib.MAX_WBITS
+            elif len(chunk) >= 2 and chunk[0] & 0x0F == 8 and ((chunk[0] << 8) | chunk[1]) % 31 == 0:
+                wbits = zlib.MAX_WBITS
+            else:
+                wbits = -zlib.MAX_WBITS
+            decoder = zlib.decompressobj(wbits)
+        try:
+            decoded = decoder.decompress(chunk, remaining)
+        except zlib.error as exc:
+            raise ValueError('invalid compressed probe response') from exc
+        parts.append(decoded)
+        remaining -= len(decoded)
+    if remaining and decoder is not None and not decoder.eof:
+        raise ValueError('incomplete compressed probe response')
+    return b''.join(parts)

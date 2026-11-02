@@ -5,8 +5,12 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
+    # Numbered 0012 on 1.4-develop before develop's 0008 and 0009 (released in 1.3.x) were merged in: renumbered past them, and
+    # ``replaces`` keeps a database that already applied it under the old name from applying it twice (see 0010_sentinel_enrollment_builtin).
+    replaces = [("agentapi", "0012_sentinel_defaults_kinds")]
+
     dependencies = [
-        ("agentapi", "0011_scanner_fallback"),
+        ("agentapi", "0013_scanner_fallback"),
     ]
 
     operations = [

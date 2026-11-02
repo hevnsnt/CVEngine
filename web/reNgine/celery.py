@@ -14,6 +14,11 @@ app.Task = PauseAwareTask
 app.config_from_object('django.conf:settings', namespace='CELERY')
 from reNgine.time_limits import QueueTimeLimits
 app.conf.task_annotations = (QueueTimeLimits(),)  # the limits of each task's queue (reNgine/time_limits.py)
+# Celery's autoscaler never runs more than one task at a time in a gevent pool while that task runs (reNgine/gevent_autoscale.py)
+app.conf.worker_autoscaler = 'reNgine.gevent_autoscale:GeventAutoscaler'
+# After a broker reconnect celery lowers the prefetch and restores it toward pool.num_processes, which on gevent is the greenlets running, not the
+# ceiling: acks_late tasks then ran one at a time until a restart. The prefetch stays at the ceiling (set at start and by the autoscaler).
+app.conf.worker_enable_prefetch_count_reduction = False
 app.autodiscover_tasks()
 
 
@@ -65,6 +70,19 @@ def recap_version_only_answers(*args, **kwargs):
             logging.getLogger(__name__).info('%d version-only CVE match answers kept as needs validation', changed)
     except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
         logging.getLogger(__name__).exception('could not recap the version-only answers')
+
+
+@worker_ready.connect()
+def rescore_for_heat_cap(*args, **kwargs):
+    """Host scores are stored: when the version-only heat cap changed (the 1.3.2 upgrade, or CVENGINE_VERSION_ONLY_MAX_HEAT), one full
+    rescore is queued so a score never counts a version-only match as fire after its heat stopped saying so (cveFeed.scoring.
+    rescore_if_heat_cap_changed). Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import scoring
+        scoring.rescore_if_heat_cap_changed()
+    except Exception:  # noqa: BLE001 - the next worker start or the daily rescore tries again
+        logging.getLogger(__name__).exception('could not check the version-only heat cap')
 
 
 @worker_ready.connect()

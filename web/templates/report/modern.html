@@ -902,7 +902,7 @@
                         {% for subdomain in subdomains %}
                             <tr class=" {% if subdomain.http_status >= 200 and subdomain.http_status < 300 %} low-td {% elif subdomain.http_status >= 300 and subdomain.http_status < 400 %} medium-td {% elif subdomain.http_status >= 400 and subdomain.http_status < 500 %} high-td {% else %} unknown-td {% endif %} ">
                                 <td class="number-td">{{ forloop.counter }}</td>
-                                <td class="subdomain-name-td"><a href="#subdomain_{{subdomain.name}}" class="no-style-a">{{ subdomain.name }}</a></td>
+                                <td class="subdomain-name-td"><a href="#subdomain_{{subdomain.name}}" class="no-style-a">{{ subdomain.name }}</a>{% if subdomain.report_alias %} ({{ subdomain.report_alias }}){% endif %}</td>
                                 <td class="page-title-td">
                                     {% if subdomain.page_title %}{{ subdomain.page_title }}{% endif %}
                                 </td>
@@ -974,7 +974,7 @@
                     {% for subdomain in subdomains %}
                         <div class="subdomain-card" id="subdomain_{{subdomain.name}}">
                             <div class="subdomain-card-header">
-                                <span class="subdomain-card-name">{{ subdomain.name }}</span>
+                                <span class="subdomain-card-name">{{ subdomain.name }}{% if subdomain.report_alias %} ({{ subdomain.report_alias }}){% endif %}</span>
                                 {% if subdomain.http_status %}
                                     <span class="subdomain-card-http-status {% if subdomain.http_status >= 200 and subdomain.http_status < 300 %} low-td {% elif subdomain.http_status >= 300 and subdomain.http_status < 400 %} medium-td {% elif subdomain.http_status >= 400 and subdomain.http_status < 500 %} high-td {% else %} unknown-td {% endif %}">{{ subdomain.http_status }}</span>
                                 {% endif %}

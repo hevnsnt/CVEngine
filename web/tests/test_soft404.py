@@ -21,11 +21,42 @@ class NormaliseTests(SimpleTestCase):
 		self.assertNotIn('my page', soft404.normalise(text, '/my page'))
 		self.assertEqual(soft404.normalise('See /a/b', '/a/b'), soft404.normalise('See /c/d', '/c/d'))
 
-	def test_a_word_of_the_page_that_is_also_in_the_path_is_left_alone(self):
-		self.assertIn('admin panel', soft404.normalise('the admin panel is here', '/admin'))
+	def test_the_bare_slug_is_taken_out_with_and_without_the_slash_in_any_case_and_encoding(self):
+		for text in ('The page "admin" could not be found', 'No such page: /admin', 'ADMIN is gone', 'Not found: admin/', 'Not found: %2Fadmin'):
+			self.assertEqual(soft404.normalise(text, '/admin'), soft404.normalise(text.replace('admin', 'cvengine-ab12cd34ef56').replace('ADMIN', 'CVENGINE-AB12CD34EF56'), '/cvengine-ab12cd34ef56'), text)
+		self.assertEqual(soft404.normalise('page "my page"', '/my page'), soft404.normalise('page "my%20page"', '/my page'))
+		self.assertEqual(soft404.normalise('page "my+page"', '/my page'), soft404.normalise('page "my page"', '/my page'))
+
+	def test_a_longer_word_that_holds_the_slug_is_left_alone(self):
+		self.assertIn('administrator', soft404.normalise('the administrator panel is here', '/admin'))
+		self.assertIn('padmin', soft404.normalise('padmin', '/admin'))
+
+	def test_the_last_segment_and_the_whole_path_both_count_as_the_slug(self):
+		self.assertEqual(soft404.normalise('Not found: "wp-login"', '/wp-login.php'), soft404.normalise('Not found: "cvengine-1"', '/cvengine-1.php'))
+		self.assertEqual(soft404.normalise('Not found: "users"', '/api/users'), soft404.normalise('Not found: "cvengine-1"', '/api/cvengine-1'))
+		self.assertEqual(soft404.normalise('Not found: "api/users"', '/api/users'), soft404.normalise('Not found: "api/cvengine-1"', '/api/cvengine-1'))
 
 
 class SameTests(SimpleTestCase):
+	def test_a_page_that_names_the_bare_slug_is_the_same_as_the_missing_page(self):
+		def page(name):
+			return f'<html><head><title>Not found - Example</title></head><body><h1>Oops</h1><p>The page "{name}" could not be found.</p><p>Try the search box.</p></body></html>'
+		self.assertTrue(soft404.same(answer('/admin', body=page('admin')), answer('/cvengine-ab12cd34ef56', body=page('cvengine-ab12cd34ef56'))))
+
+	def test_a_title_that_names_the_slug_is_the_same_as_the_missing_pages_title(self):
+		chrome = 'Portal navigation menu footer copyright 2026 ' * 20
+
+		def page(name):
+			return {'body': f'<html><head><title>{name} - Portal</title></head><body>{chrome}<h2>{name}</h2></body></html>', 'title': f'{name} - Portal'}
+		self.assertTrue(soft404.same(answer('/admin', **page('admin')), answer('/cvengine-ab12cd34ef56', **page('cvengine-ab12cd34ef56'))))
+		self.assertTrue(soft404.same(answer('/Admin', **page('ADMIN')), answer('/cvengine-ab12cd34ef56', **page('cvengine-ab12cd34ef56'))))
+
+	def test_a_real_page_that_uses_the_word_is_still_another_page(self):
+		def missing(name):
+			return f'<html><head><title>Portal</title></head><body>{"Portal menu footer " * 20}<p>The page "{name}" could not be found.</p></body></html>'
+		real = '<html><head><title>Portal</title></head><body>' + 'Portal menu footer ' * 20 + '<p>Admin console: ' + ' '.join(f'user{n} role{n}' for n in range(40)) + '</p></body></html>'
+		self.assertFalse(soft404.same(answer('/admin', body=real), answer('/cvengine-ab12cd34ef56', body=missing('cvengine-ab12cd34ef56'))))
+
 	def test_the_same_page_is_the_same(self):
 		self.assertTrue(soft404.same(answer(body=SHELL), answer('/cvengine-1', body=SHELL)))
 

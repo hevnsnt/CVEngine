@@ -32,6 +32,32 @@ MODES = {
 }
 MODE_ARGS = {name: m['args'] for name, m in MODES.items()}  # kept for callers that read the extra args
 DEFAULT_MODE = 'standard'
+# bbot's trufflehog module (part of the deep preset, through the code-enum flag) checks every secret it finds against the issuer's live API:
+# bbot 3.0.2 never passes trufflehog's --no-verification, and its only_verified option only filters what is reported, so the credential of a
+# third party found on a target is always used. That cannot be turned off from the module's options, so the module is excluded (-em) unless a
+# person opted in with CVENGINE_BBOT_TRUFFLEHOG=1 and the project is not a bug bounty project (see trufflehog_allowed).
+TRUFFLEHOG_ENV = 'CVENGINE_BBOT_TRUFFLEHOG'
+TRUFFLEHOG_FLAG = '--cvengine-trufflehog'  # internal: run_discovery adds it for a project that may use trufflehog; build_command consumes it
+
+
+def trufflehog_enabled():
+    """True when CVENGINE_BBOT_TRUFFLEHOG is set to 1, true, yes or on. Off by default."""
+    return os.environ.get(TRUFFLEHOG_ENV, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def trufflehog_allowed(project_id=None):
+    """May bbot's trufflehog module run for this project: the setting is on and the project has no bug bounty engagement (a program's rules
+    almost always forbid using a credential found on its assets, and cvENGINE cannot read a program's exceptions, so a bounty project is
+    always off, whatever the setting)."""
+    if not trufflehog_enabled():
+        return False
+    if project_id:
+        from cveFeed.models import BountyEngagement
+        if BountyEngagement._base_manager.filter(project_id=project_id).exists():
+            return False
+    return True
+
+
 PRESET_FLAG = '--cvengine-preset'  # internal: marks the private preset file private_config passes to build_command
 HEAVY_KIND = {'deep': 'bbot-deep', 'passive': 'bbot-passive'}  # any other mode is the standard weight
 BBOT_SEVERITIES = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
@@ -285,6 +311,10 @@ def build_command(targets, presets=None, mode=DEFAULT_MODE, extra_args=(), stric
         names.append(args[at + 1])
         del args[at:at + 2]
     cmd += ['-p', *names]  # one -p with every preset: bbot's -p takes the list and a second -p replaces the first
+    verify_secrets = TRUFFLEHOG_FLAG in args
+    args = [a for a in args if a != TRUFFLEHOG_FLAG]
+    if not (verify_secrets and trufflehog_enabled()):
+        cmd += ['-em', 'trufflehog']  # excluded in every mode; the next token is always another option (-rf, --force or --json), which ends -em's list
     if strict_scope:
         cmd.append('--strict-scope')
     return cmd + cfg['args'] + ['--json', '-y', '--no-color', *args]
@@ -300,7 +330,29 @@ _CONFIG_REJECTED = re.compile(r'Error parsing command-line (?:config option|pres
 # "Setup soft-failed for shodan_dns: Error with API (401 Unauthorized": a module that could not start (a rejected or missing key)
 # is skipped and the scan goes on, so this line is the only place a rejected key shows
 _SOFT_FAIL = re.compile(r'Setup soft-failed for (\w+): (.{1,200})')
+# "Setup hard-failed for gowitness: Failed to set up Google chrome. Please install manually ...": a module whose set-up returned False or
+# raised. With --force (the standard and deep modes) bbot logs it and carries on without the module, so this line is the only place it shows.
+# bbot then adds a summary line, "Setup hard-failed for 1 modules (gowitness)", which names the modules without a reason.
+_HARD_FAIL = re.compile(r'Setup hard-failed for (\w+): (.{1,200})')
+_HARD_FAIL_SUMMARY = re.compile(r'Setup hard-failed for \d[\d,]* modules \(([^)]*)\)')
 _ERROR_LINE = re.compile(r'(?:\b\w*(?:Error|Exception)\b|\bfailed\b|\bFailed\b|\bCRITICAL\b)')
+
+
+def _note_hard_failure(line, hard_failures):
+    """Add ``(module, reason)`` to ``hard_failures`` for a bbot log ``line`` that reports a module whose set-up hard-failed. A module is
+    listed once; the line that carries a reason replaces an earlier summary entry that named it without one."""
+    found = _HARD_FAIL.search(line)
+    if found:
+        entries = [(found.group(1), found.group(2).strip())]
+    else:
+        summary = _HARD_FAIL_SUMMARY.search(line)
+        entries = [(name.strip(), '') for name in (summary.group(1).split(',') if summary else []) if name.strip()]
+    for module, reason in entries:
+        known = [i for i, (name, _reason) in enumerate(hard_failures) if name == module]
+        if not known:
+            hard_failures.append((module, reason))
+        elif reason and not hard_failures[known[0]][1]:
+            hard_failures[known[0]] = (module, reason)
 
 
 def config_secrets(extra_args):
@@ -371,10 +423,12 @@ def private_config(extra_args):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None):
+def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), strict_scope=False, problems=None,
+                  hard_failures=None):
     """Run bbot and yield decoded JSON events as they arrive; API keys in ``extra_args`` reach bbot through a private temporary
     config file (see private_config), never through its command line. ``problems``, when given, collects ``(module, reason)`` for every
-    module bbot skipped at start-up. See _stream_events for the rest.
+    module bbot skipped at start-up; ``hard_failures`` the same for modules whose set-up hard-failed (the reason is empty when only
+    bbot's summary line named the module). See _stream_events for the rest.
 
     Settings > Proxy (``cveFeed.egress_proxy``) is applied through bbot's own ``web.http_proxy`` setting, so the HTTP requests of its modules
     go through it (the passive modules' calls to third-party services included: bbot cannot tell them apart). The proxy URL (it may carry a
@@ -384,11 +438,11 @@ def stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIME
     extra_args = [*(extra_args or ()), *egress_proxy.for_tool('bbot')]
     with private_config(extra_args) as args:
         yield from _stream_events(targets, presets, mode, timeout, args, secrets=config_secrets(extra_args), strict_scope=strict_scope,
-                                  problems=problems)
+                                  problems=problems, hard_failures=hard_failures)
 
 
 def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIMEOUT, extra_args=(), secrets=None, strict_scope=False,
-                   problems=None):
+                   problems=None, hard_failures=None):
     """Run bbot and yield decoded JSON events as they arrive (kills bbot after ``timeout`` seconds).
 
     A nonzero exit or timeout is a failed discovery even if it emitted partial events.
@@ -418,6 +472,8 @@ def _stream_events(targets, presets=None, mode=DEFAULT_MODE, timeout=DEFAULT_TIM
                 found = _SOFT_FAIL.search(line)
                 if found and problems is not None:
                     problems.append((found.group(1), found.group(2).strip()))
+                if hard_failures is not None:
+                    _note_hard_failure(line, hard_failures)
 
         drain = threading.Thread(target=_drain_stderr, daemon=True)
         drain.start()

@@ -226,6 +226,123 @@ class SentinelFlagTests(TestCase):
 		self.assertEqual(self.run_nmap({'hosts': self.hosts(), 'os_reliable': False}), '')
 
 
+class GuessProvenanceTests(TestCase):
+	"""What the model is told about a host's operating system depends on where the guess was made: a guess measured by a Sentinel (on its own
+	network) is believed whatever path this server's scanners have, a guess this server's scanner made is believed only when that path can be."""
+
+	def setUp(self):
+		from django.core.cache import cache
+		cache.delete(os_detection.PATH_CACHE_KEY)
+		self.addCleanup(cache.delete, os_detection.PATH_CACHE_KEY)
+		env = mock.patch.dict(os.environ, {}, clear=False)
+		env.start()
+		os.environ.pop('CVENGINE_OS_DETECTION', None)
+		self.addCleanup(env.stop)
+
+	def kernel(self, release):
+		return mock.patch.object(os_detection, '_kernel', return_value=release)
+
+	def host(self, address, **fields):
+		ip, _ = IpAddress.objects.get_or_create(address=address)
+		for key, value in fields.items():
+			setattr(ip, key, value)
+		ip.save()
+		return SimpleNamespace(ip_addresses=SimpleNamespace(all=lambda: [IpAddress.objects.get(pk=ip.pk)]))
+
+	def sentinel_scanned(self, address, guess='Ubuntu 22.04 Linux 5.15'):
+		nmap_scan.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': None, 'ports': []}], os_reliable=True)  # as sentinel_dispatch calls it
+		return self.host(address)
+
+	def local_scanned(self, address, guess='Google Fuchsia'):
+		nmap_scan.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': 86, 'ports': []}])
+		return self.host(address)
+
+	def test_a_local_scan_on_docker_desktop_is_dropped_and_the_block_says_why(self):
+		with self.kernel('6.10.14-linuxkit'):
+			sub = self.host('203.0.113.71', os_guess='Google Fuchsia', os_accuracy=86, fingerprint={'os_source': 'nmap'})  # stored before the path was known
+			out = host_context._os(sub, [])
+		self.assertEqual(out['guesses'], [])
+		self.assertIn('Docker Desktop', out['note'])
+
+	def test_a_sentinel_scanned_host_keeps_its_guess_on_docker_desktop(self):
+		with self.kernel('6.10.14-linuxkit'):
+			out = host_context._os(self.sentinel_scanned('203.0.113.72'), [])
+		self.assertEqual([g['guess'] for g in out['guesses']], ['Ubuntu 22.04 Linux 5.15'])
+		self.assertNotIn('note', out)
+
+	def test_a_host_on_a_normal_linux_install_keeps_its_guess(self):
+		with self.kernel('6.8.0-45-generic'):
+			local = host_context._os(self.local_scanned('203.0.113.73', 'Linux 5.4'), [])
+			sentinel = host_context._os(self.sentinel_scanned('203.0.113.74'), [])
+		self.assertEqual([g['guess'] for g in local['guesses']], ['Linux 5.4'])
+		self.assertEqual([g['guess'] for g in sentinel['guesses']], ['Ubuntu 22.04 Linux 5.15'])
+		self.assertNotIn('note', local)
+
+	def test_an_interfering_canary_drops_a_local_guess_and_keeps_a_sentinels(self):
+		with self.kernel('6.8.0-45-generic'):
+			sub_local, sub_sentinel = self.local_scanned('203.0.113.75', 'Linux 5.4'), self.sentinel_scanned('203.0.113.76')
+			os_detection.record_path({'state': 'interfering', 'answered': 5, 'lost': 5, 'hosts': 5})
+			local, sentinel = host_context._os(sub_local, []), host_context._os(sub_sentinel, [])
+		self.assertEqual(local['guesses'], [])
+		self.assertIn('translates addresses', local['note'])
+		self.assertEqual([g['guess'] for g in sentinel['guesses']], ['Ubuntu 22.04 Linux 5.15'])
+
+	def test_a_sentinels_guess_is_stamped_as_its_own_and_survives_the_cleanup(self):
+		with self.kernel('6.10.14-linuxkit'):
+			self.sentinel_scanned('203.0.113.77')
+			ip = IpAddress.objects.get(address='203.0.113.77')
+			ip.os_accuracy = 90  # even with an accuracy, which would make the cleanup take it for a packet guess
+			ip.save()
+			self.assertEqual(ip.fingerprint['os_source'], 'sentinel')
+			self.assertEqual(os_detection.clear_stored_guesses(), 0)
+		self.assertEqual(IpAddress.objects.get(address='203.0.113.77').os_guess, 'Ubuntu 22.04 Linux 5.15')
+
+	def test_a_local_guess_is_stamped_as_nmap(self):
+		with self.kernel('6.8.0-45-generic'):
+			self.local_scanned('203.0.113.78', 'Linux 5.4')
+		self.assertEqual(IpAddress.objects.get(address='203.0.113.78').fingerprint['os_source'], 'nmap')
+
+	def test_the_hosts_own_report_is_believed_on_any_path(self):
+		with self.kernel('6.10.14-linuxkit'):
+			out = host_context._os(self.host('203.0.113.79', os_guess='Ubuntu 24.04.1 LTS', os_accuracy=100, fingerprint={'host_reported': {'os': 'Ubuntu'}}), [])
+		self.assertEqual([g['guess'] for g in out['guesses']], ['Ubuntu 24.04.1 LTS'])
+
+	def test_the_override_still_wins_over_provenance(self):
+		with self.kernel('6.8.0-45-generic'), mock.patch.dict(os.environ, {'CVENGINE_OS_DETECTION': 'distrust'}):
+			out = host_context._os(self.sentinel_scanned('203.0.113.80'), [])
+		self.assertEqual(out['guesses'], [])
+		self.assertIn('CVENGINE_OS_DETECTION=distrust', out['note'])
+		with self.kernel('6.10.14-linuxkit'), mock.patch.dict(os.environ, {'CVENGINE_OS_DETECTION': 'trust'}):
+			out = host_context._os(self.host('203.0.113.81', os_guess='Google Fuchsia', os_accuracy=86), [])
+		self.assertEqual([g['guess'] for g in out['guesses']], ['Google Fuchsia'])
+
+	def test_a_host_with_no_guess_on_docker_desktop_still_says_why(self):
+		with self.kernel('6.10.14-linuxkit'):
+			out = host_context._os(self.host('203.0.113.82'), [])
+		self.assertEqual(out['guesses'], [])
+		self.assertIn('Docker Desktop', out['note'])
+
+
+class NatVmKernelTests(SimpleTestCase):
+	"""A VM that sits behind NAT is recognised by its kernel's name where that name is well known: boot2docker (docker-machine, Docker Toolbox) and
+	the moby kernel of the early Docker for Mac, beside linuxkit, WSL 2 and OrbStack. Other NAT VMs (Colima, Podman machine, Rancher Desktop on
+	macOS) run an ordinary distribution kernel with no name of its own, so only the daily measurement can tell."""
+
+	def unreliable(self, release):
+		with mock.patch.object(os_detection, '_kernel', return_value=release), mock.patch.dict(os.environ, {}, clear=False):
+			os.environ.pop('CVENGINE_OS_DETECTION', None)
+			with mock.patch.object(os_detection, 'path_state', return_value={'state': 'unknown'}):
+				return os_detection.unreliable()
+
+	def test_boot2docker_and_moby_kernels_are_recognised(self):
+		for release in ('4.1.13-boot2docker', '4.19.130-boot2docker', '4.9.21-moby', '4.9.93-linuxkit-aufs'):
+			self.assertTrue(self.unreliable(release), release)
+
+	def test_an_ordinary_distribution_kernel_is_not_mistaken_for_one(self):
+		for release in ('6.8.0-45-generic', '6.8.9-300.fc40.x86_64', '6.6.51-0-virt', '5.15.0-1060-aws', '6.1.0-18-amd64'):
+			self.assertFalse(self.unreliable(release), release)
+
+
 class MeasuredPathTests(TestCase):
 	"""A path measured to lose nmap's malformed probes (cveFeed.path_probe) makes guesses unreliable, like a recognised Docker Desktop."""
 

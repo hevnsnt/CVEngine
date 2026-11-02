@@ -22,6 +22,9 @@ class SweepTests(TestCase):
 	def setUp(self):
 		_clear_claims()
 		self.addCleanup(_clear_claims)
+		patcher = mock.patch('cveFeed.ct_queue._client', return_value=None)  # no per-domain markers in Redis: they would outlive the test
+		patcher.start()
+		self.addCleanup(patcher.stop)
 		org = Org.objects.create(name='S', slug='s')
 		self.project = Project.objects.create(name='P', slug='ps', insert_date=timezone.now(), org=org)
 

@@ -253,7 +253,7 @@ class Network:
             response = conn.getresponse()
             if response.status != 200:
                 return None
-            body = response.read(mailfail.MAX_POLICY_BYTES + 1)
+            body = pinned_transport.read_body(response, mailfail.MAX_POLICY_BYTES + 1)  # gzip despite identity is decoded, capped after decoding
             return None if len(body) > mailfail.MAX_POLICY_BYTES else body.decode('utf-8', 'replace')
         except (OSError, http.client.HTTPException, ValueError):
             return None

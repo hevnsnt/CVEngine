@@ -17,10 +17,11 @@ PAGE = """<html><head>
 
 
 class LibraryDetectionTests(unittest.TestCase):
-	def test_versions_come_from_script_names_and_query_strings(self):
+	def test_script_names_are_hints_and_a_query_string_is_never_a_version(self):
 		every, _ = fingerprint.script_sources(PAGE, 'https://www.rt.test/')
-		names = [n for n, _src in fingerprint.from_script_urls(every)]
-		self.assertEqual(names, ['jQuery:3.4.1', 'Vue.js:3.3.4', 'jQuery:3.7.1'])
+		found = fingerprint.from_script_urls(every)
+		self.assertEqual([n for n, _src in found], ['jQuery:3.4.1', 'Vue.js:3.3.4', 'jQuery'])  # ?ver=3.7.1 is the asset's cache-buster
+		self.assertEqual({src for _n, src in found}, {'script:filename'})
 
 	def test_only_same_host_scripts_are_read(self):
 		every, local = fingerprint.script_sources(PAGE, 'https://www.rt.test/')
@@ -66,12 +67,16 @@ class ScriptReadingTests(RouteFixture, TestCase):
 
 	def test_script_banners_join_the_hosts_fingerprints_and_technologies(self):
 		fetched = self.run_check({'jquery-3.4.1.min.js': '/*! jQuery v3.4.1 | MIT */', 'app.js': '/*! Bootstrap v3.3.7 */'})
-		self.assertEqual(len(fetched), 3)  # three same-host scripts, none from another host
+		# the three same-host scripts and the library on a public CDN; never the script of another site
+		self.assertEqual(len(fetched), 4)
+		self.assertNotIn('https://other.example/x.js', fetched)
 		root = RouteAuth.objects.get(path='/')
 		self.assertNotIn('local_scripts', root.evidence)
+		self.assertNotIn('page_scripts', root.evidence)
 		self.assertIn('jQuery:3.4.1', root.evidence['fingerprint_names'])
 		self.assertIn('Bootstrap:3.3.7', root.evidence['fingerprint_names'])
-		self.assertIn('Vue.js:3.3.4', root.evidence['fingerprint_names'])  # named by its CDN URL, never fetched
+		self.assertIn('Vue.js:3.3.4', root.evidence['fingerprint_names'])  # its file states nothing here: the CDN path is the hint
+		self.assertEqual(root.evidence['libraries']['vue']['version_source'], 'filename')
 		route_auth.link_technologies(self.scan_obj, {root.url: {'evidence': root.evidence}})
 		sub = Subdomain.objects.get(scan_history=self.scan_obj)
 		self.assertIn('Bootstrap:3.3.7', [t.name for t in sub.technologies.all()])

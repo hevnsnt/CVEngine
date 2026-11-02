@@ -1,3 +1,4 @@
+from reNgine.ai_profiles import PROFILES
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.db import models
 from reNgine.definitions import *
@@ -73,7 +74,7 @@ class AIProviderSettings(models.Model):
 
 	The API key lives here (Postgres), set via the settings UI, never in git or .env.
 	"""
-	PROVIDER_CHOICES = [('anthropic', 'Anthropic'), ('openai', 'OpenAI'), ('openrouter', 'OpenRouter'), ('ollama', 'Ollama'), ('vllm', 'vLLM'), ('lmstudio', 'LM Studio')]
+	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (reNgine/ai_profiles.py)
 	id = models.AutoField(primary_key=True)
 	provider = models.CharField(max_length=32, choices=PROVIDER_CHOICES, default='anthropic')
 	model = models.CharField(max_length=200, blank=True, default='')
@@ -89,6 +90,16 @@ class AIProviderSettings(models.Model):
 	plan_daily_per_project = models.PositiveIntegerField(default=20)
 	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
 	cve_guidance_daily = models.PositiveIntegerField(default=25, db_default=25)
+	# How a request is made. Empty (NULL or '') means "not set here": the request then follows the environment variable of the same name
+	# (CVENGINE_AI_TIMEOUT and the others) and then the provider's own default (reNgine/ai_profiles.py), so an install that never touches
+	# these sends exactly what it did before. The ranges are in ai_profiles.NUMBER_SETTINGS and are enforced by the settings API.
+	request_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to wait for an answer
+	connect_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to reach the server
+	max_tokens = models.PositiveIntegerField(null=True, blank=True)  # the reply limit, for every stage
+	context_tokens = models.PositiveIntegerField(null=True, blank=True)  # Ollama's num_ctx
+	structured_mode = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', auto, all, off
+	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
+	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')

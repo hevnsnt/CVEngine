@@ -1,5 +1,8 @@
+import gzip
+import io
 import os
 import socket
+import zlib
 from unittest import mock
 
 from django.test import SimpleTestCase
@@ -77,3 +80,68 @@ class PinnedTransportTests(SimpleTestCase):
             with self.assertRaises(OSError):
                 connection.connect()
         raw.close.assert_called_once()
+
+
+class FakeResponse:
+    """The part of an ``http.client.HTTPResponse`` a body reader uses: ``getheader`` and ``read(n)``, counting what was read."""
+
+    def __init__(self, body, encoding=None):
+        self.stream, self.encoding, self.read_total = io.BytesIO(body), encoding, 0
+
+    def getheader(self, name, default=None):
+        return self.encoding if name.lower() == 'content-encoding' and self.encoding is not None else default
+
+    def read(self, amt=None):
+        chunk = self.stream.read(amt)
+        self.read_total += len(chunk)
+        return chunk
+
+
+PAGE = b'<html><head><title>Shelly</title></head><body>Device Model 1PM</body></html>'
+
+
+def raw_deflate(data):
+    packer = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    return packer.compress(data) + packer.flush()
+
+
+class ReadBodyTests(SimpleTestCase):
+    """``read_body``: what every in-process HTTP reader gets when a server ignores ``Accept-Encoding: identity`` (the printer and relay of #281)."""
+
+    def test_identity_and_no_header_are_read_as_sent_and_capped(self):
+        for encoding in (None, '', 'identity', ' Identity '):
+            self.assertEqual(transport.read_body(FakeResponse(PAGE, encoding), 1000), PAGE, encoding)
+        self.assertEqual(transport.read_body(FakeResponse(PAGE), 10), PAGE[:10])
+        self.assertEqual(transport.read_body(FakeResponse(b''), 10), b'')
+
+    def test_gzip_zlib_deflate_and_raw_deflate_are_decoded(self):
+        cases = {'gzip': gzip.compress(PAGE), 'deflate': zlib.compress(PAGE), 'DEFLATE': raw_deflate(PAGE), ' gzip ': gzip.compress(PAGE)}
+        for encoding, body in cases.items():
+            self.assertEqual(transport.read_body(FakeResponse(body, encoding), 1000), PAGE, encoding)
+
+    def test_the_cap_is_on_the_decompressed_output_and_a_bomb_stops_at_it(self):
+        bomb = gzip.compress(b'A' * 50_000_000, compresslevel=9)  # about 50 KB claiming 50 MB
+        self.assertLess(len(bomb), 100_000)
+        response = FakeResponse(bomb, 'gzip')
+        body = transport.read_body(response, 64 * 1024)
+        self.assertEqual(len(body), 64 * 1024)
+        self.assertLessEqual(response.read_total, 64 * 1024 + transport.COMPRESSED_SLACK)  # the compressed side is bounded too
+        self.assertEqual(len(transport.read_body(FakeResponse(zlib.compress(b'A' * 5_000_000), 'deflate'), 1000)), 1000)
+
+    def test_a_page_that_decodes_to_less_than_the_cap_is_whole(self):
+        self.assertEqual(transport.read_body(FakeResponse(gzip.compress(PAGE), 'gzip'), len(PAGE)), PAGE)
+        self.assertEqual(transport.read_body(FakeResponse(gzip.compress(PAGE), 'gzip'), len(PAGE) + 1), PAGE)
+
+    def test_an_empty_compressed_body_is_empty_not_an_error(self):
+        self.assertEqual(transport.read_body(FakeResponse(b'', 'gzip'), 100), b'')
+
+    def test_a_stream_that_does_not_decode_or_ends_early_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, 'invalid compressed probe response'):
+            transport.read_body(FakeResponse(b'not gzip at all', 'gzip'), 100)
+        with self.assertRaisesRegex(ValueError, 'incomplete compressed probe response'):
+            transport.read_body(FakeResponse(gzip.compress(PAGE * 50)[:40], 'gzip'), 10_000)
+
+    def test_an_encoding_it_cannot_read_is_an_error_not_binary_text(self):
+        for encoding in ('br', 'zstd', 'compress', 'gzip, br'):
+            with self.assertRaisesRegex(ValueError, 'unsupported probe content encoding'):
+                transport.read_body(FakeResponse(b'\x1b\x00', encoding), 100)

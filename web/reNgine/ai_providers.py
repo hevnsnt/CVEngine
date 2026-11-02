@@ -17,6 +17,10 @@ from functools import wraps
 
 import requests
 
+from cveFeed.secret_redaction import redact_text
+from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
+	AIRuntime, clean_number, reasoning_plan, setting_applies)
+
 logger = logging.getLogger(__name__)
 _usage_stage = ContextVar('cvengine_ai_usage_stage', default='unspecified')
 
@@ -38,8 +42,10 @@ _request_options = ContextVar('cvengine_ai_request_options', default={})
 def request_options(**options):
 	"""Per-request options a stage asks for, read by the providers that take them: ``temperature`` and ``seed`` (a self-hosted server
 	answers differently on every call unless both are pinned, so a verdict is not reproducible; the hosted providers are left alone),
-	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``) and ``token_factor`` (a retry after a reply was cut off
-	asks for a longer one)."""
+	``schema`` (a JSON Schema the reply must follow, see ``structured_levels``), ``max_tokens`` (the stage's own reply limit, used when
+	the operator set none and the server is self-hosted, see ``reply_limit``) and ``token_factor`` (a retry after a reply was cut off asks
+	for a longer one), ``redact_reply`` (False for a stage whose reply is code or a template that must stay literal: the prompt is masked
+	whatever this says, only the reply is left as the model wrote it)."""
 	token = _request_options.set({**_request_options.get(), **options})
 	try:
 		yield
@@ -56,30 +62,97 @@ def _env_number(name, low, high):
 	return value if low <= value <= high else None
 
 
-def request_timeout(default):
-	"""Seconds a completion may take: ``CVENGINE_AI_TIMEOUT`` (10 to 3600) when set, else the provider's own. A local model on a laptop
-	can take longer than the 120 seconds that suits a hosted one."""
-	return _env_number('CVENGINE_AI_TIMEOUT', 10, 3600) or default
+def _layered(setting, runtime):
+	"""``(value, source)`` of a number setting: what the operator saved on the Settings page (``source`` 'setting'), else its environment
+	variable ('env'), else ``(None, 'default')``. The page wins over the environment, so a change made in the browser is not undone by an
+	old line in ``.env``; an unset or out-of-range value falls through to the next layer."""
+	saved = clean_number(setting, getattr(runtime, setting, None)) if runtime is not None else None
+	if saved is not None:
+		return saved, 'setting'
+	low, high, env_name = NUMBER_SETTINGS[setting][:3]
+	value = _env_number(env_name, low, high)
+	return (value, 'env') if value is not None else (None, 'default')
+
+
+def request_timeout(default, runtime=None):
+	"""Seconds a completion may take: the Settings page's value, else ``CVENGINE_AI_TIMEOUT`` (10 to 3600), else the provider's own. A local
+	model on a laptop can take longer than the 120 seconds that suits a hosted one."""
+	return _layered('request_timeout', runtime)[0] or default
 
 
 CONNECT_TIMEOUT = 10  # seconds to reach the server, apart from the (long) wait for a model to answer: a server that is down fails in 10
 
 
-def output_token_cap():
-	"""The reply length limit to send to an OpenAI-compatible server or Ollama: ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768) when set, else
-	None, which leaves the server's own limit (a reasoning model spends thousands of tokens thinking before it answers, so no cap is
-	sent unless the operator chose one)."""
-	cap = _env_number('CVENGINE_AI_MAX_TOKENS', 64, 32768)
-	if cap and _request_options.get().get('token_factor'):
-		cap = min(32768, cap * int(_request_options.get()['token_factor']))
+def connect_timeout(runtime=None):
+	"""Seconds to reach the server: the Settings page's value, else ``CVENGINE_AI_CONNECT_TIMEOUT`` (1 to 300), else CONNECT_TIMEOUT. The wait
+	for the answer is ``request_timeout``; a slow proxy or a distant network can need more than 10 seconds just to connect."""
+	return _layered('connect_timeout', runtime)[0] or CONNECT_TIMEOUT
+
+
+TRIAGE_TOKEN_CAP = STAGE_REPLY_CAPS['triage']  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
+
+
+def reply_limit(provider):
+	"""The reply length limit to send, or None to send none. The Settings page's limit, else ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768), for every
+	provider and every stage. Neither set:
+	Anthropic is sent MAX_TOKENS (2048, what it always was); a self-hosted server and Ollama are sent the stage's own limit when it has one
+	(``request_options(max_tokens=...)``: triage's TRIAGE_TOKEN_CAP) and MAX_TOKENS otherwise, so a model that never stops cannot hold a
+	worker; OpenAI and OpenRouter get none (a hosted reasoning model spends part of its limit thinking, and OpenAI names the field
+	differently). A retry after a cut-off reply asks for ``token_factor`` times as much."""
+	options = _request_options.get()
+	cap = _layered('max_tokens', provider.runtime)[0]
+	if cap is None:
+		profile = PROFILES.get(provider.name)
+		if profile and profile.reply_cap:  # Anthropic and the self-hosted servers; the latter take the stage's own limit first
+			cap = (options.get('max_tokens') if profile.reply_cap_by_stage else None) or profile.reply_cap
+	if cap and options.get('token_factor'):
+		cap = min(32768, cap * int(options['token_factor']))
 	return cap
 
 
-def ollama_context():
-	"""``CVENGINE_OLLAMA_NUM_CTX`` (512 to 1048576), the context window to ask Ollama for, or None. Ollama sizes it by the machine's memory
-	(4k tokens under 24 GiB, 32k from 24 to 48, 256k above) and a prompt longer than it is cut, so a host-context prompt can lose its
-	start without an error; set it when the server's default is small."""
-	return _env_number('CVENGINE_OLLAMA_NUM_CTX', 512, 1048576)
+_REASONING_NOTED = set()
+
+
+def _note_once(*key):
+	"""True the first time ``key`` is seen: a setting that is ignored is said so once, not on every request."""
+	if key in _REASONING_NOTED:
+		return False
+	_REASONING_NOTED.add(key)
+	return True
+
+
+def reasoning_level(runtime=None):
+	"""The reasoning level to ask for: the Settings page's (``default`` there means "send nothing", whatever the environment says), else
+	``CVENGINE_AI_REASONING`` (off, low, medium, high or max), or None when neither is set or it is not one of those, which sends nothing (what
+	every version before it did). An environment value that is not a level is logged once."""
+	saved = getattr(runtime, 'reasoning', '') if runtime is not None else ''
+	if saved:
+		return saved if saved in REASONING_LEVELS else None
+	value = os.environ.get('CVENGINE_AI_REASONING', '').strip().lower()
+	if not value:
+		return None
+	if value not in REASONING_LEVELS and _note_once('bad-level', value):
+		logger.warning('CVENGINE_AI_REASONING=%r is not one of %s: no reasoning setting is sent', value, ', '.join(REASONING_LEVELS))
+	return value if value in REASONING_LEVELS else None
+
+
+def reasoning_fields(provider, max_tokens=None):
+	"""The top-level request fields the reasoning setting adds for this provider's model (see ``ai_profiles.reasoning_plan``), {} when it is
+	unset or does not apply here; when it is set and nothing can be sent, that is logged once per provider and model."""
+	level = reasoning_level(provider.runtime)
+	if level is None:
+		return {}
+	fields, why = reasoning_plan(provider.name, provider.model, level, max_tokens)
+	if why and _note_once(provider.name, provider.model, why):
+		logger.warning('the reasoning setting (%s) is ignored for %s %s: %s', level, provider.name, provider.model or '(default model)', why)
+	return fields
+
+
+def ollama_context(runtime=None):
+	"""The context window to ask Ollama for (512 to 1048576): the Settings page's, else ``CVENGINE_OLLAMA_NUM_CTX``, else None. Ollama sizes it
+	by the machine's memory (4k tokens under 24 GiB, 32k from 24 to 48, 256k above) and a prompt longer than it is cut, so a host-context
+	prompt can lose its start without an error; set it when the server's default is small."""
+	return _layered('context_tokens', runtime)[0]
 
 
 def _token_number(value):
@@ -117,16 +190,24 @@ def _record_completion(provider, status, category, started, duration_ms):
 
 
 def tracked_completion(fn):
-	"""Wraps complete() and complete_vision(): same usage accounting either way."""
+	"""Wraps complete() and complete_vision(): same usage accounting either way, and the one place every prompt and every reply passes, so
+	the last line of defence against a secret reaching the provider or being stored from its answer sits here: the user message is masked
+	by ``cveFeed.secret_redaction`` before it is sent (the system prompt is ours and static), and so is the reply before it is returned."""
 	@wraps(fn)
 	def wrapped(self, *args, **kwargs):
 		from datetime import datetime, timezone
+		if len(args) > 1:  # (system, user, ...)
+			args = (args[0], redact_text(args[1]), *args[2:])
+		elif 'user' in kwargs:
+			kwargs['user'] = redact_text(kwargs['user'])
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
 		self._last_usage, self._last_actual_model = None, ''
 		status, category = 'failed', ''
 		try:
 			answer = fn(self, *args, **kwargs)
+			if _request_options.get().get('redact_reply', True):  # a stage whose reply is code that must stay literal (templategen) opts out
+				answer = redact_text(answer)
 			status = 'succeeded'
 			return answer
 		except Exception as exc:
@@ -136,22 +217,15 @@ def tracked_completion(fn):
 			_record_completion(self, status, category, started, max(0, int((time.monotonic() - tick) * 1000)))
 	return wrapped
 
-ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
+ANTHROPIC_URL = PROFILES['anthropic'].default_base
 ANTHROPIC_VERSION = '2023-06-01'
-OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
+OPENAI_URL = PROFILES['openai'].default_base + '/chat/completions'
 # Models used when none is chosen. Anthropic and OpenAI get the newest cheapest model: resolved from the
 # provider's own model list (see pick_cheapest_newest), with these as the fallback when the list cannot be read.
 # OpenRouter, Ollama, vLLM and LM Studio serve whatever the operator picked or hosts, so there is no default for them.
-DEFAULT_MODELS = {
-	'anthropic': 'claude-haiku-5-5',
-	'openai': 'gpt-5.4-nano',
-	'openrouter': '',
-	'ollama': '',
-	'vllm': '',
-	'lmstudio': '',
-}
-SELECTABLE = ('openrouter', 'ollama', 'vllm', 'lmstudio')  # the user must choose the model
-OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
+DEFAULT_MODELS = {name: profile.default_model for name, profile in PROFILES.items()}
+SELECTABLE = tuple(name for name, profile in PROFILES.items() if not profile.default_model)  # the user must choose the model
+OPENROUTER_BASE = PROFILES['openrouter'].default_base
 LOCAL_NAMES = ('localhost', '127.0.0.1', '::1', '[::1]')
 HOST_FROM_CONTAINER = 'host.docker.internal'  # compose maps this to the Docker host for the web and celery containers
 URL_HELP = ('the server address, for example http://100.64.0.5:{port} (a Tailscale or other remote machine) '
@@ -169,7 +243,7 @@ def reachable_url(url):
 		return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 	return url
 REQUEST_TIMEOUT = 120
-MAX_TOKENS = 2048
+MAX_TOKENS = DEFAULT_REPLY_CAP
 VERDICTS = ('affected', 'not_affected', 'uncertain')
 
 UNTRUSTED_NOTICE = (
@@ -255,7 +329,8 @@ class AIProvider:
 	name = ''
 	timeout = REQUEST_TIMEOUT  # seconds a completion may take; a provider that loads models on demand overrides it
 
-	def __init__(self, model=None, api_key=None, base_url=None):
+	def __init__(self, model=None, api_key=None, base_url=None, runtime=None):
+		self.runtime = runtime if runtime is not None else AIRuntime()  # the operator's settings (reNgine.ai_profiles.AIRuntime)
 		self._model = model or ''
 		self.api_key = api_key
 		self.base_url = base_url
@@ -299,7 +374,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=(CONNECT_TIMEOUT, request_timeout(self.timeout)))
+			resp = requests.post(url, headers=headers, json=payload, timeout=(connect_timeout(self.runtime), request_timeout(self.timeout, self.runtime)))
 			resp.raise_for_status()
 			try:
 				data = resp.json()
@@ -316,6 +391,8 @@ class AIProvider:
 			body = getattr(getattr(e, 'response', None), 'text', '')
 			raise AIProviderError(f'{self.name} HTTP request failed (status {status or "unknown"})',
 				category=category, http_status=status, hint=str(body or '')[:400].lower()) from e
+		except requests.ConnectTimeout as e:  # the server was not reached in time (a ConnectTimeout is a Timeout too, so it is caught first)
+			raise AIProviderError(f'{self.name} connection timed out', category='provider_connect_timeout') from e
 		except requests.Timeout as e:
 			raise AIProviderError(f'{self.name} request timed out', category='provider_timeout') from e
 		except requests.RequestException as e:
@@ -357,16 +434,18 @@ def _anthropic_text(data):
 # first request tells: a refusal that names the field steps down to JSON mode and then to nothing, and the answer is remembered per
 # (provider, address, model) for an hour. Hosted providers are not sent it unless ``CVENGINE_AI_STRUCTURED=all``: a refusal there costs a
 # paid request, and their models follow the prompt.
-STRUCTURED_LEVELS = {'ollama': ('json_schema', 'json', 'none')}
-_DEFAULT_LEVELS = ('json_schema', 'json_object', 'none')
 _STRUCTURED = {}  # (provider, base_url, model) -> (expires, level)
 _NAMES_STRUCTURE = re.compile(r'response_format|json_schema|json_object|schema|grammar|format|guided|structured')
 
 
-def structured_mode():
-	"""``CVENGINE_AI_STRUCTURED``: ``auto`` (default: the self-hosted servers), ``all`` (OpenRouter and OpenAI too) or ``off``."""
+def structured_mode(runtime=None):
+	"""Whether a request carries a schema: ``auto`` (the self-hosted servers), ``all`` (OpenRouter and OpenAI too) or ``off``. The Settings
+	page's choice, else ``CVENGINE_AI_STRUCTURED``, else ``auto``."""
+	saved = getattr(runtime, 'structured_mode', '') if runtime is not None else ''
+	if saved in STRUCTURED_MODES:
+		return saved
 	value = os.environ.get('CVENGINE_AI_STRUCTURED', 'auto').strip().lower()
-	return value if value in ('auto', 'all', 'off') else 'auto'
+	return value if value in STRUCTURED_MODES else 'auto'
 
 
 def triage_schema():
@@ -393,10 +472,11 @@ def structured_levels(provider):
 	"""The levels to try for this request, best first, or () when it carries no schema or this provider is not sent one."""
 	if not _request_options.get().get('schema'):
 		return ()
-	mode = structured_mode()
-	if mode == 'off' or (provider.name not in SERVER_URL_PROVIDERS and mode != 'all') or provider.name == 'anthropic':
+	mode = structured_mode(provider.runtime)
+	profile = PROFILES.get(provider.name)
+	if mode == 'off' or not profile or not profile.structured or (not profile.structured_default and mode != 'all'):
 		return ()
-	levels = STRUCTURED_LEVELS.get(provider.name, _DEFAULT_LEVELS)
+	levels = profile.structured
 	cached = _STRUCTURED.get(_structure_key(provider))
 	if cached and cached[0] > time.time() and cached[1] in levels:
 		return levels[levels.index(cached[1]):]
@@ -440,30 +520,41 @@ class AnthropicProvider(AIProvider):
 	def _headers(self):
 		return {'x-api-key': self.api_key or '', 'anthropic-version': ANTHROPIC_VERSION}
 
+	def _messages_url(self):
+		"""The messages endpoint: Anthropic's own unless a Base URL is set. A bare address (``https://gateway.example``, or one ending in
+		``/v1``) is the server and the endpoint is under it; an address with any other path is used as written, as it always was."""
+		if not (self.base_url or '').strip():
+			return ANTHROPIC_URL
+		from urllib.parse import urlsplit
+		url = reachable_url(self.base_url)
+		path = urlsplit(url).path.rstrip('/')
+		if not path:
+			return url.rstrip('/') + '/v1/messages'
+		if path == '/v1':
+			return url.rstrip('/') + '/messages'
+		return url
+
+	def _body(self, system, messages):
+		cap = reply_limit(self)
+		return {'model': self.model, 'max_tokens': cap, 'system': system, 'messages': messages, **reasoning_fields(self, cap)}
+
 	def list_models(self):
-		base = (self.base_url or ANTHROPIC_URL).split('/v1/')[0]
+		base = self._messages_url().split('/v1/')[0]
 		data = self._get(f'{base}/v1/models?limit=1000', self._headers())
 		models = [{'id': m['id'], 'created': _epoch(m.get('created_at')), 'price': None} for m in data.get('data', []) if m.get('id')]
 		return sorted(models, key=lambda m: -m['created'])
 
 	@tracked_completion
 	def complete(self, system, user):
-		data = self._post(
-			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
-			 'messages': [{'role': 'user', 'content': user}]})
+		data = self._post(self._messages_url(), self._headers(), self._body(system, [{'role': 'user', 'content': user}]))
 		return _anthropic_text(data)
 
 	@tracked_completion
 	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
 		import base64
-		data = self._post(
-			self.base_url or ANTHROPIC_URL, self._headers(),
-			{'model': self.model, 'max_tokens': MAX_TOKENS, 'system': system,
-			 'messages': [{'role': 'user', 'content': [
-				 {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type,
-											   'data': base64.b64encode(image_bytes).decode()}},
-				 {'type': 'text', 'text': user}]}]})
+		data = self._post(self._messages_url(), self._headers(), self._body(system, [{'role': 'user', 'content': [
+			{'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': base64.b64encode(image_bytes).decode()}},
+			{'type': 'text', 'text': user}]}]))
 		return _anthropic_text(data)
 
 
@@ -517,20 +608,21 @@ class OpenAIProvider(AIProvider):
 		return 'max_completion_tokens' if host == 'api.openai.com' else 'max_tokens'
 
 	def _options(self):
-		"""The limit, temperature and seed this request carries. The limit only when the operator set one (``output_token_cap``); the
-		temperature and seed only to a self-hosted server and only when the stage pinned them (``request_options``): pinning both is what
-		makes a verdict reproducible (llama.cpp's seed is random by default)."""
+		"""The limit, temperature and seed this request carries. The limit as ``reply_limit`` says (the operator's, else the default of a
+		self-hosted server; none for OpenAI and OpenRouter); the temperature and seed only to a self-hosted server and only when the stage
+		pinned them (``request_options``): pinning both is what makes a verdict reproducible (llama.cpp's seed is random by default). The
+		opt-in reasoning field (``CVENGINE_AI_REASONING``) last: nothing unless it is set."""
 		out = {}
-		cap = output_token_cap()
+		cap = reply_limit(self)
 		if cap:
 			out[self._limit_name()] = cap
 		pinned = _request_options.get()
-		if self.name in SERVER_URL_PROVIDERS:
-			if pinned.get('temperature') is not None:
-				out['temperature'] = pinned['temperature']
-			if pinned.get('seed') is not None:
-				out['seed'] = pinned['seed']
-		return out
+		profile = PROFILES[self.name]
+		if profile.temperature_ok and pinned.get('temperature') is not None:
+			out['temperature'] = pinned['temperature']
+		if profile.seed_ok and pinned.get('seed') is not None:
+			out['seed'] = pinned['seed']
+		return {**out, **reasoning_fields(self, cap)}
 
 	def _check_text(self, data):
 		_openai_text(data, self.name)
@@ -591,6 +683,13 @@ class LMStudioProvider(OpenAIProvider):
 		return [m for m in super().list_models() if 'embed' not in m['id'].lower()]
 
 
+def _keep_alive_value(text):
+	"""Ollama reads a JSON string as a Go duration ("30m", "1h", "90s"), which has no spelling for "unload now" or "never unload": ``"-1"`` is
+	refused with a 400 ("missing unit in duration"). Those two are sent as the integers 0 and -1 (seconds, negative means forever), which is the
+	other form it takes; a duration stays a string."""
+	return int(text) if re.fullmatch(r'-?\d+', text) else text
+
+
 def _ollama_text(data):
 	"""The text of an Ollama chat response, shared by complete() and complete_vision()."""
 	try:
@@ -616,20 +715,22 @@ class OllamaProvider(AIProvider):
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
 	def _options(self):
-		"""Ollama's ``options``: the reply limit and the context window when the operator set them, the temperature and the seed when the
-		stage pinned them."""
+		"""Ollama's ``options``: the reply limit (``reply_limit``), the context window when the operator set it, the temperature and the
+		seed when the stage pinned them; beside them ``think`` when ``CVENGINE_AI_REASONING`` is set and the model has the switch."""
 		options = {}
-		cap = output_token_cap()
+		cap = reply_limit(self)
 		if cap:
 			options['num_predict'] = cap
-		context = ollama_context()
+		context = ollama_context(self.runtime)
 		if context:
 			options['num_ctx'] = context
 		pinned = _request_options.get()
-		for key in ('temperature', 'seed'):
-			if pinned.get(key) is not None:
+		profile = PROFILES['ollama']
+		for key, allowed in (('temperature', profile.temperature_ok), ('seed', profile.seed_ok)):
+			if allowed and pinned.get(key) is not None:
 				options[key] = pinned[key]
-		return {'options': options} if options else {}
+		keep = {'keep_alive': _keep_alive_value(self.runtime.keep_alive)} if self.runtime.keep_alive else {}  # how long the model stays loaded after the request
+		return {**({'options': options} if options else {}), **keep, **reasoning_fields(self, cap)}
 
 	def _check_text(self, data):
 		_ollama_text(data)
@@ -653,11 +754,11 @@ class OllamaProvider(AIProvider):
 	def _warn_if_cut_off(self, data):
 		"""A prompt longer than the context window is cut at its start without an error. Where the window was set, say when a prompt came
 		close to it (``prompt_eval_count`` is what the server counted)."""
-		context = ollama_context()
+		context = ollama_context(self.runtime)
 		used = data.get('prompt_eval_count') if isinstance(data, dict) else None
 		if context and isinstance(used, int) and used >= 0.95 * context:
 			logger.warning('ollama read %d prompt tokens of a %d token context window: the start of the prompt may have been cut; raise '
-						   'CVENGINE_OLLAMA_NUM_CTX', used, context)
+						   'the context setting (Settings, AI model, or CVENGINE_OLLAMA_NUM_CTX)', used, context)
 
 	@tracked_completion
 	def complete_vision(self, system, user, image_bytes, media_type='image/png'):
@@ -670,13 +771,16 @@ class OllamaProvider(AIProvider):
 		return _ollama_text(data)
 
 
-PROVIDERS = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
-KEYLESS = ('ollama', 'vllm', 'lmstudio')  # a key is optional (vLLM, LM Studio) or unused (Ollama)
-SERVER_URL_PROVIDERS = ('ollama', 'vllm', 'lmstudio')  # you run the server, so there is no default address
-LOCAL_PORT = {'ollama': 11434, 'vllm': 8000, 'lmstudio': 1234}  # each server's usual port, for the address hints
+_CLASSES = {cls.name: cls for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider, OllamaProvider, VLLMProvider, LMStudioProvider)}
+PROVIDERS = {name: _CLASSES[name] for name in PROFILES}  # the ids come from the profile table (reNgine.ai_profiles); a profile without a class fails here
+KEYLESS = tuple(name for name, profile in PROFILES.items() if not profile.needs_key)  # a key is optional (vLLM, LM Studio) or unused (Ollama)
+SERVER_URL_PROVIDERS = tuple(name for name, profile in PROFILES.items() if profile.needs_url)  # you run the server, so there is no default address
+LOCAL_PORT = {name: profile.port for name, profile in PROFILES.items() if profile.needs_url}  # each server's usual port, for the address hints
 
 
-def get_provider(name, model=None, api_key=None, base_url=None):
+def get_provider(name, model=None, api_key=None, base_url=None, runtime=None):
+	"""``runtime`` is the operator's ``AIRuntime`` (timeouts, reply limit, context window, structured output, reasoning, keep-alive); without
+	one every setting follows its environment variable and then the provider's default."""
 	try:
 		cls = PROVIDERS[name]
 	except KeyError:
@@ -687,7 +791,56 @@ def get_provider(name, model=None, api_key=None, base_url=None):
 		raise AIProviderError(f'{name} needs the server URL: {URL_HELP.format(port=LOCAL_PORT[name])}')
 	if base_url and not re.match(r'^https?://', base_url.strip(), re.I):
 		raise AIProviderError('the server URL must start with http:// or https://')
-	return cls(model=model, api_key=api_key, base_url=base_url)
+	return cls(model=model, api_key=api_key, base_url=base_url, runtime=runtime)
+
+
+def provider_defaults(name):
+	"""What a request gets for each setting when neither the Settings page nor the environment sets it, for the page's hints: the answer
+	time, the connect time, the reply limit (None: none is sent), the triage limit where a stage has its own, whether a schema is sent, whether a reasoning field can be sent at all."""
+	profile = PROFILES[name]
+	return {'request_timeout': PROVIDERS[name].timeout, 'connect_timeout': CONNECT_TIMEOUT, 'max_tokens': profile.reply_cap or None,
+		'triage_max_tokens': STAGE_REPLY_CAPS['triage'] if profile.reply_cap and profile.reply_cap_by_stage else None,
+		'structured': bool(profile.structured and profile.structured_default), 'structured_possible': bool(profile.structured),
+		'reasoning_sent': bool(profile.reasoning_field)}  # False: reasoning is switched on the server (vLLM, LM Studio) or not at all (OpenRouter)
+
+
+def effective_settings(name, model, runtime):
+	"""What a request to provider ``name`` and ``model`` uses for each setting, and where it comes from, for the Settings page:
+	``{setting: {'value', 'source': 'setting' | 'env' | 'default', 'applies', 'note'}}``. ``value`` is None where nothing is sent."""
+	profile, defaults = PROFILES[name], provider_defaults(name)
+	out = {}
+	for setting in NUMBER_SETTINGS:
+		value, source = _layered(setting, runtime)
+		if value is None:
+			value = defaults.get(setting)
+		out[setting] = {'value': value, 'source': source, 'applies': setting_applies(setting, name), 'note': ''}
+	if out['max_tokens']['source'] == 'default' and defaults['triage_max_tokens']:
+		out['max_tokens']['note'] = f'{defaults["triage_max_tokens"]} for a finding triage'
+	mode, source = structured_mode(runtime), 'default'
+	if runtime is not None and runtime.structured_mode:
+		source = 'setting'
+	elif os.environ.get('CVENGINE_AI_STRUCTURED', '').strip().lower() in STRUCTURED_MODES:
+		source = 'env'
+	sends = bool(profile.structured) and mode != 'off' and (profile.structured_default or mode == 'all')
+	out['structured_mode'] = {'value': mode, 'source': source, 'applies': bool(profile.structured), 'note': 'a schema is sent to this provider' if sends else 'no schema is sent to this provider'}
+	level = reasoning_level(runtime)
+	source = 'setting' if runtime is not None and runtime.reasoning else 'env' if level else 'default'
+	note = ''
+	if level:
+		fields, why = reasoning_plan(name, model, level, reply_limit_for(name, runtime))
+		note = why or 'applied to this model'
+	out['reasoning'] = {'value': level, 'source': source, 'applies': True, 'note': note}
+	keep = getattr(runtime, 'keep_alive', '') or None
+	out['keep_alive'] = {'value': keep, 'source': 'setting' if keep else 'default', 'applies': setting_applies('keep_alive', name), 'note': ''}
+	return out
+
+
+def reply_limit_for(name, runtime):
+	"""The reply limit a stage without a limit of its own gets from provider ``name`` (None: none is sent), without building a provider."""
+	cap = _layered('max_tokens', runtime)[0]
+	if cap is None:
+		cap = PROFILES[name].reply_cap or None
+	return cap
 
 
 _THINK = re.compile(r'<think(?:ing)?>.*?</think(?:ing)?>', re.DOTALL | re.IGNORECASE)
@@ -856,7 +1009,7 @@ def _triage_clean(value, depth=0):
 	"""A payload with every string cleaned and capped, forbidden keys dropped, and the size bounded (defence in depth: the
 	builders in cveFeed.triage already clean what they select)."""
 	if isinstance(value, str):
-		return clean_text(value, 3000)
+		return clean_text(redact_text(value), 3000)  # masked before the cleaning can mangle a secret into something no pattern knows
 	if isinstance(value, dict) and depth < 4:
 		return {clean_text(k, 60, strict=True): _triage_clean(v, depth + 1) for k, v in list(value.items())[:40]
 				if str(k).lower() not in TRIAGE_FORBIDDEN_KEYS}
@@ -889,16 +1042,20 @@ TRIAGE_SEED = 20260101  # any fixed number: with the temperature at 0 it is what
 
 def _ask_triage(provider, stage, system, user):
 	"""One triage completion: reproducible (temperature and seed pinned, which only a self-hosted server receives), shaped by the triage
-	schema where the server takes one, and, when the reply was cut off at a limit the operator set, asked once more with a longer one
-	(a reasoning model spends part of the limit thinking). Without a limit set there is nothing to lengthen and the error stands."""
-	options = {'temperature': 0, 'seed': TRIAGE_SEED, 'schema': triage_schema()}
+	schema where the server takes one, and, when the reply was cut off at a limit that was sent, asked once more with twice the limit (a
+	reasoning model spends part of it thinking). A provider that was sent no limit (OpenAI, OpenRouter) has nothing to lengthen and the
+	error stands."""
+	options = {'temperature': 0, 'seed': TRIAGE_SEED, 'schema': triage_schema(), 'max_tokens': TRIAGE_TOKEN_CAP}
 	with usage_stage(stage), request_options(**options):
 		try:
 			return provider.complete(system, user)
 		except AIProviderError as error:
-			if error.category != 'output_truncated' or not output_token_cap():
+			if error.category != 'output_truncated' or not reply_limit(provider):
 				raise
+			cut_off, sent = error, reply_limit(provider)
 	with usage_stage(stage), request_options(**options, token_factor=2):
+		if reply_limit(provider) == sent:  # a limit already at the ceiling (32768): the same paid request cannot answer differently
+			raise cut_off
 		return provider.complete(system, user)
 
 
@@ -1003,17 +1160,23 @@ def suggest_local_checks(provider, context):
 	return {'parsed': parse_local_checks(reply), 'model': f'{provider.name}:{provider.model}'}
 
 
-def detect_provider(api_key):
-	"""Guess the provider from an API key's prefix; None when it is not recognisable.
+# Prefixes that name one vendor and no other. A key is only ever sent where the user chose, and a prefix is only taken for a choice when it
+# cannot belong to anyone else; the bare ``sk-`` that OpenAI used to issue is also used by DeepSeek and by many
+# OpenAI-compatible vendors and proxies, so it names nobody. ``AIza`` is Google's (no provider for it yet).
+KEY_PREFIXES = (('sk-ant-', 'anthropic'), ('sk-or-', 'openrouter'), ('sk-proj-', 'openai'))
 
-	Anthropic keys start ``sk-ant-``; OpenRouter ``sk-or-``; OpenAI keys start ``sk-`` (``sk-proj-``,
-	``sk-svcacct-`` ...). Anthropic is checked first since both begin ``sk-``.
-	"""
+
+def detect_provider(api_key):
+	"""The provider an API key's prefix names, or None when it does not name exactly one: ``sk-ant-`` is Anthropic, ``sk-or-`` OpenRouter,
+	``sk-proj-`` OpenAI. A bare ``sk-...`` key is ambiguous (see ``ambiguous_key``) and is never guessed onto a vendor: the caller asks."""
 	key = (api_key or '').strip()
-	if key.startswith('sk-ant-'):
-		return 'anthropic'
-	if key.startswith('sk-or-'):  # OpenRouter, before the generic sk- check
-		return 'openrouter'
-	if key.startswith('sk-') and len(key) >= 20:
-		return 'openai'
+	for prefix, provider in KEY_PREFIXES:
+		if key.startswith(prefix):
+			return provider
 	return None
+
+
+def ambiguous_key(api_key):
+	"""Whether a key looks like an OpenAI-style secret (``sk-``) that more than one vendor issues, so the user has to say whose it is."""
+	key = (api_key or '').strip()
+	return key.startswith('sk-') and detect_provider(key) is None

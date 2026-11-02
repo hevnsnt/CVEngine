@@ -49,6 +49,9 @@ class ScanHistory(models.Model):
 	dorks = models.ManyToManyField('Dork', related_name='dorks', blank=True)
 	initiated_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='initiated_scans', blank=True, null=True)
 	aborted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='aborted_scans')
+	# The bbot mode this scan was queued to run in ('' for a scan queued before it was recorded). A queued scan whose worker message was lost is sent
+	# again in this mode (cveFeed.reaper), so a passive scan is never recovered as a standard one.
+	discovery_mode = models.CharField(max_length=16, blank=True, default='', db_default='')
 
 	class Meta:
 		indexes = [

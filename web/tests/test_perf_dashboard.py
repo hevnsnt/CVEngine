@@ -41,6 +41,7 @@ class GraphPollingTests(TestCase):
 		version = first.json()['version']
 		self.assertEqual(self.client_.get(f'/cve/api/graph?v={version}').status_code, 304)
 		self.sub.ip_addresses.add(IpAddress.objects.create(address='192.0.2.6'))
+		views.clear_stats_cache()  # the version is itself kept GRAPH_VERSION_SECONDS per scope; a revision bump (a closed finding) drops it at once
 		changed = self.client_.get(f'/cve/api/graph?v={version}')
 		self.assertEqual(changed.status_code, 200)
 		self.assertNotEqual(changed.json()['version'], version)

@@ -73,8 +73,16 @@ def strategy_of(cve):
 
 
 def tier_of(match):
-    from agentapi import services
-    return services._match(match)['cve']['tier']
+    """The heat the match shows (``threat.match_heat``)."""
+    from cveFeed.threat import match_heat
+    return match_heat(match)
+
+
+def validation_tier_of(match):
+    """The heat without the version-only cap (``threat.validation_heat``): what orders validation work, so a known-exploited match that
+    rests on its version alone is still checked first."""
+    from cveFeed.threat import validation_heat
+    return validation_heat(match)
 
 
 def describe(match, kind, mode=None):

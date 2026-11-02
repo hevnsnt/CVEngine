@@ -15,6 +15,7 @@ import {
   copyButton,
   copyText,
   dialog,
+  emptyState,
   field,
   text as uiText,
 } from "/staticfiles/cve/ui.js";
@@ -22,7 +23,9 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } f
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -65,9 +68,32 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
+// a CVE listed as exploited in the wild, shown on its row whatever the heat: a match that rests on its version alone is held at
+// smoke (CVENGINE_VERSION_ONLY_MAX_HEAT) until a check confirms it, and KEV must still be visible at a glance
+const kevBadge = (heatCapped) => {
+  const b = badge("KEV", "critical");
+  b.title = heatCapped
+    ? "Listed as exploited in the wild. The match rests on a version alone, so it shows below fire until a check confirms it; it is validated first."
+    : "Listed as exploited in the wild";
+  return b;
+};
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
 const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
+// What a person calls a host or target, and the note they wrote, shown beside its address and never in place of it. Both are typed text: they only
+// ever become text nodes (el() sets textContent), the note is a tooltip and a clipped line.
+const aliasTag = (row) => (row && row.alias ? el("span", "alias-tag", row.alias, { title: [row.alias, row.note].filter(Boolean).join("\n") }) : null);
+const named = (link, row) => {
+  const box = el("span", "named");
+  box.append(link);
+  const tag = aliasTag(row);
+  if (tag) box.append(" ", tag);
+  if (row && row.note) box.append(el("span", "note alias-note", row.note, { title: row.note }));
+  return box;
+};
+// the two fields, bounded like the server bounds them (60 characters on one line, 1000 for the note); the host page and the target dialog share them
+const aliasInput = (value) => uiText(value || "", { maxlength: "60", placeholder: "A short name, e.g. Lab printer" });
+const noteInput = (value) => Object.assign(el("textarea", "alias-note-box", null, { rows: "3", maxlength: "1000", placeholder: "Anything worth remembering" }), { value: value || "" });
 // a CVE id printed anywhere links to its match on that host; without a match id, to the matches that name it
 const cveLink = (project, cveId, matchId, host) => (project ? cveAnchor(project, cveId, matchId, host) : el("span", "", cveId));
 // "CVE CVE-2026-1" in a host's search reasons links to that CVE's match on the host; the host and IP are this row itself
@@ -269,7 +295,7 @@ function createList({
       failures = 0;
       if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
-      if (reset && !items.length) body.append(el("p", "empty", empty));
+      if (reset && !items.length) body.append(emptyNode(empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset, quiet);
       more.textContent = "";
@@ -422,6 +448,55 @@ const duration = (from, to) => {
   if (m < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+// A scan's stages as a pipeline, in the order they were created. A stage's time is its start while it runs and its end once it is done,
+// and stages run one after another, so a finished stage took from the end of the one before it (or the scan's start) to its own time.
+// Each step shows that length as text and as a bar against the longest, so where the time went reads at a glance; the running stage
+// has a live timer and a beam on its connector, a failed one its error. Returns {node, tick}: tick() repaints the live timer.
+const STAGE_STATE = { success: "done", running: "running", queued: "waiting", failed: "failed", aborted: "stopped" };
+function stagePipeline(stages, scan) {
+  const steps = stages.slice().sort((a, b) => a.id - b.id);
+  let prevEnd = scan.started;
+  const spans = steps.map((st) => {
+    if (st.status === "queued") return { from: null, to: null };
+    if (st.status === "running") return { from: st.time, to: null };
+    const span = { from: prevEnd, to: st.time };
+    prevEnd = st.time;
+    return span;
+  });
+  const lengthOf = ({ from, to }) => (from ? Math.max(0, (to ? new Date(to) : new Date()) - new Date(from)) : 0);
+  const longest = Math.max(1, ...spans.map(lengthOf));
+  const node = el("div", "pipe-wrap");
+  const done = steps.filter((st) => st.status === "success").length;
+  const running = steps.filter((st) => st.status === "running").map((st) => st.title || st.name);
+  const failed = steps.filter((st) => st.status === "failed").length;
+  const total = `${steps.length} stage${steps.length === 1 ? "" : "s"}`;
+  node.append(el("p", "pipe-sum", running.length || steps.some((st) => st.status === "queued")
+    ? `${done} of ${total} done${running.length ? ` · now: ${running.join(", ")}` : ""}`
+    : `${total}${failed ? ` · ${failed} failed` : " · all done"}`));
+  const list = el("ol", "pipe");
+  const live = [];
+  steps.forEach((st, i) => {
+    const li = el("li", `pipe-step ${st.status}`);
+    const main = el("div", "pipe-main");
+    main.append(el("b", "", st.title || st.name), el("span", "pipe-state", STAGE_STATE[st.status] || st.status));
+    if (st.error) main.append(el("p", "pipe-err", st.error));
+    const bar = el("span", "pipe-bar", null, { "aria-hidden": "true" });
+    const fill = el("i");
+    bar.append(fill);
+    const dur = el("span", "pipe-dur");
+    const paint = () => {
+      const span = spans[i];
+      dur.textContent = span.from ? duration(span.from, span.to) : "";
+      fill.style.width = span.from ? `${Math.max(3, (100 * lengthOf(span)) / Math.max(longest, lengthOf(span)))}%` : "0";
+    };
+    paint();
+    if (st.status === "running") live.push(paint);
+    li.append(el("span", "pipe-dot", null, { "aria-hidden": "true" }), main, bar, dur);
+    list.append(li);
+  });
+  node.append(list);
+  return { node, tick: () => live.forEach((paint) => paint()) };
+}
 const meterCell = (n, of) => {
   const box = el("div", "meter-cell");
   const bar = el("div", "meter");
@@ -473,6 +548,23 @@ const whenCell = (iso) => {
   const t = el("time", "when", null, { datetime: iso, title: `${fmtDateTime(iso)} ${zoneLabel()} (${iso.replace("T", " ").slice(0, 19)} UTC)` });
   t.append(el("b", "", fmtTime(iso)), el("span", "", fmtDay(iso)));
   return t;
+};
+
+// What an empty list shows: a plain sentence, emptyState() options, or a function returning either, so a list can tell "nothing yet"
+// (say what to do next) from "nothing matches these filters" (offer to clear them).
+function emptyNode(empty) {
+  const v = typeof empty === "function" ? empty() : empty;
+  return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
+}
+// The empty Targets page's next step: the shell's own Add targets button, when this page has one
+function addTargetsAction() {
+  const add = document.querySelector("[data-add-targets]");
+  return add ? [{ label: "Add targets", run: () => add.click() }] : [];
+}
+const NO_TARGETS = {
+  icon: "target",
+  title: "No targets yet",
+  body: "A target is a domain, IP or range to watch. Paste a list, one per line; #Project headers sort them into projects. Discovery and scanning start on their own.",
 };
 
 function searchBox(placeholder, onChange) {
@@ -654,7 +746,7 @@ function shotPair(c, project = slug) {
   [c.before, c.after].forEach((side, i) => {
     if (!side || !side.subdomain_id) return;
     const img = el("img", "shot", null, {
-      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/`,
+      src: `/cve/${encodeURIComponent(project)}/hosts/${side.subdomain_id}/screenshot/?row=1`,
       alt: `${i ? "Current" : "Previous"} screenshot of ${c.host}`,
       loading: "lazy",
     });
@@ -797,6 +889,8 @@ const hostOverview = (h) => {
   const http = h.http || {};
   const hosting = h.hosting || {};
   const rows = [];
+  if (h.alias) rows.push({ label: "Alias", value: h.alias });
+  if (h.note) rows.push({ label: "Note", value: h.note });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
@@ -843,7 +937,15 @@ const technologyTable = (h) => {
       if (t.version) line.append(el("span", "chip", t.version));
       if (t.category) line.append(badge(t.category, "queued"));
       line.append(el("span", "note", t.source ? `seen via ${t.source}` : ""));
+      if (t.version_source === "filename") line.append(badge("version from the file name only", "ice"));
+      if (t.copy_state === "shadowed") line.append(badge("replaced by a later copy", "ice"));
       box.append(line);
+      // a JavaScript library the page loads more than once: every copy, and the one that runs (textContent only)
+      const copies = Array.isArray(t.copies) ? t.copies : [];
+      if (copies.length > 1 || t.copies_unresolved) {
+        const where = copies.map((c) => `${c.version || "version unknown"} (${c.state || "?"}${c.version_source === "filename" ? ", from the file name" : ""}) ${c.path || ""}`).join("; ");
+        box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others; an earlier copy stays listed as a candidate, since older code may still use it."}`));
+      }
     });
   }
   if (unverified.length) {
@@ -978,10 +1080,101 @@ const subdirectoryCard = (h) => {
   });
   return box;
 };
+// The browser's screenshots of a host (cveFeed.web_shot): the best picture, then every captured page with its final URL, status and
+// title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
+const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
+const OUTCOME_TEXT = {
+  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+};
+function screenshotsSection(h, project, isCurrent) {
+  const box = el("div", "shots-box");
+  const head = el("div", "host-assess-head");
+  head.append(el("h3", "sec", "Screenshots"));
+  const button = el("button", "btn sm", "Take screenshot", { type: "button" });
+  button.title = "Queue a fresh browser capture of every web page of this host";
+  button.disabled = !!(h.excluded || h.archived);
+  head.append(button);
+  const body = el("div", "shots-body");
+  box.append(head, body);
+  const paint = (data) => {
+    body.textContent = "";
+    const rows = data.screenshots || [];
+    const withImage = rows.filter((r) => r.has_image);
+    const note = data.note !== undefined ? data.note : h.screenshot_note;
+    if (!withImage.length && !h.screenshot) body.append(el("p", "note", note || "No screenshot yet."));
+    withImage.forEach((r) => {
+      const figure = el("figure", "shot-figure");
+      const img = el("img", "shot", null, {
+        src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&v=${encodeURIComponent(r.captured_at || "")}`),
+        alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
+      });
+      img.onerror = () => img.remove();
+      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      figure.append(img, caption);
+      if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
+      if (r.has_previous) {
+        const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
+        const before = el("img", "shot", null, { src: shotUrl(project, h, `scheme=${encodeURIComponent(r.scheme)}&port=${r.port}&previous=1`), alt: `Previous screenshot of ${h.host} port ${r.port}`, loading: "lazy" });
+        before.hidden = true;
+        before.onerror = () => toggle.remove();
+        toggle.onclick = () => { before.hidden = !before.hidden; toggle.textContent = before.hidden ? "Compare with previous" : "Hide previous"; };
+        figure.append(toggle, before);
+      }
+      body.append(figure);
+    });
+    if (!withImage.length && h.screenshot) {
+      // only a discovery screenshot exists (the older bbot capture): the host's own picture URL serves it
+      const img = el("img", "shot", null, { src: shotUrl(project, h, `v=${h.screenshot_version || 0}`), alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy" });
+      img.onerror = () => img.remove();
+      body.append(img);
+      if (note) body.append(el("p", "note", note));
+    }
+    rows.filter((r) => !r.has_image).forEach((r) =>
+      body.append(el("p", "note", `${r.scheme}://${h.host}:${r.port}: ${OUTCOME_TEXT[r.outcome] || r.outcome}${r.reason ? `. ${r.reason}` : ""}`)),
+    );
+    if (data.unavailable_reason) body.append(el("p", "note", data.unavailable_reason));
+  };
+  paint({ screenshots: h.screenshots || [], note: h.screenshot_note });
+  let polling = 0;
+  const follow = async (token, tries) => {
+    if (!isCurrent() || token !== polling) return;
+    try {
+      const data = await api("GET", `${baseOf(project)}/hosts/${h.id}/screenshots`);
+      paint(data);
+      if (data.queued && tries > 0) return void setTimeout(() => follow(token, tries - 1), 5000);
+    } catch (e) {
+      body.append(el("p", "note", `Status refresh failed: ${e.message}`));
+    }
+    button.disabled = !!(h.excluded || h.archived);
+    button.textContent = "Take screenshot";
+  };
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = "Queued…";
+    try {
+      const data = await api("POST", `${baseOf(project)}/hosts/${h.id}/screenshot`, {});
+      paint(data);
+      toast("Screenshot queued");
+      follow(++polling, 30);
+    } catch (e) {
+      toast(e.message, true);
+      body.append(el("p", "note", e.message));
+      button.disabled = !!(h.excluded || h.archived);
+      button.textContent = "Take screenshot";
+    }
+  };
+  return box;
+}
 // A port's RDP login-screen capture (cveFeed.rdp_shot): the image, exactly as read by the AI (never guessed), and its summary.
 // Only ever present when nmap already confirmed the server accepts a connection without Network Level Authentication.
 const rdpShotCard = (shot) => {
   const box = el("div", "rdp-shot");
+  if (shot.outcome === "nla_required") {
+    // no picture exists to take: the server insists on Network Level Authentication and paints nothing before sign-in
+    box.append(el("div", "note", `RDP login screen: not captured. ${shot.reason || "NLA is required, so there is no sign-in screen to photograph."}`));
+    return box;
+  }
   box.append(el("div", "note", "RDP login screen (captured with no credentials sent)"));
   if (shot.url) {
     const img = el("img", "shot rdp-shot-img", null, { src: shot.url, alt: "RDP login screen capture", loading: "lazy" });
@@ -1562,12 +1755,34 @@ function findingPage(mount, cfg) {
   // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
   // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
   const BULK_KINDS = ["match", "vulnerability", "hygiene"];
-  const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk"];
   const STATUS_LABELS = [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]];
   const BULK_MAX = 200;
   const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
   const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
-  async function setStatusBatch(items, value) {
+  // A group row (GET findings?group=cve) stands for several hosts' findings: it is sent as its members, each through the same route and
+  // the same per-finding gates and audit, and the members' results are read back onto the row (finding-groups-logic.js).
+  const resultKey = (i) => `${itemKind(i)}-${i.id}`;
+  // A group sends only the members the change applies to: by default the open and in progress ones whose status it changes (fixed,
+  // accepted and ruled-out hosts are left as they are unless `includeClosed`). The summary counts findings and sites, not rows.
+  async function setStatusBatch(items, value, opts = {}) {
+    if (!items.some(FG.isGroup)) {
+      const r = await setStatusEach(items, value);
+      return { ...r, summary: FG.doneSummary(r.ok) };
+    }
+    const r = FG.foldResults(items, await setStatusEach(FG.expandForBulk(items, value, opts), value), resultKey);
+    return { ...r, summary: FG.doneSummary(r.ok) };
+  }
+  // Undo: every finding (every member of a group) back to its own earlier status
+  async function restoreStatuses(items, priorOf) {
+    const out = { ok: [], failed: [] };
+    for (const [was, group] of FG.restoreBatches(items, priorOf)) {
+      const r = await setStatusEach(group, was);
+      out.ok.push(...r.ok);
+      out.failed.push(...r.failed);
+    }
+    return out;
+  }
+  async function setStatusEach(items, value) {
     const ok = [];
     const failed = [];
     const groups = new Map(); // one request series per project (the all-projects view mixes them)
@@ -1612,32 +1827,28 @@ function findingPage(mount, cfg) {
         side,
         rows,
         noun: "finding",
-        labelOf: (item) => item.title || (item.cve && item.cve.id) || `#${item.id}`,
+        labelOf: (item) => {
+          const name = item.title || (item.cve && item.cve.id) || `#${item.id}`;
+          if (FG.isGroup(item)) return `${name} ${FG.hostsText(item.group)}`;
+          return item.__groupOf && item.host ? `${name} on ${item.host}` : name; // one member of a group, in a failure report
+        },
         selectable: isBulkable,
         hint: "",
         afterRun: () => list.reload(),
         actions: [
           {
             select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
+            label: "Change status",
             verb: "Updating",
             done: "Updated",
+            // a selection holding a group asks first, saying how many hosts change and how many settled ones are left alone
+            confirm: (n, items, value) => FG.confirmText(items, value),
+            confirmTitle: (items) => `Change ${items.filter(FG.isGroup).length === 1 ? "a group of hosts" : "groups of hosts"}?`,
             runBatch: setStatusBatch,
-            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk)
-            prior: (item) => {
-              const was = item.status ?? item.remediation_status; // the unified list says status, the matches list says remediation_status
-              return STATUS_VALUES.includes(was) ? was : undefined;
-            },
-            restoreBatch: async (items, priorOf) => {
-              const byStatus = new Map();
-              items.forEach((i) => byStatus.set(priorOf(i), [...(byStatus.get(priorOf(i)) || []), i]));
-              const out = { ok: [], failed: [] };
-              for (const [was, group] of byStatus) {
-                const r = await setStatusBatch(group, was);
-                out.ok.push(...r.ok);
-                out.failed.push(...r.failed);
-              }
-              return out;
-            },
+            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk); the unified list
+            // says status, the matches list remediation_status, and a group row each member's own (FG.priorOf)
+            prior: FG.priorOf,
+            restoreBatch: restoreStatuses,
           },
         ],
       })
@@ -1665,7 +1876,7 @@ function findingPage(mount, cfg) {
     metaTools.append(
       exportButton({
         run: async (progress) => {
-          const { rows, truncated } = await collectAll((page, size) => api("GET", `${cfg.path}?${query({ ...cfg.params(), page, page_size: size })}`), progress);
+          const { rows, truncated } = await collectAll((page, size) => api("GET", `${cfg.path}?${query({ ...(cfg.exportParams || cfg.params)(), page, page_size: size })}`), progress);
           return { filename: `cvengine-${cfg.csv.name}-${ALL ? "all" : slug}-${stamp()}.csv`, columns: cfg.csv.columns, rows, truncated };
         },
       }),
@@ -1725,6 +1936,10 @@ function findingPage(mount, cfg) {
       if (mine !== token) return;
       pane.textContent = "";
       pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
+      if (FG.isGroup(row) && row.id === id && kind === "match") {
+        // a group row opens its hottest member: say so, and that every host keeps its own status
+        back.after(el("p", "note group-note", `This row groups the same client-side library file ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
+      }
       if (validate) {
         if (location.hash.includes("&validate")) history.replaceState(null, "", `${location.pathname}${location.search}#${ALL ? `${project}:${key}` : key}`); // a reload must not run it again
         const run = pane.querySelector("[data-validate]");
@@ -1778,29 +1993,37 @@ function findingPage(mount, cfg) {
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
+          const prior = FG.priorOf(item);
           const menu = [
             { section: "copy", label: "Copy title", run: () => copyValue(rowName, "title") },
             { section: "copy", label: "Copy link", run: () => copyValue(`${location.origin}${location.pathname}#${hashOf(item)}`, "link") },
             { section: "open", label: "Open in a new tab", run: () => window.open(`${location.pathname}${location.search}#${hashOf(item)}`, "_blank", "noopener") },
           ];
           if (isBulkable(item)) {
-            STATUS_LABELS.forEach(([value, label]) =>
-              menu.push({
-                section: "status",
-                label: `Mark as ${label}`,
-                disabled: was === value,
-                run: async () => {
-                  const r = await setStatusBatch([item], value);
-                  if (r.failed.length) return toast(r.failed[0].error, true);
-                  list.reload();
-                  if (STATUS_VALUES.includes(was)) {
-                    undoNotice(`Marked ${label.toLowerCase()}`, async () => {
-                      const back = await setStatusBatch([item], was);
-                      toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
-                      list.reload();
-                    });
-                  } else toast(`Marked ${label.toLowerCase()}`);
-                },
+            const group = FG.isGroup(item);
+            // a group: the plain entries change its open and in progress hosts only; when some are fixed, accepted or ruled out, a
+            // second set of entries includes them, and says so
+            const variants = [{ includeClosed: false }, ...(group && FG.closedCount(item.group) ? [{ includeClosed: true }] : [])];
+            variants.forEach((opts) =>
+              STATUS_LABELS.forEach(([value, label]) => {
+                const hosts = group ? FG.targetsOf(item.group, value, opts).ids.length : 0;
+                menu.push({
+                  section: opts.includeClosed ? "status-closed" : "status",
+                  label: group ? FG.menuLabel(item, value, label, opts) : `Mark as ${label}`,
+                  disabled: group ? hosts === 0 : was === value,
+                  run: async () => {
+                    const r = await setStatusBatch([item], value, opts);
+                    if (r.failed.length) return toast(r.failed[0].error, true);
+                    list.reload();
+                    if (prior !== undefined) {
+                      undoNotice(`Marked ${label.toLowerCase()}: ${r.summary}`, async () => {
+                        const back = await restoreStatuses(r.ok, () => prior);
+                        toast(back.failed.length ? back.failed[0].error : "Undone", back.failed.length > 0);
+                        list.reload();
+                      });
+                    } else toast(`Marked ${label.toLowerCase()}: ${r.summary}`);
+                  },
+                });
               }),
             );
           }
@@ -1808,7 +2031,14 @@ function findingPage(mount, cfg) {
         });
         (r.notes || []).filter(Boolean).forEach((n) => row.append(n instanceof Node ? n : el("span", "note host-why", n)));
         row.onclick = (e) => {
-          if (e.target.closest("a")) return; // a link inside the row goes where it points
+          const member = e.target.closest("a[data-finding-key]"); // one host of a group: open its own finding here
+          if (member && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+            e.preventDefault();
+            history.replaceState(null, "", location.pathname + location.search + `#${ALL ? `${projectOf(item)}:` : ""}${member.dataset.findingKey}`);
+            show(member.dataset.findingKey, projectOf(item));
+            return;
+          }
+          if (e.target.closest("a, summary, details")) return; // a link inside the row goes where it points; a group's host list opens in place
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
         };
@@ -1886,11 +2116,15 @@ function allTargets(mount) {
     mount,
     path: `${base}/targets`,
     params: () => ({ q: q.value }),
-    empty: 'No targets yet. Use "Add targets" with #Project headers to paste a list of domains, IPs or ranges.',
+    empty: () =>
+      q.value.trim()
+        ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; list.reload(); } }] }
+        : { ...NO_TARGETS, actions: addTargetsAction() },
     render: table(
       withProject([
-        { label: "Target", render: (t) => hostLink(t.name, projectOf(t)) },
+        { label: "Target", render: (t) => named(hostLink(t.name, projectOf(t)), t) },
         { label: "Scope", render: (t) => (t.host_scoped ? "this host only" : t.scope_mode === "parent" ? "includes parent domain" : "auto") },
+        { label: "Discovery", render: (t) => modeText(t.discovery_mode) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2028,6 +2262,66 @@ const pages = {
       box.append(pick, note);
       return box;
     };
+    // The alias (a short display name) and the note of a target: shown beside its name in lists, search and reports, searchable, never scanned
+    const editLabel = (t) =>
+      dialog(`Alias and note: ${t.name}`, (body, close) => {
+        const alias = aliasInput(t.alias);
+        const note = noteInput(t.note);
+        body.append(
+          field("Alias", alias, "A short display name. The target's name stays as it is."),
+          field("Note", note),
+        );
+        const failure = el("p", "msg err", "", { role: "alert", style: "display:none" });
+        const actions = el("div", "actions");
+        const no = el("button", "btn ghost", "Cancel", { type: "button" });
+        no.onclick = close;
+        const save = uiButton("Save", async () => {
+          failure.style.display = "none";
+          try {
+            const r = await post(`targets/${t.id}/profile`, { alias: alias.value, note: note.value });
+            t.alias = r.alias;
+            t.note = r.note;
+            close();
+            toast(`${t.name}: saved`);
+            list.reload();
+          } catch (err) {
+            failure.textContent = err.message;
+            failure.style.display = "block";
+          }
+        });
+        actions.append(no, save);
+        body.append(failure, actions);
+        setTimeout(() => alias.focus(), 0);
+      });
+    // The mode discovery runs in whenever it starts on its own (the work conductor's rescans, the weekly sweeps). "Manual only" is
+    // "just add it, do not scan yet": nothing automatic scans it until a person picks a mode here and presses Discover or Scan.
+    const modeSelects = new Map(); // target id -> the Discovery column's choice
+    const howSyncs = new Map(); // target id -> redraws the choice next to Discover (and its button) from the target's mode
+    const discoveryCell = (t) => {
+      const pick = el("select", "", null, { "aria-label": `Discovery mode of ${t.name}` });
+      for (const [value, label] of STORED) {
+        const o = el("option", "", label, { value });
+        o.selected = t.discovery_mode === value;
+        pick.append(o);
+      }
+      modeSelects.set(t.id, pick); // Discover keeps the mode it ran in: this shows it
+      pick.onchange = async () => {
+        pick.disabled = true;
+        try {
+          const r = await post(`targets/${t.id}/discovery-mode`, { discovery_mode: pick.value });
+          t.discovery_mode = r.discovery_mode;
+          howSyncs.get(t.id)?.();
+          toast(`${t.name}: discovery ${r.discovery_mode}`);
+        } catch (err) {
+          pick.value = t.discovery_mode;
+          toast(err.message, true);
+        }
+        pick.disabled = false;
+      };
+      const box = el("div", "scope-cell");
+      box.append(pick);
+      return box;
+    };
     const rowBox = (t) => {
       const b = el("input", "", null, { type: "checkbox", "aria-label": `Select ${t.name}` });
       b.checked = allMatching || selected.has(t.id);
@@ -2055,12 +2349,26 @@ const pages = {
         syncBar();
       },
       params: () => ({ q: q.value }),
-      empty:
-        'No targets yet. Use "Add targets" to paste a list of domains, IPs or ranges.',
+      empty: () =>
+        q.value.trim()
+          ? { icon: "search", title: "No target matches", body: `Nothing matches \u201c${q.value.trim()}\u201d.`, actions: [{ label: "Clear search", run: () => { q.value = ""; reload(); } }] }
+          : { ...NO_TARGETS, actions: addTargetsAction() },
       render: table([
         { label: "", cls: "sel", head: () => headBox, render: rowBox },
-        { label: "Target", render: (t) => hostLink(t.name) },
+        {
+          label: "Target",
+          render: (t) => {
+            const box = named(hostLink(t.name), t);
+            // the edit sits with the name it labels (the actions column is already full)
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
+            edit.onclick = () => editLabel(t);
+            box.append(el("br"), edit);
+            return box;
+          },
+        },
         { label: "Scope", render: (t) => scopeCell(t) },
+        { label: "Discovery", render: (t) => discoveryCell(t) },
         { label: "Hosts", cls: "num", render: (t) => t.hosts ?? "-" },
         { label: "Exposed", render: (t) => meterCell(t.exposed, t.hosts) },
         { label: "Added", render: (t) => shortDate(t.created) },
@@ -2069,24 +2377,46 @@ const pages = {
           label: "",
           render: (t) => {
             const box = el("div", "row-actions");
+            // the mode Discover runs in: the target's own, or another one, which the server keeps on the target. A manual only target has none:
+            // the choice starts empty and the button waits for one.
+            const how = el("select", "", null, { "aria-label": `Mode to discover ${t.name} in` });
             const discover = el("button", "btn sm", "Discover", {
               type: "button",
             });
+            let busy = false;
+            const sync = () => {
+              how.replaceChildren(...discoverOptions(t.discovery_mode).map(([value, label]) => Object.assign(el("option", "", label), { value })));
+              how.value = defaultChoice(t.discovery_mode);
+              how.title = discoverHint(t.discovery_mode);
+              discover.disabled = busy || !canDiscover(how.value);
+            };
+            howSyncs.set(t.id, sync);
+            how.onchange = () => {
+              discover.disabled = busy || !canDiscover(how.value);
+            };
+            sync();
             discover.onclick = async () => {
+              busy = true;
               discover.disabled = true;
               discover.textContent = "Queueing…";
               try {
-                const r = await post(`targets/${t.id}/discover`, {});
-                toast(`Discovery #${r.scan_id} started`);
+                const stored = t.discovery_mode;
+                const r = await post(`targets/${t.id}/discover`, discoverBody(stored, how.value));
+                t.discovery_mode = modeAfter(r, stored);
+                const shown = modeSelects.get(t.id);
+                if (shown) shown.value = t.discovery_mode;
+                toast(startedText(r, stored));
                 discover.textContent = "Discovery queued";
                 setTimeout(() => {
+                  busy = false;
                   discover.textContent = "Discover";
-                  discover.disabled = false;
+                  sync();
                 }, 8000);
               } catch (err) {
                 toast(err.message, true);
+                busy = false;
                 discover.textContent = "Discover";
-                discover.disabled = false;
+                sync();
               }
             };
             const scan = el("button", "btn ghost sm", "Scan", {
@@ -2111,7 +2441,7 @@ const pages = {
                 scan.disabled = false;
               }
             };
-            box.append(discover, scan);
+            box.append(how, discover, scan);
             if (signIns) box.append(signInButton(signIns, t));
             return box;
           },
@@ -2171,7 +2501,15 @@ const pages = {
       mount,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
-      empty: "No scans here. Start one from Targets.",
+      empty: () =>
+        status.value
+          ? { icon: "radar", title: "No scans with this status", actions: [{ label: "Show all scans", run: () => status.node.querySelector("button").click() }] }
+          : {
+              icon: "radar",
+              title: "No scans yet",
+              body: "A scan starts when you add a target, on the target's schedule, or when you press Scan on the Targets page.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
@@ -2490,6 +2828,8 @@ const pages = {
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
           { label: "Host", value: (h) => h.host },
+          { label: "Alias", value: (h) => h.alias || "" },
+          { label: "Note", value: (h) => h.note || "" },
           { label: "Also answers to", value: (h) => (h.aliases || []).join(" ") },
           ...(ALL ? [{ label: "Project", value: (h) => projectOf(h) || "" }] : []),
           { label: "Temperature", value: (h) => h.heat || "unscanned" },
@@ -2540,20 +2880,20 @@ const pages = {
       };
       label.append(box, document.createTextNode(` Only hosts with a screenshot (${withShot.length} of ${shown.length})`));
       galleryHead.append(label);
-      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken when a scan finds a web page." : "No hosts match."));
+      if (!cards.length) galleryGrid.append(el("p", "empty", shown.length ? "None of the loaded hosts has a screenshot yet. Screenshots are taken by a browser after a scan finds a web page, and hourly for hosts that have none; open a host and press Take screenshot to take one now." : "No hosts match."));
       cards.forEach((h) => {
         const card = el("button", "shot-card", null, { type: "button", "data-heat": h.heat || "unscanned", "aria-label": `Open ${h.host}` });
         const frame = el("span", "shot-frame");
         if (h.screenshot) {
-          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb`, alt: "", loading: "lazy", decoding: "async" });
+          const img = el("img", "", null, { src: `/cve/${encodeURIComponent(projectOf(h) || slug)}/hosts/${h.id}/screenshot/?size=thumb&v=${h.screenshot_version || 0}`, alt: h.screenshot_alt || `Screenshot of ${h.host}`, loading: "lazy", decoding: "async" });
           img.onerror = () => {
             img.remove();
             frame.append(el("span", "shot-none", "No screenshot"));
           };
           frame.append(img);
-        } else frame.append(el("span", "shot-none", "No screenshot"));
+        } else frame.append(el("span", "shot-none", "No screenshot", h.screenshot_note ? { title: h.screenshot_note } : {}));
         const meta = el("span", "shot-meta");
-        meta.append(el("b", "mono", h.host), el("span", "note", [`score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
+        meta.append(el("b", "mono", h.host), el("span", "note", [h.alias, `score ${h.score || 0}`, h.http_status ? `HTTP ${h.http_status}` : "", h.title].filter(Boolean).join(" · ")));
         card.append(frame, meta);
         card.onclick = () => {
           galleryOn = false;
@@ -2608,6 +2948,8 @@ const pages = {
       box.append(el("h3", "sec", "Asset info"));
       const p = h.profile || {};
       const rows = [
+        ["Alias", h.alias],
+        ["Note", h.note],
         ["Owner", p.owner],
         ["Purpose", p.purpose],
         ["Criticality", p.criticality && p.criticality !== "unknown" ? p.criticality : ""],
@@ -2627,12 +2969,23 @@ const pages = {
       crit.value = CRITICALITY.includes(p.criticality) ? p.criticality : "unknown";
       const grid = el("div", "asset-grid");
       grid.append(field("Owner", owner), field("Purpose", purpose), field("Criticality", crit));
+      // the alias and note are the host's own (saved per project and host name); one that only the target has is shown as a hint, not edited here
+      const own = (key) => (h[`${key}_from`] === "target" ? "" : h[key] || "");
+      const alias = aliasInput(own("alias"));
+      const note = noteInput(own("note"));
+      if (h.alias_from === "target") alias.placeholder = `${h.alias} (from the target)`;
+      if (h.note_from === "target") note.placeholder = "A note on the target is shown for this host";
+      const names = el("div", "asset-grid alias-grid");
+      names.append(field("Alias", alias, "A short display name, shown beside the address. The address and discovered names stay."), field("Note", note));
       const save = uiButton("Save", async () => {
-        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value });
+        const r = await api("POST", hostPath(h, "profile"), { owner: owner.value, purpose: purpose.value, criticality: crit.value, alias: alias.value, note: note.value });
         h.profile = { owner: r.owner, purpose: r.purpose, criticality: r.criticality };
+        Object.assign(h, { alias: r.alias, alias_from: r.alias ? "host" : "", note: r.note, note_from: r.note ? "host" : "" });
+        paintAlias(h);
+        list.reload();
         toast("Asset info saved");
       }, "btn sm");
-      box.append(grid, save);
+      box.append(grid, names, save);
       return box;
     }
     // After a removal the host is gone from the list: back to the Hosts list, refreshed
@@ -2807,6 +3160,14 @@ const pages = {
       return box;
     }
 
+    // the alias beside the title of the open host, after it was saved
+    function paintAlias(h) {
+      const tag = pane.querySelector(".host-alias");
+      if (!tag) return;
+      tag.textContent = h.alias || "";
+      tag.title = h.note || "";
+      tag.hidden = !h.alias;
+    }
     function showHost(h) {
       current = h && h.id;
       rows.querySelectorAll(".host-row").forEach((r) =>
@@ -2826,6 +3187,7 @@ const pages = {
       };
       const head = el("div", "host-head");
       head.append(el("h2", "host-title", h.host));
+      head.append(el("span", "alias-tag host-alias", h.alias || "", { title: h.note || "" }));
       head.append(copyButton(h.host, "hostname"), copyButton(() => `${location.origin}${location.pathname}#${h.id}`, "link to this host", "link"));
       const HEAT = { fire: ["Fire", "fire"], smoke: ["Smoke", "smoke"], ice: ["Ice", "ice"], clean: ["Clean", "success"], unscanned: ["Not scanned", "queued"] };
       if (HEAT[h.heat]) head.append(badge(HEAT[h.heat][0], HEAT[h.heat][1]));
@@ -2993,6 +3355,7 @@ const pages = {
             ? el("a", "", text, { href: `/cve/${encodeURIComponent(projectOf(h))}/${r.finding === "match" ? "matches" : "vulns"}/#${r.id}` })
             : el("span", "", text);
           line.append(badge(r.temp, r.temp), label, el("span", "note", r.detail));
+          if (r.kev) line.append(kevBadge(r.heat_capped));
           if (r.kind === "cve") line.append(el("span", "note host-why", r.description || "Description unavailable in the CVE feed."));
           if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }, { project: projectOf(h), kind: r.finding === "match" ? "match" : "vulnerability", id: r.id }));
           why.append(line);
@@ -3025,16 +3388,8 @@ const pages = {
       if (h.title) hdr.append(el("p", "sub", h.title));
       if (h.target) hdr.append(el("p", "note", `Target ${h.target}`));
       const compareBox = el("div", "shot-compare");
-      if (h.screenshot) {
-        const img = el("img", "shot", null, {
-          src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${h.id}/screenshot/`,
-          alt: `Screenshot of ${h.host}`,
-          loading: "lazy",
-        });
-        img.onerror = () => img.remove();
-        S.web.append(img);
-        S.web.append(compareBox);
-      }
+      S.web.append(screenshotsSection(h, projectOf(h), () => current === h.id));
+      S.web.append(compareBox);
       const techBox = technologyTable(h);
       if (techBox) OV.side.append(techBox);
       [wordpressCard(h), probeCard(h), alsoServedCard(h)].forEach((card) => {
@@ -3054,7 +3409,7 @@ const pages = {
             // the front page changed: let the previous screenshot be looked at next to the current one
             const toggle = el("button", "btn ghost sm", "Compare with previous", { type: "button" });
             const before = el("img", "shot", null, {
-              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/`,
+              src: `/cve/${encodeURIComponent(projectOf(h))}/hosts/${shot.before.subdomain_id}/screenshot/?row=1`,
               alt: `Previous screenshot of ${h.host}`,
               loading: "lazy",
             });
@@ -3198,7 +3553,33 @@ const pages = {
       path: `${base}/search`,
       params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
       pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
-      empty: "No hosts match. Hosts appear as discovery and port scans finish.",
+      empty: () =>
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+          ? {
+              icon: "search",
+              title: "No host matches",
+              body: q.value.trim() ? "Try a bare word, or one filter such as port:443 or tech:nginx." : "No host is at this temperature right now.",
+              actions: [
+                {
+                  label: "Clear filters",
+                  run: () => {
+                    q.value = "";
+                    heatFilter = "all";
+                    scopeFilter = "all";
+                    scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
+                    syncUrl();
+                    paintHeat();
+                    list.reload();
+                  },
+                },
+              ],
+            }
+          : {
+              icon: "server",
+              title: "No hosts yet",
+              body: "Hosts appear as discovery and port scans finish on your targets.",
+              actions: [{ label: "Go to Targets", href: `/cve/${encodeURIComponent(slug)}/targets/` }],
+            },
       onLoaded: (data) => {
         totalHosts = data.count || 0;
         scopeChips.hidden = !data.has_internal && scopeFilter === "all";
@@ -3220,6 +3601,8 @@ const pages = {
           const top = el("span", "hr-top");
           const nameBox = el("span", "cve-id");
           nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
+          const tag = aliasTag(h);
+          if (tag) nameBox.append(" ", tag); // beside the address, which stays the link
           top.append(nameBox, el("span", "hr-score", String(h.score || 0), { title: "Score" }));
           const meta = el("span", "host-meta");
           meta.append(h.ips[0] ? rowIp(projectOf(h), h.ips[0].address) : el("span", "note", "no IP"));
@@ -3282,13 +3665,32 @@ const pages = {
     const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
     const header = el("p", "note");
     mount.append(header);
-    const params = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}) });
+    // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
+    let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
+    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
+    const params = () => FG.listParams(filtersNow(), groupMode);
+    const everyHost = el("button", "new-toggle every-host", "Show every host", {
+      type: "button",
+      "aria-pressed": String(groupMode === FG.EVERY_HOST),
+      title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
+    });
+    const setGroupMode = (mode) => {
+      groupMode = mode === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
+      everyHost.setAttribute("aria-pressed", String(groupMode === FG.EVERY_HOST));
+    };
+    everyHost.onclick = () => {
+      setGroupMode(groupMode === FG.EVERY_HOST ? FG.GROUPED : FG.EVERY_HOST);
+      reload();
+    };
     const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 0 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
     const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
+    // KEV whatever the heat: a match that rests on its version alone is smoke at most, so heat alone no longer finds every exploited CVE
+    const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
+    kev.value = wanted.get("kev") === "1" ? "1" : "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -3297,7 +3699,7 @@ const pages = {
       // the response already says how many of each type match the other filters: one request for the four chips
       async () => {
         const r = await api("GET", `${base}/findings?${query({ ...params(), type: "all", page_size: 0 })}`);
-        return { all: r.total, ...r.counts };
+        return FG.chipCounts(r); // rows when grouped, as the list shows them
       },
     );
     const sev = picker(
@@ -3320,7 +3722,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "" };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -3331,20 +3733,22 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }),
       apply: (v) => {
+        setGroupMode(v.group);
         setPicker(type, "type", v.type);
         setPicker(sev, "severity", v.severity);
         setPicker(status, "status", v.status);
         q.value = v.host;
         scope.value = v.internal || "";
+        kev.value = v.kev || "";
         reload();
       },
     });
@@ -3356,14 +3760,42 @@ const pages = {
       [type, sev, status].forEach((p) => p.refresh());
       list.reload();
     }
-    function describe({ counts = {}, total = 0, count = 0, truncated = false }) {
+    function describe(data) {
+      const { count = 0, truncated = false } = data;
       header.textContent = "";
       const link = (key, n) => el("a", "", `${n} ${{ cve: n === 1 ? "CVE match" : "CVE matches", scanner: n === 1 ? "scanner finding" : "scanner findings", hygiene: n === 1 ? "hygiene finding" : "hygiene findings" }[key]}`,
         { href: `/cve/${encodeURIComponent(slug)}/${{ cve: "matches", scanner: "vulns", hygiene: "hygiene" }[key]}/${key === "scanner" ? "?type=scanner" : ""}` });
-      header.append(`${total} finding${total === 1 ? "" : "s"}: `);
+      // the per-type numbers stay per host finding in both modes; grouped, the lead also says how many rows that is
+      const { lead, counts, grouped, truncated: truncatedNote } = FG.headerParts(data);
+      header.append(lead);
       ["cve", "scanner", "hygiene"].forEach((key, i) => header.append(...(i ? [" · "] : []), link(key, counts[key] || 0)));
+      if (grouped) header.append(`. ${grouped}`);
+      if (truncatedNote) header.append(" ", el("strong", "group-truncated", truncatedNote));
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }
+    // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)
+    const groupHosts = (f) => {
+      const g = f.group;
+      const box = el("details", "group-hosts");
+      const heat = FG.heatSplit(g);
+      box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}`));
+      const list = el("ul", "group-members");
+      FG.sortedMembers(g).forEach((m) => {
+        const li = el("li");
+        li.append(
+          ...[
+            el("a", "", m.host, { href: `#${FG.memberHash(m, projectOf(f), ALL)}`, "data-finding-key": `match-${m.id}`, title: `Open the finding on ${m.host}` }),
+            m.heat ? badge(m.heat, m.heat) : null,
+            badge(String(m.status).replace(/_/g, " ")),
+            m.classification ? badge(m.classification.replace(/_/g, " ")) : null,
+          ].filter(Boolean),
+        );
+        list.append(li);
+      });
+      if (g.members_truncated) list.append(el("li", "note", `and ${g.findings - g.members.length} more (Show every host lists them all)`));
+      box.append(list);
+      return box;
+    };
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
@@ -3388,18 +3820,50 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, scope, type.node, sev.node, status.node],
+      filters: [views.node, q, scope, kev, type.node, sev.node, status.node, everyHost],
       params,
-      empty: "No findings match these filters.",
+      exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
+      empty: () => {
+        const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
+        if (narrowed)
+          return {
+            icon: "search",
+            title: "Nothing matches these filters",
+            actions: [
+              {
+                label: "Clear filters",
+                run: () => {
+                  setPicker(type, "type", "all");
+                  setPicker(sev, "severity", "all");
+                  q.value = "";
+                  scope.value = "";
+                  kev.value = "";
+                  reload();
+                },
+              },
+            ],
+          };
+        if (status.value === "actionable")
+          return {
+            icon: "shield",
+            tone: "calm",
+            title: "Nothing needs action",
+            body: "Every finding is fixed, accepted, info only or ruled out by the AI. Scans keep looking.",
+            actions: [{ label: "Show everything", run: () => { setPicker(status, "status", "all"); reload(); } }],
+          };
+        return { icon: "bug", title: "No findings yet", body: "Findings appear as scans finish and new CVEs match your hosts." };
+      },
       onLoaded: (data, reset) => {
         if (reset) describe(data);
       },
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), f.internal ? internalBadge() : null, badge(f.severity, f.severity), aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
-               f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
-        notes: [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+               !FG.isGroup(f) && f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
+        notes: FG.isGroup(f)
+          ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
+          : [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),
     });
     [type, sev, status].forEach((p) => p.refresh());
@@ -3449,13 +3913,19 @@ const pages = {
         ["fixed", "Fixed"],
         ["accepted_risk", "Accepted risk"],
       ],
-      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, page_size: 0 })}`)).count,
+      async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );
     const cls = select("AI classification", CLASS_OPTIONS, () => {
       status.refresh();
       list.reload();
     });
+    // KEV whatever the heat: a match that rests on its version alone is smoke at most
+    const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => {
+      status.refresh();
+      list.reload();
+    });
+    kev.value = urlq.get("kev") === "1" ? "1" : "";
     const statusControl = matchStatusControl;
     const list = findingPage(mount, {
       bulk: true,
@@ -3464,15 +3934,23 @@ const pages = {
       noun: "match",
       plural: "matches",
       path: `${base}/matches`,
-      filters: [cveNote, q, status.node, cls, verdict],
-      params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly }),
-      empty: "No CVE matches yet. They appear when a new CVE matches a host in your inventory.",
+      filters: [cveNote, q, status.node, cls, verdict, kev],
+      params: () => ({ host: q.value, status: status.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value }),
+      empty: () =>
+        q.value.trim() || status.value || cls.value || cveOnly || kev.value || verdict.value !== "active"
+          ? { icon: "search", title: "No match for these filters" }
+          : {
+              icon: "match",
+              tone: "calm",
+              title: "No open CVE matches",
+              body: "When a new CVE matches software on one of your hosts, it appears here with the AI's verdict.",
+            },
       onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
       statusControl,
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
+        meta: [badge(m.cve.tier, m.cve.tier), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });
@@ -3536,7 +4014,7 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card");
+  const certs = el("section", "card hy-card hy-certs");
   certs.append(
     el("h2", "", "Certificates"),
     el(
@@ -3570,7 +4048,7 @@ pages.hygiene = function hygiene(mount) {
   }).start();
 
   const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS and email authentication"));
+  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
   const tools = el("div", "tools");
   const sev = picker(
     "Severity",
@@ -3590,6 +4068,7 @@ pages.hygiene = function hygiene(mount) {
     [
       ["", "All areas"],
       ["tls", "TLS and certificates"],
+      ["cleartext", "Cleartext services"],
       ["spf", "SPF"],
       ["dkim", "DKIM"],
       ["dmarc", "DMARC"],
@@ -3614,8 +4093,15 @@ pages.hygiene = function hygiene(mount) {
     mount: issues,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
-    empty:
-      "No open issues. Certificates, TLS settings, SPF, DKIM and DMARC all look healthy.",
+    empty: () =>
+      sev.value || kind.value || q.value.trim()
+        ? { icon: "search", title: "No issue matches these filters" }
+        : {
+            icon: "shield",
+            tone: "calm",
+            title: "No open hygiene issues",
+            body: "Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
+          },
     onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
@@ -3696,7 +4182,7 @@ pages.changes = function changes(mount) {
     mount,
     path: `${base}/changes`,
     params: () => ({ since: since.value, host: host.value, kind: kinds.value }),
-    empty: "No changes in this period. Changes appear when a scan finds something different from the last one.",
+    empty: { icon: "pulse", title: "No changes in this period", body: "Changes appear when a scan finds something different from the last one." },
     onLoaded: (_, reset, quiet) => reset && !quiet && kinds.refresh(),
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
@@ -3782,7 +4268,7 @@ pages.activity = function activity(mount) {
     mount,
     path: `${base}/activity`,
     params: () => ({ kind: kinds.value }),
-    empty: "No activity yet. The engine reports here as it reads the feed, checks the inventory and runs scans.",
+    empty: { icon: "pulse", title: "No activity yet", body: "The engine reports here as it reads the feed, checks the inventory and runs scans." },
     render: table(withProject([
       { label: "When", render: (a) => whenCell(a.created) },
       { label: "Kind", render: (a) => badge(ACTIVITY_KIND[a.kind] || a.kind, ACTIVITY_BADGE[a.kind] || "") },
@@ -3940,8 +4426,10 @@ pages.scan = async function scanDetail(mount) {
         return [box, v];
       };
       const [durBox, durValue] = fact("Duration", duration(s.started, s.finished));
+      let pipe = null;
       const paintDur = () => {
         durValue.textContent = duration(s.started, s.finished);
+        if (pipe) pipe.tick();
       };
       if (live) ticker = setInterval(paintDur, 1000);
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
@@ -3962,16 +4450,8 @@ pages.scan = async function scanDetail(mount) {
       top.insertBefore(pop, top.lastChild);
       head.append(top, meta);
       if (stages.length) {
-        const row = el("div", "phases");
-        stages
-          .slice()
-          .sort((a, b) => (a.time || "").localeCompare(b.time || ""))
-          .forEach((st) => {
-            const box = el("div", `phase ${st.status}`);
-            box.append(el("b", "", st.title), el("span", "", st.error ? st.error : st.status));
-            row.append(box);
-          });
-        head.append(row);
+        pipe = stagePipeline(stages, s);
+        head.append(pipe.node);
       }
       if (s.error) head.append(el("p", "msg err", s.error));
 

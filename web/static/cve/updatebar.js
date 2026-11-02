@@ -1,5 +1,5 @@
 // Superusers only: a slim bar when the twice-daily check found a newer CVEngine version. Approval happens in Settings.
-import { hideVeil, loadScene, manageVeil, showVeil } from "/staticfiles/cve/sitewatch.js";
+import { hardReload, hideVeil, loadScene, manageVeil, showVeil } from "/staticfiles/cve/sitewatch.js";
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -61,7 +61,7 @@ function watchUpdate(first) {
   const finish = (now) => {
     grey(true, `Updated to ${now.latest || first.latest}. Taking you back.`);
     paint(3, `Updated to ${now.latest || first.latest}`, "Scanning has resumed. Reloading.", false);
-    setTimeout(() => location.replace("/cve/"), 1800);
+    setTimeout(() => hardReload("/cve/"), 1800);
   };
   const tick = async () => {
     let now = null;

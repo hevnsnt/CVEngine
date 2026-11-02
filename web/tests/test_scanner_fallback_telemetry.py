@@ -104,14 +104,63 @@ class RecordedReasonTests(FallbackBase):
             self.assertIsNone(self.dispatch(timeout=30))
         self.assertEqual(self.rows(), [('nmap', 'no_scanner')])
 
-    def test_the_addresses_beyond_one_task_run_here_and_are_recorded(self):
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop: one chunk task at a time
+    def test_the_addresses_beyond_one_task_go_in_a_second_task_and_nothing_runs_here(self):
         self.make_sentinel(['naabu'])
         ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'outcome': 'done', 'ports': {}})), \
                 mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
             dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        self.assertEqual(local.call_args.args[0], ips[dispatch.MAX_ADDRESSES:])
-        self.assertEqual(self.rows(), [('naabu', 'over_chunk')])
+        local.assert_not_called()
+        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 2)
+        self.assertEqual(self.rows(), [])
+
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})
+    def test_a_chunk_never_sent_after_an_unclaimed_one_runs_here_and_is_recorded(self):
+        self.make_sentinel(['naabu'])
+        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+            dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
+        self.assertEqual(local.call_args.args[0], ips)  # the unclaimed chunk and the one never sent after it
+        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 1)
+        self.assertEqual(self.rows(), [('naabu', 'not_claimed_in_time'), ('naabu', 'over_chunk')])
+
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '4'})
+    def test_side_by_side_chunks_nobody_claims_each_record_their_own_reason(self):
+        agent = self.make_sentinel(['naabu'])
+        Agent.objects.filter(pk=agent.pk).update(max_concurrent=4)
+        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+            dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
+        self.assertEqual(sorted(local.call_args.args[0]), sorted(ips))
+        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 2)  # both chunks were sent at once
+        self.assertEqual(self.rows(), [('naabu', 'not_claimed_in_time')] * 2)
+
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '4', ENV: 'none'})
+    def test_side_by_side_chunks_wait_when_the_kind_may_not_run_here(self):
+        agent = self.make_sentinel(['naabu'])
+        Agent.objects.filter(pk=agent.pk).update(max_concurrent=4)
+        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
+        local.assert_not_called()
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(SentinelTask.objects.filter(status__in=('queued', 'claimed', 'running')).exists())
+
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1', ENV: 'none'})
+    def test_a_chunk_never_sent_waits_when_the_kind_may_not_run_here(self):
+        self.make_sentinel(['naabu'])
+        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
+        local.assert_not_called()
+        self.assertEqual(self.rows(), [])
 
     def test_every_reason_the_code_can_name_is_a_listed_reason(self):
         import inspect

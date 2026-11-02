@@ -36,6 +36,34 @@ class EntrypointTests(SimpleTestCase):
         for required in ('discovery_queue', 'cve_feed_queue', 'send_notif_queue', 'api_queue'):
             self.assertIn(required, queues)
 
+    def test_the_classic_worker_defaults_to_ten_slots(self):
+        # certificate lookups may sleep up to 30 s in a slot waiting for crt.sh's pacing (ctmonitor.MAX_INLINE_WAIT), and every running task holds a
+        # database connection: ten, not twenty, now that the autoscaler really fills them (reNgine/gevent_autoscale.py)
+        saved = os.environ.pop('CLASSIC_CONCURRENCY', None)
+        try:
+            classic = [c for c in worker_commands() if 'classic_worker' in c]
+            self.assertEqual(len(classic), 1)
+            self.assertIn('--autoscale=10,1', classic[0])
+            os.environ['CLASSIC_CONCURRENCY'] = '14'
+            self.assertIn('--autoscale=14,1', [c for c in worker_commands() if 'classic_worker' in c][0])
+        finally:
+            os.environ.pop('CLASSIC_CONCURRENCY', None)
+            if saved is not None:
+                os.environ['CLASSIC_CONCURRENCY'] = saved
+
+    def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
+        root = SCRIPT.parent.parent
+        for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
+            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]', (root / name).read_text(), name)
+        # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
+        for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
+            text = (root / 'scripts' / name).read_text()
+            keep, recreate, ready = (text.index('up -d --no-recreate db redis'), text.index('up -d --no-deps db'),
+                                     text.index('exec -T db pg_isready'))
+            self.assertLess(keep, recreate, name)
+            self.assertLess(recreate, ready, name)
+            self.assertLess(ready, text.index('migrate --noinput', ready), name)
+
     def test_theharvester_is_gone(self):
         self.assertNotIn('theHarvester', ' '.join(worker_commands()))
         self.assertNotIn('theHarvester_queue', SCRIPT.read_text())

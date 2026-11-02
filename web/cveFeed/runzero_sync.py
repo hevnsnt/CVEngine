@@ -138,22 +138,29 @@ def _store(ip, block):
 def _corroborate_matches(project, ips):
     """Raise the confidence of the project's existing port-based CVE matches that runZero also reports, once each. Matches the AI
     ruled out or the distribution patched are left alone, and ``ai_verdict`` is never touched: this is evidence, not a verdict."""
+    from cveFeed import match_policy, scoring
     from cveFeed.models import CVEMatch
-    changed = 0
+    gained, turned = [], []
     for ip in ips:
         cves = {v['cve'] for v in ((ip.fingerprint or {}).get('runzero') or {}).get('vulns') or []}
         if not cves:
             continue
         matches = CVEMatch.objects.filter(subdomain__target_domain__project=project, subdomain__ip_addresses=ip, source='port',
                                           cve_entry__cve_id__in=cves).exclude(ai_verdict='not_affected').exclude(distro_status='patched')
-        for match in matches.select_related('cve_entry').distinct():
+        for match in matches.select_related('cve_entry', 'triage').distinct():
             evidence = dict(match.evidence or {})
             if evidence.get('runzero') or match.cve_entry.cve_id not in runzero.reported_cves(ip, evidence.get('port')):
                 continue
+            was_version_only = match_policy.is_version_only(match)  # read before the write: only a real smoke-to-fire change is paged
             match.confidence, match.evidence = runzero.boosted(match.confidence), {**evidence, 'runzero': True, 'confidence_before': match.confidence}
             match.save(update_fields=['confidence', 'evidence', 'updated_at'])
-            changed += 1
-    return changed
+            gained.append(match.pk)
+            if was_version_only:
+                turned.append(match.pk)
+    # a runZero report is hard evidence (match_policy.has_hard_evidence): the hosts are rescored, the snapshots re-read, and a match that
+    # was version-only and is fire now is paged once
+    scoring.evidence_arrived(gained, confirmed=turned)
+    return len(gained)
 
 
 def _forget_absent(project, present):
@@ -177,7 +184,8 @@ def _retract_matches(project):
     the inventory): the evidence it was boosted by is gone. Returns how many were retracted."""
     from cveFeed.models import CVEMatch
     changed = 0
-    boosted = CVEMatch.objects.filter(subdomain__target_domain__project=project, source='port', evidence__runzero=True).select_related('cve_entry')
+    retracted = []
+    boosted = CVEMatch.objects.filter(subdomain__target_domain__project=project, source='port', evidence__runzero=True).select_related('cve_entry', 'subdomain__target_domain')
     for match in boosted.distinct():
         evidence = dict(match.evidence or {})
         reported = any(match.cve_entry.cve_id in runzero.reported_cves(ip, evidence.get('port')) for ip in match.subdomain.ip_addresses.all())
@@ -189,6 +197,12 @@ def _retract_matches(project):
         match.evidence = evidence
         match.save(update_fields=['confidence', 'evidence', 'updated_at'])
         changed += 1
+        retracted.append(match)
+    if retracted:  # the evidence is gone, and with it maybe the match's fire: the score and the snapshots follow
+        from cveFeed import scoring
+        from cveFeed.views import bump_stats_revision
+        scoring.rescore_for_matches(retracted)
+        bump_stats_revision()
     return changed
 
 

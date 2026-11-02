@@ -261,12 +261,19 @@ def list_engines(ctx, params=None):
 # --- targets and scans ---------------------------------------------------------
 
 def _target(d):
-    out = {'id': d.id, 'name': d.name, 'description': d.description,
+    out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
-           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped()}
+           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
+
+
+def _target_search(qs, q):
+    """``qs`` (Domains) narrowed to the ones whose name, alias or note contains ``q``: the one search the target list and "delete all matching" share."""
+    from django.db.models import Q
+    q = str(q)
+    return qs.filter(Q(name__icontains=q) | Q(alias__icontains=q) | Q(note__icontains=q))
 
 
 def list_targets(ctx, slug, params):
@@ -284,7 +291,7 @@ def list_targets(ctx, slug, params):
     if everywhere:
         qs = qs.select_related('project')
     if params.get('q'):
-        qs = qs.filter(name__icontains=params['q'])
+        qs = _target_search(qs, params['q'])
     return paginate(qs, params, _tagged(_target, lambda d: d.project) if everywhere else _target)
 
 
@@ -309,6 +316,58 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
         raise ApiError(404, 'target not found')
     d.scope_mode = scope_mode
     d.save(update_fields=['scope_mode'])
+    return _target(d)
+
+
+def clean_alias_note(alias=None, note=None):
+    """``{'alias': ..., 'note': ...}`` for the fields given (``None`` leaves a field alone, ``''`` clears it), cleaned and bounded
+    (targetApp.alias_note), or a 400 naming the field."""
+    from targetApp import alias_note
+    fields = {}
+    try:
+        if alias is not None:
+            fields['alias'] = alias_note.clean_alias(alias)
+        if note is not None:
+            fields['note'] = alias_note.clean_note(note)
+    except ValueError as e:
+        raise ApiError(400, str(e))
+    return fields
+
+
+def set_target_profile(ctx, slug, target_id, alias=None, note=None):
+    """Set the alias (a short display name) and/or the note of a target. Only the fields given change; an empty string clears one. Display
+    only: the target's name is what is scanned and never changes."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    fields = clean_alias_note(alias, note)
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    changed = [key for key, value in fields.items() if getattr(d, key) != value]
+    if changed:
+        for key in changed:
+            setattr(d, key, fields[key])
+        d.save(update_fields=changed)
+        audit(ctx.user, 'target.profile', f'{d.name} in {slug}', project.org, project=slug, name=d.name, fields=changed)
+    return _target(d)
+
+
+def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
+    """Change the mode a target is discovered in whenever discovery starts on its own: ``standard``, ``deep``, ``passive``, or ``manual``
+    (never started automatically; only a person's Discover or Scan, once a mode is chosen). Changing it starts nothing."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    if not isinstance(discovery_mode, str) or discovery_mode not in {m for m, _label in Domain.DISCOVERY_MODES}:
+        raise ApiError(400, 'discovery_mode must be standard, deep, passive or manual')
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    if d.discovery_mode != discovery_mode:
+        audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
+        d.discovery_mode = discovery_mode
+        d.save(update_fields=['discovery_mode'])
     return _target(d)
 
 
@@ -356,7 +415,18 @@ def _not_internal(project, domains):
     return [d for d in domains if not (nets and in_internal_range(d.name, nets))]
 
 
-def _create_domains(project, names, description='', excluded=None):
+def _discovery_mode(mode):
+    """The mode to store on new targets: ``mode`` (standard, deep, passive, or manual for "just add them, do not scan yet"), standard when
+    none is given. Anything else is refused, since the stored mode decides what every later automatic scan of the target may do."""
+    from targetApp.models import Domain
+    if mode in (None, ''):
+        return Domain.DISCOVERY_STANDARD
+    if not isinstance(mode, str) or mode not in {m for m, _label in Domain.DISCOVERY_MODES}:
+        raise ApiError(400, 'mode must be standard, deep, passive or manual')
+    return mode
+
+
+def _create_domains(project, names, description='', excluded=None, discovery_mode='standard'):
     """Create a Domain per name in bulk, in order. Returns (the rows created, the names that already existed). Domain
     names are unique within an organization, so a name another project of the same organization holds counts as existing (another
     organization's record of the same name is a different, separate record). A name the project's organization
@@ -381,7 +451,8 @@ def _create_domains(project, names, description='', excluded=None):
     for start in range(0, len(wanted), 1000):
         part = wanted[start:start + 1000]
         # ignore_conflicts: a concurrent add of the same name must not fail the whole batch; the re-read says what we own
-        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now) for n in part],
+        Domain.objects.bulk_create([Domain(name=n, project=project, org_id=org_id, description=description or None, insert_date=now,
+                                                      discovery_mode=discovery_mode) for n in part],
                                    ignore_conflicts=True)
         created += Domain.objects.filter(project=project, name__in=part).order_by('id')
     created.sort(key=lambda d: d.id)
@@ -391,24 +462,26 @@ def _create_domains(project, names, description='', excluded=None):
 def add_target(ctx, slug, value, description='', discover=False, mode=None):
     """Add a domain, IP, CIDR or range as target(s); ranges expand to individual IPs (capped). Every address of a range is
     queued for discovery, in order."""
+    from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     project, _ = get_project(ctx, slug, write=True)
     if not isinstance(value, str):
         raise ApiError(400, 'value must be text')
+    stored = _discovery_mode(mode)
     kind, names = _expand_target(value, project.id)
     excluded = []
-    created, existing = _create_domains(project, names, description, excluded)
+    created, existing = _create_domains(project, names, description, excluded, stored)
     if excluded and not created and not existing:
         raise ApiError(409, f'{excluded[0]} is excluded for this organization and is never added or scanned '
                             '(an organization admin can lift the exclusion)')
     if kind == DOMAIN and created:  # every domain target is "subscribed": watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
-        watch_certificate_transparency.delay(created[0].id)
+        from cveFeed import ct_queue
+        ct_queue.queue_lookups([created[0].id], ct_queue.ADD_LIFETIME)  # one marker per domain: adding it twice queues one lookup
     scan_ids = []
     created_for_discovery = _not_internal(project, created)  # a Sentinel inside an internal network scans those; bbot here never does
     deferred = 0
-    if discover and created_for_discovery:  # bbot discovery streams into the dashboard as it runs
-        scans, deferred = _discover_new(created_for_discovery, mode, project.id, initiated_by=ctx.user)
+    if discover and created_for_discovery and stored != Domain.DISCOVERY_MANUAL:  # bbot discovery streams into the dashboard as it runs
+        scans, deferred = _discover_new(created_for_discovery, stored, project.id, initiated_by=ctx.user)
         scan_ids = [scan.id for scan in scans]
     return {'kind': kind, 'created': [_target(d) for d in created], 'already_exists': existing, 'excluded': excluded, 'scan_ids': scan_ids,
             'discovery_deferred': deferred}
@@ -418,12 +491,16 @@ SCAN_STATUS_FILTER = {'queued': -1, '-1': -1, 'failed': 0, '0': 0, 'running': 1,
                       'aborted': 3, '3': 3}
 
 
-def _scan(s, detail=False, queued=None):
-    """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once."""
+def _scan(s, detail=False, queued=None, stalled_before=None):
+    """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once. ``stalled_before`` is the
+    moment a running scan counts as stalled when it started earlier (``now - running_window()``): a list computes it once for the whole page,
+    because running_window() reads the timing settings and would otherwise cost one query per row."""
+    if stalled_before is None:
+        stalled_before = timezone.now() - running_window()
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
            'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
-           'stalled': s.scan_status == 1 and s.start_scan_date < timezone.now() - running_window(),  # marked running, but older than any scan can run
+           'stalled': s.scan_status == 1 and s.start_scan_date < stalled_before,  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
     if s.scan_status == -1:  # how many scans are ahead of this one in the queue
         from cveFeed.discovery import queue_position
@@ -481,7 +558,9 @@ def list_scans(ctx, slug, params):
         if not cache:
             cache.append(queued_ids())
         return cache[0]
-    serialize = _tagged(lambda sc: _scan(sc, queued=queued), lambda sc: sc.domain.project) if everywhere else (lambda sc: _scan(sc, queued=queued))
+    stalled_before = timezone.now() - running_window()  # once per page, not once per row
+    serialize = _tagged(lambda sc: _scan(sc, queued=queued, stalled_before=stalled_before), lambda sc: sc.domain.project) if everywhere \
+        else (lambda sc: _scan(sc, queued=queued, stalled_before=stalled_before))
     return {'count': total, 'page': page, 'page_size': size, 'results': [serialize(sc) for sc in scans]}
 
 
@@ -577,7 +656,7 @@ def start_scan(ctx, slug, target_id, engine_id=None):
         return internal
     if engine_id is not None and not EngineType.objects.filter(id=engine_id).exists():
         raise ApiError(404, 'engine not found')
-    scan = start_discovery(domain, initiated_by=ctx.user)
+    scan = start_discovery(domain, _run_mode(domain), initiated_by=ctx.user)
     return {'scan_id': scan.id, 'status': 'queued'}
 
 
@@ -664,7 +743,7 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
     qs = Domain.objects.filter(project=project)
     if all_matching:
         if q:
-            qs = qs.filter(name__icontains=str(q)[:200])
+            qs = _target_search(qs, str(q)[:200])
     elif ids is not None:
         if not isinstance(ids, list) or not ids:
             raise ApiError(400, 'ids must be a non-empty list')
@@ -692,8 +771,24 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
     return {'deleted': deleted, 'skipped_running': len(busy), 'matched': len(wanted)}
 
 
+def _run_mode(domain, mode=None):
+    """The mode a person's discovery of ``domain`` runs in: the one asked for (standard, deep or passive), else the one stored on the target.
+    A manual only target has no mode to fall back on, so a run of it names one (and discover_target then keeps it)."""
+    from targetApp.models import Domain
+    if mode in (None, ''):
+        if domain.discovery_mode == Domain.DISCOVERY_MANUAL:
+            raise ApiError(409, f'{domain.name} is set to manual only (added with "just add them, do not scan yet"): choose standard, deep or passive to discover it')
+        return domain.discovery_mode
+    if mode not in (Domain.DISCOVERY_STANDARD, Domain.DISCOVERY_DEEP, Domain.DISCOVERY_PASSIVE):
+        raise ApiError(400, 'mode must be standard, deep or passive')
+    return mode
+
+
 def discover_target(ctx, slug, target_id, mode=None):
-    """Start a bbot discovery plus nuclei pipeline on one existing target."""
+    """Start a bbot discovery plus nuclei pipeline on one existing target, in ``mode`` (kept on the target) or the target's own. The answer
+    says what actually happened: ``discovery_mode`` is the mode stored on the target after the call, ``scan_mode`` the mode the returned scan
+    runs in (a scan already going keeps the mode it was started in, so the two can differ; an internal target's scan has none, and its stored
+    mode is not changed)."""
     from cveFeed.discovery import start_discovery
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
@@ -703,9 +798,13 @@ def discover_target(ctx, slug, target_id, mode=None):
     _refuse_excluded(project, domain)
     internal = _internal_scan(ctx, project, domain)
     if internal:
-        return internal
-    scan = start_discovery(domain, mode, initiated_by=ctx.user) if mode else start_discovery(domain, initiated_by=ctx.user)
-    return {'scan_id': scan.id, 'status': 'started'}
+        return {**internal, 'discovery_mode': domain.discovery_mode, 'scan_mode': ''}
+    run = _run_mode(domain, mode)
+    scan = start_discovery(domain, run, initiated_by=ctx.user)
+    if run != domain.discovery_mode:  # a mode chosen here is the mode the target is rescanned in from now on
+        domain.discovery_mode = run
+        domain.save(update_fields=['discovery_mode'])
+    return {'scan_id': scan.id, 'status': 'started', 'discovery_mode': domain.discovery_mode, 'scan_mode': scan.discovery_mode or run}
 
 
 RESCAN_MAX_HOSTS = 200
@@ -760,6 +859,52 @@ def request_host_assessment(ctx, slug, host_id):
     return {**serialize(job), 'created': created}
 
 
+def _screenshot_host_row(ctx, slug, host_id, write):
+    from startScan.models import Subdomain
+    project, _ = get_project(ctx, slug, write=True) if write else get_one_project(ctx, slug)
+    sub = (Subdomain.objects.filter(pk=_host_id(host_id), target_domain__project=project).select_related('target_domain')
+           .prefetch_related('ip_addresses__ports').first())
+    if not sub:
+        raise ApiError(404, 'host not found')
+    return project, sub
+
+
+def request_host_screenshot(ctx, slug, host_id):
+    """Take screenshot: queue a fresh browser capture of every web page of one inventoried host (cveFeed.web_shot). It goes through the same
+    gates as a host assessment (scope, exclusions, archive, the bug bounty program's scope) and is allowed for a person even where the program has
+    not confirmed automated testing. The pictures arrive within a minute or so; ``GET .../screenshots`` shows how it went."""
+    from cveFeed import web_shot
+    from cveFeed.host_assessment import _admit
+    project, sub = _screenshot_host_row(ctx, slug, host_id, write=True)  # first: an ``_all`` or read-only caller is refused before anything else
+    try:
+        _admit(project, sub, unattended=False)
+    except ValueError as exc:
+        raise ApiError(409, str(exc)) from exc
+    why = web_shot.unavailable_reason()
+    if why:
+        raise ApiError(503, why)
+    summary = web_shot.queue_host(project, sub, by_person=True)
+    rows = host_screenshots(ctx, slug, host_id)
+    if summary['blocked'] and not summary['queued']:
+        raise ApiError(409, rows['note'] or 'this host cannot be photographed from this server', screenshots=rows['screenshots'])
+    return {**rows, 'status': 'queued' if summary['queued'] or summary['kept'] else 'nothing_to_capture', 'queued': summary['queued'],
+            'pages': summary['targets']}
+
+
+def host_screenshots(ctx, slug, host_id):
+    """What the browser captures of one host say: every page's outcome and reason, and whether anything is waiting."""
+    from cveFeed import web_shot
+    from cveFeed.models import HostScreenshot
+    project, sub = _screenshot_host_row(ctx, slug, host_id, write=False)
+    name = web_shot.host_of(sub)
+    rows = list(HostScreenshot.objects.filter(project=project, host=name))
+    shown = web_shot.pictures(rows)
+    return {'host': name, 'host_id': sub.pk, 'available': web_shot.available(), 'unavailable_reason': web_shot.unavailable_reason() or None,
+            'queued': sum(1 for r in rows if r.outcome == 'queued'),
+            'screenshots': [web_shot.describe(r, name) for r in sorted(rows, key=web_shot.rank)],
+            'note': web_shot.note_for(rows, has_web_evidence=bool(web_shot.web_targets(sub)), legacy=not shown and bool(sub.screenshot_path))}
+
+
 def get_host_assessment(ctx, slug, assessment_id):
     from cveFeed.host_assessment import serialize
     from cveFeed.models import HostAssessment
@@ -793,6 +938,12 @@ def stop_host_assessment(ctx, slug, assessment_id):
     HostAssessment.objects.filter(pk=job.pk, status__in=('queued', 'running')).update(
         status='stopped', finished_at=timezone.now(), error='Stopped by a person')
     if job.scan_id:
+        from cveFeed.host_assessment import BATCH_STOPPED
+        # a batch is one scan over several hosts: stopping one host's assessment stops the run, the only way to stop scanning that host (stages cannot
+        # drop one host mid-run). The other hosts it carried are settled now with a reason of their own, which a first-pass sweep does not count as
+        # an attempt (``assessment_review.host_coverage_due``), so they are queued again by the next sweep instead of waiting out the 24 hours
+        HostAssessment.objects.filter(scan_id=job.scan_id, status__in=('queued', 'running')).update(
+            status='stopped', finished_at=timezone.now(), error=BATCH_STOPPED)
         _abort_scan(job.scan, ctx.user)
     return {'id': job.pk, 'status': 'stopped'}
 
@@ -824,10 +975,8 @@ def _discover_new(domains, mode, project_id, initiated_by=None):
     longest, one per project per minute, so the targets left for it are scanned all the same and interleaved with everyone else's. With the
     conductor off (``CVENGINE_WORK_DEPTH=0``) nothing would pick them up, so then every target is queued now."""
     from cveFeed import activity, conductor
-    try:
-        cap = max(1, int(os.environ.get('CVENGINE_BULK_DISCOVER_NOW', BULK_DISCOVER_NOW)))
-    except ValueError:
-        cap = BULK_DISCOVER_NOW
+    from cveFeed import tunables
+    cap = max(1, int(tunables.value('bulk_discover_now', BULK_DISCOVER_NOW)))  # saved on Settings, configMaxxing, else CVENGINE_BULK_DISCOVER_NOW, else 50
     if not conductor.wanted_depth():
         cap = len(domains) or 1
     else:  # what the project already has waiting counts against the batch: two pastes in a row are not two batches
@@ -1017,6 +1166,7 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
     require_write_token(ctx)
     if not isinstance(text, str):
         raise ApiError(400, 'text must be pasted text')
+    manual = _discovery_mode(mode) == 'manual'
     org, current = _current_org(ctx.user, current_project)
     if org is None:  # authorize before the paste is read: a caller with no organization gets nothing parsed
         raise ApiError(403, 'you are not a member of any organization')
@@ -1052,9 +1202,9 @@ def add_targets_by_org(ctx, text, discover=True, mode=None, current_project=None
             res['slug'] = project.slug
             if not entries:
                 continue
-            added = _add_targets(ctx, project.slug, entries, False, None)
+            added = _add_targets(ctx, project.slug, entries, False, used)  # the mode is stored with the targets; discovery is queued below
             res.update(created=added['created'], already_exists=added['already_exists'], invalid=added['invalid'], excluded=added['excluded'])
-            if discover and added['domains']:
+            if discover and not manual and added['domains']:
                 scans, left = _discover_new(added['domains'], used, project.id, initiated_by=ctx.user)
                 scan_ids += [scan.id for scan in scans]
                 deferred += left
@@ -1093,6 +1243,7 @@ def _add_targets(ctx, slug, values, discover, mode):
     bad line never blocks the rest; the response says what happened to every line. Every target that is created is
     queued for discovery, first in, first out."""
     project, _ = get_project(ctx, slug, write=True)
+    _discovery_mode(mode)  # before the exclusions below, which cannot be undone
     if values is not None and not isinstance(values, (str, list)):
         raise ApiError(400, 'targets must be a list or pasted text')
     entries = parse_target_list(values) if isinstance(values, str) else [t for t in dict.fromkeys(normalize_target(str(v)) for v in (values or [])) if t]
@@ -1118,9 +1269,11 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
 
     ``initiated_by`` is recorded on the ``ScanHistory`` rows discovery queues for the newly-created targets; left unset (as the
     runZero import leaves it) for a source with no asking user."""
+    from targetApp.models import Domain
     from targetApp.target_types import DOMAIN
     if len(entries) > BULK_MAX_ENTRIES:
         raise ApiError(400, f'{len(entries)} entries; the limit is {BULK_MAX_ENTRIES} per request')
+    stored = _discovery_mode(mode)  # kept on every target this creates: the mode its later automatic scans use
     names, domain_names, invalid, seen = [], [], [], set()
     for entry in entries:
         if len(names) >= BULK_MAX_EXPANDED:
@@ -1141,18 +1294,17 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
             if kind == DOMAIN:
                 domain_names.append(name)
     skipped = []
-    created, existing = _create_domains(project, names, excluded=skipped)
+    created, existing = _create_domains(project, names, excluded=skipped, discovery_mode=stored)
     invalid += [{'value': n, 'error': 'excluded for this organization: never added or scanned'} for n in skipped]
     invalid += refused
     if domain_names:  # domain targets are watched for new certificates going forward
-        from cveFeed.tasks import watch_certificate_transparency
+        from cveFeed import ct_queue
         names_wanted = set(domain_names)
         wanted = [d for d in created if d.name in names_wanted]
-        for i, d in enumerate(wanted):  # crt.sh blocks a burst, so each check starts a couple of seconds after the last
-            watch_certificate_transparency.apply_async(args=[d.id], countdown=int(i * 2.5))
+        ct_queue.queue_lookups([d.id for d in wanted], ct_queue.ADD_LIFETIME)  # spaced out (crt.sh blocks a burst), marked, and expiring
     scan_ids, used, note, deferred = [], mode, None, 0
     to_discover = _not_internal(project, created)  # targets inside a declared internal network are a Sentinel's to scan, never discovered from here
-    if discover and to_discover:
+    if discover and to_discover and stored != Domain.DISCOVERY_MANUAL:  # manual: "just add them, do not scan yet"
         scans, deferred = _discover_new(to_discover, used, project.id, initiated_by=initiated_by)
         scan_ids = [scan.id for scan in scans]
     return {'received': len(entries), 'created': len(created), 'created_names': [d.name for d in created][:200],
@@ -1162,22 +1314,26 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
 
 # --- inventory and findings ----------------------------------------------------
 
-def _heat_reasons(sub):
-    """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first."""
+def _heat_reasons(sub, capped=True):
+    """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first. ``capped=False``
+    rates each CVE match by ``threat.validation_heat`` (no version-only cap): what a confirmer (OpenVAS) orders hosts by."""
     from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.distro import label_for
-    from cveFeed.threat import SEVERITY_HEAT, classify_threat_tier, match_temperature
+    from cveFeed.threat import SEVERITY_HEAT, match_heat, validation_heat
     reasons = []
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out by the AI, fixed or an accepted risk: not a reason for the host's colour
             continue
         c = m.cve_entry
-        tier = classify_threat_tier(kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss)
+        uncapped = validation_heat(m)
+        temp = match_heat(m) if capped else uncapped
+        held = temp != uncapped  # a version-only match held below its CVE's tier: say so, so KEV is never hidden
         reasons.append({'kind': 'cve', 'label': c.cve_id, 'description': _cve_description(c, 180),
                         'detail': (f'CVSS {c.cvss}' if c.cvss is not None else 'no score') +
                         (', listed as exploited' if c.kev else '') + (', AI confirmed' if m.ai_verdict == 'affected' else '') +
-                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else ''),
-                        'temp': match_temperature(tier, c.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)),
+                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else '') +
+                        (f', version only: shown as {temp} until a check confirms it' if held else ''),
+                        'temp': temp, 'kev': bool(c.kev), 'heat_capped': held,
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
     for v in sub.vulnerability_set.all():
         if finding_is_live(v) and v.severity in SEVERITY_HEAT:
@@ -1232,9 +1388,10 @@ def _merge_group(sub, others):
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
     score and the web routes, which are both read by name."""
     from cveFeed.counts import finding_is_live, match_is_live
+    from cveFeed.threat import HEAT_RANK
     from startScan.models import open_services
     ips, seen_ports = {}, set()
-    reasons, seen_reasons = [], set()
+    reasons, seen_reasons = [], {}
     vulns, seen_vulns = {}, set()
     cves = set()
     for row in [sub, *others]:
@@ -1250,8 +1407,12 @@ def _merge_group(sub, others):
         for r in _heat_reasons(row):
             key = (r['kind'], r['finding'], r['label'] if r['kind'] == 'cve' else r['id'])
             if key not in seen_reasons:
-                seen_reasons.add(key)
+                seen_reasons[key] = len(reasons)
                 reasons.append(r)
+            elif HEAT_RANK.get(r['temp'], 0) > HEAT_RANK.get(reasons[seen_reasons[key]]['temp'], 0):
+                # one CVE on two copies (or two products) of the host: the hotter one speaks for it, so a validated copy is not hidden
+                # behind a version-only one that the cap holds at smoke
+                reasons[seen_reasons[key]] = r
         for m in row.cve_matches.all():
             if match_is_live(m):
                 cves.add(m.cve_entry.cve_id)
@@ -1279,6 +1440,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
     host_key = (sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())
     rdp_shots_by_port = ((shared or {}).get('rdp_shots') or {}).get(host_key) or {}
+    static_rdp = {r.port: r for r in ((shared or {}).get('shots') or {}).get(host_key, []) if r.scheme == 'rdp'}  # an RDP port that requires NLA: the outcome, not nothing
     from cveFeed import host_context, subdir_apps
     probe_rows = ((shared or {}).get('probes') or {}).get(host_key) or []
     unverified = _unverified_products(sub, others, ips)
@@ -1296,7 +1458,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
-            'screenshot': bool(sub.screenshot_path), 'screenshot_note': _screenshot_note(sub, http),
+            **_screenshot_fields(sub, http, ips, (shared or {}).get('shots', {}).get(host_key, []), (shared or {}).get('legacy_shots', {}).get(host_key), network),
             'technologies': sorted(techs),
             'technology_details': details,
             # products seen with no version: kept as metadata, never matched to CVEs until a version is found (cveFeed.match_policy)
@@ -1324,7 +1486,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'db': (p.extra or {}).get('db') or None,
                  'http': p.http or None, 'tls': p.tls or None,
-                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
+                 'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number), static_rdp.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
                        'classification': _classification_of(v)} for v in vulns][:15],
             # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
@@ -1333,6 +1495,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
+            # what a person calls the host and wrote about it (display only; ``aliases`` above are the other DNS names on its addresses)
+            **alias_and_note(sub, others, (shared or {}).get('tags') or {}),
             'inventory': _host_inventory(sub, others, shared)}
     if (shared or {}).get('coverage') is not None:
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
@@ -1395,22 +1559,37 @@ def _unverified_products(sub, others, ips):
     return match_policy.unversioned_leads(technologies, ports)[:50]
 
 
-def _screenshot_note(sub, http):
-    """Why a host has no front-page screenshot, in a line for the host page (empty when it has one). Screenshots are taken by discovery
-    (bbot's gowitness) of a host that answers over HTTP; a host found before that was on, or that never answered, has none."""
-    if sub.screenshot_path:
-        return ''
-    if not (http.get('url') or http.get('status')):
-        return 'None: no web page has answered on this host, so there is nothing to capture.'
-    return 'None yet: screenshots are taken when a host is discovered, and this one has not been rediscovered since; rescan the host to take one.'
+def _screenshot_fields(sub, http, ips, rows, legacy_id, network=None):
+    """The screenshot part of a host record. The browser's captures (``HostScreenshot``, cveFeed.web_shot) come first; a discovery screenshot
+    (``Subdomain.screenshot_path``, bbot's gowitness) is the fallback, and it is the newest same-name row that has one, not just ``sub``: a rescan
+    writes a new row with no screenshot, and it used to hide the older row's. ``screenshot_note`` says why there is none (or what the latest
+    attempt did), never "none yet" without a reason."""
+    from cveFeed import web_shot
+    pictures = web_shot.pictures(rows)
+    legacy = sub.id if sub.screenshot_path else legacy_id
+    legacy_shown = not pictures and legacy is not None
+    web_ports = any(web_shot.KNOWN_WEB_PORTS.get(p.number) or 'http' in (p.service_name or '').lower() for e in ips.values() for p in e['ports'])
+    ports_known = any(e['ports'] for e in ips.values())
+    note = web_shot.note_for(rows, has_web_evidence=bool(http.get('url') or http.get('status') or web_ports), legacy=legacy_shown,
+                             network=network, ports_known=ports_known)
+    shown = pictures[0] if pictures else None
+    return {'screenshot': bool(pictures) or legacy_shown, 'screenshot_note': note,
+            'screenshot_source': 'browser' if pictures else 'discovery' if legacy_shown else None,
+            'screenshot_alt': web_shot.alt_text(sub.name.lower().rstrip('.'), shown) if shown else f'Screenshot of {sub.name}',
+            'screenshot_version': int(shown.captured_at.timestamp()) if shown and shown.captured_at else 0,
+            'screenshots': [web_shot.describe(r, sub.name.lower().rstrip('.')) for r in sorted((r for r in rows if r.scheme != 'rdp'), key=web_shot.rank)]}
 
 
-def _rdp_screenshot_field(sub, shot):
-    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none."""
+def _rdp_screenshot_field(sub, shot, static=None):
+    """What the host record sends about one port's RDP capture (cveFeed.rdp_shot), or None when there is none. A port that needs NLA has no picture
+    to send; its outcome (``cveFeed.web_shot``) is sent instead of nothing."""
     if not shot:
+        if static is not None and static.outcome == 'nla_required':
+            return {'url': None, 'outcome': 'nla_required', 'reason': static.reason, 'logged_in_user': '', 'summary': '', 'error': '',
+                    'captured_at': static.attempted_at.isoformat() if static.attempted_at else None}
         return None
     return {'url': f'/cve/{sub.target_domain.project.slug}/hosts/{sub.id}/rdp-screenshot/{shot.port}/' if sub.target_domain else None,
-            'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
+            'outcome': 'ok', 'logged_in_user': shot.logged_in_user, 'summary': shot.ai_summary, 'error': shot.ai_error,
             'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
@@ -1418,7 +1597,7 @@ def _host_record(sub, ips, techs, root):
     """``(http, hosting, technology_details)`` for one host: the Shodan-style part of the record. What the host row stores wins; what
     the web route check saw on the root page (its status, title, Server and X-Powered-By headers) fills what the row lacks, so a host
     the route check reached is never shown as unprobed."""
-    from cveFeed import cms, fingerprint, hosting
+    from cveFeed import cms, fingerprint, hosting, js_libraries
     from cveFeed.correlation import split_name_version
     evidence = dict((root.evidence or {}) if root else {})
     http = {'url': sub.http_url or (root.url if root else None),
@@ -1434,12 +1613,32 @@ def _host_record(sub, ips, techs, root):
                             cdn_name=sub.cdn_name or '', is_cdn=bool(sub.is_cdn or any(e['ip'].is_cdn for e in ips.values())))
     from_page = {f['name']: f['source'] for f in evidence.get('fingerprints') or []}
     wrong = cms.superseded(sub, techs | set(from_page))  # a version of a one-core product the evidence disproves: kept, shown, never matched
+    libraries = {str(r.get('product', '')).lower(): r for r in (evidence.get('libraries') or {}).values() if isinstance(r, dict)} \
+        if isinstance(evidence.get('libraries'), dict) else {}
     details = []
     for name in sorted(techs | set(from_page)):
         base, version = split_name_version(name)
-        details.append({'name': base or name, 'version': version, 'category': fingerprint.categorize(name),
-                        'source': from_page.get(name, 'scan'), **({'superseded': True} if (cms.key(base), version) in wrong else {})})
+        row = {'name': base or name, 'version': version, 'category': fingerprint.categorize(name),
+               'source': from_page.get(name, 'scan'), **({'superseded': True} if (cms.key(base), version) in wrong else {})}
+        record = libraries.get((base or '').lower()) if js_libraries.is_library(name) else None
+        if record:  # every copy of the library on the front page and the one that runs (cveFeed.js_libraries)
+            row.update(library_details(record, version))
+        details.append(row)
     return http, info, details
+
+
+def library_details(record, version):
+    """The host record's view of one JavaScript library: where this version came from, every copy on the front page and which runs."""
+    from cveFeed.host_context import library_copies
+    copies = library_copies(record, limit=8)
+    mine = next((c for c in copies if c['version'] == version and c['state'] in ('effective', 'unresolved')), None) or \
+        next((c for c in copies if c['version'] == version), None)
+    out = {'copies': copies, 'version_source': (mine or {}).get('version_source') or record.get('version_source') or ''}
+    if mine:
+        out['copy_state'] = mine['state']
+    if record.get('copies_unresolved'):
+        out['copies_unresolved'] = True
+    return out
 
 
 def _roots_for(project, subs):
@@ -1474,6 +1673,15 @@ def _shared_for(project, subs):
     rdp_shots = {}
     for row in RdpScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}):
         rdp_shots.setdefault((row.project_id, row.host), {})[row.port] = row
+    from cveFeed.models import HostScreenshot
+    shots = {}
+    for row in HostScreenshot.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower().rstrip('.') for s in subs}):
+        shots.setdefault((row.project_id, row.host), []).append(row)
+    # the newest row of each name that has a discovery screenshot: what the host shows when its own row has none (a rescan writes a row without one)
+    legacy_shots = {}
+    for pid, name, row_id in Subdomain.objects.filter(target_domain__project_id__in=_pids_of(project, subs), name__in={s.name for s in subs}) \
+            .exclude(screenshot_path__isnull=True).exclude(screenshot_path='').order_by('id').values_list('target_domain__project_id', 'name', 'id'):
+        legacy_shots[(pid, name.lower())] = row_id
     from cveFeed.models import ProbeObservation
     probe_rows = {}
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), host__in={s.name.lower() for s in subs}).order_by('-observed_at'):
@@ -1483,10 +1691,33 @@ def _shared_for(project, subs):
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), probe='vhost-probe', kind='vhost', outcome='found',
                                                product__in=list(addresses)).order_by('host'):
         vhosts.setdefault((row.project_id, row.product), []).append(row)
-    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'probes': probe_rows, 'vhosts': vhosts}
+    return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
+            'probes': probe_rows, 'vhosts': vhosts}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
+
+
+def alias_and_note(sub, others, tags):
+    """``{alias, alias_from, note, note_from}`` for one host, from ``tags`` (``_profiles_for``: the alias and note of every HostProfile among the page's
+    names). The host's own name first, then the other names on its addresses (the Hosts page shows them as one host, so a person's alias on
+    the name that used to be on display still shows when another name takes its place), then the target when the host is the target itself
+    (an IP added as a target): ``*_from`` says which, ``host`` or ``target``, or is empty. Display only."""
+    group = [sub, *sorted(others, key=lambda r: r.name.lower())]
+    out = {'alias': '', 'alias_from': '', 'note': '', 'note_from': ''}
+    for key in ('alias', 'note'):
+        for row in group:
+            pid = row.target_domain.project_id if row.target_domain else None
+            value = (tags.get((pid, row.name.lower())) or {}).get(key, '')
+            if value:
+                out[key], out[f'{key}_from'] = value, 'host'
+                break
+        else:
+            for row in group:
+                if row.target_domain and row.name.lower() == row.target_domain.name.lower() and getattr(row.target_domain, key):
+                    out[key], out[f'{key}_from'] = getattr(row.target_domain, key), 'target'
+                    break
+    return out
 
 
 def _pid_of(project, sub):
@@ -1499,20 +1730,24 @@ def _pids_of(project, subs):
     return sorted({_pid_of(project, s) for s in subs})
 
 
-def _profiles_for(project, subs):
-    """``({(project id, lowercase host): {owner, purpose, criticality}}, {(project id, lowercase host) that is excluded})`` for a page of
-    hosts: two queries however many projects the page spans. The asset information a person typed on the host page, and whether the
-    project's organization excluded the name."""
+def _profiles_for(project, subs, others=None):
+    """``({(project id, lowercase host): {owner, purpose, criticality}}, {(project id, lowercase host) that is excluded}, {(project id, lowercase host):
+    {alias, note}})`` for a page of hosts: two queries however many projects the page spans. The asset information a person typed on the host page,
+    whether the project's organization excluded the name, and the alias and note of every name that has one: the page's names and, with ``others``
+    (``_name_siblings``), the other names on the same addresses, so an alias still shows when another name of the host is the one on display."""
     from cveFeed.models import HostExclusion, HostProfile
-    wanted = {s.name.lower() for s in subs}
+    wanted = {s.name.lower() for s in subs} | {o.name.lower() for rows in (others or {}).values() for o in rows}
     pids = _pids_of(project, subs)
-    profiles = {(row.project_id, row.host): {'owner': row.owner, 'purpose': row.purpose, 'criticality': row.criticality}
-                for row in HostProfile.objects.filter(project_id__in=pids, host__in=wanted)}
+    profiles, tags = {}, {}
+    for row in HostProfile.objects.filter(project_id__in=pids, host__in=wanted):
+        profiles[(row.project_id, row.host)] = {'owner': row.owner, 'purpose': row.purpose, 'criticality': row.criticality}
+        if row.alias or row.note:
+            tags[(row.project_id, row.host)] = {'alias': row.alias, 'note': row.note}
     try:  # the organization's exclusions reach every project of the org
         excluded = set(HostExclusion.objects.filter(org__projects__id__in=pids, host__in=wanted).values_list('org__projects__id', 'host'))
     except Exception:  # noqa: BLE001 - same as cveFeed.exclusions: a lookup problem never breaks a listing
         excluded = set()
-    return profiles, excluded
+    return profiles, excluded, tags
 
 
 def _labels_for(project, subs):
@@ -1601,8 +1836,9 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
     subs = page['results']
     others = _name_siblings(project, subs)
     labels = _labels_for(project, subs)
-    profiles, excluded = _profiles_for(project, subs)
+    profiles, excluded, tags = _profiles_for(project, subs, others)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
+    shared['tags'] = tags
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)
@@ -1620,10 +1856,10 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
 
 def host_group(project, sub):
     """The single-host view of ``sub``: its name's other current rows folded in, whichever row was asked for."""
-    profiles, excluded = _profiles_for(project, [sub])
     key = (project.id, sub.name.lower())
     others = _name_siblings(project, [sub])
-    shared = {**_shared_for(project, [sub]), 'inventories': _inventories_for(project, [sub], others),
+    profiles, excluded, tags = _profiles_for(project, [sub], others)
+    shared = {**_shared_for(project, [sub]), 'tags': tags, 'inventories': _inventories_for(project, [sub], others),
               'coverage': _coverage_for([sub], others, project), 'coverage_rich': True}  # the single host also names each address, port or CVE judged
     return _host(sub, others[sub.id], _labels_for(project, [sub]).get(key, ()),
                  profiles.get(key), key in excluded, _roots_for(project, [sub]).get(key), shared)
@@ -1685,12 +1921,13 @@ def _internal_filter(qs, params, prefix=''):
 
 def list_hosts(ctx, slug, params):
     """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name)."""
+    from django.db.models import Q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     from cveFeed.correlation import latest_scan_q
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     if params.get('q'):
-        qs = qs.filter(name__icontains=params['q'])
+        qs = qs.filter(Q(name__icontains=params['q']) | _alias_note_q(params['q'], project))
     if params.get('target_id'):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
     qs = _internal_filter(qs, params)
@@ -1705,7 +1942,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country')
+                  'sensitive', 'zombie', 'country', 'alias', 'note')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
@@ -1771,6 +2008,24 @@ def _ip_filter(value):
         return Q(ip_addresses__address__startswith=value)
 
 
+def _alias_note_q(value, project, fields=('alias', 'note')):
+    """A Q matching the hosts whose alias or note (``fields``) contains ``value``: the HostProfile of the host's own name, and, for a host that is
+    its target itself (an address added as a target), the target's. One correlated subquery on the (project, host) key of HostProfile, so a search
+    costs no extra query. In the all-projects view the profile must be of the host's own project. A name is compared lowercase, as HostProfile
+    stores it."""
+    from django.db.models import Exists, F, OuterRef, Q
+    from django.db.models.functions import Lower
+
+    from cveFeed.models import HostProfile
+    text, target_text = Q(), Q()
+    for field in fields:
+        text |= Q(**{f'{field}__icontains': value})
+        target_text |= Q(**{f'target_domain__{field}__icontains': value})
+    own = HostProfile.objects.filter(text, host=Lower(OuterRef('name')))
+    own = own.filter(project_id=OuterRef('target_domain__project_id')) if _is_all(project) or project is None else own.filter(project=project)
+    return Q(Exists(own)) | (Q(name__iexact=F('target_domain__name')) & target_text)
+
+
 def _hosts_named_in(rows, project):
     """A Q matching the hosts named by ``rows`` (RouteAuth or HostState rows, narrowed to ``project`` or, when it is None, unnarrowed).
     By name inside one project. In the all-projects view by (project, name): a route or zombie state of one project must never
@@ -1833,7 +2088,7 @@ def _term_filter(field, value, project=None):
                        'vulnerability__name', 'cve_matches__cve_entry__cve_id'):
             q |= Q(**{f'{lookup}__icontains': value})
         q |= Q(**{ports + 'service_name__icontains': value}) & open_port
-        return q
+        return q | _alias_note_q(value, project)
     if field == 'tech':
         return _running_q(value, project)
     if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4), on a technology row or an open port, on the same row
@@ -1865,7 +2120,9 @@ def _term_filter(field, value, project=None):
     if field == 'ip':
         return _ip_filter(value)
     if field == 'host':
-        return Q(name__icontains=value)
+        return Q(name__icontains=value) | _alias_note_q(value, project, ('alias',))
+    if field in ('alias', 'note'):
+        return _alias_note_q(value, project, (field,))
     if field == 'vuln':
         return Q(vulnerability__name__icontains=value)
     if field == 'sev':
@@ -2005,6 +2262,21 @@ def _why_matched(sub, terms):
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
     return list(dict.fromkeys(reasons))[:8]
+
+
+def _alias_reasons(row, terms):
+    """What each positive term matched in a host row's alias or note, for the results list (the row already carries both, so no query)."""
+    reasons = []
+    for neg, field, value, _quoted in terms:
+        v = value.lower()
+        if neg or field not in (None, 'host', 'alias', 'note'):
+            continue
+        if field != 'note' and v in row['alias'].lower():
+            reasons.append(f'alias {row["alias"]}')
+        if field in (None, 'note') and v in row['note'].lower():
+            note = ' '.join(row['note'].split())
+            reasons.append(f'note {note[:60]}{"…" if len(note) > 60 else ""}')
+    return reasons
 
 
 HEAT_FACET_VALUES = ('fire', 'smoke', 'ice', 'clean', 'unscanned')
@@ -2172,6 +2444,8 @@ def search_hosts(ctx, slug, params):
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    for row in page['results']:
+        row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
     page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id),
                                              **search_facets}
     page['has_internal'] = _any_internal()  # a project the caller sees declared an internal network: the page offers the scope filter
@@ -2277,7 +2551,7 @@ def _hygiene(f):
 
 
 def list_hygiene(ctx, slug, params):
-    """TLS, certificate and email-authentication (SPF, DKIM, DMARC, CAA) findings."""
+    """TLS, certificate, email-authentication (SPF, DKIM, DMARC, CAA) and cleartext-service findings."""
     from cveFeed.models import HygieneFinding
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
@@ -2289,7 +2563,7 @@ def list_hygiene(ctx, slug, params):
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
     if params.get('check'):
-        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls
+        qs = qs.filter(check_name__startswith=params['check'])  # e.g. spf, dmarc, dkim, tls, cleartext
     if params.get('q'):
         qs = qs.filter(host__icontains=params['q'])
     return paginate(qs, params, _tagged(_hygiene, lambda f: f.domain.project) if everywhere else _hygiene)
@@ -2766,12 +3040,14 @@ def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
 
 def _match(m):
     from cveFeed.distro import label_for
-    from cveFeed.threat import match_temperature
+    from cveFeed.threat import match_heat, validation_heat
     sub = m.subdomain
     cve = _cve(m.cve_entry, brief=True)
     cve['feed_tier'] = cve['tier']
-    cve['tier'] = match_temperature(cve['tier'], m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m))  # rated as it applies to this host
-    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None,
+    cve['tier'] = match_heat(m)  # rated as it applies to this host: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT
+    cve['validation_tier'] = validation_heat(m)  # the same without that cap: what orders validation
+    cve['heat_capped'] = cve['tier'] != cve['validation_tier']
+    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None, 'version_only': match_policy.is_version_only(m),
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
             'confidence': m.confidence, 'source': m.source, 'host_reported': m.source == 'host',
             'ai_verdict': m.ai_verdict, 'ai_reason': m.ai_reason,
@@ -2832,6 +3108,8 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(subdomain__name__icontains=params['host'])
     if params.get('cve'):  # one CVE id: where a CVE named in free text (an activity line) links to
         qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
+    if _kev_only(params):
+        qs = qs.filter(cve_entry__kev=True)
     return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
@@ -2840,6 +3118,12 @@ def list_matches(ctx, slug, params):
 FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
+
+
+def _kev_only(params):
+    """``kev=1`` (or true, yes): only CVE matches of a CVE listed as exploited. Heat no longer says KEV (a version-only KEV match is smoke,
+    ``threat.match_heat``), so this is how a person or an agent finds them all. Any other value is ignored."""
+    return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _finding_sources(project, params):
@@ -2857,6 +3141,9 @@ def _finding_sources(project, params):
     wanted = params.get('type') or 'all'
     if wanted != 'all' and wanted not in FINDING_TYPES:
         raise ApiError(400, f'type must be all or one of {", ".join(FINDING_TYPES)}')
+    kev = _kev_only(params)
+    if kev:
+        wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
     status = params.get('status') or 'actionable'
     if status not in ('actionable', 'all'):
         raise ApiError(400, 'status must be actionable or all')
@@ -2872,6 +3159,8 @@ def _finding_sources(project, params):
     sources = {}
     if wanted in ('all', 'cve'):
         qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        if kev:
+            qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
             qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk'))
         if params.get('host'):
@@ -2925,7 +3214,10 @@ def _finding_row(kind, obj):
         if obj.source == 'host':
             note += ' (reported by the host)'
         status = 'ruled out' if obj.ai_verdict == 'not_affected' else obj.remediation_status
-        extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160)}
+        # KEV is shown on the row whatever the heat: a version-only match of a known-exploited CVE shows smoke, not fire
+        from cveFeed.threat import validation_heat
+        extra = {'cvss': cve.cvss, 'description': _cve_description(cve, 160), 'kev': bool(cve.kev), 'version_only': match_policy.is_version_only(obj),
+                 'heat_capped': heat != validation_heat(obj)}  # the version-only cap lowered it (CVENGINE_VERSION_ONLY_MAX_HEAT)
     elif kind == 'scanner':
         title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
         status, extra = ('closed' if not obj.open_status else obj.remediation_status), {}
@@ -2949,15 +3241,26 @@ def _finding_project(kind, obj):
             'hygiene': lambda o: o.domain.project}[kind](obj)
 
 
+GROUP_MODES = ('none', 'cve')  # group=cve: the same script on sibling hosts is one row (cveFeed.finding_groups)
+
+
 def list_findings(ctx, slug, params):
     """Every finding of the project in one list, hottest first: CVE matches, scanner findings and hygiene findings. Facets:
     type (all|cve|scanner|hygiene), heat (all|fire|smoke|ice), severity (all|critical|high|medium|low|info), status
-    (actionable, the default, or all) and host. ``counts`` holds the total of each type under the same facets; the list itself
-    pages through at most MAX_FINDINGS rows (``truncated`` says when there are more)."""
+    (actionable, the default, or all), host, and kev=1 (CVE matches of a CVE listed as exploited only, whatever their heat). ``counts`` holds the total of each type under the same facets; the list itself
+    pages through at most MAX_FINDINGS rows (``truncated`` says when there are more).
+
+    ``group=cve`` folds the CVE matches of one script on sibling hosts into one row (``_grouped_findings``); the default
+    (``group=none``) is one row per host, as it always was."""
     project, _ = get_project(ctx, slug)
     page, size = page_args(params, zero_ok=True)  # page_size=0: the counts alone
+    group = str(params.get('group') or 'none').strip().lower()
+    if group not in GROUP_MODES:
+        raise ApiError(400, 'group must be none or cve')
     sources = _finding_sources(project, params)
     counts = {key: qs.count() for key, qs in sources.items()}
+    if group == 'cve':
+        return _grouped_findings(project, sources, counts, page, size)
     total = sum(counts.values())
     start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
     merged = []
@@ -2975,6 +3278,68 @@ def list_findings(ctx, slug, params):
         results.append(row)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
+
+
+def _grouped_findings(project, sources, counts, page, size):
+    """``list_findings`` with ``group=cve``: the same facets and order, but the CVE matches of one script on sibling hosts are one row
+    (the rule is in ``cveFeed.finding_groups``). A group row is its hottest member's ordinary row (its id and kind open that member)
+    plus ``group``: every member's id, host and own status, and the split of heat, status, classification and validation.
+
+    ``counts`` stays per host finding, as without grouping; ``row_counts`` is the rows of each type the grouped list has, ``total`` and
+    ``count`` count rows (they page the list), ``findings_total`` is the host findings behind them, ``groups`` the rows that stand for
+    more than one host and ``grouped_findings`` the host findings inside those. Queries: the counts, one values() pass over the
+    filtered CVE matches (at most GROUP_SCAN_MAX, ``group_scan_truncated`` past that: the rest stay one row each), the top of the
+    scanner and hygiene lists, and one query for the representatives on the page."""
+    from cveFeed import finding_groups
+    cve_qs = sources.get('cve')
+    built, scanned = finding_groups.read(cve_qs) if cve_qs is not None else ([], 0)
+    overflow = max(0, counts.get('cve', 0) - scanned)
+    row_counts = {key: counts.get(key, 0) for key in FINDING_TYPES}
+    if cve_qs is not None:
+        row_counts['cve'] = len(built) + overflow
+    multi = [g for g in built if len(g['members']) > 1]
+    total = sum(row_counts.values())
+    start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
+    epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+    merged = []
+    if stop > start:
+        merged += [('cve', g) for g in built[:stop]]
+        if overflow and len(built) < stop:  # past the pass's cap: the remaining matches, one row each, in the list's order
+            merged += [('cve-obj', obj) for obj in cve_qs[scanned:scanned + stop - len(built)]]
+        for key in ('scanner', 'hygiene'):
+            if key in sources:
+                merged += [(key, obj) for obj in sources[key][:stop]]
+
+    def order(pair):
+        key, item = pair
+        if key == 'cve':
+            return finding_groups.sort_key(item['rep'])
+        return (item.heat_rank, item.sev, item.when or epoch, item.id)
+    merged.sort(key=order, reverse=True)
+    page_items = merged[start:stop]
+    rep_ids = [item['rep']['id'] for key, item in page_items if key == 'cve']
+    reps = {obj.id: obj for obj in cve_qs.filter(id__in=rep_ids).select_related('subdomain__target_domain')} if rep_ids else {}
+    everywhere = _is_all(project)
+    results = []
+    for key, item in page_items:
+        if key == 'cve':
+            obj = reps.get(item['rep']['id'])
+            if obj is None:  # gone between the two reads (a rescan retired it): the next page load settles it
+                continue
+            row = _finding_row('cve', obj)
+            if len(item['members']) > 1:
+                row['group'] = finding_groups.summary(item, _iso)
+        else:
+            key, obj = ('cve' if key == 'cve-obj' else key), item
+            row = _finding_row(key, obj)
+        if everywhere:
+            owner = _finding_project(key, obj)
+            row['project'], row['project_name'] = (owner.slug, owner.name) if owner else (None, None)
+        results.append(row)
+    return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page, 'page_size': size,
+            'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': 'cve', 'row_counts': row_counts,
+            'findings_total': sum(counts.values()), 'groups': len(multi), 'grouped_findings': sum(len(g['members']) for g in multi),
+            'group_scan_truncated': overflow > 0, 'results': results}
 
 
 def _host_of(obj):
@@ -3144,7 +3509,9 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     _rescore_hosts(hosts)  # once per host, not once per finding
-    activity.log('remediation', f'bulk marked {updated} finding(s) {status}', project=project, count=updated, failed=len(failed))
+    # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
+    activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
+                 hosts=len(hosts), failed=len(failed))
     return {'updated': updated, 'failed': failed}
 
 

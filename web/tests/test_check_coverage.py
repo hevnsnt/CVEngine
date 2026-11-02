@@ -272,6 +272,66 @@ class ApplicabilityTests(SimpleTestCase):
 		self.assertEqual(state_of(facts(ports=[port(80, 'http')]), 'db-exposure')[0], 'not_applicable')
 		self.assertEqual(state_of(facts(ports=[port(6379, 'redis')]), 'db-exposure')[0], 'due')
 
+	def test_cleartext_check_applies_only_to_a_host_with_a_cleartext_service_or_a_checked_web_route(self):
+		self.assertEqual(state_of(facts(ports=[port(80, 'http'), port(22, 'ssh')]), 'cleartext')[0], 'not_applicable')
+		for number, service in ((23, 'telnet'), (21, 'ftp'), (513, 'login'), (514, 'shell'), (512, 'exec')):
+			self.assertEqual(state_of(facts(ports=[port(number, service)]), 'cleartext')[0], 'due', service)
+		for number, service in ((990, 'ftps'), (992, 'telnets'), (23, 'tcpwrapped')):  # encrypted or not a service: nothing to report on
+			self.assertEqual(state_of(facts(ports=[port(number, service)]), 'cleartext')[0], 'not_applicable', service)
+		self.assertEqual(state_of(facts(ports=[port(23, 'telnet', protocol='udp')]), 'cleartext')[0], 'not_applicable')
+		web = facts(ports=[port(80, 'http')], web_bases=['http://www.example.test'])
+		self.assertEqual(state_of(web, 'cleartext')[0], 'not_applicable')  # no route check has read its pages yet
+		ev = cc.Evidence(NOW)
+		ev.routes[(1, web.name)] = ago(days=1)
+		self.assertEqual(state_of(web, 'cleartext', ev)[0], 'due')
+
+	def test_cleartext_check_leaves_out_a_cdn_edge_and_a_tailnet_address_like_the_check_itself(self):
+		edge = facts(addresses=[cc.Addr('203.0.113.10', is_cdn=True, ports=[port(21, 'ftp')])])
+		self.assertEqual(state_of(edge, 'cleartext')[0], 'not_applicable')
+		tailnet = facts(addresses=[cc.Addr('100.101.102.103', ports=[port(23, 'telnet')])])
+		self.assertEqual(state_of(tailnet, 'cleartext')[0], 'not_applicable')
+
+	def test_cleartext_check_is_judged_by_the_hygiene_run_of_the_target_or_the_scan_stage(self):
+		host = facts(name='router.example.test', ports=[port(23, 'telnet')], scan_id=9)
+		state, row = state_of(host, 'cleartext')
+		self.assertEqual((state, row['detail']), ('due', 'never run'))
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=3))  # the whole-target run is recorded on the target
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=30))  # past its 24 hour window
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'due')
+		ev.stages[(9, 'host_hygiene')] = [(2, ago(days=1))]  # a run limited to this scan's hosts counts too
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+		ev.stages[(9, 'host_hygiene')] = [(0, ago(days=1))]
+		self.assertEqual(state_of(host, 'cleartext', ev)[0], 'due')
+		other = facts(name='router.example.test', ports=[port(23, 'telnet')], target_name='other.test')
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, 'example.test', ago(hours=3))  # another target's run is not this host's
+		self.assertEqual(state_of(other, 'cleartext', ev)[0], 'due')
+
+	def test_cleartext_check_follows_its_switch_and_the_bounty_gate(self):
+		host = facts(ports=[port(23, 'telnet')])
+		with mock.patch.dict(os.environ, {'CVENGINE_HYGIENE_CLEARTEXT': '0'}):
+			state, row = state_of(host, 'cleartext')
+		self.assertEqual(state, 'not_applicable')
+		self.assertIn('CVENGINE_HYGIENE_CLEARTEXT=0', row['detail'])
+		ev = cc.Evidence(NOW)
+		ev.blocked = {1}  # the hygiene sweep skips the project, so nothing would refresh the check
+		state, row = state_of(host, 'cleartext', ev)
+		self.assertEqual((state, row['detail']), ('not_applicable', cc.BOUNTY_REASON))
+
+	def test_cleartext_check_is_judged_for_a_host_inside_a_declared_internal_network_too(self):
+		host = facts(name='10.20.0.7', address='10.20.0.7', ports=[port(23, 'telnet')], internal='10.20.0.0/24', target_name='10.20.0.7',
+			target_is_domain=False)
+		ev = cc.Evidence(NOW)
+		ev.add_ledger('hygiene', 1, '10.20.0.7', ago(hours=2))
+		with mock.patch.object(cc, '_sentinel_online', return_value=True):
+			self.assertEqual(state_of(host, 'cleartext', ev)[0], 'done')
+			self.assertEqual(state_of(host, 'cleartext')[0], 'due')
+			# the rest of the external checks stay not applicable to it, as before
+			self.assertEqual(state_of(host, 'waf')[0], 'not_applicable')
+
 	def test_target_level_checks_count_on_the_target_only(self):
 		sub = facts(name='www.example.test')
 		target = facts(name='example.test')
