@@ -95,8 +95,9 @@ def fire_matches(since, scan=None, cve_ids=None):
     new CVEs (``cve_ids``, when given) made on the inventory. A feed match belongs to the scan whose host row it sits on, so it is
     not filtered on the scan; the caller runs this after the AI has judged them.
 
-    A page needs evidence that the vulnerability exists: the host's version in the affected range, a template hit, or the
-    distribution tracker calling it vulnerable. A match the AI left uncertain (the AI's false-positive call lands there when no
+    A page needs evidence that the vulnerability exists and the match to be fire on the host (``threat.match_heat``): with the default
+    CVENGINE_VERSION_ONLY_MAX_HEAT a version in the affected range alone is smoke, so only a match with hard evidence (a template hit, the
+    distribution tracker calling it vulnerable, the host's own report, runZero, a validation hit) is paged. A match the AI left uncertain (the AI's false-positive call lands there when no
     hard evidence can close it) is not announced unless a template hit or the distribution tracker proves it; it stays open, is
     tested, and a hit is announced by ``template_hits``. Matches the version rules out, the AI judged not affected or the host's
     distribution has patched are left out."""
@@ -105,7 +106,7 @@ def fire_matches(since, scan=None, cve_ids=None):
 
         from cveFeed import match_policy
         from cveFeed.models import CVEEntry, CVEMatch
-        from cveFeed.threat import fire_tier_q
+        from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
         rows = rows.filter(scan_history=scan) if scan is not None else rows
         if cve_ids is not None:
@@ -114,6 +115,9 @@ def fire_matches(since, scan=None, cve_ids=None):
         rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').filter(
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
+        # and fire on the host: a version-only match shows smoke by default (threat.version_only_max_heat), so it is not paged as fire;
+        # its validation hit is announced by ``template_hits``
+        rows = rows.annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE])
         total = rows.count()
         if not total:
             return False

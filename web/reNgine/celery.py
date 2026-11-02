@@ -73,6 +73,19 @@ def recap_version_only_answers(*args, **kwargs):
 
 
 @worker_ready.connect()
+def rescore_for_heat_cap(*args, **kwargs):
+    """Host scores are stored: when the version-only heat cap changed (the 1.3.2 upgrade, or CVENGINE_VERSION_ONLY_MAX_HEAT), one full
+    rescore is queued so a score never counts a version-only match as fire after its heat stopped saying so (cveFeed.scoring.
+    rescore_if_heat_cap_changed). Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import scoring
+        scoring.rescore_if_heat_cap_changed()
+    except Exception:  # noqa: BLE001 - the next worker start or the daily rescore tries again
+        logging.getLogger(__name__).exception('could not check the version-only heat cap')
+
+
+@worker_ready.connect()
 def start_first_run_bootstrap(*args, **kwargs):
     """A brand-new install loads its CVE feed as soon as its workers are up, not at the first scheduled run (cveFeed.tasks.
     bootstrap_first_run does nothing on an install that already has CVEs). The delay lets the other workers and beat settle.

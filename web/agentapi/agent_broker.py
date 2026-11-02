@@ -515,7 +515,8 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
         with transaction.atomic():
             task = AgentTask.objects.create(
                 project=project, match=match, kind=kind, mode=task_mode, required_capabilities=needs, host=sub.name[:500],
-                os_family=agent_tasks.host_os_family(sub), ips=agent_tasks.host_ips(sub), priority=agent_tasks.PRIORITY.get(match_tier, 1),
+                os_family=agent_tasks.host_os_family(sub), ips=agent_tasks.host_ips(sub),
+                priority=agent_tasks.PRIORITY.get(agent_tasks.validation_tier_of(match) if kind == 'validate' else match_tier, 1),
                 created_by=ctx.user)
     except IntegrityError:
         return 'already queued or in progress'

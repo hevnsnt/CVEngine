@@ -79,15 +79,68 @@ def is_version_unknown(evidence, version_in_range, template_result='', distro_st
         and distro_status != 'vulnerable' and not evidence.get('runzero')
 
 
+# ----------------------------------------------------------------------------- hard evidence: the one definition
+
+def has_hard_evidence(source, evidence, template_result='', distro_status='', validation_status=''):
+    """Whether a CVE match rests on evidence about *this host* beyond a version string. The one definition, used by triage's ceiling, the
+    match heat (``threat.match_heat``) and its database form (``hard_evidence_q``). Hard evidence is any of:
+
+      * a template hit (``template_result`` vulnerable: a nuclei CVE template, or a confirmed OpenVAS test);
+      * the distribution's tracker listing the host's package as vulnerable (``distro_status`` vulnerable);
+      * the host's own inventory report: the match was made from it (source ``host``) or it confirmed an external match
+        (``evidence.host_reported``);
+      * a runZero report of the same CVE on the host (``evidence.runzero``);
+      * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
+
+    Everything else is *version-only*: a version read by nmap or a banner, by technology detection (a script name, a page generator), by
+    WPScan, an OpenVAS test below its quality bar, or a CVE's version range read against any of those. An AI verdict is not evidence
+    (text never confirms), and a version re-read by another tool is the same evidence again."""
+    evidence = evidence or {}
+    return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
+            or bool(evidence.get('host_reported')) or bool(evidence.get('runzero')) or validation_status == 'hit')
+
+
+def hard_evidence_q(prefix=''):
+    """The database form of ``has_hard_evidence`` over CVEMatch rows (``prefix`` reaches the match from another model). The validation hit is
+    read through the match's Triage row (a one-to-one, so the join never multiplies rows)."""
+    from django.db.models import Q
+    p = prefix
+    return (Q(**{p + 'template_result': 'vulnerable'}) | Q(**{p + 'distro_status': 'vulnerable'}) | Q(**{p + 'source': 'host'})
+            | Q(**{p + 'evidence__has_key': 'host_reported'}) | Q(**{p + 'evidence__has_key': 'runzero'})
+            | Q(**{p + 'triage__validation_status': 'hit'}))
+
+
+def _validation_status(match):
+    """The validation status of a CVEMatch's Triage row ('' when it has none). Uses the row a ``select_related``/``prefetch_related`` of
+    ``triage`` loaded; otherwise one query."""
+    from django.core.exceptions import ObjectDoesNotExist
+    try:
+        row = match.triage
+    except (ObjectDoesNotExist, AttributeError):
+        return ''
+    return getattr(row, 'validation_status', '') or ''
+
+
+def is_version_only(match):
+    """Whether a CVEMatch is *version-only*: it has no hard evidence (``has_hard_evidence``). Such a match never shows the highest heat by
+    default (``threat.version_only_max_heat``), KEV or not; validation is how it earns it."""
+    return not has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
+                                 getattr(match, 'distro_status', '') or '', _validation_status(match))
+
+
+def version_only_q(prefix=''):
+    """The database form of ``is_version_only``."""
+    return ~hard_evidence_q(prefix)
+
+
 def version_only(source, evidence, version_in_range, template_result='', distro_status=''):
     """Whether a match stands on nothing but a version string inside an advisory's range (or older than every branch it fixes, which
-    correlation records as ``branch_unlisted`` with no range result: the same string, read against the advisory's branches): no template
-    hit, no distribution tracker listing, no host-reported inventory (source ``host``), no runZero report. A banner version is the
+    correlation records as ``branch_unlisted`` with no range result: the same string, read against the advisory's branches) and has no hard
+    evidence (``has_hard_evidence``; a validation hit is weighed by the caller, on the Triage row). A banner version is the
     weakest evidence there is (a distribution backports fixes without changing it, a proxy answers for another server), so such a match
     is a lead to check, never a finding the AI can call affected (``triage.ceiling``)."""
     on_version = version_in_range is True or (version_in_range is None and bool((evidence or {}).get('branch_unlisted')))
-    return (on_version and template_result != 'vulnerable' and distro_status != 'vulnerable'
-            and source != 'host' and not (evidence or {}).get('runzero'))
+    return on_version and not has_hard_evidence(source, evidence, template_result, distro_status)
 
 
 def version_unknown(match):

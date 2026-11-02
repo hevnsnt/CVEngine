@@ -1090,7 +1090,8 @@ def recap_version_only():
     version = Q(match__version_in_range=True) | Q(match__version_in_range__isnull=True, match__evidence__has_key='branch_unlisted')
     rows = (Triage.objects.filter(version, kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'))
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
-            .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
+            .exclude(match__source='host').exclude(match__evidence__has_key='host_reported')
+            .exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
     ids = list(rows.values_list('pk', flat=True))
     changed = 0
     now = timezone.now()
