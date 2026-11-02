@@ -888,7 +888,7 @@ def signature_of(obj):
 DIFFERENT_PRODUCT = 'Closed automatically: different product'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
-               match_policy.NO_EVIDENCE)
+               match_policy.NO_EVIDENCE, js_libraries.LIBRARY_CLOSED)
 
 
 def closure_summary(reason):
@@ -908,6 +908,20 @@ def _names(values, limit=3):
     return ', '.join('"%s"' % v for v in seen[:limit])
 
 
+def library_provenance_reason(match):
+    """The stored reason to close a JavaScript library match the host's own page contradicts (``js_libraries.HostLibraries.judge``), or
+    ''. Read by ``invalid_identity_reason``, so the periodic ``reconcile_invalid_correlations`` sweep re-checks stored matches against
+    the page without a rescan: a version a technology scan read that the page's own files contradict, on a host that only redirects, on
+    a page that loads no such script, or that is a cache-buster."""
+    if getattr(match, 'source', '') != 'tech' or not match.matched_version or match.subdomain_id is None:
+        return ''
+    name, _cpe = match_policy.sighting_of(match)
+    if not js_libraries.is_library(name):
+        return ''
+    skip, evidence, _cap = js_libraries.HostLibraries.for_subdomain(match.subdomain).judge(name, match.matched_version)
+    return js_libraries.closed_reason(evidence['reason']) if skip and evidence.get('reason') else ''
+
+
 def invalid_identity_reason(match):
     """A reason to close this *candidate correlation*, never a claim that the host lacks backend software.
 
@@ -920,6 +934,9 @@ def invalid_identity_reason(match):
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
+    reason = library_provenance_reason(match)
+    if reason:
+        return reason
     # The sighting the match was made from, not the product the advisory names: a match in range stores the advisory's own name, which
     # always matches itself, so only the original sighting can show that a different product was linked (an "nginx" fingerprint
     # against ingress-nginx's ranges).
@@ -1093,8 +1110,8 @@ def save_matches(rows, covered=None):
         or existing[k].distro_status != r["distro_status"]
         or ((existing[k].ai_reason or '').startswith('Closed automatically:') and
             any(getattr(existing[k], field) != r[field] for field in _MATCH_FIELDS))
-        # closed because the host only redirected: it matches again, so the host serves its own page now, whatever else changed
-        or (existing[k].ai_reason or '').startswith(js_libraries.ALIAS_CLOSED))}
+        # closed because the host's own page contradicted it: it matches again, so the page says otherwise now, whatever else changed
+        or (existing[k].ai_reason or '').startswith(js_libraries.LIBRARY_CLOSED))}
     if any(key not in existing for key in unique) or moved:  # a new match of a kind the AI already judged starts out judged
         verdicts = {signature_of(v): v for v in MatchVerdict.objects.filter(
             cve_entry_id__in={k[0] for k in unique if k not in existing or k in moved})}
@@ -1164,8 +1181,8 @@ def close_stale(current, covered):
         return set()
     stale_keep, hosts = [], set()
     for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
-            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "template_result",
-            "remediation_status", "version_in_range"):
+            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
+            "template_result", "remediation_status", "version_in_range"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
             continue
         if m.template_result == 'vulnerable':
@@ -1179,11 +1196,10 @@ def close_stale(current, covered):
         stale_keep.append(m)
         hosts.add(m.subdomain_id)
     if stale_keep:
-        aliases = _alias_hosts({m.subdomain_id for m in stale_keep if m.source == 'tech' and js_libraries.is_library(m.matched_product)})
+        reasons = _library_closures([m for m in stale_keep if m.source == 'tech' and js_libraries.is_library(m.matched_product)])
         by_reason = {}
         for m in stale_keep:
-            target = aliases.get(m.subdomain_id) if m.source == 'tech' and js_libraries.is_library(m.matched_product) else ''
-            reason = js_libraries.alias_closed_reason(target) if target else (
+            reason = reasons.get(m.pk) or (
                 "Closed automatically: the host no longer matches this CVE (the version moved out of the affected range "
                 "or the product is gone).")
             by_reason.setdefault(reason, []).append(m.pk)
@@ -1199,17 +1215,25 @@ def close_stale(current, covered):
     return hosts
 
 
-def _alias_hosts(subdomain_ids):
-    """``{subdomain id: the host it only redirects to}`` for those of ``subdomain_ids`` whose front page only redirects to another host
-    (``js_libraries.HostLibraries.alias_of``): their library matches close with a reason of their own, so they reopen if that changes."""
-    if not subdomain_ids:
+def _library_closures(matches):
+    """``{match id: stored reason}`` for the JavaScript library matches among ``matches`` (stale tech matches) that the host's own page
+    contradicts (``js_libraries.HostLibraries.judge`` skips their version): the reason says what the page states, and the match reopens
+    when that changes (``save_matches``)."""
+    if not matches:
         return {}
+    from cveFeed.match_policy import sighting_of
     from startScan.models import Subdomain
+    hosts = {sub.pk: js_libraries.HostLibraries.for_subdomain(sub) for sub in Subdomain.objects.filter(
+        pk__in={m.subdomain_id for m in matches}).select_related('target_domain').prefetch_related('ip_addresses__ports')}
     out = {}
-    for sub in Subdomain.objects.filter(pk__in=list(subdomain_ids)).select_related('target_domain').prefetch_related('ip_addresses__ports'):
-        target = js_libraries.HostLibraries.for_subdomain(sub).alias_of
-        if target:
-            out[sub.pk] = target
+    for m in matches:
+        libraries = hosts.get(m.subdomain_id)
+        if libraries is None:
+            continue
+        name = m.matched_product if js_libraries.PRODUCTS.get((m.matched_product or '').strip().lower()) else sighting_of(m)[0]
+        skip, evidence, _cap = libraries.judge(name, m.matched_version)
+        if skip and evidence.get('reason'):
+            out[m.pk] = js_libraries.closed_reason(evidence['reason'])
     return out
 
 

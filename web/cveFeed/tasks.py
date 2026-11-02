@@ -979,9 +979,12 @@ def validate_match_on_demand(request_id):
 
 @app.task(name='reconcile_invalid_correlations', bind=False, queue='cve_feed_queue')
 def reconcile_invalid_correlations(limit=50):
-    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls."""
+    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls: every project's current matches,
+    ``limit`` (at most 100) a run in id order from a stored cursor, so the whole table is walked in turn with no long lock. It closes a
+    wrong product link (``correlation.invalid_identity_reason``) and a JavaScript library match the host's own page contradicts
+    (``correlation.library_provenance_reason``), and logs how many it closed for each reason."""
     from django.db import transaction
-    from cveFeed import correlation
+    from cveFeed import correlation, js_libraries
     from cveFeed.models import BackgroundCursor, CVEMatch
 
     batch_size = max(1, min(int(limit), 100))
@@ -993,14 +996,20 @@ def reconcile_invalid_correlations(limit=50):
         if not batch:
             cursor.last_pk = 0
             batch = list(base[:batch_size])
-        closed = 0
+        closed, by_reason = 0, {}
         for match in batch:
-            if correlation.invalid_identity_reason(match):
-                closed += int(correlation.close_invalid_correlation(match))
+            reason = correlation.invalid_identity_reason(match)
+            if reason and correlation.close_invalid_correlation(match, reason):
+                closed += 1
+                kind = js_libraries.closure_kind(reason) or 'identity'
+                by_reason[kind] = by_reason.get(kind, 0) + 1
         if batch:
             cursor.last_pk = batch[-1].pk
         cursor.save(update_fields=['last_pk', 'updated_at'])
-    return {'reviewed': len(batch), 'closed': closed, 'last_match_id': cursor.last_pk}
+    if closed:
+        logger.info('reconcile_invalid_correlations closed %d of %d matches: %s', closed, len(batch),
+                    ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk}
 
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')

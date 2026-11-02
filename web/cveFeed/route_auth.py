@@ -215,9 +215,17 @@ def classify(probe):
                                       headers=probe.get('headers'))
     if probe.get('headers') and root:
         evidence['headers'] = probe['headers']  # the root page's kept response headers: host metadata for the AI and the host page
-    page_scripts = js_libraries.parse_page(body, page_url) if root and 200 <= (probe.get('status') or 0) < 300 else []
+    # a front page's scripts are the host's: its own page (2xx) or the page it serves for "/" when that is missing (a hosted site's 404
+    # still loads its scripts); never an edge's challenge, a redirect or an error
+    from cveFeed.probes import challenge_of
+    script_root = root and js_libraries.page_status(probe.get('status')) and not challenge_of(probe)
+    page_scripts = js_libraries.parse_page(body, page_url) if script_root else []
     if any(entry['url'] for entry in page_scripts):
         evidence['page_scripts'] = {'page': page_url, 'scripts': page_scripts}  # read by _read_scripts, which removes it before anything is stored
+    if script_root:
+        # the front page was parsed for its scripts: a library no script of it is cannot be this page's, and a ?ver= string a script of
+        # another library or of no library carries is that script's cache-buster (cveFeed.js_libraries.HostLibraries.judge)
+        evidence['script_page'] = js_libraries.script_page(page_scripts)
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
