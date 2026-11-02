@@ -91,12 +91,13 @@ def managed():
         else:
             what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth'}[f.key]
         optimistic = max(low, min(high, f.auto_optimistic))
-        out.append(Managed(f.key, 'scan_concurrency', f.label, Setting(f.key, what, f.label, low, high, f.auto_step, 'more', optimistic), f.env))
+        out.append(Managed(f.key, 'scan_concurrency', f.label, Setting(f.key, what, f.label, low, high, f.auto_step, 'more', optimistic,
+                                                                               f.default), f.env))
     kinds = {'stage_parallel': 'stage', 'work_min_gap_hours': 'work_gap', 'sentinel_refresh_gap_hours': 'refresh_gap'}
     for t in tunables.TUNABLES:
         if t.auto_tunable:
             out.append(Managed(t.key, 'tunables', t.label, Setting(t.key, kinds[t.key], t.label, t.auto_min, t.auto_max, t.auto_step, t.auto_sense,
-                                                                    t.auto_optimistic), t.env))
+                                                                    t.auto_optimistic, t.default), t.env))
     return out
 
 
@@ -164,9 +165,16 @@ def _clean_values(values):
 
 
 def applied_values(row=None):
-    """The tuned numbers that apply now, from the database: the row's numbers in mode Auto, none otherwise."""
+    """The tuned numbers that apply now, from the database: the row's numbers in mode Auto, none otherwise. An emergency back-off taken while
+    the database did not answer and not recorded yet (``pending_emergency``) lowers its keys, so no reader puts the old numbers back."""
     row = row or settings_row()
-    return _clean_values(row.values) if effective_mode(row) == 'auto' else {}
+    if effective_mode(row) != 'auto':
+        return {}
+    values = _clean_values(row.values)
+    for key, number in pending_emergency().items():
+        if key in values and number < values[key]:
+            values[key] = number
+    return values
 
 
 def publish(row=None):
@@ -291,10 +299,10 @@ def _record(**fields):
     return TuningDecision.objects.create(**fields)
 
 
-def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, actor=None, action=None, phase=''):
+def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, actor=None, action=None, phase='', only_lower=False):
     """Set a tuned number (mode Auto) and record it. Returns the decision, or None when, checked again under the row's lock, the mode is no
     longer Auto (a person chose Off or Suggest while this run was working, or the kill switch is set) or the setting was pinned meanwhile:
-    nothing is written then."""
+    nothing is written then. ``only_lower``: write only when ``new`` is below the tuned number the row holds now."""
     from django.db import transaction
 
     from cveFeed.models import AutoTuneSettings
@@ -304,6 +312,8 @@ def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, a
             return None
         values = dict(row.values or {})
         before = values.get(m.key)
+        if only_lower and not (isinstance(before, int) and new < before):
+            return None
         values[m.key] = new
         row.values = values
         row.save()
@@ -463,6 +473,8 @@ def release(user, key):
     number = int(saved[key])
     with transaction.atomic():
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
+        if effective_mode(row) != 'auto':  # checked again under the lock: a person may have chosen Off or Suggest meanwhile
+            raise TuningError(409, 'auto-tuning is not in Auto mode: turn it on first (or reset the saved value to go back to the environment or the default)')
         values = dict(row.values or {})
         before = values.get(key)
         values[key] = number  # the same number, so nothing jumps; the tuner moves it from the next run
@@ -816,17 +828,43 @@ def run(now_dt=None):
 
 
 EMERGENCY_KEY = 'cvengine:autotune:emergency'
+DB_DOWN_KEY = 'cvengine:autotune:db-down'
 EMERGENCY_KEYS = ('discovery_concurrency', 'work_depth')  # the settings whose tasks each hold a database connection
+DB_DOWN_RUNS_APART = 25 * 60  # two failed runs (every ten minutes) no further apart than this are "in a row"
+
+
+def _json_get(client, key, empty):
+    try:
+        value = json.loads(client.get(key) or 'null')
+    except Exception:  # noqa: BLE001
+        return empty
+    return value if isinstance(value, type(empty)) else empty
+
+
+def pending_emergency(client=None):
+    """{key: new number} of the emergency back-offs not recorded in the database yet (``EMERGENCY_KEY``). Never raises."""
+    try:
+        client = client or _redis()
+        if client is None:
+            return {}
+        values = _json_get(client, EMERGENCY_KEY, {}).get('values') or {}
+        return {k: v[1] for k, v in values.items() if isinstance(v, list) and len(v) == 2 and isinstance(v[1], int)}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def emergency_backoff(now):
-    """The fallback path when the database does not answer (out of connections, or down): nothing can be read or recorded there, so this works
-    from Redis alone. The published tuned numbers of the discovery pool and the conductor (the settings whose tasks hold a database
-    connection each) are backed off (``autotune_policy.backoff``) and published again with a newer version, so the 30 second tick cannot put
-    the old numbers back while the database is away; the discovery workers are resized directly with celery's ``autoscale`` remote control; and
-    the change is kept in Redis (``EMERGENCY_KEY``) to be recorded as a back-off in the history by the first run that reaches the database
-    again (``record_emergency``). A setting that is pinned, or not tuned, is not touched; nothing happens in Off or Suggest, or with the kill
-    switch, as the published copy says."""
+    """The fallback when the database does not answer (out of connections, or down): nothing can be read or written there, so this works from
+    Redis alone, and only when the database failed this run AND the one before (``DB_DOWN_KEY``; a plain Postgres restart of a few seconds is not
+    an emergency). Then the discovery pool and the conductor (whose tasks each hold a database connection) take ONE back-off step
+    (``autotune_policy.backoff``) and hold for ``BACKOFF_HOLD`` before another, like any back-off.
+
+    The source of truth while the database is away is ``EMERGENCY_KEY`` in Redis: ``{'values': {key: [number before the emergency, number
+    now]}, 'at': time of the last step}``. Every reader of the tuned numbers honours it: ``applied_values`` (the database row, so the 30 second
+    tick's publish and ``scan_concurrency.apply_discovery``'s resize, and a starting container) lowers a pending key to its emergency number, and
+    the published Redis copy carries it too. The discovery workers are resized directly with celery's ``autoscale``. The first run that reaches the
+    database again writes the numbers into the row and the history (phase ``emergency``, ``record_emergency``) and clears the key. A setting
+    that is pinned, or not tuned, is not touched; nothing happens in Off or Suggest, or with the kill switch."""
     from cveFeed import autotune_policy as policy
     summary = {'at': datetime.fromtimestamp(now, dt_timezone.utc).isoformat(), 'mode': None, 'settings': {}, 'changes': [], 'advisor': None,
                'held': 'the database does not answer: emergency back-off from Redis only'}
@@ -835,10 +873,20 @@ def emergency_backoff(now):
         summary['held'] = 'the database does not answer, and there is no Redis copy to back off from'
         remember(summary)
         return summary
-    try:
-        copy = json.loads(client.get(VALUES_KEY) or '{}')
-    except ValueError:
-        copy = {}
+    down = _json_get(client, DB_DOWN_KEY, {})
+    in_a_row = bool(down) and now - float(down.get('last', 0)) <= DB_DOWN_RUNS_APART
+    client.set(DB_DOWN_KEY, json.dumps({'first': down.get('first', now) if in_a_row else now, 'last': now}), ex=86400)
+    if not in_a_row:
+        summary['held'] = 'the database did not answer; an emergency back-off follows if it still does not at the next run'
+        remember(summary)
+        return summary
+    pending = _json_get(client, EMERGENCY_KEY, {})
+    if pending.get('at') and now - float(pending['at']) < policy.BACKOFF_HOLD:
+        summary['held'] = (f'the database does not answer; emergency back-off {int((now - float(pending["at"])) // 60)} min ago, holding '
+                           f'{policy.BACKOFF_HOLD // 60} min')
+        remember(summary)
+        return summary
+    copy = _json_get(client, VALUES_KEY, {})
     summary['mode'] = copy.get('mode')
     values = dict(copy.get('values') or {})
     if copy.get('mode') != 'auto':
@@ -852,16 +900,13 @@ def emergency_backoff(now):
                 changed[key] = [values[key], new]
                 values[key] = new
     if changed:
-        version = float(copy.get('v') or 0) + 1  # newer than the database row, so the tick's publish of the old row is skipped
+        version = max(float(copy.get('v') or 0), time.time()) + 1  # newer than the row, so an old copy never replaces this one
+        recorded = dict(pending.get('values') or {})
+        for key, (old, new) in changed.items():
+            recorded[key] = [(recorded.get(key) or [old])[0], new]
+        client.set(EMERGENCY_KEY, json.dumps({'values': recorded, 'at': now}), ex=7 * 86400)
         client.set(VALUES_KEY, json.dumps({**copy, 'values': values, 't': time.time(), 'v': version, 'emergency': True}))
         resources.invalidate_auto()
-        try:
-            pending = json.loads(client.get(EMERGENCY_KEY) or '{}')
-        except ValueError:
-            pending = {}
-        for key, (old, new) in changed.items():
-            pending[key] = [pending.get(key, [old])[0], new]
-        client.set(EMERGENCY_KEY, json.dumps(pending), ex=7 * 86400)
         if 'discovery_concurrency' in changed:
             _resize_discovery_directly(changed['discovery_concurrency'][1])
         summary['changes'] = [{'setting': k, 'from': o, 'to': n, 'source': 'controller', 'applied': True, 'emergency': True}
@@ -883,23 +928,30 @@ def _resize_discovery_directly(ceiling):
 
 
 def record_emergency(now_dt):
-    """Record what ``emergency_backoff`` did while the database was away, as back-offs in the history (and in the tuned numbers), once it
-    answers again. Never raises."""
+    """The database answers: forget the failed run (``DB_DOWN_KEY``) and write what ``emergency_backoff`` did into the tuned numbers and the
+    history (phase ``emergency``, not counted as trouble at that level, so the policy may restore it quickly: ``autotune_policy.decide``). A
+    number is only ever lowered here; a setting whose number is already at or below it (a person changed the mode meanwhile, or it was pinned)
+    is left alone. Never raises."""
     client = _redis()
+    if client is None:
+        return
     try:
-        pending = json.loads(client.get(EMERGENCY_KEY) or '{}') if client is not None else {}
+        client.delete(DB_DOWN_KEY)
+        pending = _json_get(client, EMERGENCY_KEY, {}).get('values') or {}
     except Exception:  # noqa: BLE001
         return
     if not pending:
         return
     keys = by_key()
-    for key, (old, new) in pending.items():
+    for key, pair in pending.items():
         m = keys.get(key)
-        if m is None:
+        if m is None or not isinstance(pair, list) or len(pair) != 2:
             continue
+        old, new = pair
         try:
-            apply_tuned(m, old, new, mode='auto', source='controller', pressure=True, phase='back_off', signals={},
-                        reason='the database did not answer (out of connections or down): emergency back-off from Redis')
+            apply_tuned(m, old, new, mode='auto', source='controller', pressure=False, phase='emergency', signals={'emergency': True},
+                        reason='the database did not answer (out of connections or down) in two runs in a row: emergency back-off from Redis',
+                        only_lower=True)
         except Exception:  # noqa: BLE001
             logger.warning('auto-tune: the emergency back-off of %s could not be recorded', key)
     client.delete(EMERGENCY_KEY)

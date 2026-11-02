@@ -21,21 +21,24 @@ from dashboard.models import AuditLog, Org, OrgMembership
 from reNgine import resources
 from tests.test_agentapi import call, tool_call
 from tests.test_settings import send
+from tests.test_scan_concurrency import FakeApp
 from tests.test_tenancy import client_for
 
 NOW = 1_800_000_000.0
 LONG_AGO = NOW - 10 * 3600
-NMAP = policy.Setting('heavy.nmap', 'heavy:nmap', 'nmap', 1, 4, 1, 'more', 3)
-NMAP8 = policy.Setting('heavy.nmap', 'heavy:nmap', 'nmap', 1, 8, 1, 'more', 3)
-NUCLEI4 = policy.Setting('heavy.nuclei', 'heavy:nuclei', 'nuclei', 1, 4, 1, 'more', 2)
-BBOT_DEEP = policy.Setting('heavy.bbot-deep', 'heavy:bbot-deep', 'bbot deep', 1, 2, 1, 'more', 1)
+NMAP = policy.Setting('heavy.nmap', 'heavy:nmap', 'nmap', 1, 4, 1, 'more', 3)  # no shipped default: no floor
+NMAP8 = policy.Setting('heavy.nmap', 'heavy:nmap', 'nmap', 1, 8, 1, 'more', 3, 2)
+NUCLEI4 = policy.Setting('heavy.nuclei', 'heavy:nuclei', 'nuclei', 1, 4, 1, 'more', 2, 1)
+BBOT_DEEP = policy.Setting('heavy.bbot-deep', 'heavy:bbot-deep', 'bbot deep', 1, 2, 1, 'more', 1, 1)
 DISCOVERY24 = policy.Setting('discovery_concurrency', 'discovery', 'pool', 4, 24, 2, 'more', 16)
-DISCOVERY32 = policy.Setting('discovery_concurrency', 'discovery', 'pool', 4, 32, 2, 'more', 16)
-BATCH = policy.Setting('assess_batch', 'batch', 'batch', 4, 32, 4, 'more', 16)
-DEPTH = policy.Setting('work_depth', 'depth', 'depth', 1, 16, 1, 'more', 6)
-WORK_GAP = policy.Setting('work_min_gap_hours', 'work_gap', 'gap', 1, 12, 1, 'gap', 1)
-REFRESH_GAP = policy.Setting('sentinel_refresh_gap_hours', 'refresh_gap', 'refresh', 2, 24, 1, 'gap', 3)
-STAGE16 = policy.Setting('stage_parallel', 'stage', 'stage', 2, 16, 1, 'more', 6)
+DISCOVERY32 = policy.Setting('discovery_concurrency', 'discovery', 'pool', 4, 32, 2, 'more', 16, 8)
+BATCH = policy.Setting('assess_batch', 'batch', 'batch', 4, 32, 4, 'more', 16, 8)
+DEPTH = policy.Setting('work_depth', 'depth', 'depth', 1, 16, 1, 'more', 6, 3)
+WORK_GAP = policy.Setting('work_min_gap_hours', 'work_gap', 'gap', 1, 12, 1, 'gap', 1, 2)
+REFRESH_GAP = policy.Setting('sentinel_refresh_gap_hours', 'refresh_gap', 'refresh', 2, 24, 1, 'gap', 3, 6)
+STAGE16 = policy.Setting('stage_parallel', 'stage', 'stage', 2, 16, 1, 'more', 6, 4)
+ALL_COSTS = {'bbot-deep': 2400, 'bbot-standard': 900, 'bbot-passive': 500, 'nuclei': 1000, 'nuclei-light': 500, 'nmap': 300,
+             'route-probe': 150, 'wpscan': 400, 'testssl': 200, 'screenshot': 500}
 SETTINGS = (NMAP8, NUCLEI4, BBOT_DEEP, DISCOVERY32, BATCH, DEPTH, WORK_GAP, REFRESH_GAP, STAGE16)
 ENV_NAMES = ([f.env for f in sc.FIELDS] + [t.env for t in tunables.TUNABLES] + ['CVENGINE_AUTOTUNE']
              + [f'HEAVY_TUNE_{w}_{k.upper().replace("-", "_")}' for w in ('MIN', 'MAX') for k in resources.MAX_CONCURRENT])
@@ -101,8 +104,9 @@ class SizingTests(SimpleTestCase):
         facts = {'cores': 2, 'memory_budget_mb': 3000, 'cost_mb': self.COSTS, 'db_max': 300, 'db_used': 20, 'sentinel_live': 0, 'sentinel_slots': 0,
                  'hosts': 40, 'targets': 10}
         got = self.targets(facts)
-        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (1, 1, 1))  # two cores shared by every kind
-        self.assertEqual((got['discovery_concurrency'], got['work_depth'], got['assess_batch']), (4, 3, 8))
+        # two cores shared by every kind: the CPU share gives nmap 1, but a kind never aims below what it ships with (nmap 2)
+        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (2, 1, 1))
+        self.assertEqual((got['discovery_concurrency'], got['work_depth'], got['assess_batch']), (8, 3, 8))  # two per core is 4: the default 8 stays
         self.assertEqual(got['work_min_gap_hours'], 2)
 
     def test_a_medium_box_with_two_sentinels_keeps_their_nine_slots_busy(self):
@@ -123,7 +127,7 @@ class SizingTests(SimpleTestCase):
                  'hosts': 20000, 'targets': 5000, 'discovery_ceiling': 32}
         got = self.targets(facts)
         self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['discovery_concurrency'], got['stage_parallel'], got['work_depth']), (8, 4, 32, 16, 16))
-        busy_db = dict(facts, db_max=300, db_used=250)
+        busy_db = dict(facts, db_max=300, db_used=250, discovery_active=0)
         self.assertEqual(policy.size_for(DISCOVERY32, busy_db, current=16)[0], 4)  # a database near its limit holds the pool down
         self.assertIn('database', policy.size_for(DISCOVERY32, busy_db, current=16)[1])
 
@@ -172,7 +176,50 @@ class CpuAndDatabaseSizingTests(SimpleTestCase):
     def test_the_database_guard_counts_the_connections_in_use_not_the_ceiling(self):
         busy = {'cores': 8, 'sentinel_live': 2, 'sentinel_slots': 9, 'db_max': 300, 'db_used': 200, 'discovery_active': 2}
         self.assertEqual(policy.size_for(DISCOVERY32, busy, current=32)[0], 12)  # 2 running + (210 - 200): not 32 + 10
-        self.assertEqual(policy.size_for(DISCOVERY32, dict(busy, discovery_active=None), current=32)[0], 10)
+        # the pool's own running tasks not reported (inspect timed out): the headroom is not known, so it limits nothing (not 0 + 10)
+        unknown = policy.size_for(DISCOVERY32, dict(busy, discovery_active=None), current=32)
+        self.assertEqual(unknown[0], 22)
+        self.assertNotIn('in use', unknown[1])
+        facts = {'cores': 8, 'sentinel_live': 2, 'sentinel_slots': 9, 'db_max': 100, 'db_used': 52, 'discovery_active': None}
+        target, _why, _known = policy.size_for(DISCOVERY32, facts, current=22)
+        self.assertEqual(target, 22)
+        plan = decide(DISCOVERY32, 22, 8, history(), past=SETTLED, target=target)
+        self.assertNotEqual(plan['phase'], 'cap')
+        self.assertEqual(policy.size_for(DISCOVERY32, dict(facts, discovery_active=22), current=22)[0], 22)  # 22 + 70 - 52 = 40: room
+
+    def test_no_setting_aims_below_what_it_ships_with_on_a_four_core_box(self):
+        facts = {'cores': 4, 'memory_budget_mb': 3400, 'cost_mb': ALL_COSTS, 'db_max': 300, 'db_used': 40, 'discovery_active': 4,
+                 'sentinel_live': 2, 'sentinel_slots': 9, 'hosts': 1000, 'targets': 200}
+        for m in autotune.managed():
+            s = m.setting
+            target, why, known = policy.size_for(s, facts, current=s.default)
+            self.assertFalse(policy._beyond(s, s.default, target), f'{s.key}: target {target} is less than the default {s.default} ({why})')
+            for age in (60, 3600):  # in the warm-up and after it: the default is never capped
+                plan = decide(s, s.default, s.default, history(), boot_at=NOW - age, target=target, target_known=known)
+                self.assertNotEqual(plan['direction'], 'less', (s.key, plan))
+        two = dict(facts, cores=2, sentinel_live=0, sentinel_slots=0)
+        self.assertEqual(policy.size_for(autotune.by_key()['heavy.nmap'].setting, two)[0], 2)  # the CPU share says 1; nmap ships with 2
+
+    def test_the_memory_budget_may_still_go_below_the_default(self):
+        tight = {'cores': 16, 'memory_budget_mb': 500, 'cost_mb': ALL_COSTS}
+        self.assertEqual(policy.size_for(autotune.by_key()['heavy.nmap'].setting, tight)[0], 1)  # 500 MB holds one 300 MB nmap
+
+    def test_a_16_core_box_aims_high_and_light_kinds_reach_their_maximum_on_a_large_one(self):
+        big = {'cores': 16, 'memory_budget_mb': 48000, 'cost_mb': ALL_COSTS, 'sentinel_live': 0}
+        kinds = {m.key: m.setting for m in autotune.managed() if m.key.startswith('heavy.')}
+        targets = {k: policy.size_for(s, big)[0] for k, s in kinds.items()}
+        self.assertEqual((targets['heavy.nmap'], targets['heavy.nuclei'], targets['heavy.route-probe']), (8, 4, 16))
+        self.assertTrue(all(targets[k] >= 3 for k in kinds if k != 'heavy.bbot-deep'), targets)
+        for key, s in kinds.items():
+            plan = decide(s, s.default, s.default, history(), boot_at=NOW - 3600, target=targets[key])
+            if targets[key] > s.default:
+                self.assertEqual((plan['phase'], plan['new']), ('aim_high', targets[key]), key)
+        huge = dict(big, cores=32)
+        for key, s in kinds.items():
+            if key != 'heavy.bbot-deep':
+                self.assertEqual(policy.size_for(s, huge)[0], s.high, key)
+        used = sum(targets[k] * policy.CORES_PER_RUN[k.split('.', 1)[1]] for k in kinds)
+        self.assertLessEqual(used, 16)
 
     def test_ready_needs_memory_and_a_sentinel_report(self):
         self.assertFalse(policy.facts_ready({'memory_budget_mb': 3000}))
@@ -352,6 +399,17 @@ class ControllerTests(SimpleTestCase):
         self.assertEqual(policy.towards(WORK_GAP, 1, 'more'), 1)
         self.assertEqual(policy.towards(WORK_GAP, 2, 'more'), 1)
 
+    def test_after_an_emergency_the_number_comes_back_in_one_step_once_the_database_has_room(self):
+        past = [change(3 * 3600, 8, 22, 'aim_high'), change(30 * 60, 22, 16, 'emergency')]
+        plan = decide(DISCOVERY32, 16, 8, history(), past=past, target=22)
+        self.assertEqual((plan['phase'], plan['new']), ('recover', 22))
+        self.assertEqual(decide(DISCOVERY32, 16, 8, history(), past=[past[0], change(5 * 60, 22, 16, 'emergency')], target=22)['phase'], '')
+        busy = history(db={'used': 250, 'max': 300})
+        self.assertNotEqual(decide(DISCOVERY32, 16, 8, busy, past=past, target=22)['phase'], 'recover')  # no room yet
+        self.assertEqual(decide(DISCOVERY32, 16, 8, history(), past=past, target=18)['new'], 18)  # never above the target
+        self.assertNotEqual(decide(DISCOVERY32, 16, 8, history(), past=past + [change(10 * 60, 16, 14, 'back_off', True)], target=22)['phase'],
+                            'recover')  # a later change: the normal rules
+
     def test_no_measurements(self):
         self.assertIn('no measurements', decide(NMAP8, 2, 2, [])['why_not_raised'])
 
@@ -454,7 +512,7 @@ class Isolated:
         client = resources.redis_client()
         if client is not None:
             client.delete(autotune.VALUES_KEY, autotune.SAMPLES_KEY, autotune.BOOT_KEY, autotune.LAST_RUN_KEY, autotune.ADVISOR_KEY,
-                          'cvengine:sweep:autotune', sc.VALUES_KEY, tunables.VALUES_KEY)
+                          'cvengine:sweep:autotune', sc.VALUES_KEY, tunables.VALUES_KEY, autotune.EMERGENCY_KEY, autotune.DB_DOWN_KEY)
         sc.invalidate()
         tunables.invalidate()
         resources.invalidate_auto()
@@ -730,27 +788,97 @@ class ReviewFixTests(Isolated, TestCase):
         error, text = tool_call(token, 'revert_tuning_decision', {'decision_id': 10 ** 30})
         self.assertTrue(error)
 
-    def test_when_the_database_does_not_answer_the_pool_backs_off_from_redis_and_is_recorded_later(self):
+    def db_down_run(self, at):
         from django.db import OperationalError
+        resources.redis_client().delete('cvengine:sweep:autotune')
+        with mock.patch.object(autotune, 'settings_row', side_effect=OperationalError('too many clients')), \
+                mock.patch.object(autotune, '_resize_discovery_directly') as resize:
+            summary = autotune.run(at)
+        return summary, resize
+
+    def test_when_the_database_does_not_answer_twice_the_pool_backs_off_once_from_redis_holds_and_is_recorded_later(self):
+        from reNgine import celery as celery_module
         row = AutoTuneSettings.current()
         row.values = {'discovery_concurrency': 24, 'work_depth': 8}
         row.save()
         autotune.publish(row)
-        resources.redis_client().delete('cvengine:sweep:autotune')
-        with mock.patch.object(autotune, 'settings_row', side_effect=OperationalError('too many clients')), \
-                mock.patch.object(autotune, '_resize_discovery_directly') as resize:
-            summary = autotune.run()
-        self.assertIn('emergency', summary['held'])
+        start = timezone.now()
+        summary, resize = self.db_down_run(start)  # one failed run (a Postgres restart looks like this): not an emergency
+        self.assertIn('next run', summary['held'])
+        resize.assert_not_called()
+        resources.invalidate_auto()
+        self.assertEqual(resources.auto_values()['discovery_concurrency'], 24)
+        summary, resize = self.db_down_run(start + timedelta(minutes=10))  # the next run fails too: one back-off step
         resize.assert_called_once_with(18)
+        self.assertEqual({c['setting']: (c['from'], c['to']) for c in summary['changes']}, {'discovery_concurrency': (24, 18), 'work_depth': (8, 6)})
         resources.invalidate_auto()
         self.assertEqual(resources.auto_values()['discovery_concurrency'], 18)
-        autotune.reconcile()  # the 30 second tick, with the database back, must not put 24 back before the run records it
+        summary, resize = self.db_down_run(start + timedelta(minutes=20))  # still away, inside the back-off hold: no second step
+        resize.assert_not_called()
+        self.assertIn('holding', summary['held'])
+        # the 30 second tick with the database back for it (the run has not recorded yet): the same numbers, the worker is not resized back
+        fake = FakeApp({sc.DISCOVERY_WORKER_PREFIX + 'one': 18})
+        with mock.patch.object(celery_module, 'app', fake):
+            autotune.reconcile()
+            record = sc.reconcile()
+        self.assertEqual((record['want'], fake.calls), (18, []))
         resources.invalidate_auto()
         self.assertEqual(resources.auto_values()['discovery_concurrency'], 18)
-        self.run_with(n=1)
-        recorded = TuningDecision.objects.get(setting='discovery_concurrency', phase='back_off')
-        self.assertEqual((recorded.old_value, recorded.new_value, recorded.pressure), (24, 18, True))
+        self.assertEqual(autotune.applied_values()['work_depth'], 6)
+        self.assertEqual(sc.bootstrap_value('discovery_concurrency'), 18)  # a container starting now gets it too
+        self.run_with(n=1, now=start + timedelta(minutes=30))
+        recorded = TuningDecision.objects.get(setting='discovery_concurrency', phase='emergency')
+        self.assertEqual((recorded.old_value, recorded.new_value, recorded.pressure), (24, 18, False))
+        self.assertLessEqual(AutoTuneSettings.current().values['discovery_concurrency'], 18)  # written to the row (then sized: 16 for 8 cores)
         self.assertIsNone(resources.redis_client().get(autotune.EMERGENCY_KEY))
+        self.assertIsNone(resources.redis_client().get(autotune.DB_DOWN_KEY))
+
+    def test_one_failed_run_between_good_ones_is_never_an_emergency(self):
+        row = AutoTuneSettings.current()
+        row.values = {'discovery_concurrency': 24}
+        row.save()
+        autotune.publish(row)
+        start = timezone.now()
+        for i in range(3):
+            _summary, resize = self.db_down_run(start + timedelta(minutes=20 * i))
+            resize.assert_not_called()
+            self.run_with(n=1, now=start + timedelta(minutes=20 * i + 10))
+        self.assertFalse(TuningDecision.objects.filter(phase='emergency').exists())
+
+    def test_recording_an_emergency_only_ever_lowers(self):
+        resources.redis_client().set(autotune.EMERGENCY_KEY, json.dumps({'values': {'discovery_concurrency': [24, 18]}, 'at': 1}))
+        row = AutoTuneSettings.current()
+        row.values = {'discovery_concurrency': 12}  # lower already (a mode cycle and a new run since)
+        row.save()
+        autotune.record_emergency(timezone.now())
+        self.assertEqual(AutoTuneSettings.current().values, {'discovery_concurrency': 12})
+        self.assertFalse(TuningDecision.objects.filter(phase='emergency').exists())
+
+    def test_release_checks_the_mode_again_under_the_lock(self):
+        sc.update({'heavy.nmap': 3}, self.root)
+        real, calls = autotune.effective_mode, {'n': 0}
+
+        def mode_then_off(row=None):
+            calls['n'] += 1
+            out = real(row)
+            if calls['n'] == 1:  # release's first check passed; a person chooses Off before release takes the lock
+                autotune.set_mode(self.root, 'off')
+            return out
+        with mock.patch.object(autotune, 'effective_mode', side_effect=mode_then_off):
+            with self.assertRaises(autotune.TuningError) as raised:
+                autotune.release(self.root, 'heavy.nmap')
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(AutoTuneSettings.current().values, {})
+        self.assertEqual(sc.saved_values().get('heavy.nmap'), 3)  # the person's pin is kept
+
+    def test_a_fresh_boot_on_a_four_core_box_lowers_nothing_below_what_ships(self):
+        with mock.patch.object(autotune, '_process_started', return_value=timezone.now().timestamp() - 60):
+            summary = self.run_with({'cores': 4, 'memory': {'budget_mb': 3400, 'cost_mb': ALL_COSTS}, 'sentinel': {'live': 2, 'slots': 9}}, n=1)
+        self.assertEqual(summary['changes'], [])  # warming up: nothing jumps, and nothing is capped below its default
+        for key, info in summary['settings'].items():
+            m = autotune.by_key()[key]
+            if info.get('target') is not None and m.setting.sense == 'more':
+                self.assertGreaterEqual(info['target'], m.setting.default, key)
 
 
 class PrecedenceTests(Isolated, TestCase):

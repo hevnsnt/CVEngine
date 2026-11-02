@@ -216,7 +216,7 @@ export function sizedText(at) {
 export function decisionText(d) {
   const label = d.label || d.setting;
   const who = d.source === "person" ? d.actor || "a person" : SOURCE_LABEL[d.source] || d.source;
-  const phase = { aim_high: "aimed high", back_off: "backed off", probe: "probed up", cap: "held to the memory budget" }[d.phase];
+  const phase = { aim_high: "aimed high", back_off: "backed off", probe: "probed up", cap: "brought down to the target", emergency: "backed off (database away)", recover: "restored after the database came back" }[d.phase];
   const what = (d.applied && phase) || {
     raise: d.applied ? "raised" : "suggested raising",
     lower: d.applied ? "lowered" : "suggested lowering",

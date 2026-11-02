@@ -1926,7 +1926,7 @@ class TuningDecision(models.Model):
     old_layer_value = models.IntegerField(null=True, blank=True)  # what that layer held before (None: nothing), so a revert restores it exactly
     applied = models.BooleanField(default=False)
     pressure = models.BooleanField(default=False)  # a back-off forced by trouble (memory, database, worker, Sentinel time-outs)
-    phase = models.CharField(max_length=12, blank=True, default="")  # aim_high | back_off | cap | probe | "" (a person, or a calm change)
+    phase = models.CharField(max_length=12, blank=True, default="")  # aim_high | back_off | cap | probe | emergency | recover | "" (a person, or a calm change)
     reason = models.CharField(max_length=300, blank=True, default="")
     signals = models.JSONField(default=dict, blank=True)
     actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")

@@ -61,16 +61,21 @@ LOW_DISK_PERCENT = 10          # under this share of free disk, no target is abo
 # key: the setting's key. kind: what it is (``heavy:<scanner kind>``, ``discovery``, ``batch``, ``depth``, ``stage``, ``work_gap``,
 # ``refresh_gap``). low/high: the auto-tuning range. step: one step. sense: ``more`` (a higher number does more at once) or ``gap`` (a higher
 # number waits longer between runs, so does less). optimistic: the target when the facts it is sized from are not known.
-Setting = namedtuple('Setting', 'key kind label low high step sense optimistic', defaults=(None,))
+# ``default``: the number the setting ships with (the registry default). Sizing from CPU cores or Sentinels never puts a target below it: only
+# the memory budget at a kind's real peak, the database's connections and the size of the instance (the limits that protect the machine) and
+# trouble (a back-off) go lower. None: no floor.
+Setting = namedtuple('Setting', 'key kind label low high step sense optimistic default', defaults=(None, None))
 
 # CPU cores one run of a scanner kind keeps busy (nmap and nuclei probe in parallel; route probes and testssl mostly wait on the network).
-CORES_PER_RUN = {'bbot-deep': 1, 'bbot-standard': 0.5, 'bbot-passive': 0.25, 'nuclei': 1, 'nuclei-light': 0.5, 'nmap': 0.5, 'route-probe': 0.25,
-                 'wpscan': 0.5, 'testssl': 0.25, 'screenshot': 0.5}
+CORES_PER_RUN = {'bbot-deep': 1, 'bbot-standard': 0.5, 'bbot-passive': 0.25, 'nuclei': 1, 'nuclei-light': 0.5, 'nmap': 0.5, 'route-probe': 0.025,
+                 'wpscan': 0.25, 'testssl': 0.1, 'screenshot': 0.25}
 # The share of the CPU budget (CPU_BUDGET x cores) each scanner kind is sized for. The kinds run side by side, so they share the cores instead of
 # each being sized against all of them: the shares add up to 1, so the kinds at their targets together stay inside the budget (a kind always gets
 # at least one run).
+# At 16 cores this gives nmap 8, nuclei 4, nuclei light, bbot standard and passive and wpscan 3, testssl 4, screenshot 3 and route probes 16 (their
+# auto-tuning maximums or close), about 15 cores in all. A kind's CPU share only limits how far it goes above its shipped default (``Setting.default``).
 CPU_SHARE = {'nmap': 0.30, 'nuclei': 0.25, 'nuclei-light': 0.10, 'bbot-standard': 0.10, 'bbot-deep': 0.05, 'bbot-passive': 0.05,
-             'route-probe': 0.05, 'wpscan': 0.05, 'testssl': 0.025, 'screenshot': 0.025}
+             'route-probe': 0.025, 'wpscan': 0.05, 'testssl': 0.025, 'screenshot': 0.05}
 assert abs(sum(CPU_SHARE.values()) - 1.0) < 1e-9
 
 
@@ -160,6 +165,11 @@ def size_for(setting, facts, current=None):
     * hours before a target is rescanned: 1 with four cores or more, else 2;
     * hours before a Sentinel refresh: 3 with four Sentinel slots or more, else 6.
 
+    Sizing from cores or Sentinels never goes below the number the setting ships with (``Setting.default``, ``_floor``): "aim high" never means
+    less than a fresh install runs. Only the limits that protect the machine go lower: the memory budget at a kind's real peak, the database
+    (when the pool's own running tasks reported; otherwise that headroom is not known and limits nothing), a small instance. The CPU share only
+    limits how far a kind goes above its default.
+
     A small instance (fewer than ``SMALL_INSTANCE`` hosts and targets) keeps the discovery pool at 8 and the conductor at 3; under
     ``LOW_DISK_PERCENT`` of free disk nothing is above its optimistic value. The result is always inside the setting's auto-tuning range."""
     optimistic = setting.optimistic if setting.optimistic is not None else (setting.low if setting.sense == 'gap' else setting.high)
@@ -178,7 +188,7 @@ def size_for(setting, facts, current=None):
             why.append(f'{budget} MB budget / {cost} MB a run')
         if cores:
             share = CPU_BUDGET * cores * CPU_SHARE.get(scanner, 0.05)
-            parts.append(max(1, int(share // CORES_PER_RUN.get(scanner, 1))))
+            parts.append(max(1, setting.default or 1, int(share // CORES_PER_RUN.get(scanner, 1))))  # CPU never below the shipped default
             why.append(f'its share of {cores} cores')
         if len(parts) < 2:
             known = False
@@ -193,6 +203,7 @@ def size_for(setting, facts, current=None):
             target, reason = 2 * cores, f'two per core ({cores} cores)'
         else:
             target, reason, known = optimistic, 'cores and Sentinels not known: optimistic value', False
+        target = _floor(setting, target)
         if small:
             target, reason = min(target, 8), reason + f', small instance ({scale} hosts and targets)'
         db_max, db_used = facts.get('db_max'), facts.get('db_used')
@@ -200,8 +211,10 @@ def size_for(setting, facts, current=None):
             ceiling = int(DB_TARGET * db_max) - RESERVED_CONNECTIONS
             if ceiling < target:
                 target, reason = ceiling, f'database: max_connections {db_max}'
-            if db_used is not None:
-                active = facts.get('discovery_active') or 0
+            active = facts.get('discovery_active')
+            # The pool's own running tasks are part of db_used: without their count (the worker did not answer) the headroom is not known,
+            # so it neither limits nor lowers anything this time.
+            if db_used is not None and active is not None:
                 room_left = active + int(DB_TARGET * db_max) - db_used
                 if room_left < target:
                     target, reason = room_left, f'database: {db_used} of {db_max} connections in use'
@@ -211,6 +224,7 @@ def size_for(setting, facts, current=None):
         else:
             target, reason = optimistic, 'no live Sentinel: optimistic value'
             known = sentinels_known
+        target = _floor(setting, target)
         if small:
             target, reason = min(target, 8), reason + ', small instance'
     elif kind == 'depth':
@@ -219,6 +233,7 @@ def size_for(setting, facts, current=None):
             reason = f'{cores} cores' + (f' and {slots} Sentinel slots' if slots else '')
         else:
             target, reason, known = optimistic, 'cores not known: optimistic value', False
+        target = _floor(setting, target)
         if small:
             target, reason = min(target, 3), reason + ', small instance'
         if facts.get('discovery_ceiling'):
@@ -229,17 +244,20 @@ def size_for(setting, facts, current=None):
         else:
             target, reason = optimistic, 'no live Sentinel: optimistic value'
             known = sentinels_known
+        target = _floor(setting, target)
     elif kind == 'work_gap':
         if cores:
             target, reason = (1, f'{cores} cores') if cores >= 4 else (2, f'only {cores} cores')
         else:
             target, reason, known = optimistic, 'cores not known: optimistic value', False
+        target = _floor(setting, target)
     elif kind == 'refresh_gap':
         if live and slots:
             target, reason = (3, f'{slots} Sentinel slots') if slots >= 4 else (6, f'only {slots} Sentinel slots')
         else:
             target, reason = optimistic, 'no live Sentinel: optimistic value'
             known = sentinels_known
+        target = _floor(setting, target)
     else:
         target, reason, known = optimistic, 'optimistic value', False
     disk = facts.get('disk_free_percent')
@@ -248,6 +266,13 @@ def size_for(setting, facts, current=None):
         if modest != target:
             target, reason = modest, f'only {disk:.0f}% disk free'
     return _clamp(setting, target), reason, known
+
+
+def _floor(setting, target):
+    """Never less work than the setting ships with (``Setting.default``): sizing from cores or Sentinels only ever aims higher."""
+    if setting.default is None or setting.default <= 0:
+        return target
+    return max(target, setting.default) if setting.sense == 'more' else min(target, setting.default)
 
 
 def facts_ready(facts):
@@ -460,7 +485,9 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     ``cap``): the Sentinels left, the database filled up, a kind's real peak grew. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
     restart and for ``ready`` (or ``AIM_FALLBACK_SECONDS``), and only ever goes up.
 
-    Returns {'direction': 'more'|'less'|None, 'new', 'pressure', 'phase' ('aim_high', 'back_off', 'cap', 'probe' or ''), 'reason',
+    After an emergency back-off the number before it comes back in one step once the database has room again (``_recovery``, phase ``recover``).
+
+    Returns {'direction': 'more'|'less'|None, 'new', 'pressure', 'phase' ('aim_high', 'back_off', 'cap', 'probe', 'recover' or ''), 'reason',
     'ai_range': (lowest, highest) an AI recommendation may pick or None, 'why_not_raised', 'target', 'ceiling'}. ``new`` is None when
     nothing moves."""
     out = {'direction': None, 'new': None, 'pressure': False, 'phase': '', 'reason': '', 'ai_range': None, 'why_not_raised': '',
@@ -521,6 +548,12 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
                    reason=f'aim high for this machine ({target_reason or "sized"}): {value} to {ceiling}' + (f'; {remembered}' if remembered else ''))
         return out
 
+    recovery = _recovery(setting, value, samples, history, now=now, ceiling=ceiling, held=held)
+    if recovery is not None:
+        out.update(direction='more', new=recovery, phase='recover', ai_range=None,
+                   reason=f'the database answers again and has room: restored {value} to {recovery}, where it was before the emergency back-off')
+        return out
+
     last_change = max((h['at'] for h in history), default=None)
     lower = towards(setting, value, 'less')
     less_ok = lower != value and (last_change is None or now - last_change >= cooldown)
@@ -535,6 +568,26 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     if less_ok:
         out['ai_range'] = tuple(sorted((lower, value)))
     return out
+
+
+def _recovery(setting, value, samples, history, *, now, ceiling, held):
+    """After an emergency back-off (phase ``emergency``: the database did not answer in two runs in a row, ``cveFeed.autotune.emergency_backoff``)
+    the outage was transient once the database answers again with room to spare: the number it held before goes back in one step, without the
+    two healthy hours and outside ``DAILY_PROBES`` (those stay for normal probes), once ``BACKOFF_HOLD`` has passed since the back-off was
+    recorded and the last ``HEALTHY_SAMPLES`` measurements show room (``room``) and no trouble. Never above the ceiling, never while a revert
+    holds the setting, never after a later change. Returns the number, or None."""
+    if held or setting.sense != 'more':
+        return None
+    latest = max(history, key=lambda h: h['at'], default=None)
+    if latest is None or latest.get('phase') != 'emergency' or now - latest['at'] < BACKOFF_HOLD:
+        return None
+    goal = min(latest.get('old') or value, ceiling)
+    if goal <= value or len(samples) < HEALTHY_SAMPLES:
+        return None
+    recent = samples[-HEALTHY_SAMPLES:]
+    if trouble(setting, samples) or any(room(s) for s in recent):
+        return None
+    return _clamp(setting, goal)
 
 
 def _probe_blocker(setting, value, samples, history, *, now, ceiling, remembered, held, last_change, probe_cooldown, target_reason):
