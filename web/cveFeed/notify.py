@@ -1,11 +1,17 @@
 """Notification messages for the CVE pipeline, sent through the channels configured under Settings, Notifications.
 
-Four events, each one message per call and each call made once per scan, per feed sync or per saved-search evaluation, never per host:
+Each event is one message per call, and each call is made once per scan, per feed sync or per saved-search evaluation, never per host:
 - ``fire_matches``: new fire-tier CVE matches (``send_vuln_notif``);
 - ``fire_confirmed``: matches that were not proven (smoke) that evidence later turned fire (``send_vuln_notif``);
+- ``cves_turned_hot``: matches already proven whose CVE joined the KEV or gained a known exploit, so they turned fire (``send_vuln_notif``);
 - ``template_hits``: hosts a template test confirmed vulnerable, for a CVE that can be fire under the heat policy (``send_vuln_notif``);
 - ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``);
 - ``saved_search``: a saved search found new matches, lost some or reached its threshold (``send_interesting_notif``).
+
+A CVE match is paged as fire once (``CVEMatch.fire_notified_at``), not once per scan: a rescan's copy carries it (``correlation._carry_remediation``).
+When the heat policy changes (the update that introduced it, a switch on the Heat policy card or ``CVENGINE_HEAT_POLICY``, the legacy cap), every
+match that is fire under the new rule is marked as announced without a message (``baseline_heat_policy``): the switch itself is no news, so it
+never pages the backlog, and every later page is about something that changed after the rule was in force.
 
 The senders are the reNgine helpers (Slack, Discord, Telegram, Lark), which read the one Notification row and do nothing
 for a channel that is off or incomplete. Sending is best effort: a failure is logged without its text (a Telegram error
@@ -174,6 +180,95 @@ def fire_confirmed(match_ids):
     except Exception as exc:  # noqa: BLE001
         logger.warning('fire confirmation notification failed (%s)', type(exc).__name__)
         return False
+
+
+def cves_turned_hot(cve_ids):
+    """One message for the CVE matches that turned fire because their CVE joined the KEV or gained a known exploit (``cve_ids``: the CVEs
+    whose signals just went from neither to either; ``intel.reconcile`` and the cve.now refresh report them). Under the KEV heat policy only:
+    a match whose version is proven is fire now and is paged once (``fire_notified_at``, claimed like every page); one we only infer is smoke
+    and is not paged (it is validated first, in the fire lane, and paged when proof turns it fire). A template hit on such a CVE is paged
+    here too: ``template_hits`` left it out while the CVE was ice. Only the current inventory's rows are counted and named; a match the AI ruled
+    out, fixed, accepted as a risk or patched by the distribution is left out. Under ``legacy`` nothing is sent from here (the legacy
+    behaviour is unchanged). Never raises."""
+    try:
+        from cveFeed.correlation import latest_scan_q
+        from cveFeed.models import CVEMatch
+        from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, heat_policy, match_heat_rank_expr
+        ids = sorted({int(i) for i in cve_ids or () if i})
+        if not ids or heat_policy() == LEGACY_POLICY:
+            return False
+        fire = list(CVEMatch.objects.filter(cve_entry_id__in=ids, fire_notified_at__isnull=True).filter(latest_scan_q('subdomain__'))
+                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
+                    .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True)[:MAX_MARK])
+        claimed = _claim(fire)
+        if claimed is None:
+            return False
+        total = claimed.count()
+        sample = list(claimed.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
+        hosts = claimed.values('subdomain__name').distinct().count()
+        text = (f'CVEngine: {total} CVE match{"es" if total != 1 else ""} turned fire-tier on {hosts} host{"s" if hosts != 1 else ""}: the CVE '
+                f'is now on the KEV or has a known exploit: {_listing([(_name(c), _name(h)) for c, h in sample], total)}')
+        return _send(text, 'send_vuln_notif')
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('turned-hot notification failed (%s)', type(exc).__name__)
+        return False
+
+
+def mark_announced(match_ids):
+    """Mark these CVE matches as paged as fire without sending anything, when they are fire now: what was already true when the heat policy
+    took effect, or what turned fire only because correlation now records what proves it (``correlation.save_matches``). Returns how many were
+    marked. Never raises."""
+    try:
+        from cveFeed.models import CVEMatch
+        from cveFeed.threat import FIRE, HEAT_RANK, match_heat_rank_expr
+        ids = sorted({int(i) for i in match_ids or () if i})
+        if not ids:
+            return 0
+        fire = (CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).annotate(heat_rank=match_heat_rank_expr())
+                .filter(heat_rank=HEAT_RANK[FIRE]).values('pk'))
+        from django.utils import timezone
+        return CVEMatch.objects.filter(pk__in=fire, fire_notified_at__isnull=True).update(fire_notified_at=timezone.now())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('could not mark matches as announced (%s)', type(exc).__name__)
+        return 0
+
+
+BASELINE_LANE = 'heat_baseline'  # BackgroundCursor.lane: last_pk holds which heat rule fire_notified_at was last baselined to (BASELINE_SIGNATURES)
+BASELINE_SIGNATURES = ('kev', 'legacy:fire', 'legacy:smoke', 'legacy:ice')  # threat.heat_signature() values; the stored number is index + 1
+
+
+def baseline_heat_policy(match_model=None, cursor_model=None):
+    """When the heat rule (``threat.heat_signature``: the policy, and under legacy the version-only cap) differs from the one the pages were last
+    baselined to, mark every CVE match that is fire under the rule now and was never paged as announced (``fire_notified_at``), without a message,
+    and record the rule. So a policy switch, and the update that introduced the policy, never pages the backlog: a page is always about
+    something that changed while the rule was in force (new matches, ``fire_confirmed``, ``cves_turned_hot``), and a smoke match is still paged
+    when proof turns it fire. Runs from migration 0137 (the update), when a worker starts and on the 30 second tick (a switch on the card);
+    one cheap read when nothing changed, and one locked row so two workers never both do it. ``match_model`` and ``cursor_model`` are the
+    migration's historical models. Returns how many matches it marked."""
+    from django.db import transaction
+    from django.utils import timezone
+
+    from cveFeed.threat import FIRE, HEAT_RANK, heat_signature, match_heat_rank_expr
+    if match_model is None:
+        from cveFeed.models import CVEMatch as match_model
+    if cursor_model is None:
+        from cveFeed.models import BackgroundCursor as cursor_model
+    signature = heat_signature()
+    code = BASELINE_SIGNATURES.index(signature) + 1 if signature in BASELINE_SIGNATURES else len(BASELINE_SIGNATURES) + 1
+    if cursor_model.objects.filter(lane=BASELINE_LANE, last_pk=code).exists():
+        return 0
+    with transaction.atomic():
+        cursor, _ = cursor_model.objects.select_for_update().get_or_create(lane=BASELINE_LANE)
+        if cursor.last_pk == code:
+            return 0
+        fire = (match_model.objects.filter(fire_notified_at__isnull=True).annotate(heat_rank=match_heat_rank_expr())
+                .filter(heat_rank=HEAT_RANK[FIRE]).values('pk'))
+        marked = match_model.objects.filter(pk__in=fire, fire_notified_at__isnull=True).update(fire_notified_at=timezone.now())
+        cursor.last_pk = code
+        cursor.save(update_fields=['last_pk', 'updated_at'])
+    if marked:
+        logger.info('heat rule %s: %d fire CVE matches marked as announced (the switch itself pages nothing)', signature, marked)
+    return marked
 
 
 def _claim(ids):

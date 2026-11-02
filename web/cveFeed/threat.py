@@ -266,6 +266,100 @@ def match_heat_rank_expr(capped=True):
     return Case(*whens, default=Value(HEAT_RANK[ICE]), output_field=IntegerField())
 
 
+# ----------------------------------------------------------------------------- scanner findings (startScan.Vulnerability)
+#
+# A scanner finding that names CVEs (a nuclei CVE template, the CVE template pass, OpenVAS, WPScan, node2shell) is a CVE on the host, so under the
+# ``kev`` policy it follows the CVE rule, not its severity: one of its CVEs on the KEV or with a known exploit and the finding confirmed is fire
+# (the finding itself is a behavioural check: the template or the active test matched the flaw on the host); hot but not confirmed (an OpenVAS
+# result below its quality bar, tagged qod-unconfirmed, or a WPScan finding, which reads a plugin's version) is smoke, fire once a validation
+# reproduced it; none of its CVEs hot (or none stored by this instance) is ice, whatever its severity. A finding that names no CVE (an exposure,
+# a misconfiguration, a default login) has no KEV listing to read and keeps its severity heat (critical and high fire, medium smoke, low ice).
+# Informational findings have no heat, as before. Under ``legacy`` every finding keeps its severity heat.
+
+UNCONFIRMED_TAG = "qod-unconfirmed"  # cveFeed.openvas_scan: a result below CONFIRMED_QOD, a version or banner inference
+VERSION_READ_SOURCES = ("wpscan",)  # scanners whose CVE findings rest on a version they read, not on a check of the flaw
+
+
+def finding_cve_names(vuln):
+    """The CVE ids a Vulnerability names, upper-cased (its ``cve_ids``; a prefetch of ``cve_ids`` saves the query)."""
+    return sorted({(c.name or "").strip().upper() for c in vuln.cve_ids.all() if (c.name or "").strip()})
+
+
+def hot_cve_names(names):
+    """The ids among ``names`` of stored CVEs that are hot (``is_hot``): one query."""
+    from cveFeed.models import CVEEntry
+    names = {str(n).upper() for n in names if n}
+    if not names:
+        return set()
+    return set(CVEEntry.objects.filter(hot_q(), cve_id__in=names).values_list("cve_id", flat=True))
+
+
+def finding_confirmed(vuln):
+    """Whether a scanner finding is a confirmation of its flaw: a validation reproduced it, or the scanner itself checked the flaw (not an
+    OpenVAS result below its quality bar, not a version-reading scanner such as WPScan). Reads prefetched ``tags`` and ``triage`` when loaded."""
+    from cveFeed.match_policy import _validation_status
+    if _validation_status(vuln) == "hit":
+        return True
+    if (getattr(vuln, "source", "") or "") in VERSION_READ_SOURCES:
+        return False
+    return UNCONFIRMED_TAG not in {t.name for t in vuln.tags.all()}
+
+
+def finding_heat(vuln, capped=True, hot_names=None, policy=None):
+    """The heat a scanner finding (a ``startScan.Vulnerability``) shows on its host, or None when it has none (informational). ``hot_names``: the
+    hot CVE ids among the findings' CVEs when the caller looked them up for many at once (``hot_cve_names``). ``capped=False`` is the heat once
+    confirmed (what OpenVAS orders hosts by). The database form is ``finding_heat_rank_expr``."""
+    severity_heat = SEVERITY_HEAT.get(vuln.severity)
+    if severity_heat is None or (policy or heat_policy()) == LEGACY_POLICY:
+        return severity_heat
+    names = finding_cve_names(vuln)
+    if not names:
+        return severity_heat
+    hot = hot_names if hot_names is not None else hot_cve_names(names)
+    if not any(n in hot for n in names):
+        return ICE
+    return FIRE if not capped or finding_confirmed(vuln) else SMOKE
+
+
+def finding_heat_reason(vuln, heat, hot_names=None):
+    """Why a scanner finding that names CVEs has its heat under the KEV policy, else '' (a finding without CVEs is rated by its severity)."""
+    if heat is None or heat_policy() == LEGACY_POLICY:
+        return ""
+    names = finding_cve_names(vuln)
+    if not names:
+        return ""
+    if heat == ICE:
+        return REASON_NOT_HOT
+    if heat == FIRE:
+        return "on the KEV or a public exploit is known; confirmed by the scanner" if finding_confirmed(vuln) else \
+            "on the KEV or a public exploit is known"
+    return "on the KEV or a public exploit is known; not confirmed (a version or banner inference)"
+
+
+def finding_heat_rank_expr(capped=True):
+    """The database form of ``HEAT_RANK.get(finding_heat(...), 0)`` over Vulnerability rows (3 fire, 2 smoke, 1 ice, 0 none): what the Findings
+    list, its heat facet, the reports and the graph read for scanner findings."""
+    from django.db.models import Case, Exists, IntegerField, OuterRef, Q, Value, When
+    from django.db.models.functions import Upper
+
+    from cveFeed.models import CVEEntry
+    from startScan.models import CveId, VulnerabilityTags
+    severity = severity_heat_rank_expr()
+    if heat_policy() == LEGACY_POLICY:
+        return severity
+    names = CveId.objects.filter(cve_ids=OuterRef("pk")).annotate(upper=Upper("name"))
+    carries = Exists(names)
+    hot = Exists(names.filter(upper__in=CVEEntry.objects.filter(hot_q()).values("cve_id")))
+    unconfirmed = (Q(source__in=VERSION_READ_SOURCES) | Q(Exists(VulnerabilityTags.objects.filter(vuln_tags=OuterRef("pk"), name=UNCONFIRMED_TAG))))
+    confirmed = Q(triage__validation_status="hit") | ~unconfirmed
+    whens = [When(~Q(severity__in=list(SEVERITY_HEAT)), then=Value(0)), When(Q(carries) & ~Q(hot), then=Value(HEAT_RANK[ICE]))]
+    if capped:
+        whens += [When(Q(hot) & confirmed, then=Value(HEAT_RANK[FIRE])), When(Q(hot), then=Value(HEAT_RANK[SMOKE]))]
+    else:
+        whens.append(When(Q(hot), then=Value(HEAT_RANK[FIRE])))
+    return Case(*whens, default=severity, output_field=IntegerField())
+
+
 def severity_heat_rank_expr(field="severity"):
     """The database form of ``HEAT_RANK.get(SEVERITY_HEAT.get(severity), 0)``: critical and high 3, medium 2, low 1, info 0."""
     from django.db.models import Case, IntegerField, Value, When

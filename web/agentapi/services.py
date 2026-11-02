@@ -1389,7 +1389,8 @@ def _heat_reasons(sub, capped=True):
     why it has its heat (``threat.heat_reason``: "on the KEV; version not proven", "not on the KEV and no known exploit", ...)."""
     from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.distro import label_for
-    from cveFeed.threat import SEVERITY_HEAT, heat_reason, match_heat, validation_heat
+    from cveFeed.threat import (LEGACY_POLICY, SEVERITY_HEAT, finding_cve_names, finding_heat, finding_heat_reason, heat_policy, heat_reason,
+                                hot_cve_names, match_heat, validation_heat)
     reasons = []
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out by the AI, fixed or an accepted risk: not a reason for the host's colour
@@ -1406,11 +1407,15 @@ def _heat_reasons(sub, capped=True):
                         (f': {why}' if why else ''),
                         'temp': temp, 'kev': bool(c.kev), 'heat_capped': held, 'heat_reason': why,
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
-    for v in sub.vulnerability_set.all():
-        if finding_is_live(v) and v.severity in SEVERITY_HEAT:
-            reasons.append({'kind': 'finding', 'label': v.name, 'detail': SEVERITY_NAMES.get(v.severity, str(v.severity)),
-                            'temp': SEVERITY_HEAT[v.severity], 'finding': 'vulnerability', 'id': v.id,
-                            'classification': _classification_of(v)})
+    # a scanner finding that names CVEs follows the CVE rule under the KEV policy (threat.finding_heat); any other keeps its severity heat
+    live = [v for v in sub.vulnerability_set.all() if finding_is_live(v) and v.severity in SEVERITY_HEAT]
+    hot = (hot_cve_names({n for v in live for n in finding_cve_names(v)}) if live and heat_policy() != LEGACY_POLICY else set())
+    for v in live:
+        temp = finding_heat(v, capped=capped, hot_names=hot)
+        why = finding_heat_reason(v, temp, hot)
+        reasons.append({'kind': 'finding', 'label': v.name, 'detail': SEVERITY_NAMES.get(v.severity, str(v.severity)) + (f': {why}' if why else ''),
+                        'temp': temp, 'finding': 'vulnerability', 'id': v.id, **({'heat_reason': why} if why else {}),
+                        'classification': _classification_of(v)})
     rank = {'fire': 0, 'smoke': 1, 'ice': 2}
     return sorted(reasons, key=lambda r: rank.get(r['temp'], 3))
 
@@ -1851,7 +1856,7 @@ def _name_siblings(project, subs):
     ids = host_siblings([s.id for s in subs])
     wanted = {i for rows in ids.values() for i, _ in rows}
     rows = {r.id: r for r in Subdomain.objects.filter(id__in=wanted).select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')}
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')}
     return {s.id: [rows[i] for i, _ in ids.get(s.id, []) if i in rows] for s in subs}
 
 
@@ -2006,7 +2011,7 @@ def list_hosts(ctx, slug, params):
 
     def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
         rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
-            .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies')
+            .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')
         by_id = {row.pk: row for row in rows}
         return [by_id[i] for i in ids if i in by_id]
     return _mark_zombies(project, _hosts_page(project, ordered, params, load=load))
@@ -2361,7 +2366,7 @@ def _heat_facets(project, qs):
     badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
     total = qs.count()
     subs = list(qs.select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage',
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
     ).order_by('id')[:HEAT_FACET_CAP])
     others = _name_siblings(project, subs)
     counts = {v: 0 for v in HEAT_FACET_VALUES}
@@ -2513,7 +2518,7 @@ def search_hosts(ctx, slug, params):
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'technologies').order_by(*_host_order(params))
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
     for row in page['results']:
         row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
@@ -3208,7 +3213,7 @@ def _finding_sources(project, params):
     from django.db.models import Case, F, IntegerField, Value, When
 
     from cveFeed.models import HygieneFinding
-    from cveFeed.threat import CRITICAL_CVSS, HIGH_CVSS, match_heat_rank_expr, severity_heat_rank_expr
+    from cveFeed.threat import CRITICAL_CVSS, HIGH_CVSS, finding_heat_rank_expr, match_heat_rank_expr, severity_heat_rank_expr
     from startScan.models import Vulnerability
     wanted = params.get('type') or 'all'
     if wanted != 'all' and wanted not in FINDING_TYPES:
@@ -3241,7 +3246,7 @@ def _finding_sources(project, params):
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
             .select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee', *(['target_domain__project'] if everywhere else [])) \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
+            .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
                       comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))

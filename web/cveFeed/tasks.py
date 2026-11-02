@@ -244,6 +244,8 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
     due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
+    from cveFeed.threat import is_hot
+    signals_moved, turned_hot = [], []
     for old in list(due):
         try:
             entry = client.get_entry(old.cve_id)
@@ -255,9 +257,18 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
                 changed += 1
                 CVEEntry.objects.filter(pk=obj.pk).update(needs_recorrelation=True)
                 MatchVerdict.objects.filter(cve_entry_id=obj.pk).delete()
+            if before[1:5] != after[1:5]:  # the score or an exploitation signal: the heat of its matches, and so the hosts' scores, moved
+                signals_moved.append(obj.pk)
+                if is_hot(obj.kev, obj.exploit_db) and not is_hot(old.kev, old.exploit_db):
+                    turned_hot.append(obj.pk)
         except Exception as exc:
             failed += 1
             logger.warning('cve.now: failed to refresh %s: %s', old.cve_id, exc)
+    if signals_moved:
+        from cveFeed import notify, scoring
+        from cveFeed.models import CVEMatch
+        scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=signals_moved).select_related('subdomain__target_domain'))
+        notify.cves_turned_hot(turned_hot)  # proven matches of a CVE that joined the KEV or gained an exploit: paged once
     result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed, "changed": changed, "failed": failed}
     logger.info(f"cve.now sync complete: {result}")
     tiers = [e.threat_tier for e in new_entries]
@@ -544,6 +555,9 @@ def sync_threat_intel():
             scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=cve_ids)
                                         .select_related('subdomain__target_domain')
                                         .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
+    if result.get('signals_turned_hot'):  # a CVE that joined the KEV or gained an exploit: its proven matches turned fire, paged once
+        from cveFeed import notify
+        notify.cves_turned_hot(result['signals_turned_hot'])
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
     if result.get('ranges_repaired'):  # entries whose ranges were re-derived are correlated again (cveFeed.intel.repair_ranges)
@@ -1800,6 +1814,11 @@ def report_resources():
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
     from cveFeed import scoring
     scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
+    try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)
+        from cveFeed import notify
+        notify.baseline_heat_policy()
+    except Exception:  # noqa: BLE001 - the next tick tries again
+        logger.exception('could not baseline the fire pages for the heat rule')
     return {}
 
 

@@ -316,9 +316,11 @@ def merged_flags(feed, intel):
     return kev, epss_reached, exploit_db
 
 
-def reconcile(data, since=None, now=None, chunk=2000):
+def reconcile(data, since=None, now=None, chunk=2000, turned_hot=None):
     """Bring every stored CVE's intel and signals in line with the sources (only CVEs created after ``since`` when given).
-    Returns (rows updated, CVE ids whose signals changed)."""
+    Returns (rows updated, CVE ids whose signals changed). ``turned_hot``, a list when given, receives the ids of the CVEs that were neither on
+    the KEV nor exploited and now are (``threat.is_hot``): their proven matches turn fire (``notify.cves_turned_hot``)."""
+    from cveFeed.threat import is_hot
     from cveFeed.models import CVEEntry
     now = now or timezone.now()
     qs = CVEEntry.objects.order_by("id")
@@ -341,6 +343,8 @@ def reconcile(data, since=None, now=None, chunk=2000):
             entry = CVEEntry(id=r["id"], intel=intel, kev=kev, epss_reached=epss_reached, exploit_db=exploit_db, synced_at=now)
             entry.flags_moved = flags_moved
             batch.append(entry)
+            if turned_hot is not None and is_hot(kev, exploit_db) and not is_hot(r["kev"], r["exploit_db"]):
+                turned_hot.append(r["id"])
         # synced_at moves only with the signals: it keys the correlation pool's cache, which holds them
         moved = [e for e in batch if e.flags_moved]
         CVEEntry.objects.bulk_update(moved, ["intel", "kev", "epss_reached", "exploit_db", "synced_at"], batch_size=500)
@@ -953,7 +957,8 @@ def run(now=None, get=None):
             errors[name] = err
     marker, _ = IntelSource.objects.get_or_create(name="_reconcile")
     since = None if (any_changed or not marker.last_checked) else marker.last_checked - timedelta(minutes=5)
-    updated, changed_ids = reconcile(data, since=since, now=now)
+    turned_hot = []
+    updated, changed_ids = reconcile(data, since=since, now=now, turned_hot=turned_hot)
     marker.last_checked = now
     marker.save(update_fields=["last_checked"])
     created = import_missing(data, _int_env("CVENGINE_INTEL_IMPORT_PER_RUN", 2000, 0, 20000), now=now, get=get)
@@ -968,5 +973,5 @@ def run(now=None, get=None):
         logger.info("threat intel: %s of the %s imported CVE records state their affected releases as unaffected ranges of a default-affected "
                     "product (defaultStatus), which are now read as the releases between those ranges", LAST_IMPORT["default_status"], len(created))
     return {"sources": {n: len(data.get(n) or {}) for n in names}, "errors": errors, "reconciled": updated,
-            "signals_changed": changed_ids, "imported": created, "default_status_records": LAST_IMPORT["default_status"],
+            "signals_changed": changed_ids, "signals_turned_hot": turned_hot, "imported": created, "default_status_records": LAST_IMPORT["default_status"],
             "ranges_repaired": repaired.get("repaired", 0) + repaired.get("normalized", 0)}

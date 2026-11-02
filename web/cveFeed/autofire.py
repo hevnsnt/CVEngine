@@ -114,9 +114,15 @@ def fire_for_cve(cve, engine_id=None, max_hosts=DEFAULT_MAX_HOSTS, provider=None
     run = AutoFireRun.objects.filter(cve_entry=cve).first()  # a retry reuses the errored row (one run per CVE)
     if run is None:
         run = AutoFireRun(cve_entry=cve)
-    run.tier, run.status, run.error, run.matches_found, run.targets, run.scan_ids = cve.threat_tier, 'done', '', 0, [], []
-    hunting = activity.log('target', f'{cve.cve_id} is {run.tier.upper()}: looking for exposed hosts',
-                           cve_id=cve.cve_id, status='running')
+    # what auto-fire acts on is the CVE's signals (threat.attention_tier, under either heat policy): the run records that tier, and the log says
+    # what the heat policy rates the CVE when the two differ (a CVSS 9.8 CVE neither on the KEV nor exploited is tested, and is ice)
+    from cveFeed.threat import attention_tier
+    heat = cve.threat_tier
+    attention = attention_tier(kev=cve.kev, epss_reached=cve.epss_reached, exploit_db=cve.exploit_db, cvss=cve.cvss)
+    run.tier, run.status, run.error, run.matches_found, run.targets, run.scan_ids = attention, 'done', '', 0, [], []
+    said = (f'{cve.cve_id} is {heat.upper()}' if heat == attention else
+            f'{cve.cve_id} is {heat} under the heat policy and {attention} by its CVSS and EPSS')
+    hunting = activity.log('target', f'{said}: looking for exposed hosts', cve_id=cve.cve_id, status='running')
     project_ids = set()
     try:
         if not correlated:

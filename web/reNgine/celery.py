@@ -86,6 +86,19 @@ def rescore_for_heat_cap(*args, **kwargs):
 
 
 @worker_ready.connect()
+def baseline_heat_pages(*args, **kwargs):
+    """When the heat rule changed (the heat policy or, under legacy, the version-only cap), every CVE match that is fire under the new rule is
+    marked as announced without a message, so the switch never pages the backlog (cveFeed.notify.baseline_heat_policy; the update itself is
+    baselined by migration 0137). Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import notify
+        notify.baseline_heat_policy()
+    except Exception:  # noqa: BLE001 - the 30 second tick tries again
+        logging.getLogger(__name__).exception('could not baseline the fire pages for the heat rule')
+
+
+@worker_ready.connect()
 def start_first_run_bootstrap(*args, **kwargs):
     """A brand-new install loads its CVE feed as soon as its workers are up, not at the first scheduled run (cveFeed.tasks.
     bootstrap_first_run does nothing on an install that already has CVEs). The delay lets the other workers and beat settle.

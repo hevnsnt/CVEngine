@@ -19,7 +19,7 @@ from django.utils import timezone
 from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, ICE, SMOKE, validation_heat
+from cveFeed.threat import FIRE, ICE, LEGACY_POLICY, SMOKE, heat_policy, hot_q, validation_heat
 
 PAGE = 100
 MAX_ENQUEUE = 20
@@ -109,11 +109,18 @@ def _candidate_rows(lane):
     from targetApp.models import in_target_scope_q
     # a finding on a name kept under a target that is now exactly one host (=example.com) is never validated automatically through it
     match_scope, vuln_scope = in_target_scope_q('match__subdomain__'), in_target_scope_q('vulnerability__subdomain__')
-    cve_fire = (Q(match__cve_entry__kev=True) | Q(match__cve_entry__exploit_db=True)
-                | Q(match__cve_entry__cvss__gte=9)
-                | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
-                | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
-    cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+    if heat_policy() == LEGACY_POLICY:
+        cve_fire = (Q(match__cve_entry__kev=True) | Q(match__cve_entry__exploit_db=True)
+                    | Q(match__cve_entry__cvss__gte=9)
+                    | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
+                    | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
+        cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+        cve_smoke = cve_hot
+    else:
+        # the KEV rule: a match's lane is its validation heat (tier_for), fire for a CVE on the KEV or with a known exploit and ice otherwise,
+        # whatever its CVSS or EPSS; no CVE match is in the smoke lane (smoke is "hot, not proven", and proof is what validation adds)
+        cve_fire = cve_hot = hot_q('match__cve_entry__')
+        cve_smoke = Q(pk__in=[])
     unknown = match_policy.version_unknown_q('match__')  # waits for a person or a published range: never validated automatically
     if lane == ICE:
         # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
@@ -122,7 +129,7 @@ def _candidate_rows(lane):
                 & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__') & match_scope)
         return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
-    candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
+    candidate = ((cve_fire if lane == FIRE else cve_smoke) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
                  & latest_scan_q('match__subdomain__') & match_scope)
     candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity) & vuln_scope
     candidate |= Q(hygiene__status='open', hygiene__severity__gte=severity)

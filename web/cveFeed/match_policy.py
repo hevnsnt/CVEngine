@@ -153,9 +153,65 @@ def version_only_q(prefix=''):
 # ----------------------------------------------------------------------------- proof: what turns a KEV match fire (the heat policy)
 
 PROVEN_LIBRARY_CONFIDENCE = 0.8  # js_libraries.CONFIDENCE: a file's comment banner 0.9, a code signature 0.8; a file name 0.4
-# the template_result a version-class template hit is recorded as (PR #384, templategen.VERSION_ONLY_RESULT): a template that only reads a
-# static page or a banner matched the version string on the host. It proves the version, not the flaw.
+# the template_result a version-class template hit is recorded as: a template that only reads a static page or a banner matched the version
+# string on the host. It proves the version, not the flaw. PR #384 writes it and defines it as ``templategen.VERSION_ONLY_RESULT``, which is
+# not on develop yet: once #384 is merged, import that constant here instead of this literal so the two cannot drift apart.
 VERSION_TEMPLATE_RESULT = 'version_only'
+
+# Products whose service banner never proves the version that runs: a distribution ships them and fixes them by backporting, so the banner keeps
+# the upstream version after the fix, and most distributions print no marker of themselves in it (RHEL and CentOS OpenSSH, SUSE and Amazon Linux
+# Apache httpd, nginx everywhere); or the operating system services them (IIS and HTTP.sys are patched by Windows Update, which keeps the version
+# string). Read as normalized prefixes of the scanner's product name ("Apache httpd" -> apachehttpd, "PostgreSQL DB" -> postgresql...): every
+# product ``distro.PACKAGES`` maps to a package, and the other daemons distributions commonly ship. Only a product NOT listed (a vendor's own
+# build: an appliance, Jenkins, Confluence, the VPN gateways the KEV is full of) has a banner that proves its version.
+DISTRO_PACKAGED_PREFIXES = (
+    'apache', 'nginx', 'openssh', 'openssl', 'mysql', 'mariadb', 'percona', 'postgresql', 'php', 'exim', 'postfix', 'sendmail', 'opensmtpd',
+    'dovecot', 'courier', 'cyrus', 'bind', 'iscbind', 'unbound', 'dnsmasq', 'proftpd', 'vsftpd', 'pureftpd', 'samba', 'lighttpd', 'squid',
+    'dropbear', 'openldap', 'slapd', 'cups', 'redis', 'memcached', 'ntp', 'chrony', 'netsnmp', 'haproxy', 'varnish', 'tomcat', 'rpcbind',
+    'nfs', 'xinetd', 'openvpn', 'strongswan', 'libreswan', 'perl', 'python', 'ruby', 'linux', 'gnu', 'debian', 'ubuntu', 'redhat', 'centos',
+    'freebsd', 'openbsd', 'netbsd',
+    # serviced by the operating system's own updates
+    'microsoftiis', 'microsofthttpapi', 'microsoftwindows', 'iis',
+)
+
+
+def distro_packaged(product):
+    """Whether a service banner of ``product`` (the scanner's product name) can hide a backported fix: a product a distribution packages or
+    the operating system services (``DISTRO_PACKAGED_PREFIXES``). Its banner is never proof of the version, only the distribution's tracker
+    (``distro_status`` vulnerable) or hard evidence is. An empty name is not packaged (and never proves anything either)."""
+    from cveFeed import distro
+    token = re.sub(r'[^a-z0-9]', '', (product or '').lower())
+    return bool(token) and (token in distro.PACKAGES or token.startswith(DISTRO_PACKAGED_PREFIXES))
+
+
+def provenance_recorded(evidence):
+    """Whether a match's evidence was written by the code that records everything ``version_read_from_component`` reads: a port row needs
+    ``vendor_banner`` (recorded since the heat policy's review; a row from before reads as no proof until the next correlation writes it). The
+    first correlation after the update therefore turns some old rows fire by recording what was already true, which is no news: it is not paged
+    (``correlation.save_matches``, ``correlation._carry_remediation``)."""
+    if not isinstance(evidence, dict) or evidence.get('source') != 'port':
+        return True
+    return 'vendor_banner' in evidence
+
+
+_TYPEOF_REGISTERED = []
+
+
+def _register_json_typeof():
+    """Register ``jsontype`` (PostgreSQL ``jsonb_typeof``) on JSON key lookups once, so a database form can insist a value is a number: JSONB
+    orders true, arrays and objects above every number, so ``value >= 0.8`` alone holds for them where Python's test does not."""
+    if _TYPEOF_REGISTERED:
+        return
+    from django.db.models import CharField, Transform
+    from django.db.models.fields.json import KeyTransform
+
+    class JSONTypeof(Transform):
+        lookup_name = 'jsontype'
+        function = 'jsonb_typeof'
+        output_field = CharField()
+
+    KeyTransform.register_lookup(JSONTypeof)
+    _TYPEOF_REGISTERED.append(True)
 
 
 def version_read_from_component(evidence, distro_status='', template_result=''):
@@ -169,9 +225,11 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
         ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set);
       * a network service that answered nmap's version probe itself: ``evidence.source`` port, ``method`` probed (``table`` is nmap's
-        guess from the port number), and NO distribution packaging read from the banner (``evidence.distro``): a distribution backports
-        fixes without changing the upstream version it prints, so a distro-packaged banner proves nothing until the distribution's own
-        tracker gives a verdict (``distro_status`` vulnerable is hard evidence; patched is ice).
+        guess from the port number), a vendor-built product (``evidence.vendor_banner``: not ``distro_packaged``, recorded by correlation)
+        and NO distribution packaging read from the banner (``evidence.distro``). A distribution backports fixes without changing the
+        upstream version it prints, and most print no marker of themselves, so the banner of a product a distribution packages (OpenSSH,
+        Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, BIND, Dovecot, ...) or the operating system services (IIS) proves nothing until the
+        distribution's own tracker gives a verdict (``distro_status`` vulnerable is hard evidence; patched is ice).
 
     Never proof: a version from a script's file name, CDN path or ``?ver=`` query (``version_source`` filename, 0.4), a copy a later one
     replaces, a fallback or a copy of an unresolved set (their caps, 0.4 and 0.5, are below the bar), a library version another tool read
@@ -192,17 +250,21 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
                 and isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= PROVEN_LIBRARY_CONFIDENCE
                 and not evidence_flag(evidence, 'copies_unresolved'))
     if source == 'port':
-        return evidence.get('method') == 'probed' and not evidence_flag(evidence, 'distro')
+        return evidence.get('method') == 'probed' and evidence_flag(evidence, 'vendor_banner') and not evidence_flag(evidence, 'distro')
     return False
 
 
 def version_read_from_component_q(prefix=''):
-    """The database form of ``version_read_from_component``."""
+    """The database form of ``version_read_from_component``. The confidence must be a JSON number (``jsonb_typeof``), as Python's
+    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number."""
     from django.db.models import Q
+    _register_json_typeof()
     p = prefix
     library = (Q(**{p + 'evidence__source': 'tech', p + 'evidence__version_source': 'body', p + 'evidence__copy_state': 'effective',
+                    p + 'evidence__version_confidence__jsontype': 'number',
                     p + 'evidence__version_confidence__gte': PROVEN_LIBRARY_CONFIDENCE}) & ~evidence_flag_q('copies_unresolved', p))
-    service = Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & ~evidence_flag_q('distro', p)
+    service = (Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & evidence_flag_q('vendor_banner', p)
+               & ~evidence_flag_q('distro', p))
     template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})
     return (template | library | service) & ~Q(**{p + 'distro_status': 'patched'})
 
