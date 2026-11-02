@@ -43,7 +43,8 @@ MAX_SCRIPT_BYTES = 300 * 1024  # of the decoded body of one script
 MAX_PER_SCRIPT_HOST = 40     # requests one script host (a shared static host, a CDN) receives in one scan
 SCRIPT_HOST_GAP = 0.5        # seconds between two requests to one script host, across every worker of the scan
 DEFAULT_MAX_REQUESTS, DEFAULT_MAX_SECONDS = 300, 600  # script requests and seconds of reading per scan (CVENGINE_SCRIPT_READ_MAX_*)
-MAX_ENTRIES = 80             # script tags read from one page
+MAX_ENTRIES = 80             # scripts with a source read from one page (inline scripts and fallbacks are not counted)
+MAX_TAGS = 2000              # script tags of any kind looked at on one page
 MAX_COPIES = 8               # copies of one library kept on the record
 HEAD = 4096                  # a banner is in the first bytes of a file
 SCAN = 128 * 1024            # a code signature is looked for this far in
@@ -221,7 +222,11 @@ def identify(url):
 
 _SCRIPT_OPEN = re.compile(r'<script\b([^<>]{0,2000})>', re.IGNORECASE)
 _ATTR = re.compile(r'''([^\s"'<>/=]{1,40})(?:\s{0,4}=\s{0,4}(?:"([^"]{0,1000})"|'([^']{0,1000})'|([^\s"'<>`=]{1,1000})))?''')
-_JS_TYPES = ('', 'text/javascript', 'application/javascript', 'application/x-javascript', 'text/ecmascript', 'module')
+_JS_TYPES = ('', 'text/javascript', 'application/javascript', 'application/x-javascript', 'text/ecmascript', 'application/ecmascript',
+             'text/jscript', 'text/livescript', 'text/x-javascript', 'text/x-ecmascript', 'text/javascript1.0', 'text/javascript1.1',
+             'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'module')
+# a script a consent manager or loader runs later by switching its type (``type="text/plain" data-cookieconsent=...``): it still loads
+_DEFERRED_TYPES = ('text/plain', 'text/x-deferred', 'text/partytown', 'text/x-cookieconsent')
 NOCONFLICT = re.compile(r'\.noConflict\(\s{0,4}(?:true|!0)\s{0,4}\)')
 # ``window.jQuery || document.write('<script src="/js/jquery-1.8.3.min.js"><\/script>')``: a copy the page loads only when another failed
 _WRITE_SRC = re.compile(r'''document\.write(?:ln)?\(\s{0,8}["']\s{0,8}<script\b[^<>]{0,300}?\bsrc\s{0,4}=\s{0,4}\\?["']?([^"'\\\s<>]{1,500})''',
@@ -258,19 +263,22 @@ def _absolute(value, page_url):
 
 
 def parse_page(body, page_url):
-    """The page's scripts in document order: ``[{'order', 'url', 'timing', 'noconflict', 'fallback'}]``. ``url`` is absolute (None for an
-    inline script); ``timing`` is ``sync``, ``defer`` (also a module script) or ``async``; ``noconflict`` marks an inline script that calls
-    ``noConflict(true)``; ``fallback`` marks a script an inline ``document.write`` loads only when an earlier one failed (it never replaces the
-    copy that did load). The page is read the way a browser tokenizes it: a ``<script>`` inside an HTML comment or inside another script's
-    text is not a script. ``nomodule`` scripts (skipped by every current browser), non-JavaScript types and ``data:`` or other non-HTTP
-    sources are left out."""
+    """The page's scripts in document order: ``[{'order', 'url', 'timing', 'noconflict', 'fallback', 'alternative'}]``. ``url`` is absolute
+    (None for an inline script); ``timing`` is ``sync``, ``defer`` (also a module script) or ``async``; ``noconflict`` marks an inline script
+    that calls ``noConflict(true)``. ``fallback`` marks a copy that is not the page's ordinary load, named by ``alternative``: one an inline
+    ``document.write`` loads only when an earlier one failed, a ``nomodule`` script (run by old browsers only) or one whose type a consent
+    manager switches later (``text/plain``). Such a copy never replaces the copy that loaded, and stays a capped candidate. The page is read
+    the way a browser tokenizes it: a ``<script>`` inside an HTML comment or inside another script's text is not a script. Other
+    non-JavaScript types and ``data:`` or other non-HTTP sources are left out. At most MAX_ENTRIES scripts with a source are kept; inline
+    scripts and fallbacks do not count against it."""
     text = body or ''
     lower = text.lower()
-    out, pos, order = [], 0, 0
-    while len(out) < MAX_ENTRIES:
-        start = lower.find('<script', pos)
-        if start == -1:
-            break
+    out, pos, order, sources, start = [], 0, 0, 0, -1
+    while sources < MAX_ENTRIES and order < MAX_TAGS:
+        if start < pos:  # the next tag is looked for once, not again after every comment before it
+            start = lower.find('<script', pos)
+            if start == -1:
+                break
         comment = lower.find('<!--', pos, start)
         if comment != -1:  # a comment before the next tag hides everything up to its end, tags included
             end = lower.find('-->', comment + 4)
@@ -289,20 +297,27 @@ def parse_page(body, page_url):
         order += 1
         attrs = _attributes(tag.group(1))
         kind = (attrs.get('type') or '').split(';')[0].strip().lower()
-        if kind not in _JS_TYPES or 'nomodule' in attrs:
+        alternative = 'nomodule' if 'nomodule' in attrs else (f'type={kind}' if kind in _DEFERRED_TYPES else '')
+        if kind not in _JS_TYPES and not alternative:
             continue
         timing = 'async' if 'async' in attrs else 'defer' if ('defer' in attrs or kind == 'module') else 'sync'
         if 'src' in attrs:
             url = _absolute(attrs['src'], page_url)
             if url:
-                out.append({'order': this, 'url': url, 'timing': timing, 'noconflict': False})
+                sources += 1
+                entry = {'order': this, 'url': url, 'timing': timing, 'noconflict': False}
+                if alternative:
+                    entry.update({'fallback': True, 'alternative': alternative})
+                out.append(entry)
+            continue
+        if alternative:
             continue
         inline = inner[:MAX_INLINE]
         out.append({'order': this, 'url': None, 'timing': 'sync' if kind != 'module' else 'defer', 'noconflict': bool(NOCONFLICT.search(inline))})
         for written in itertools.islice(_WRITE_SRC.finditer(inline), 3):
             url = _absolute(written.group(1), page_url)
-            if url and len(out) < MAX_ENTRIES:
-                out.append({'order': this, 'url': url, 'timing': 'sync', 'noconflict': False, 'fallback': True})
+            if url:
+                out.append({'order': this, 'url': url, 'timing': 'sync', 'noconflict': False, 'fallback': True, 'alternative': 'document.write'})
     return out
 
 
@@ -660,9 +675,10 @@ def _copies(entries):
             claims[library] = (version, 'filename' if version else '', 'filename' if version else '')
         for key, (version, source, how) in claims.items():
             copy = {'url': entry['url'][:300], 'version': version, 'source': source, 'how': how, 'order': entry['order'],
-                    'timing': entry['timing'], 'rank': _execution_rank(entry)}
+                    'timing': entry['timing'], 'rank': _execution_rank(entry), 'file_read': read is not None}
             if entry.get('fallback'):
                 copy['fallback'] = True
+                copy['alternative'] = entry.get('alternative') or 'document.write'
             if key == library and entry.get('query_version'):
                 copy['query_version'] = entry['query_version']
             if key == library and entry.get('filename_version') and source == 'body' and entry['filename_version'] != version:
@@ -721,6 +737,8 @@ def resolve(entries):
         if reasons:  # the record speaks for the last copy whose file states it (else the last versioned one), as a guess
             effective = (next((c for c in reversed(ordered) if c['version'] and c['source'] == 'body'), None)
                          or next((c for c in reversed(ordered) if c['version']), effective))
+        if effective['version'] and effective['source'] != 'body':  # the same version read from a file elsewhere on the page is the evidence
+            effective = next((c for c in reversed(ordered) if c['version'] == effective['version'] and c['source'] == 'body'), effective)
         confidence = CONFIDENCE.get(effective['how'], 0.0) if effective['version'] else 0.0
         if reasons:
             confidence = min(confidence, UNRESOLVED_CAP)
@@ -761,7 +779,10 @@ def is_library(name):
 FILENAME_SOURCES = ('script:name', 'script:filename')  # 'script:name' is how a name hint (or a ?ver= string) was labelled before 1.3.2
 LEGACY_NOTE = ('read from the script name or its query string by a scan before 1.3.2; the next route check reads the file itself')
 SHADOWED_NOTE = 'shadowed by {by} loaded later; older code or closures may still use it'
-FALLBACK_NOTE = 'a fallback the page loads only when an earlier script fails to load'
+FALLBACK_NOTES = {'document.write': 'a fallback the page loads only when an earlier script fails to load',
+                  'nomodule': 'a nomodule script: only browsers without module support run it',
+                  'type': 'a script whose type a loader or consent manager switches before it runs'}
+UNREAD_NOTE = ('read from the script\'s {where}; its file was not read ({why}), so the file has not confirmed it')
 
 
 class HostLibraries:
@@ -796,14 +817,22 @@ class HostLibraries:
             elif row.source in FILENAME_SOURCES and row.version:
                 _legacy_add(legacy, f'{row.product}:{row.version}', row.source)
         records = {}
-        for when, key, record in sorted(dated, key=lambda item: (item[0] is not None, item[0] or 0)):
-            records[key] = record  # the newest reading of each library wins
+        for _when, key, record in sorted(dated, key=lambda item: (item[0] is not None, item[0] or 0), reverse=True):
+            if key not in records:
+                records[key] = {**record, 'copies': list(record.get('copies') or [])}  # the newest reading of each library speaks
+                continue
+            # every current front page (https and http, the route check and the probe) adds the copies the newest one did not see, so a
+            # version one of them read from a file is never lost
+            seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
+            records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
         return cls(records, legacy)
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
-        most its confidence may be (None: no cap). Only a version a script's query string or name carried, where the file itself states
-        another or nothing, is skipped; a copy a later one replaces and a fallback stay candidates at SHADOWED_CAP."""
+        most its confidence may be (None: no cap). Only a version a script's query string or name carried, where that script's own file was
+        read and states another version or none, is skipped. A copy a later one replaces and a fallback stay candidates at SHADOWED_CAP, and
+        a query or name version of a script that was never read (reading off, a budget, a refused or failing host) at the file-name
+        confidence: nothing is dropped that a file has not contradicted."""
         key = PRODUCTS.get((product or '').strip().lower())
         if not key or not version:
             return False, {}, None
@@ -811,29 +840,41 @@ class HostLibraries:
         if record is None:
             return self._judge_legacy(key, version)
         copies = [c for c in record.get('copies') or [] if isinstance(c, dict)]
-        summary = [{k: c.get(k) for k in ('url', 'version', 'source', 'order', 'state', 'loaded_after_noconflict') if c.get(k) not in (None, '')}
-                   for c in copies][:MAX_COPIES]
+        summary = [{k: c.get(k) for k in ('url', 'version', 'source', 'order', 'state', 'loaded_after_noconflict', 'alternative')
+                    if c.get(k) not in (None, '')} for c in copies][:MAX_COPIES]
         base = {'copies': summary, **({'copies_unresolved': True} if record.get('copies_unresolved') else {})}
-        mine = [c for c in copies if c.get('version') == version]
         rank = {'effective': 0, 'unresolved': 1, 'shadowed': 2, 'fallback': 3}
-        mine.sort(key=lambda c: (rank.get(c.get('state'), 9), c.get('source') != 'body'))
+        mine = [c for c in copies if c.get('version') == version]
         if mine:
-            copy = mine[0]
-            state, source = copy.get('state'), copy.get('source') or ''
+            # the version's best standing among its copies, and the best evidence for it: a file that states it beats a name, whichever copy
+            state = min((c.get('state') for c in mine), key=lambda st: rank.get(st, 9))
+            copy = min(mine, key=lambda c: (c.get('source') != 'body', rank.get(c.get('state'), 9)))
+            source = copy.get('source') or ''
             confidence = CONFIDENCE.get(copy.get('how') or '', 0.0)
-            cap = CONFIDENCE['filename'] if source == 'filename' else None
+            cap = CONFIDENCE['filename'] if source != 'body' else None
             evidence = {**base, 'script_url': copy.get('url', ''), **({'script_sha256': copy['sha256']} if copy.get('sha256') else {}),
-                        'version_source': source, 'copy_state': state}
+                        'version_source': source or 'filename', 'copy_state': state}
             if state == 'unresolved':
                 cap = min(cap if cap is not None else 1.0, UNRESOLVED_CAP)
             elif state in ('shadowed', 'fallback'):
                 cap = min(cap if cap is not None else 1.0, SHADOWED_CAP)
-                by = copy.get('shadowed_by') or record.get('version') or 'a later copy'
-                evidence['version_note'] = SHADOWED_NOTE.format(by=by) if state == 'shadowed' else FALLBACK_NOTE
+                holder = next((c for c in mine if c.get('state') == state), copy)
+                by = holder.get('shadowed_by') or record.get('version') or 'a later copy'
+                alternative = str(holder.get('alternative') or 'document.write')
+                evidence['version_note'] = (SHADOWED_NOTE.format(by=by) if state == 'shadowed'
+                                            else FALLBACK_NOTES['type' if alternative.startswith('type=') else alternative]
+                                            if (alternative.startswith('type=') or alternative in FALLBACK_NOTES) else FALLBACK_NOTES['document.write'])
             evidence['version_confidence'] = min(confidence, cap) if cap is not None else confidence
             return False, evidence, cap
-        if any(version in (c.get('query_version'), c.get('filename_version')) for c in copies):
-            return True, {}, None  # the string a script's query or name carries, where the file states otherwise or nothing
+        named = [c for c in copies if version in (c.get('query_version'), c.get('filename_version'))]
+        if named and any(c.get('file_read', c.get('source') == 'body') for c in named):
+            return True, {}, None  # the string a script's query or name carries, where the file itself was read and states otherwise or nothing
+        if named:  # the script was never read: its query or name string is all there is, kept at the file-name confidence
+            copy = named[0]
+            where = 'query string' if copy.get('query_version') == version else 'file name'
+            return False, {**base, 'script_url': copy.get('url', ''), 'version_source': 'filename', 'copy_state': copy.get('state') or '',
+                           'version_confidence': CONFIDENCE['filename'],
+                           'version_note': UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read')}, CONFIDENCE['filename']
         return False, {'copies': summary, 'version_source': 'other'}, None  # another tool read it; shown with what the page itself says
 
     def _judge_legacy(self, key, version):

@@ -376,7 +376,10 @@ def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, 
     records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate, target), budget,
                                      before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id),
                                      reader=reader, project=project)
-    hints = {f['name'] for f in evidence.get('fingerprints') or [] if f.get('source') == 'script:filename' and js_libraries.is_library(f['name'])}
+    # a file-name hint gives way only to a library the page's scripts were resolved for; any other stays as it was
+    resolved = {r['product'].lower() for r in records.values()}
+    hints = {f['name'] for f in evidence.get('fingerprints') or []
+             if f.get('source') == 'script:filename' and f['name'].split(':', 1)[0].strip().lower() in resolved}
     kept = [f for f in evidence.get('fingerprints') or [] if f['name'] not in hints]
     found = fingerprint.extend(kept, js_libraries.names_of(records))
     if records:

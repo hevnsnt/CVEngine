@@ -364,8 +364,9 @@ def library_brief(evidence, names=()):
         out['copies_on_page'] = [{'script': _path_only(c.get('url'), names), 'version': _s(c.get('version'), 40, names) or 'unknown',
                                   'version_from': _s(c.get('source') or 'nothing readable', 20), 'state': _s(c.get('state'), 20),
                                   **({'loaded_after_noconflict': True} if c.get('loaded_after_noconflict') else {})} for c in copies[:8]]
-        out['note'] = ('Scripts run in document order and a later full copy of a library replaces the global an earlier one set, so the '
-                       'effective copy is the one the page uses; a shadowed copy is replaced by it.')
+        out['note'] = ('Scripts run in document order and a later full copy of a library takes over the global an earlier one set, so the '
+                       'effective copy is the one most page code uses; a shadowed copy may still be used by older code or closures that '
+                       'captured it, and a fallback runs only when its condition is met.')
     if evidence.get('copies_unresolved'):
         out['copies_unresolved'] = True
         out['note'] = 'The page does not show which copy runs (async loading or jQuery.noConflict(true)): each copy is only a candidate.'

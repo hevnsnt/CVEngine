@@ -549,9 +549,11 @@ class ReviewProbeTests(NoCache, SimpleTestCase):
                 '<script src="javascript:alert(1)"></script><script src="https://evil.test\\@www.rt.test/jquery.js"></script>'
                 '<script src="https://a.test@evil.test/jquery.js"></script>'
                 '<script src=" https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js "></script>')
-        urls = [e['url'] for e in js_libraries.parse_page(html, PAGE_URL) if e['url']]
-        self.assertEqual(urls, ['https://www.rt.test/a/jquery-1.8.3.min.js', 'https://www.rt.test/js/jquery.min.js?ver=1.0.4',
-                                'https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js'])
+        entries = [e for e in js_libraries.parse_page(html, PAGE_URL) if e['url']]
+        self.assertEqual([e['url'] for e in entries], ['https://www.rt.test/a/jquery-1.8.3.min.js', 'https://www.rt.test/legacy/jquery-1.4.js',
+                                                       'https://www.rt.test/js/jquery.min.js?ver=1.0.4',
+                                                       'https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js'])
+        self.assertEqual(entries[1].get('alternative'), 'nomodule')  # old browsers run it: a capped candidate, never the effective copy
 
     def test_the_reviews_hostile_inputs_stay_fast(self):
         import time
@@ -762,3 +764,94 @@ class ProbePageTests(NoCache, SimpleTestCase):
             found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
             self.assertEqual([o for o in found if o['kind'] == 'version'], [])
             self.assertEqual(asked, ['https://www.rt.test/'])
+
+
+class SecondReviewTests(NoCache, SimpleTestCase):
+    """The second review (1.3.2): nothing a file has not contradicted is dropped, and the page limit never hides a later script."""
+
+    def test_inline_scripts_never_use_up_the_page_limit(self):
+        page = '<script src="/js/a.js"></script>' + '<script>var a=1</script>' * 200 + '<script src="/js/jquery-1.8.3.min.js"></script>'
+        entries = js_libraries.parse_page(page, PAGE_URL)
+        self.assertIn('https://www.rt.test/js/jquery-1.8.3.min.js', [e['url'] for e in entries])
+        many = ''.join(f'<script src="/js/s{i}.js"></script>' for i in range(js_libraries.MAX_ENTRIES + 5))
+        self.assertEqual(len([e for e in js_libraries.parse_page(many, PAGE_URL) if e['url']]), js_libraries.MAX_ENTRIES)
+
+    def test_comments_are_read_in_linear_time(self):
+        import time
+        for page in ('<!---->' * 37000 + '<script src="/js/jquery.js"></script>', '<!-- x -->' * 30000 + '<script>', '<!--' * 60000):
+            started = time.monotonic()
+            js_libraries.parse_page(page, PAGE_URL)
+            self.assertLess(time.monotonic() - started, 0.5, page[:20])
+
+    def test_with_reading_off_a_query_version_is_a_capped_candidate_never_dropped(self):
+        with mock.patch.dict('os.environ', {'CVENGINE_SCRIPT_BODY_READ': '0'}):
+            entries = js_libraries.parse_page('<script src="/js/jquery.min.js?ver=3.5.1"></script>', PAGE_URL)
+            records = js_libraries.read_page(entries, PAGE_URL, fetcher({}), js_libraries.vetter(PAGE_URL), {'left': 6}, reader=reader())
+        skip, evidence, cap = js_libraries.HostLibraries(records).judge('jQuery', '3.5.1')
+        self.assertEqual((skip, evidence['version_source'], cap), (False, 'filename', 0.4))
+        self.assertIn('script reading is off', evidence['version_note'])
+
+    def test_with_the_budget_spent_a_query_version_is_a_capped_candidate(self):
+        page = '<script src="/js/jquery-3.7.1.min.js"></script><script src="/css/bootstrap.min.js?ver=3.3.7"></script>'
+        records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN}, scan=reader(max_requests=1))
+        skip, evidence, cap = js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')
+        self.assertEqual((skip, cap, evidence['version_note'].startswith("read from the script's query string")), (False, 0.4, True))
+        records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN, '/css/bootstrap.min.js': NO_BANNER})  # read: states nothing
+        self.assertTrue(js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')[0])
+        records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN, '/css/bootstrap.min.js': BOOTSTRAP_4})  # read: states another version
+        self.assertTrue(js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')[0])
+
+    def test_a_version_read_from_a_file_is_not_downgraded_by_an_unread_copy_of_it(self):
+        page = '<script src="/a/jquery.js"></script><script src="/b/jquery-3.4.1.min.js"></script>'  # the second 404s
+        records = read(page, {'/a/jquery.js': JQ_341_MIN})
+        record = records['jquery']
+        self.assertEqual((record['version'], record['version_source'], record['version_confidence']), ('3.4.1', 'body', 0.9))
+        skip, evidence, cap = js_libraries.HostLibraries(records).judge('jQuery', '3.4.1')
+        self.assertEqual((skip, evidence['version_source'], evidence['copy_state'], cap), (False, 'body', 'effective', None))
+
+    def test_nomodule_and_consent_typed_scripts_are_capped_candidates(self):
+        page = ('<script src="/js/jquery-3.7.1.min.js"></script><script nomodule src="/old/jquery-1.12.4.min.js"></script>'
+                '<script type="text/plain" data-cookieconsent="marketing" src="/c/jquery-2.2.4.min.js"></script>')
+        records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN, '/old/jquery-1.12.4.min.js': JQ_341_MIN.replace('3.4.1', '1.12.4'),
+                              '/c/jquery-2.2.4.min.js': JQ_341_MIN.replace('3.4.1', '2.2.4')})
+        record = records['jquery']
+        self.assertEqual(record['version'], '3.7.1')
+        self.assertEqual({c['version']: (c['state'], c.get('alternative')) for c in record['copies']},
+                         {'3.7.1': ('effective', None), '1.12.4': ('fallback', 'nomodule'), '2.2.4': ('fallback', 'type=text/plain')})
+        libraries = js_libraries.HostLibraries(records)
+        self.assertEqual(libraries.judge('jQuery', '1.12.4')[2], js_libraries.SHADOWED_CAP)
+        self.assertIn('nomodule', libraries.judge('jQuery', '1.12.4')[1]['version_note'])
+        self.assertIn('consent manager', libraries.judge('jQuery', '2.2.4')[1]['version_note'])
+
+    def test_the_triage_note_does_not_say_a_shadowed_copy_is_unused(self):
+        brief = triage.library_brief({'version_source': 'body', 'copies': [{'url': '/a.js', 'version': '1.12.4', 'state': 'shadowed'},
+                                                                           {'url': '/b.js', 'version': '3.7.1', 'state': 'effective'}]})
+        self.assertIn('may still be used by older code or closures', brief['note'])
+        self.assertNotIn('replaced by it', brief['note'])
+
+
+class SecondReviewDbTests(NoCache, RouteFixture, TestCase):
+    def test_a_late_library_script_past_many_inline_scripts_keeps_its_hint(self):
+        page = '<script src="/js/a.js"></script>' + '<script>var a=1</script>' * 85 + '<script src="/js/jquery-1.8.3.min.js"></script>'
+        self.answers = {'/': {'status': 200, 'body': page}}
+        scan = self.scan()
+        self.run_it(scan)
+        root = RouteAuth.objects.get(path='/')
+        self.assertIn('jQuery:1.8.3', root.evidence['fingerprint_names'])  # not read (404): the name stays a hint, never removed
+
+    def test_every_current_front_page_adds_the_copies_it_read(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        self.scan()
+        sub = Subdomain.objects.select_related('target_domain').get(name='www.rt.test')
+        older = read('<script src="/a/jquery.js"></script>', {'/a/jquery.js': JQ_341_MIN})
+        newer = read('<script src="/a/jquery.js?ver=3.4.1"></script><script src="/b/jquery.js"></script>', {'/b/jquery.js': JQ_371_MIN})
+        now = timezone.now()
+        RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.rt.test', path='/', url='http://www.rt.test/',
+                                 auth_state='open', http_status=200, evidence={'libraries': older}, checked_at=now - timedelta(hours=1))
+        RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.rt.test', path='/', url=PAGE_URL,
+                                 auth_state='open', http_status=200, evidence={'libraries': newer}, checked_at=now)
+        libraries = js_libraries.HostLibraries.for_subdomain(sub)
+        self.assertEqual(libraries.records['jquery']['version'], '3.7.1')  # the newest reading speaks for the library
+        skip, evidence, _cap = libraries.judge('jQuery', '3.4.1')  # ... but the older page read 3.4.1 from a file: never skipped
+        self.assertEqual((skip, evidence['version_source']), (False, 'body'))
