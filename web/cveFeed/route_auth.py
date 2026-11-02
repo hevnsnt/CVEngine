@@ -324,7 +324,10 @@ def analyse(result):
     return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
             'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
             # what the page was, for comparing it with the answer to a path that cannot exist (cveFeed.soft404); held in memory, never stored
-            'fp': soft404.fingerprint(result, urlparse(result.get('url') or '').path), 'bytes': result.get('bytes', len(body))}
+            # the front page is never compared with a path that cannot exist (_against_missing_page): no fingerprint, so a 300 KB page is not
+            # normalised for nothing
+            'fp': (None if (urlparse(result.get('url') or '').path or '/') == '/' else
+                   soft404.fingerprint(result, urlparse(result.get('url') or '').path)), 'bytes': result.get('bytes', len(body))}
 
 
 CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
