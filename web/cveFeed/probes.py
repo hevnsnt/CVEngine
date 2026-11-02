@@ -479,16 +479,30 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
             responses.append(None)
     out = []
     first = responses[0] if responses else None
+    # fetch follows a redirect inside the host's group (apex and www answer for each other): a page another host served loads that host's
+    # scripts, so none of its libraries is recorded for this one (the other host's own probe records them)
+    elsewhere = bool(first) and not served_by(first, base)
     if handler == 'headers' and first:
-        out += observations_from_page(first)
+        out += [o for o in observations_from_page(first) if not (elsewhere and js_libraries.is_library(o['product']))]
     elif handler == 'nextjs' and first:
         out += _nextjs_observations(first, get, sleep)
-    elif handler == 'libraries' and first:
+    elif handler == 'libraries' and first and not elsewhere:
         out += _library_observations(first, script_get or get, sleep, project, reader=reader, target=target)
     out += apply_rules(probe, responses)
     if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
         out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
     return out
+
+
+def served_by(response, base):
+    """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
+    host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
+    final = response.get('final_url') or response.get('url') or ''
+    try:
+        here, there = (urlsplit(base).hostname or '').lower().rstrip('.'), (urlsplit(final).hostname or '').lower().rstrip('.')
+    except ValueError:
+        return False
+    return not there or here == there
 
 
 def _wordpress_responses(base, get, sleep):

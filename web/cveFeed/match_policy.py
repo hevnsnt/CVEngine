@@ -103,7 +103,8 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
     """Whether a CVE match rests on evidence about *this host* beyond a version string. The one definition, used by triage's ceiling, the
     match heat (``threat.match_heat``) and its database form (``hard_evidence_q``). Hard evidence is any of:
 
-      * a template hit (``template_result`` vulnerable: a nuclei CVE template, or a confirmed OpenVAS test);
+      * a template hit (``template_result`` vulnerable: a nuclei CVE template that shows the flaw, or a confirmed OpenVAS test; a template
+        that only matches a version string records ``version_only`` instead, ``templategen.template_evidence``, and is not one);
       * the distribution's tracker listing the host's package as vulnerable (``distro_status`` vulnerable);
       * the host's own inventory report: the match was made from it (source ``host``) or it confirmed an external match
         (``evidence.host_reported``);
@@ -111,7 +112,8 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
       * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
 
     Everything else is *version-only*: a version read by nmap or a banner, by technology detection (a script name, a page generator), by
-    WPScan, an OpenVAS test below its quality bar, or a CVE's version range read against any of those. An AI verdict is not evidence
+    WPScan, an OpenVAS test below its quality bar, a template that matched a version string, or a CVE's version range read against any of
+    those. An AI verdict is not evidence
     (text never confirms), and a version re-read by another tool is the same evidence again."""
     return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
             or evidence_flag(evidence, 'host_reported') or evidence_flag(evidence, 'runzero') or validation_status == 'hit')

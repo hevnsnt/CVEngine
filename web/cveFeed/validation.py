@@ -378,16 +378,9 @@ def run_nuclei_template(check):
     """Run the planned template against the one host (see templategen.run_template: -ni, -rl 10, -timeout 10, no retries)."""
     from cveFeed import templategen
     outcome = templategen._run_template_with_retry(check['params']['template'], [check['target']])[0]
-    if outcome.get('error'):
-        return {'status': 'failed', 'error': outcome['error'], 'summary': outcome['error'], 'outcome': outcome}
-    if outcome['vulnerable']:
-        hit = outcome.get('hit') or {}
-        evidence = {'matched_at': _trim(hit.get('matched-at') or hit.get('host'), 500), 'matcher_name': _trim(hit.get('matcher-name'), 200),
-                    'extracted_results': [_trim(e, 200) for e in (hit.get('extracted-results') or [])[:5]],
-                    'request': _trim(hit.get('request')), 'response': _trim(hit.get('response'))}
-        return {'status': 'hit', 'summary': f'the template matched ({evidence["matcher_name"] or "matcher"})',
-                'output_excerpt': _trim(f'matched at {evidence["matched_at"]}', OUTPUT_CAP), 'evidence': evidence, 'outcome': outcome}
-    return {'status': 'no_match', 'summary': 'the template did not match', 'outcome': outcome}
+    if outcome.get('vulnerable') and not outcome.get('error'):
+        outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
+    return _result_from_outcome(outcome)
 
 
 def run_nmap_sv(check):
@@ -675,6 +668,10 @@ def record_template_outcomes(cve, outcomes, project, template_path):
 
 
 def _result_from_outcome(outcome):
+    """A template outcome as a validation step result. A hit of a version-class template (``templategen.template_evidence``) read the
+    version again and showed nothing more: it is ``reaffirmed`` (the live version is inside the affected range), never a ``hit``, so it is
+    not hard evidence, lifts no heat, confirms no row and pages nothing."""
+    from cveFeed import templategen
     if outcome.get('error'):
         return {'status': 'failed', 'error': outcome['error'], 'summary': outcome['error'], 'outcome': outcome}
     if outcome.get('vulnerable'):
@@ -682,6 +679,10 @@ def _result_from_outcome(outcome):
         evidence = {'matched_at': _trim(hit.get('matched-at') or hit.get('host'), 500), 'matcher_name': _trim(hit.get('matcher-name'), 200),
                     'extracted_results': [_trim(e, 200) for e in (hit.get('extracted-results') or [])[:5]],
                     'request': _trim(hit.get('request')), 'response': _trim(hit.get('response'))}
+        if templategen.is_version_hit(outcome):
+            return {'status': 'reaffirmed', 'summary': 'the template matched a version string only; that version is inside the affected '
+                                                       'range, and the flaw itself was not shown',
+                    'output_excerpt': _trim(f'matched at {evidence["matched_at"]}', OUTPUT_CAP), 'outcome': outcome}
         return {'status': 'hit', 'summary': f'the template matched ({evidence["matcher_name"] or "matcher"})',
                 'output_excerpt': _trim(f'matched at {evidence["matched_at"]}', OUTPUT_CAP), 'evidence': evidence, 'outcome': outcome}
     return {'status': 'no_match', 'summary': 'the template did not match', 'outcome': outcome}

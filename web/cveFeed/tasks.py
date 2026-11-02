@@ -714,7 +714,8 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             provider = None
         outcome = run_cve_tests(cve, hosts, provider=provider, project=project_id)
         logger.info("template test %s: %s on %d hosts", cve.cve_id, outcome["source"], len(hosts))
-        vulnerable = [r["host"] for r in outcome["results"] if r["vulnerable"]]
+        from cveFeed.templategen import is_confirmed
+        vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
         pairs = [(cve.cve_id, host) for host in vulnerable]
         if batch:
             hit_batch.record(batch, pairs)

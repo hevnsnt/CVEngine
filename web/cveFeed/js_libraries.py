@@ -783,16 +783,38 @@ FALLBACK_NOTES = {'document.write': 'a fallback the page loads only when an earl
                   'nomodule': 'a nomodule script: only browsers without module support run it',
                   'type': 'a script whose type a loader or consent manager switches before it runs'}
 UNREAD_NOTE = ('read from the script\'s {where}; its file was not read ({why}), so the file has not confirmed it')
+OTHER_NOTE = ('named by another fingerprinting tool (technology detection), not read from the script file; trusted no further than a '
+              'file name until a file on the page states it')
+
+
+def redirect_alias_of(roots, host):
+    """The host a front page only redirects to, or '' when ``host`` serves a page of its own. ``roots`` are ``(url, status, location)`` of the
+    host's current root routes (http and https). A host is an alias only when every root answered a redirect and at least one of them leads
+    to another host: a redirect to itself (http to https, ``/`` to ``/en/``) is not one, and neither is a host whose root answered anything
+    else (a page, a 403, an error), whose own answer may carry scripts. Pure."""
+    target = ''
+    for url, status, location in roots:
+        if not isinstance(status, int) or not 300 <= status < 400:
+            return ''
+        try:
+            name = (urlsplit(urljoin(url or '', (location or '').strip())).hostname or '').lower().rstrip('.')
+        except ValueError:
+            return ''
+        if name and name != host and not target:
+            target = name
+    return target
 
 
 class HostLibraries:
     """What one host's front page says about its libraries: the newest record per library (route check or ``html-libraries`` probe) and,
     for data recorded before records existed, the names read from script URLs. ``judge(product, version)`` tells correlation whether a
-    stored version may make a match and with what evidence."""
+    stored version may make a match and with what evidence. ``alias_of`` is the host the front page only redirects to (``redirect_alias_of``):
+    such a host serves no scripts of its own, so no library version stored for it is matched."""
 
-    def __init__(self, records=None, legacy=None):
+    def __init__(self, records=None, legacy=None, alias_of=''):
         self.records = records or {}  # library key -> record
         self.legacy = legacy or {}    # (library key, version) -> source, from fingerprints that predate records
+        self.alias_of = alias_of
 
     @classmethod
     def for_subdomain(cls, subdomain):
@@ -801,8 +823,10 @@ class HostLibraries:
         if not project:
             return cls()
         host = subdomain.name.lower()
-        dated, legacy = [], {}
-        for row in RouteAuth.objects.filter(project_id=project, host=host, path='/', retired_at__isnull=True).only('evidence', 'checked_at'):
+        dated, legacy, roots = [], {}, []
+        for row in RouteAuth.objects.filter(project_id=project, host=host, path='/', retired_at__isnull=True).only(
+                'evidence', 'checked_at', 'url', 'http_status', 'redirect_to'):
+            roots.append((row.url, row.http_status, row.redirect_to))
             evidence = row.evidence or {}
             if isinstance(evidence.get('libraries'), dict):
                 dated += [(row.checked_at, key, rec) for key, rec in evidence['libraries'].items() if isinstance(rec, dict)]
@@ -825,17 +849,23 @@ class HostLibraries:
             # version one of them read from a file is never lost
             seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
             records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
-        return cls(records, legacy)
+        return cls(records, legacy, redirect_alias_of(roots, host))
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
-        most its confidence may be (None: no cap). Only a version a script's query string or name carried, where that script's own file was
-        read and states another version or none, is skipped. A copy a later one replaces and a fallback stay candidates at SHADOWED_CAP, and
-        a query or name version of a script that was never read (reading off, a budget, a refused or failing host) at the file-name
-        confidence: nothing is dropped that a file has not contradicted."""
+        most its confidence may be (None: no cap). Skipped: every library version of a host whose front page only redirects to another host
+        (``alias_of``: the scripts are that host's, whichever tool saw them after following the redirect), and a version a script's query
+        string or name carried where that script's own file was read and states another version or none. A copy a later one replaces and a
+        fallback stay candidates at SHADOWED_CAP, and a query or name version of a script that was never read (reading off, a budget, a
+        refused or failing host) at the file-name confidence: nothing is dropped that a file has not contradicted. A version no file on the
+        page stated (another tool's: httpx/Wappalyzer, the nuclei technology pass, bbot) is kept at the file-name confidence too: only a
+        file's own banner or code earns more. None of this is hard evidence (``match_policy.has_hard_evidence``): every library match made
+        here is version-only."""
         key = PRODUCTS.get((product or '').strip().lower())
         if not key or not version:
             return False, {}, None
+        if self.alias_of:
+            return True, {}, None  # the host serves no page of its own: what was seen behind its redirect is the other host's
         record = self.records.get(key)
         if record is None:
             return self._judge_legacy(key, version)
@@ -875,16 +905,24 @@ class HostLibraries:
             return False, {**base, 'script_url': copy.get('url', ''), 'version_source': 'filename', 'copy_state': copy.get('state') or '',
                            'version_confidence': CONFIDENCE['filename'],
                            'version_note': UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read')}, CONFIDENCE['filename']
-        return False, {'copies': summary, 'version_source': 'other'}, None  # another tool read it; shown with what the page itself says
+        # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
+        # says, and trusted no further than a file name
+        return False, {'copies': summary, **_other()}, CONFIDENCE['filename']
 
     def _judge_legacy(self, key, version):
         """A version stored before records existed, from a script's name or its query string (one cannot be told from the other any more):
-        kept as a candidate at the file-name confidence, never dropped, until the next route check reads the file."""
+        kept as a candidate at the file-name confidence, never dropped, until the next route check reads the file. A version with no reading
+        of the page at all is another tool's, kept at the same confidence."""
         source = self.legacy.get((key, version))
         if source is None:
-            return False, {}, None
+            return False, _other(), CONFIDENCE['filename']
         note = LEGACY_NOTE if source == 'script:name' else 'read from the script\'s file name only; the file itself was not read'
         return False, {'version_source': 'filename', 'version_confidence': CONFIDENCE['filename'], 'version_note': note}, CONFIDENCE['filename']
+
+
+def _other():
+    """The evidence of a library version no file on the page stated: another tool's, at the file-name confidence."""
+    return {'version_source': 'other', 'version_confidence': CONFIDENCE['filename'], 'version_note': OTHER_NOTE}
 
 
 def _legacy_add(legacy, name, source):

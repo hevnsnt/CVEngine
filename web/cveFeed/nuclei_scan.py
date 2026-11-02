@@ -722,7 +722,8 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
             ledger.record(service, failed_hosts, project, scan, 'failed')
             not_tested.update(failed_hosts)
         tested.update(done_hosts)
-        vulnerable += [(cve.cve_id, h) for h in done_hosts if results[h].get('vulnerable')]
+        from cveFeed.templategen import is_confirmed
+        vulnerable += [(cve.cve_id, h) for h in done_hosts if is_confirmed(results[h])]  # a version-class hit confirms nothing
     return {'cves': len(wanted), 'hosts': len(tested), 'not_tested': len(not_tested), 'vulnerable': vulnerable}
 
 

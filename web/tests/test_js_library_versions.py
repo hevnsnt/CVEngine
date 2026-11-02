@@ -472,10 +472,11 @@ class CorrelationTests(RouteFixture, TestCase):
             self.assertEqual((match['confidence'], match['evidence']['version_source']), (0.4, 'filename'))
             self.assertIn('1.3.2', match['evidence']['version_note'])
 
-    def test_a_library_version_with_no_page_evidence_is_matched_as_before(self):
+    def test_a_library_version_with_no_page_evidence_is_kept_at_the_file_name_confidence(self):
+        # 1.3.3: another tool's version (no file on the page stated it) is still matched, never dropped, but trusted no more than a file name
         match = self.host('jQuery:3.4.1')[('3.4.1', 11023)]
-        self.assertEqual(match['confidence'], 0.95)
-        self.assertNotIn('version_source', match['evidence'])
+        self.assertEqual(match['confidence'], js_libraries.CONFIDENCE['filename'])
+        self.assertEqual(match['evidence']['version_source'], 'other')
 
     def test_a_probe_record_counts_like_a_route_record(self):
         records = self.records(TWO_COPIES, {'/assets/jquery-3.4.1.min.js': JQ_341_MIN, '/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN})
