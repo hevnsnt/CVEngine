@@ -908,8 +908,9 @@ def _names(values, limit=3):
     return ', '.join('"%s"' % v for v in seen[:limit])
 
 
-LIBRARY_DAMPING_DAYS = 14  # a library match reopened this recently is not closed again on weak grounds (an absence, a cache-buster)
-_WEAK_LIBRARY_CLOSURES = ('no_such_script', 'cache_buster')
+LIBRARY_DAMPING_DAYS = 14  # a library match reopened this recently is not closed again on the page's word (only a redirect alias closes it)
+# every page-based closure but the redirect alias: a page that changes between readings (A/B, rotating bundles) must not flap a match
+_WEAK_LIBRARY_CLOSURES = ('contradicted_by_file', 'no_such_script', 'cache_buster')
 
 
 def _library_standing(match):
@@ -950,9 +951,9 @@ def library_closure(match, libraries, name=None, now=None, present=None):
     the stored reason to close it because the page contradicts it, and whether it must be kept open instead. Only a version the host's
     technologies still name is judged against the page (``present``: ``host_library_versions``); a version the host no longer names is an
     ordinary stale match (``close_stale``'s own closure, as for every product). A page-based closure is held back when a person or a check
-    vouches for the match, or when it reopened lately and the contradiction is weak (an absence or a cache-buster, which an A/B or
-    rotating page can show one day and not the next). The reason is never shared with another host (``close_invalid_correlation``,
-    ``_seedable``)."""
+    vouches for the match (on this row, or on an earlier scan's row of the host: ``_vouched_on_another_row``), or when it reopened lately
+    and the closure is not a redirect alias (a page that changes between readings, A/B or a rotating bundle, must not flap it). The
+    reason is never shared with another host (``close_invalid_correlation``, ``_seedable``)."""
     name = name or (match.matched_product if js_libraries.PRODUCTS.get((match.matched_product or '').strip().lower())
                     else match_policy.sighting_of(match)[0])
     key = js_libraries.PRODUCTS.get((name or '').strip().lower())
@@ -965,8 +966,8 @@ def library_closure(match, libraries, name=None, now=None, present=None):
     skip, evidence, _cap = libraries.judge(name, match.matched_version)
     if not (skip and evidence.get('reason')):
         return '', False
-    if _library_standing(match):
-        return '', True
+    if _library_standing(match) or _vouched_on_another_row(match.subdomain, name, match.matched_version):
+        return '', True  # a person or a check vouched for it, on this row or on an earlier scan's row of the host
     reason = js_libraries.closed_reason(evidence['reason'])
     if js_libraries.closure_kind(reason) in _WEAK_LIBRARY_CLOSURES and _recently_reopened(match, now):
         return '', True

@@ -1,6 +1,6 @@
-"""Third review of the JavaScript library provenance rule (cveFeed.js_libraries, correlation): a page proves a library ABSENT (or a version
-a cache-buster) only when every script on it was read whole; a fresh reading, even a partial one, reopens a match the page closed; a match
-someone vouched for survives a rescan. Each test asserts the safe outcome."""
+"""Third review of the JavaScript library provenance rule (cveFeed.js_libraries, correlation): a page with a script not read whole proves
+nothing (absence and cache-buster closures were removed altogether after the fourth review); a fresh reading, even a partial one, reopens a
+match the page closed; a match someone vouched for survives a rescan. Each test asserts the safe outcome."""
 from django.test import SimpleTestCase
 from django.utils import timezone
 from unittest import mock
@@ -9,7 +9,7 @@ import os
 from cveFeed import correlation, js_libraries
 from cveFeed.models import CVEMatch, RouteAuth
 from startScan.models import Technology
-from tests.test_js_libraries_provenance import ReviewScenarioBase
+from tests.test_js_libraries_provenance import CONTRA, ReviewScenarioBase
 from tests.test_js_library_versions import JQ_371_MIN
 
 JQ_1124 = '/*! jQuery v1.12.4 | (c) jQuery Foundation | jquery.org/license */\n!function(a,b){}'
@@ -19,16 +19,16 @@ JQ_UI_1121 = '/*! jQuery UI - v1.12.1 - 2016-09-14\n* http://jqueryui.com\n* Inc
 class ReopenOnAFreshReadingTests(ReviewScenarioBase):
     """A match the page closed reopens on any fresh reading that no longer supports the closure, even a partial one."""
 
-    def closed_by_absence(self, name):
+    def closed_by_the_page(self, name):
         sub = self.host(name, ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root(name, 200, '<script src="/site.js"></script>')
+        self.read_root(name, 200, CONTRA)
         match = self.correlate(sub)[(name, 'CVE-2020-11023', '1.12.4')]
         self.assertEqual(match.ai_verdict, 'not_affected')
         return sub
 
     def test_the_page_now_pastes_the_library_inline(self):
-        sub = self.closed_by_absence('inl2.x.test')
+        sub = self.closed_by_the_page('inl2.x.test')
         self.read_root('inl2.x.test', 200, f'<script>{JQ_1124}</script><script src="/site.js"></script>')
         self.assertEqual(RouteAuth.objects.get(host='inl2.x.test').evidence['script_page']['inline'], [{'library': 'jquery', 'version': '1.12.4'}])
         self.assertNotEqual(self.correlate(sub)[('inl2.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
@@ -43,14 +43,14 @@ class ReopenOnAFreshReadingTests(ReviewScenarioBase):
         self.assertNotEqual(self.correlate(sub)[('al.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
     def test_the_page_now_loads_the_library_past_the_parse_limit(self):
-        sub = self.closed_by_absence('cap.x.test')
+        sub = self.closed_by_the_page('cap.x.test')
         filler = ''.join(f'<script src="/p/{i}.js"></script>' for i in range(85))
         self.read_root('cap.x.test', 200, filler + '<script src="/legacy/jquery-1.12.4.min.js"></script>')
         self.assertNotEqual(self.correlate(sub)[('cap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
     def test_the_host_gains_a_web_port_not_read_yet(self):
         from startScan.models import Port
-        sub = self.closed_by_absence('port.x.test')
+        sub = self.closed_by_the_page('port.x.test')
         sub.ip_addresses.first().ports.add(Port.objects.create(number=8443, service_name='https', state='open'))
         self.assertNotEqual(self.correlate(sub)[('port.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
@@ -135,13 +135,13 @@ class VouchedForTests(ReviewScenarioBase):
         sub = self.host('v6.x.test', ['jQuery:1.12.4'])
         match = self.correlate(sub)[('v6.x.test', 'CVE-2020-11023', '1.12.4')]
         CVEMatch.objects.filter(pk=match.pk).update(assignee=user)
-        self.read_root('v6.x.test', 200, '<script src="/site.js"></script>')
+        self.read_root('v6.x.test', 200, CONTRA)
         self.correlate(sub)
         reconcile_library_provenance()
         self.assertEqual(CVEMatch.objects.get(pk=match.pk).ai_verdict, '')
         sibling = self.host('v7.x.test', ['jQuery:1.12.4'])  # the same page, nobody vouches: it closes
         self.correlate(sibling)
-        self.read_root('v7.x.test', 200, '<script src="/site.js"></script>')
+        self.read_root('v7.x.test', 200, CONTRA)
         self.assertEqual(self.correlate(sibling)[('v7.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
     def test_a_vouched_for_version_that_left_the_host_closes_even_where_the_page_contradicts_it(self):
@@ -166,7 +166,7 @@ class VouchedForTests(ReviewScenarioBase):
         sub = self.host('ns.x.test', ['jQuery:1.12.4'])
         match = self.correlate(sub)[('ns.x.test', 'CVE-2020-11023', '1.12.4')]
         CVEMatch.objects.filter(pk=match.pk).update(assignee=user, remediation_status='in_progress')
-        self.read_root('ns.x.test', 200, '<script src="/site.js"></script>')
+        self.read_root('ns.x.test', 200, CONTRA)
         self.assertEqual(self.correlate(sub)[('ns.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')  # held on its own row
         scan2 = ScanHistory.objects.create(domain=self.site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[],
                                            results_dir='y')
@@ -176,7 +176,7 @@ class VouchedForTests(ReviewScenarioBase):
         carried = self.correlate(sub2)[('ns.x.test', 'CVE-2020-11023', '1.12.4')]
         self.assertEqual((carried.ai_verdict, carried.remediation_status, carried.assignee_id), ('', 'in_progress', user.pk))
         unvouched = self.host('nu.x.test', ['jQuery:1.12.4'])  # nobody vouched: the next row has no match
-        self.read_root('nu.x.test', 200, '<script src="/site.js"></script>')
+        self.read_root('nu.x.test', 200, CONTRA)
         self.assertEqual(self.correlate(unvouched), {})
 
 
