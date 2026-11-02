@@ -24,7 +24,8 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
    never above the target or the remembered bad level. The thresholds that allow a probe are far from the ones that force a back-off
    (hysteresis).
 5. A setting above its ceiling (a target sized from facts that reported, a remembered bad level, or for a scanner kind what the memory
-   budget holds at its real peak) is brought down to it at once, with no cooldown (phase ``cap``).
+   budget holds at its real peak) is brought down to it at once, with no cooldown (phase ``cap``). The Sentinels a target is sized from are
+   the most any measurement of the last ``SENTINEL_GRACE_SECONDS`` saw (``steady_facts``), so one missed heartbeat lowers nothing.
 
 The AI advisor's answer is untrusted: ``validate_advice`` keeps only a number for a setting it was offered, inside the range the controller
 gives for that setting right now (from one step down up to the controller's own target).
@@ -57,6 +58,7 @@ SENTINEL_TROUBLE = 2           # Sentinel waits that timed out or ran locally in
 BACKLOG_SECONDS = 1800         # assessment work older than this is a backlog
 SMALL_INSTANCE = 100           # hosts plus targets under this: a small instance, sized modestly
 LOW_DISK_PERCENT = 10          # under this share of free disk, no target is above the optimistic value
+SENTINEL_GRACE_SECONDS = 25 * 60  # a Sentinel still counts for sizing until it is missing from the measurements of this long (three runs)
 
 # key: the setting's key. kind: what it is (``heavy:<scanner kind>``, ``discovery``, ``batch``, ``depth``, ``stage``, ``work_gap``,
 # ``refresh_gap``). low/high: the auto-tuning range. step: one step. sense: ``more`` (a higher number does more at once) or ``gap`` (a higher
@@ -145,6 +147,27 @@ def facts_of(sample):
             'sentinel_live': sent.get('live'), 'sentinel_slots': sent.get('slots'),
             'hosts': size.get('hosts'), 'targets': size.get('targets'), 'disk_free_percent': size.get('disk_free_percent'),
             'discovery_ceiling': _get(sample, 'discovery', 'ceiling'), 'discovery_active': _get(sample, 'discovery', 'active')}
+
+
+def steady_facts(samples):
+    """``facts_of`` the newest measurement, except that the Sentinels are the most live slots any measurement of the last
+    ``SENTINEL_GRACE_SECONDS`` reported. A Sentinel that misses its heartbeat window at one measurement (a blip: a restart, a network hiccup)
+    would otherwise lower every target sized from the Sentinel slots, bring the settings down to it at once (phase ``cap``) and leave them to
+    climb back one probe at a time over days, since the aim-high jump happens once per restart. A Sentinel missing from three measurements in a
+    row is gone, and the settings follow. ``samples`` oldest first, not empty."""
+    facts = facts_of(samples[-1])
+    newest = float(samples[-1].get('t', 0))
+    best = None
+    for sample in samples:
+        sent = sample.get('sentinel') or {}
+        if float(sample.get('t', 0)) < newest - SENTINEL_GRACE_SECONDS or sent.get('live') is None:
+            continue
+        seen = (sent.get('slots') or 0, sent.get('live'))
+        if best is None or seen > best:
+            best = seen
+    if best is not None:
+        facts['sentinel_slots'], facts['sentinel_live'] = best
+    return facts
 
 
 def size_for(setting, facts, current=None):
@@ -485,7 +508,8 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     ``cap``): the Sentinels left, the database filled up, a kind's real peak grew. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
     restart and for ``ready`` (or ``AIM_FALLBACK_SECONDS``), and only ever goes up.
 
-    After an emergency back-off the number before it comes back in one step once the database has room again (``_recovery``, phase ``recover``).
+    After an emergency back-off the number before it comes back in one step once the database has room again (``_recovery``, phase ``recover``),
+    once a day: an emergency within ``BAD_MEMORY_SECONDS`` after such a restore is remembered like trouble at the restored level (``_troubled``).
 
     Returns {'direction': 'more'|'less'|None, 'new', 'pressure', 'phase' ('aim_high', 'back_off', 'cap', 'probe', 'recover' or ''), 'reason',
     'ai_range': (lowest, highest) an AI recommendation may pick or None, 'why_not_raised', 'target', 'ceiling'}. ``new`` is None when
@@ -496,7 +520,7 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
         out['reason'] = out['why_not_raised'] = 'no measurements yet'
         return out
     ceiling, remembered, bad_below = target, '', None
-    bad = sorted((h for h in history if h.get('pressure') and h.get('old') is not None and now - h['at'] < BAD_MEMORY_SECONDS),
+    bad = sorted((h for h in history if _troubled(h, history) and h.get('old') is not None and now - h['at'] < BAD_MEMORY_SECONDS),
                  key=lambda h: h['at'])
     if bad:
         level = bad[-1]['old']
@@ -570,13 +594,27 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     return out
 
 
+def _troubled(change, history):
+    """Whether a change of the history marks the level it left as one that caused trouble: a back-off forced by evidence (``pressure``), or an
+    emergency back-off (the database did not answer) within ``BAD_MEMORY_SECONDS`` after a quick restore (``recover``) of the same setting.
+    The first emergency is taken for a transient outage and restored quickly; the second one in a day says the restored level itself ran the
+    database out of connections, so it is remembered like any trouble and the pool does not flap between the two levels."""
+    if change.get('pressure'):
+        return True
+    return change.get('phase') == 'emergency' and any(
+        h.get('phase') == 'recover' and change['at'] - BAD_MEMORY_SECONDS < h['at'] <= change['at'] for h in history)
+
+
 def _recovery(setting, value, samples, history, *, now, ceiling, held):
     """After an emergency back-off (phase ``emergency``: the database did not answer in two runs in a row, ``cveFeed.autotune.emergency_backoff``)
     the outage was transient once the database answers again with room to spare: the number it held before goes back in one step, without the
     two healthy hours and outside ``DAILY_PROBES`` (those stay for normal probes), once ``BACKOFF_HOLD`` has passed since the back-off was
     recorded and the last ``HEALTHY_SAMPLES`` measurements show room (``room``) and no trouble. Never above the ceiling, never while a revert
-    holds the setting, never after a later change. Returns the number, or None."""
+    holds the setting, never after a later change, and at most once in ``BAD_MEMORY_SECONDS`` (a second emergency after a restore is trouble,
+    ``_troubled``; the normal probes bring it back). Returns the number, or None."""
     if held or setting.sense != 'more':
+        return None
+    if any(h.get('phase') == 'recover' and now - h['at'] < BAD_MEMORY_SECONDS for h in history):
         return None
     latest = max(history, key=lambda h: h['at'], default=None)
     if latest is None or latest.get('phase') != 'emergency' or now - latest['at'] < BACKOFF_HOLD:
