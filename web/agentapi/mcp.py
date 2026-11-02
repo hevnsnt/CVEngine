@@ -21,6 +21,7 @@ from reNgine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
 from agentapi.models import SentinelTask
@@ -80,7 +81,7 @@ SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'ty
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
     ('list_projects', 'Projects you can access, with your role in each.', _schema(), lambda c, a: svc.list_projects(c), False),
-    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness and today's AI validation budget. Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
+    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness, today's AI validation budget, and auto-tuning (mode, last run, its last decisions and why each setting was not raised). Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
     ('list_engines', 'Legacy: scan engines are only labels, every scan runs the same fixed pipeline.', _schema(), lambda c, a: svc.list_engines(c), False),
     ('list_targets', 'Targets (domains, IPs) in a project.', _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_targets(c, a.get('project'), a), False),
@@ -431,6 +432,21 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
+    ('get_tuning_status', 'App Admin only. Auto-tuning of the instance throughput settings (Settings, configMaxxing): mode (off, suggest or auto; auto by default) and effective_mode (off when the CVENGINE_AUTOTUNE=0 kill switch is set), the AI advisor and its daily budget, the numbers it chose, the settings a person pinned by saving a value (with who), the settings it manages with range and step, its last run with why each setting was not raised, and the last ten decisions.',
+     _schema(), lambda c, a: tuning.get_status(c), False),
+    ('list_tuning_decisions', 'App Admin only. Auto-tuning decisions, newest first: each change or recommendation with old and new value, source (controller, ai or person), reason, whether it was applied, and can_apply / can_revert.',
+     _schema({'setting': {'type': 'string', 'description': 'only this setting key (see get_tuning_status managed[].setting)'},
+              'limit': {'type': 'integer', 'description': 'at most 200 (default 50)'}, 'offset': {'type': 'integer'}}),
+     lambda c, a: tuning.list_decisions(c, a), False),
+    ('set_tuning_mode', 'App Admin only. Set auto-tuning to off (hand tuning: nothing is measured or changed), suggest (recommendations only) or auto (bounded changes are applied), and/or turn the AI advisor on or off. Leaving auto drops the tuned numbers at once.',
+     _schema({'mode': {'type': 'string', 'enum': ['off', 'suggest', 'auto']}, 'advisor': {'type': 'boolean'}}),
+     lambda c, a: tuning.set_mode(c, {k: a[k] for k in ('mode', 'advisor') if k in a}), True),
+    ('apply_tuning_suggestion', 'App Admin only. Apply an open auto-tuning recommendation by its decision id (see list_tuning_decisions, can_apply). In auto mode it becomes the tuned number; otherwise it is saved as your value, which pins the setting. Refused when the setting changed since.',
+     _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.apply_decision(c, a['decision_id']), True),
+    ('revert_tuning_decision', 'App Admin only. Revert the newest applied auto-tuning change of a setting by its decision id (see list_tuning_decisions, can_revert); the tuner then does not raise that setting for 24 hours.',
+     _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.revert_decision(c, a['decision_id']), True),
+    ('release_tuning_pin', 'App Admin only, auto mode. Let auto-tuning manage a setting a person pinned: the saved value is removed and the same number becomes the tuned one.',
+     _schema({'setting': {'type': 'string'}}, ['setting']), lambda c, a: tuning.release(c, a['setting']), True),
     ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now. It applies to every Sentinel with no value of its own.',
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
     ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',

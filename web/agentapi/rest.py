@@ -16,6 +16,7 @@ from agentapi import sentinel_dispatch
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
 from agentapi import internal_ranges, sentinel_settings, tailscale
@@ -144,7 +145,7 @@ def _queue_agent_work(request, ctx, slug, **_):
 
 ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
-    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed and AI budget',
+    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
@@ -419,6 +420,18 @@ ROUTES = [
      lambda r, c, **k: sentinel_settings.get_defaults()),
     ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',
      lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r)))[1]),
+    ('GET', r'tuning', 'App Admin: auto-tuning of the configMaxxing throughput settings: mode (off|suggest|auto, default auto) and effective_mode (off when CVENGINE_AUTOTUNE=0), the AI advisor (enabled, provider, used_today, cap), the tuned numbers, the pinned settings (saved by a person) with who saved them, the managed settings with their range and step, the last run (per setting: value and why_not_raised) and the last ten decisions',
+     lambda r, c, **k: tuning.get_status(c)),
+    ('GET', r'tuning/decisions', 'App Admin: auto-tuning decisions, newest first (?setting=, limit up to 200, offset): old_value, new_value, source (controller|ai|person), action, applied, pressure, reason, resolution, can_apply, can_revert',
+     lambda r, c, **k: tuning.list_decisions(c, r.GET)),
+    ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again)',
+     lambda r, c, **k: tuning.set_mode(c, _body(r))),
+    ('POST', r'tuning/decisions/(?P<decision_id>\d+)/apply', 'App Admin: apply a recommendation (mode auto: it becomes the tuned number; otherwise it is saved as your value, which pins the setting); 409 when the setting changed since',
+     lambda r, c, decision_id, **k: tuning.apply_decision(c, decision_id)),
+    ('POST', r'tuning/decisions/(?P<decision_id>\d+)/revert', 'App Admin: revert the newest applied change of a setting (its layer gets back exactly what it held; no raise of that setting for 24 hours)',
+     lambda r, c, decision_id, **k: tuning.revert_decision(c, decision_id)),
+    ('POST', r'tuning/release', 'App Admin, mode auto: {setting}: remove the saved value that pins a setting and hand the same number to the tuner',
+     lambda r, c, **k: tuning.release(c, _body(r).get('setting'))),
     ('GET', r'sentinels/dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (for a Sentinel with a free slot), queue_seconds (for a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) plus per_target_seconds for each target beyond the first, and lease_seconds; read only (instance settings CVENGINE_SENTINEL_CLAIM_TIMEOUT, _QUEUE_TIMEOUT, _DISPATCH_TIMEOUT)',
      lambda r, c, **k: sentinel_dispatch.budgets()),
     ('GET', r'projects/(?P<slug>[-\w]+)/agent-tasks', 'Validation and remediation work for agents (status, kind, agent_id, host)',
