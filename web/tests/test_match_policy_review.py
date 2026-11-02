@@ -177,13 +177,15 @@ class WorkedMatchGuardTests(Fixture):
 		self.assertEqual((MatchVerdict.objects.count(), TriageVerdict.objects.count()), (0, 0))  # another host's evidence is its own
 		self.assertEqual(Triage.objects.get(match=match).classification, 'not_applicable')
 
-	def test_a_wrong_product_verdict_without_a_range_is_still_shared(self):
+	def test_a_wrong_product_verdict_without_a_range_is_not_shared_either(self):
+		# the closure reads this host's sighting, which the host's owner controls; the shared keys do not carry it, so another
+		# organization's host with the same key would be closed by it (task 256). That host is judged on its own sighting instead.
 		nginx_ui = self.cve(Cve(171, affected('nginx-ui', '1.0.0', '2.1.0')))
 		tech = self.tech('nginx')
 		match = self.match_for(nginx_ui, product='nginx-ui', evidence={'source': 'tech', 'source_id': tech.id})
 		reconcile_invalid_correlations(limit=100)
 		self.assertEqual(self.verdict(match), 'not_affected')
-		self.assertEqual(MatchVerdict.objects.count(), 1)
+		self.assertEqual((MatchVerdict.objects.count(), TriageVerdict.objects.count()), (0, 0))
 
 	def test_an_in_progress_grafana_match_with_no_bound_is_kept_by_both_sweeps(self):
 		grafana = self.cve(Cve(180, [{'vendor': 'Grafana Labs', 'product': 'Grafana', 'ranges': []}], cve_id='CVE-2021-43798'))

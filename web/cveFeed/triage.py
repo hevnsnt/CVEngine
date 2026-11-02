@@ -721,6 +721,19 @@ def _twins(pending):
     return out
 
 
+def _carried_verdict(before, match):
+    """Whether a rescan's new CVE match (``match``) takes the legacy verdict of its twin's match (``before``, the same project, host, CVE,
+    source, product, version and asset evidence: ``_twins``). The Triage row inherits the record; the match itself starts with what
+    correlation seeded, which is never a closing answer (``correlation._seedable``), so without this a rescan would reopen what the host's
+    own finding was judged not affected. A closure that is about a moment of the host (stale, rejected CVE, a page that loaded another
+    library version, an inventory or a later scan that no longer reports it) is not carried: correlation and those checks decide again."""
+    from cveFeed.correlation import AUTO_CLOSED
+    if before is None or not before.ai_verdict or before.ai_verdict == match.ai_verdict:
+        return False
+    reason = before.ai_reason or ''
+    return not reason.startswith('Closed automatically:') or reason.startswith(AUTO_CLOSED)
+
+
 def describe_kind(finding):
     from cveFeed.models import CVEMatch, HygieneFinding, RouteAuth
     if isinstance(finding, CVEMatch):
@@ -754,7 +767,7 @@ def _track(findings):
     order given; a finding with no owning project is skipped (nothing is stored without a tenancy scope)."""
     from cveFeed.models import CVEMatch, Triage
     now = timezone.now()
-    pairs, reset_matches, carried_hits = [], [], []
+    pairs, reset_matches, carried_hits, carried_verdicts = [], [], [], []
     findings = [f for f in findings if f is not None]
     for start in range(0, len(findings), CHUNK):
         described = [(f, describe(f)) for f in findings[start:start + CHUNK]]
@@ -774,6 +787,8 @@ def _track(findings):
             if row is None:
                 twin = twins.get(f.pk)
                 fields = _inherited_fields(twin, d, now) if twin is not None else {k: v for k, v in _reset_fields(d, now).items() if k != 'updated_at'}
+                if twin is not None and isinstance(f, CVEMatch) and _carried_verdict(twin.match, f):
+                    carried_verdicts.append((f, twin.match))
                 new_rows.append(Triage(project_id=d['project_id'], domain_id=d['domain_id'], host=d['host'][:500], kind=d['kind'],
                                        first_seen=d['first_seen'], last_seen=now, **{f'{fk}_id': f.pk}, **fields))
                 continue
@@ -810,6 +825,13 @@ def _track(findings):
             m.ai_verdict = m.ai_reason = m.ai_model = ''
         from cveFeed import scoring
         scoring.rescore_for_matches(reset_matches)
+    if carried_verdicts:
+        # the same host's own verdict for the same evidence: correlation no longer seeds a closing one from the shared table (task 256)
+        for f, before in carried_verdicts:
+            f.ai_verdict, f.ai_reason, f.ai_model = before.ai_verdict, before.ai_reason, before.ai_model
+            CVEMatch.objects.filter(pk=f.pk).update(ai_verdict=f.ai_verdict, ai_reason=f.ai_reason, ai_model=f.ai_model, updated_at=now)
+        from cveFeed import scoring
+        scoring.rescore_for_matches([f for f, _ in carried_verdicts])
     if carried_hits:
         # a rescan's match carried its predecessor's validation hit (hard evidence): the score and the snapshots follow. Not paged: the
         # finding is not new
@@ -916,14 +938,14 @@ def _finish_call(call, status):
     return TriageCall.objects.filter(pk=call.pk, status='running').update(status=status, finished_at=timezone.now())
 
 
-def _save_answer(call, kind, signature, outcome, model):
+def _save_answer(call, kind, signature, outcome, model, origin=None):
     from django.db import transaction
     from cveFeed.models import TriageCall
     with transaction.atomic():
         current = TriageCall.objects.select_for_update().get(pk=call.pk)
         if current.status != 'running' or current.expires_at <= timezone.now():
             return None
-        verdict = _store_verdict(kind, signature, outcome, model)
+        verdict = _store_verdict(kind, signature, outcome, model, origin)
         current.status, current.finished_at = 'succeeded', timezone.now()
         current.save(update_fields=['status', 'finished_at'])
         return verdict
@@ -1035,12 +1057,16 @@ def suggest_local_checks(row, provider=False):
     return bool(commands or stored['caveat'])
 
 
-def _store_verdict(kind, signature, outcome, model):
+def _store_verdict(kind, signature, outcome, model, origin=None):
+    """Store the answer for one signature. ``origin`` is ``(project id, host)`` of the finding the model was asked about: a closing answer
+    is reused only there (``closure_reusable``)."""
     from django.db import IntegrityError
 
     from cveFeed.models import TriageVerdict
     fields = {k: outcome[k] for k in ('classification', 'reason', 'model_classification', 'model_reason', 'overridden', 'impact',
                                       'severity_adjust', 'severity_reason', 'remediation', 'validation_notes', 'invalid_output')}
+    project_id, host = origin or (None, '')
+    fields.update(project_id=project_id, host=(host or '')[:500])
     try:
         verdict, _ = TriageVerdict.objects.get_or_create(kind=kind, signature=signature, defaults={**fields, 'model': model[:128]})
     except IntegrityError:
@@ -1053,9 +1079,33 @@ def _store_verdict(kind, signature, outcome, model):
     return verdict
 
 
+CLOSING = ('likely_false_positive', 'not_applicable')
+HELD_REASON = ('A stored answer for the same evidence would close this finding, but it was reached on another host or tenant: an answer '
+               'about what one host showed is never reused to close another organization\'s or another host\'s finding, so this one is kept '
+               'for validation.')
+
+
+def closure_reusable(verdict, row, kind, match=None):
+    """Whether the stored closing answer ``verdict`` may close ``row`` (a Triage row): only in the project it was reached in, only on that
+    host for the kinds whose prompt carries host text the signature does not (a page title, a path, a response: every kind but a CVE match,
+    whose shown host text is in its signature, ``bind_host_text``), and never, from another host, a CVE match a person stands behind (assigned,
+    or a remediation status other than open). An answer with no recorded origin (stored before it was recorded) closes nothing more.
+    The signature has no tenant, so without this one organization's host could close another's finding by showing the same evidence with a
+    crafted page or banner beside it (task 256)."""
+    if verdict.project_id is None or verdict.project_id != row.project_id:
+        return False
+    if (verdict.host or '') == (row.host or ''):
+        return True
+    if kind != 'cve_match':
+        return False
+    return match is None or not (match.assignee_id or match.remediation_status != 'open')
+
+
 def _apply(verdict, group):
-    """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. The legacy
-    ``ai_verdict`` of a CVE match follows, and is stored (MatchVerdict) for later correlations to reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
+    """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A closing verdict
+    reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached from the
+    verdict. The legacy ``ai_verdict`` of a CVE match follows, and a verdict that does not close is stored (MatchVerdict) for later
+    correlations to reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
@@ -1073,9 +1123,12 @@ def _apply(verdict, group):
     matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])}
     for row, d in group:
         classification, reason = verdict.classification, verdict.reason
+        match = matches_by_id.get(row.match_id) if row.match_id else None
+        held = classification in CLOSING and not closure_reusable(verdict, row, d['kind'], match)
+        if held:
+            classification, reason = 'needs_validation', HELD_REASON
         if row.validation_status == 'hit' and rank(classification) < rank('confirmed'):
             classification, reason = 'confirmed', row.reason or reason
-        match = matches_by_id.get(row.match_id) if row.match_id else None
         limit, limit_text = ceiling(d['kind'], d['facts'])
         if limit and rank(classification) > rank(limit) and row.validation_status != 'hit':
             # an answer stored for this evidence before the ceiling, or by a model that ignored it: the evidence class decides
@@ -1095,7 +1148,7 @@ def _apply(verdict, group):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.REASON_VERSION_UNKNOWN
-        row.verdict, row.status, row.classification, row.reason = verdict, 'triaged', classification, reason
+        row.verdict, row.status, row.classification, row.reason = None if held else verdict, 'triaged', classification, reason
         row.hard_evidence = hard_evidence(d['kind'], d['facts'])[1]
         row.updated_at = now
         rows.append(row)
@@ -1110,7 +1163,9 @@ def _apply(verdict, group):
         CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000], ai_model=verdict.model,
                                                    updated_at=now)
     m = CVEMatch.objects.filter(pk=matches[0][0].match_id).first()
-    if m:  # kept for correlation: a new host with the same evidence starts out judged (save_matches never seeds a clearing verdict onto hard evidence)
+    if m and verdict_for(matches[0][0].classification) != 'not_affected':
+        # kept for correlation: a new host with the same evidence starts out judged. Never a closing answer: the table has no tenant, so it
+        # would close another organization's new match (save_matches does not seed one either; the same host's is carried by its twin)
         MatchVerdict.objects.update_or_create(
             cve_entry_id=m.cve_entry_id, matched_product=m.matched_product, matched_version=m.matched_version,
             version_in_range=m.version_in_range, source=m.source,
@@ -1232,7 +1287,8 @@ def run_triage(pairs, provider=False, scan_id=None):
         verdict = known.get(key)
         if verdict is None and group[0][1]['facts'].get('version_unknown'):
             # no version range to test against: a review state decided without the model, so no provider call and no budget is spent
-            verdict = known[key] = _store_verdict(key[0], key[1], version_unknown_outcome(), 'deterministic-policy')
+            verdict = known[key] = _store_verdict(key[0], key[1], version_unknown_outcome(), 'deterministic-policy',
+                                                  (group[0][0].project_id, group[0][0].host))
         if verdict is not None:
             stats['cached'] += len(group)
             applied += _apply(verdict, group)
@@ -1291,7 +1347,7 @@ def run_triage(pairs, provider=False, scan_id=None):
             continue
         try:
             outcome = apply_rules(rep_d['kind'], rep_d['facts'], answer['parsed'])
-            verdict = _save_answer(claim, key[0], key[1], outcome, answer['model'])
+            verdict = _save_answer(claim, key[0], key[1], outcome, answer['model'], (group[0][0].project_id, group[0][0].host))
             if verdict is None:
                 stats['queued'] += len(group)  # the lease expired while the provider ran
                 continue

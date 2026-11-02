@@ -415,15 +415,16 @@ class ExistingDataCleanupTests(Fixture):
 		pairs = triage.track([match])
 		row, _ = pairs[0]
 		from cveFeed.models import TriageVerdict
+		# reached on this finding (the origin a stored answer records): a closing answer is reused only where it was reached (task 256)
 		verdict = TriageVerdict.objects.create(kind='cve_match', signature=row.signature, classification='not_applicable', reason='different product',
-											   model='test')
+											   model='test', project_id=row.project_id, host=row.host)
 		triage._apply(verdict, pairs)
 		match.refresh_from_db()
 		self.assertEqual(match.ai_verdict, 'not_affected')
 		hard = self.match_for(self.cve(PHP), product='PHP', version='8.1.0', in_range=True)
 		pairs = triage.track([hard])
 		verdict = TriageVerdict.objects.create(kind='cve_match', signature=pairs[0][0].signature, classification='not_applicable',
-											   reason='different product', model='test')
+											   reason='different product', model='test', project_id=pairs[0][0].project_id, host=pairs[0][0].host)
 		triage._apply(verdict, pairs)
 		hard.refresh_from_db()
 		self.assertEqual(hard.ai_verdict, 'uncertain')
