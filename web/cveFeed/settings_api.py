@@ -751,6 +751,60 @@ def tunables_put(request):
     return tunables.snapshot()
 
 
+# --- auto-tuning (configMaxxing) -------------------------------------------------------
+
+def _autotune(fn, *args):
+    from cveFeed.autotune import TuningError
+    try:
+        return fn(*args)
+    except TuningError as exc:
+        raise SettingsError(exc.status, exc.message)
+    except PermissionError as exc:
+        raise SettingsError(403, str(exc))
+
+
+def autotune_get(request):
+    from cveFeed import autotune
+    return {**autotune.status(), 'history': autotune.list_decisions(None, 30)['results']}
+
+
+def autotune_put(request):
+    """{"mode": "off" | "suggest" | "auto", "advisor": true | false}: either or both."""
+    from cveFeed import autotune
+    data = _body(request)
+    if not data or set(data) - {'mode', 'advisor'}:
+        raise SettingsError(400, 'send mode and/or advisor')
+    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'))
+    return autotune_get(request)
+
+
+def autotune_decisions(request):
+    from cveFeed import autotune
+    try:
+        limit, offset = int(request.GET.get('limit', 50)), int(request.GET.get('offset', 0))
+    except ValueError:
+        raise SettingsError(400, 'limit and offset must be whole numbers')
+    return autotune.list_decisions(request.GET.get('setting') or None, limit, offset)
+
+
+def autotune_apply(request, decision_id):
+    from cveFeed import autotune
+    return _autotune(autotune.apply_decision, request.user, int(decision_id))
+
+
+def autotune_revert(request, decision_id):
+    from cveFeed import autotune
+    return _autotune(autotune.revert, request.user, int(decision_id))
+
+
+def autotune_release(request):
+    from cveFeed import autotune
+    setting = _body(request).get('setting')
+    if not isinstance(setting, str) or not setting:
+        raise SettingsError(400, 'setting is required')
+    return _autotune(autotune.release, request.user, setting)
+
+
 # --- updates -------------------------------------------------------------------------
 
 def _update_row():
@@ -884,6 +938,11 @@ ROUTES = [
     ('GET', r'config_maxxing', lambda r, **k: config_maxxing_get(r)), ('POST', r'config_maxxing/reset', lambda r, **k: config_maxxing_reset(r)),
     ('GET', r'scan_concurrency', lambda r, **k: scan_concurrency_get(r)), ('PUT', r'scan_concurrency', lambda r, **k: scan_concurrency_put(r)),
     ('GET', r'tunables', lambda r, **k: tunables_get(r)), ('PUT', r'tunables', lambda r, **k: tunables_put(r)),
+    ('GET', r'autotune', lambda r, **k: autotune_get(r)), ('PUT', r'autotune', lambda r, **k: autotune_put(r)),
+    ('GET', r'autotune/decisions', lambda r, **k: autotune_decisions(r)),
+    ('POST', r'autotune/decisions/(?P<decision_id>\d+)/apply', lambda r, decision_id, **k: autotune_apply(r, decision_id)),
+    ('POST', r'autotune/decisions/(?P<decision_id>\d+)/revert', lambda r, decision_id, **k: autotune_revert(r, decision_id)),
+    ('POST', r'autotune/release', lambda r, **k: autotune_release(r)),
     ('GET', r'updates', lambda r, **k: updates_get(r)), ('PUT', r'updates', lambda r, **k: updates_put(r)),
     ('POST', r'updates/check', lambda r, **k: updates_check(r)), ('POST', r'updates/approve', lambda r, **k: updates_approve(r)),
     ('POST', r'updates/cancel', lambda r, **k: updates_cancel(r)), ('POST', r'updates/dismiss', lambda r, **k: updates_dismiss(r)),

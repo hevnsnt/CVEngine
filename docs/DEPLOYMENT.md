@@ -156,7 +156,7 @@ cvENGINE scans as much as the machine can hold without running out of memory, an
 
 **The memory gate still applies.** Whatever you choose, a scanner starts only when its memory estimate fits the scanning container's budget (75% of `CELERY_MEM_LIMIT`), so raising a number past what the machine can carry makes runs wait for memory; it does not make the machine run out. The page shows the container's budget and warns when your choices could want much more than it. If the warning appears, give the container more memory (`CELERY_MEM_LIMIT` in `.env`, then `make up`) before you raise the numbers further.
 
-**Safe starting values.** Change a few numbers, watch **Settings, Resources** for a day (the memory used, anything waiting for memory, anything stopped for memory), then go on. The AI review every three hours may lower a number when memory is short and raise it again, but never above the number you saved.
+**Safe starting values.** Change a few numbers, watch **Settings, Resources** for a day (the memory used, anything waiting for memory, anything stopped for memory), then go on. Auto-tuning (on by default, Settings, configMaxxing, Auto-tuning) sizes the numbers you did not save for this machine, starts there and backs off on trouble; a number you save, or set in `.env` to anything other than its default, is pinned and never moved. Choose Off there to tune everything by hand, and use the table below as your starting point.
 
 | Machine | `CELERY_MEM_LIMIT` | nmap | nuclei, nuclei light | bbot standard, passive | bbot deep | hosts assessed at once | discovery scans kept running |
 | --- | --- | --- | --- | --- | --- | --- | --- |

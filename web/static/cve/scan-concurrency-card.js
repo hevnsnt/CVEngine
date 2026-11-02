@@ -1,7 +1,7 @@
 // The Scan concurrency card of Settings, configMaxxing: how many scanner runs of each kind, how many hosts are assessed at once and how many
 // discovery scans are kept running. Everything from the server is set with textContent or value.
 import { api, badge, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
-import { API, registerCard } from "/staticfiles/cve/config-maxxing.js";
+import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import {
   EXPLANATION_TEXT, canReset, changesFrom, checkDraft, discoveryNotice, formatMb, groupFields, memoryPlan, originLines, rangeText, runningText, sourceLabel,
 } from "/staticfiles/cve/config-maxxing-logic.js";
@@ -10,7 +10,7 @@ const PATH = `${API}/scan_concurrency`;
 const TONE = { applied: "success", pending: "queued", unknown: "" };
 const STATE_LABEL = { applied: "Applied", pending: "Being applied", unknown: "Not confirmed" };
 
-function fieldRow(field, data, onInput, save) {
+function fieldRow(field, data, onInput, save, reload) {
   const row = el("div", "field", null, { style: "padding:10px 0;border-top:1px solid var(--line, rgba(128,128,128,.25))" });
   const id = `sc-${field.key.replace(/[^a-z0-9]/gi, "-")}`;
   const input = el("input", "", null, {
@@ -19,7 +19,10 @@ function fieldRow(field, data, onInput, save) {
   });
   input.value = String(field.value);
   input.dataset.key = field.key;
-  input.oninput = () => onInput();
+  input.oninput = () => {
+    input.dataset.touched = "1"; // typed in: the same number may be saved on purpose, to pin it
+    onInput();
+  };
   const reset = button("Reset to default", async () => {
     await save({ [field.key]: null });
     toast(`${field.label} is back to its default`);
@@ -34,6 +37,8 @@ function fieldRow(field, data, onInput, save) {
     id: `${id}-note`, style: "margin:4px 0 0",
   });
   row.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
+  const tuning = autoTuneRow(field, (data.autotune || {}).effective_mode, reload);
+  if (tuning) row.append(tuning);
   if (field.key === "discovery_concurrency") {
     const status = data.discovery || {};
     const line = el("p", "note", null, { style: "margin:6px 0 0" });
@@ -43,7 +48,7 @@ function fieldRow(field, data, onInput, save) {
   return { row, input };
 }
 
-async function build(host) {
+async function build(host, ctx = {}) {
   const data = await api("GET", PATH);
   const card = el("div", "card", null, { style: "max-width:720px" });
   card.append(el("h2", "", "Scan concurrency", { style: "margin-bottom:12px" }), el("p", "note", EXPLANATION_TEXT, { style: "margin:0 0 12px" }));
@@ -70,6 +75,7 @@ async function build(host) {
     }
   });
   const drafts = () => Object.fromEntries(inputs.map((i) => [i.dataset.key, i.value]));
+  const touched = () => new Set(inputs.filter((i) => i.dataset.touched).map((i) => i.dataset.key));
   const refresh = () => {
     const current = drafts();
     const caps = {};
@@ -82,7 +88,7 @@ async function build(host) {
     const plan = memoryPlan(caps, memory.costs_mb || {}, memory.budget_mb, defaults, labels);
     warnings.textContent = "";
     plan.warnings.forEach((w) => warnings.append(el("p", "msg err", w)));
-    const { error, changes } = changesFrom(data.fields, current);
+    const { error, changes } = changesFrom(data.fields, current, touched());
     problem.textContent = error || "";
     problem.hidden = !error; // an empty error bar must not show
     saveButton.disabled = !!error || !Object.keys(changes).length;
@@ -93,7 +99,7 @@ async function build(host) {
   };
   const problem = el("p", "msg err", "", { style: "margin:8px 0 0", hidden: "" });
   const saveButton = button("Save", async () => {
-    const { changes, error } = changesFrom(data.fields, drafts());
+    const { changes, error } = changesFrom(data.fields, drafts(), touched());
     if (error) throw new Error(error);
     await save(changes);
     toast("Saved. The new limits apply within a few seconds.");
@@ -101,7 +107,7 @@ async function build(host) {
   groupFields(data.fields, data.groups).forEach((group) => {
     card.append(el("p", "sec", group.title, { style: "margin:16px 0 4px" }));
     group.fields.forEach((field) => {
-      const { row, input } = fieldRow(field, data, refresh, save);
+      const { row, input } = fieldRow(field, data, refresh, save, () => (ctx.reload ? ctx.reload() : rebuild()));
       inputs.push(input);
       card.append(row);
     });
@@ -112,7 +118,7 @@ async function build(host) {
   host.textContent = "";
   host.append(card);
   refresh();
-  const rebuild = async () => build(host);
+  const rebuild = async () => build(host, ctx);
 }
 
 registerCard({ id: "scan_concurrency", title: "Scan concurrency", build });

@@ -4,6 +4,7 @@ import { ask } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
+import "/staticfiles/cve/autotune-card.js"; // registers the Auto-tuning card first: the mode sits at the top of configMaxxing
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
 import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initialDrafts, labelOf, warnings } from "/staticfiles/cve/ai-settings-logic.js";
 import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)

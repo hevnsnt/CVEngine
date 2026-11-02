@@ -288,12 +288,30 @@ def _os_detection():
 
 
 def _ai():
+    from cveFeed import autotune, tunables
     from cveFeed.models import ValidationBudget
     from dashboard.models import AIProviderSettings
     cfg = AIProviderSettings.objects.first()
     today = {row.scope: row.reserved for row in ValidationBudget.objects.filter(day=timezone.localdate())}
     return {'provider_enabled': bool(cfg and cfg.enabled), 'provider': cfg.provider if cfg and cfg.enabled else None,
-            'validation_attempts_today': today}
+            'validation_attempts_today': today,
+            'autotune_advisor_today': {'used': autotune.advisor_calls_today(), 'cap': tunables.value('autotune_ai_max_per_day'),
+                                       'since': 'UTC midnight'}}
+
+
+def _autotune():
+    """Auto-tuning (cveFeed.autotune): the mode, the last run and what it did, why each setting was not raised, and the last decisions."""
+    from cveFeed import autotune
+    full = autotune.status()
+    last = full.get('last_run') or {}
+    not_raised = {key: info.get('why_not_raised') for key, info in (last.get('settings') or {}).items() if info.get('why_not_raised')}
+    return {'mode': full['mode'], 'effective_mode': full['effective_mode'], 'killed': full['killed'],
+            'advisor': {k: full['advisor'].get(k) for k in ('enabled', 'provider', 'used_today', 'cap', 'last_error')},
+            'last_run_at': last.get('at'), 'held': last.get('held'), 'changes_last_run': last.get('changes') or [],
+            'sized_for': last.get('sized_for'), 'targets': {key: info.get('target') for key, info in (last.get('settings') or {}).items() if info.get('target') is not None},
+            'why_not_raised': not_raised, 'pinned': [p['setting'] for p in full['pinned']],
+            'last_decisions': [{k: d[k] for k in ('at', 'setting', 'old_value', 'new_value', 'source', 'action', 'applied', 'reason')}
+                               for d in full['recent_decisions'][:5]]}
 
 
 TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
@@ -521,6 +539,7 @@ def _system(user, problems, notes):
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
     out['ai'] = _probe(problems, 'ai', _ai)
+    out['autotune'] = _probe(problems, 'autotune', _autotune)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
     out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))

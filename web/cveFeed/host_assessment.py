@@ -71,7 +71,7 @@ def batch_size():
     try:
         from cveFeed import scan_concurrency
         got = scan_concurrency.resolve('assess_batch')
-        if got['source'] == 'admin':
+        if got['source'] in ('admin', 'auto'):  # saved by a person, or chosen by the auto-tuner (cveFeed.autotune)
             return got['value']
     except Exception:  # noqa: BLE001 - the saved copy is a cache: without it the environment decides
         logger.debug('assessment batch: the saved size could not be read', exc_info=False)

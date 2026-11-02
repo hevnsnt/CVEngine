@@ -1886,6 +1886,61 @@ class TunableSettings(models.Model):
         return f"tunables ({len(self.values)} set)"
 
 
+class AutoTuneSettings(models.Model):
+    """Single-row auto-tuning state of Settings, configMaxxing (see cveFeed.autotune): the mode (``off``, ``suggest`` or ``auto``, the default),
+    whether the AI advisor may be asked, and ``values``: the numbers the tuner chose for the settings it manages, ``{key: whole number}``. A
+    number here is used only while the mode is ``auto`` (and ``CVENGINE_AUTOTUNE`` is not ``0``), and only for a setting no person saved a value
+    for: a saved value pins its setting and always wins. Instance-wide, like the settings it tunes."""
+
+    MODES = ("off", "suggest", "auto")
+    mode = models.CharField(max_length=10, default="auto")
+    advisor = models.BooleanField(default=True)  # ask the AI advisor when a provider is configured
+    values = models.JSONField(default=dict, blank=True)
+    meta = models.JSONField(default=dict, blank=True)  # {key: {"hold_until": iso time}}
+    changed_at = models.DateTimeField(null=True, blank=True)  # the last change of the mode or the advisor switch, by a person
+    changed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return f"auto-tuning ({self.mode}, {len(self.values)} tuned)"
+
+
+class TuningDecision(models.Model):
+    """One change, or one recommendation, of a setting the auto-tuner manages (cveFeed.autotune): who proposed it (the controller, the AI
+    advisor, or a person applying or reverting one), the number before and after, the reason in one sentence and the measurements it read
+    (numbers only). ``applied`` is False for a recommendation that changed nothing (Suggest mode). ``layer`` says where an applied number went:
+    ``auto`` (the tuner's own numbers) or ``saved`` (a person applied it, which pins the setting). Kept ``RETENTION_DAYS`` (cveFeed.autotune)."""
+
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    setting = models.CharField(max_length=64)
+    old_value = models.IntegerField(null=True, blank=True)
+    new_value = models.IntegerField(null=True, blank=True)
+    mode = models.CharField(max_length=10)
+    source = models.CharField(max_length=12)  # controller | ai | person
+    action = models.CharField(max_length=12)  # raise | lower | apply | revert | release
+    layer = models.CharField(max_length=8, blank=True, default="")  # auto | saved | "" for a recommendation
+    old_layer_value = models.IntegerField(null=True, blank=True)  # what that layer held before (None: nothing), so a revert restores it exactly
+    applied = models.BooleanField(default=False)
+    pressure = models.BooleanField(default=False)  # a back-off forced by trouble (memory, database, worker, Sentinel time-outs)
+    phase = models.CharField(max_length=12, blank=True, default="")  # aim_high | back_off | cap | probe | emergency | recover | "" (a person, or a calm change)
+    reason = models.CharField(max_length=300, blank=True, default="")
+    signals = models.JSONField(default=dict, blank=True)
+    actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    resolved_at = models.DateTimeField(null=True, blank=True)  # a recommendation applied or replaced, or a change reverted
+    resolved_by = models.CharField(max_length=150, blank=True, default="")
+    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted
+
+    class Meta:
+        indexes = [models.Index(fields=["setting", "created_at"], name="tuning_setting_time_idx")]
+
+    def __str__(self):
+        return f"{self.setting} {self.old_value}->{self.new_value} ({self.source})"
+
+
 class SmtpSettings(models.Model):
     """Single-row outgoing mail server (Settings, Email; see cveFeed.mailer). Off by default: with it off, or with no address on the
     account, adding a person shows a temporary password as it always did. The password is encrypted like every other stored secret and
