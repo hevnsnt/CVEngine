@@ -735,6 +735,10 @@ class LegacyAndWorkedTests(RouteFixture, TestCase):
         self.assertEqual(route_auth._legacy_root_urls(self.project.id, [PAGE_URL, 'https://www.rt.test/login']), {ledger._norm(PAGE_URL)})
         RouteAuth.objects.filter(url=PAGE_URL).update(evidence={'fingerprints': [{'name': 'jQuery:3.7.1', 'source': 'script:body'}],
                                                                  'libraries': {}})
+        # read by 1.3.2, but its scripts were not recorded (1.3.3 script_page): read once more, so the page's scripts are known
+        self.assertEqual(route_auth._legacy_root_urls(self.project.id, [PAGE_URL]), {ledger._norm(PAGE_URL)})
+        RouteAuth.objects.filter(url=PAGE_URL).update(evidence={'fingerprints': [{'name': 'jQuery:3.7.1', 'source': 'script:body'}],
+                                                                 'libraries': {}, 'script_page': {'scripts': 1, 'query_versions': []}})
         self.assertEqual(route_auth._legacy_root_urls(self.project.id, [PAGE_URL]), set())
 
     def test_a_library_match_a_person_worked_is_never_closed_by_a_new_reading(self):

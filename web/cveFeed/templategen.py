@@ -308,24 +308,41 @@ def static_check(yaml_text, expected_cve_id=None):
 
 # A template may detect a CVE "by version" (the writer is told so, and the gate accepts a version regex): a hit of such a template is the
 # version read once more, the same evidence correlation already had, never a demonstration of the flaw. ``template_evidence`` sorts a
-# template into one of the two, deterministically and conservatively: only a template whose every request is a plain read (GET or HEAD of
-# a static path, or a network banner read with nothing sent) and whose matchers decide on a version string is VERSION_EVIDENCE; anything
-# else, anything it cannot read and every ssl or dns check is BEHAVIOR_EVIDENCE, so a genuine hit is never downgraded.
+# template into one of the two, deterministically. It is an allowlist: a template is VERSION_EVIDENCE only when every part of it is one
+# this classifier positively recognises as a plain read decided by a version; anything else, anything it cannot read, every ssl, dns,
+# flow or unknown block is BEHAVIOR_EVIDENCE, so a genuine hit is never downgraded.
 VERSION_EVIDENCE, BEHAVIOR_EVIDENCE = "version", "behavior"
 # what a version-class hit is recorded as on the CVE match (template_result): it is not "vulnerable", so it is not hard evidence
 # (match_policy.has_hard_evidence), does not lift the heat, confirm the triage row, record a nuclei-cve finding or page
 VERSION_ONLY_RESULT = "version_only"
+OTHER_TESTERS = r"^(?:openvas|testssl):"  # the template_id prefix of a result another tester recorded on the match
+_TEMPLATE_KEYS = {"id", "info", "http", "requests", "tcp", "network", "variables", "stop-at-first-match", "self-contained"}
 _PLAIN_PATH = re.compile(r"^(?:\{\{(?:BaseURL|RootURL)\}\})?(?:/[A-Za-z0-9_.~+-]*)*$")  # a static path: no query, no escapes, no variables
-_PLAIN_HEADERS = {"host", "user-agent", "accept", "accept-language", "accept-encoding", "connection", "cache-control", "pragma",
+_PLAIN_HEADERS = {"user-agent", "accept", "accept-language", "accept-encoding", "connection", "cache-control", "pragma",
                   "upgrade-insecure-requests"}
+_HEADER_VALUE = re.compile(r"^[A-Za-z0-9 .,;:=/*()_+-]{0,300}$")  # ordinary tokens: no { } $ < > ' " ` \ % | &
+_HOST_VALUE = "{{Hostname}}"
 _PLAIN_HTTP_KEYS = {"method", "path", "raw", "headers", "matchers", "matchers-condition", "extractors", "host-redirects", "max-redirects",
                     "redirects", "stop-at-first-match", "max-size", "id", "name", "read-all", "disable-cookie"}
 _PLAIN_NETWORK_KEYS = {"host", "address", "port", "read-size", "read-all", "matchers", "matchers-condition", "extractors", "id", "name"}
+_MATCHER_KEYS = {"type", "part", "words", "regex", "dsl", "status", "condition", "name", "case-insensitive", "internal", "match-all"}
+_CONTENT_PARTS = {"", "body", "header", "content_type", "all", "response", "raw", "data"}
 # a version number inside a regex: digits (or a digit class) on both sides of an escaped dot ("3\.4", "\d+\.\d", "[0-4]\.", "(49|50)\.")
 _REGEX_VERSION = re.compile(r"(?:\d|\\d|\]|\))(?:[+*?]|\{\d{1,3}(?:,\d{0,3})?\})?\\\.(?:\d|\\d|\[|\()")
 # ... but an address (four dotted numbers) is a disclosure's own marker, not a version
 _REGEX_ADDRESS = re.compile(r"(?:(?:\d{1,3}|\\d(?:[+*]|\{\d(?:,\d)?\})?|\[[^\]]{1,10}\](?:[+*]|\{\d(?:,\d)?\})?)\\\.){3}")
+_REGEX_GROUP_SYNTAX = re.compile(r"\(\?P?<(?:[=!]|[A-Za-z_]\w{0,30}>)")
+_WORD_CHARS = re.compile(r"^[A-Za-z0-9 ._/-]{1,80}$")  # a product and version token: no markup, quotes or payload characters
+_IDENTITY_WORD = re.compile(r"^[A-Za-z0-9 ._/-]{1,80}:?$")
+_IDENTITY_ATTRIBUTE = re.compile(r"""^(?:class|id)=(?:"[A-Za-z0-9 _-]{1,40}"|'[A-Za-z0-9 _-]{1,40}')$""")
 _WORD_VERSION = re.compile(r"(?<![\d.])\d{1,4}\.\d{1,4}(?:\.\d{1,4})?(?![\d.]*\.\d)")
+_MIME = re.compile(r"^(?:application|text)/[a-z0-9.+-]{1,40}$")
+# what a product's own name never contains: a word with one of these is a marker of what a response disclosed, not an identity
+_SENSITIVE = re.compile(r"(?i)pass|secret|token|key|private|root|admin|uid|credential|session|cookie|config|user|ssh-|begin |aws|db_|env")
+_CONSTRAINT = re.compile(r"""^\s*(?:'\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s*'|"\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s*")\s*$""")
+_COMPARE = re.compile(r"compare_versions\(\s*([A-Za-z_]\w{0,40})\s*((?:,\s*(?:'[^'\n]{1,60}'|\"[^\"\n]{1,60}\")\s*){1,6})\)")
+_CONTAINS = re.compile(r"""^\s*(?:i?contains|contains_all|contains_any)\(\s*(?:body|header|all|response|content_type)\s*((?:,\s*(?:'[^'\n]{1,80}'|"[^"\n]{1,80}")\s*){1,8})\)\s*$""")
+_STATUS_DSL = re.compile(r"^\s*status_code\s*==\s*2\d\d\s*$")
 
 
 def _plain_path(value):
@@ -333,20 +350,24 @@ def _plain_path(value):
     return bool(_PLAIN_PATH.match(text)) and ".." not in text
 
 
-def _plain_headers(headers):
-    return isinstance(headers, dict) and all(str(k).strip().lower() in _PLAIN_HEADERS for k in headers)
+def _plain_header(name, value):
+    """An ordinary request header: a known name with an ordinary value, or the Host header naming the host itself."""
+    name, value = str(name or "").strip().lower(), str(value if value is not None else "").strip()
+    if name == "host":
+        return value == _HOST_VALUE
+    return name in _PLAIN_HEADERS and bool(_HEADER_VALUE.match(value)) and ".." not in value
 
 
 def _plain_raw(raw):
-    """A raw request that only reads: GET or HEAD of a static path, the ordinary headers, no body."""
+    """A raw request that only reads: GET or HEAD of a static path, the ordinary headers with ordinary values, no body."""
     lines = str(raw or "").replace("\r\n", "\n").strip("\n").split("\n")
     fields = lines[0].split() if lines else []
-    if len(fields) != 3 or fields[0].upper() not in ("GET", "HEAD") or not _plain_path(fields[1]):
+    if len(fields) != 3 or fields[0].upper() not in ("GET", "HEAD") or not _plain_path(fields[1]) or not re.match(r"^HTTP/[12](?:\.[01])?$", fields[2]):
         return False
     for index, line in enumerate(lines[1:], 1):
         if not line.strip():
             return not any(rest.strip() for rest in lines[index + 1:])  # a body is something sent
-        if ":" not in line or line.split(":", 1)[0].strip().lower() not in _PLAIN_HEADERS:
+        if ":" not in line or not _plain_header(*line.split(":", 1)):
             return False
     return True
 
@@ -358,7 +379,8 @@ def _plain_requests(proto, block):
             return False
         if str(block.get("method", "GET")).upper() not in ("GET", "HEAD"):
             return False
-        if block.get("headers") and not _plain_headers(block["headers"]):
+        headers = block.get("headers")
+        if headers is not None and not (isinstance(headers, dict) and all(_plain_header(k, v) for k, v in headers.items())):
             return False
         paths, raws = block.get("path") or [], block.get("raw") or []
         if not isinstance(paths, list) or not isinstance(raws, list) or not (paths or raws):
@@ -369,59 +391,128 @@ def _plain_requests(proto, block):
     return False
 
 
-def _version_matcher(matcher):
-    """Whether a matcher decides on a version string: ``compare_versions`` over an extracted version, a regex that spells a version
-    number, or words that each carry one."""
+def _strings(text):
+    return re.findall(r"""'([^'\n]*)'|"([^"\n]*)\"""", text)
+
+
+def _compare_only(expr, names):
+    """Whether a DSL expression is only ``compare_versions`` calls over extracted versions (``names``) with version constraints, joined by
+    ``&&``, ``||``, ``!`` and parentheses."""
+    used = []
+
+    def one(found):
+        constraints = re.findall(r"""'[^'\n]*'|"[^"\n]*\"""", found.group(2))
+        if found.group(1) not in names or not constraints or not all(_CONSTRAINT.match(c) for c in constraints):
+            used.append(False)
+        else:
+            used.append(True)
+        return " X "
+    rest = _COMPARE.sub(one, str(expr))
+    return bool(used) and all(used) and bool(re.fullmatch(r"(?:\s|X|\(|\)|&&|\|\||!)*", rest))
+
+
+def _identity_word(word):
+    """A word that only names the product: plain text (a trailing colon allowed, ``SH Version:``) or a class or id attribute
+    (``class="ncentral"``), with nothing a secret or a disclosure would contain."""
+    word = str(word).strip()
+    return bool(_IDENTITY_WORD.match(word) or _IDENTITY_ATTRIBUTE.match(word)) and not _SENSITIVE.search(word)
+
+
+def _part_ok(matcher, names):
+    part = str(matcher.get("part", "") or "").strip().lower()
+    return part in _CONTENT_PARTS or part in names
+
+
+def _matcher_kind(matcher, names):
+    """``version`` (decides on a version), ``identity`` (names the product: a plain product word, a MIME type), ``status`` (a 2xx status)
+    or ``other``. Only the first three may make a template version-class."""
+    if not set(map(str, matcher)) <= _MATCHER_KEYS or matcher.get("negative") or not _part_ok(matcher, names):
+        return "other"
     kind = str(matcher.get("type", "")).lower()
-    if matcher.get("negative"):
-        return False
+    if kind == "status":
+        codes = matcher.get("status") or []
+        return "status" if codes and all(isinstance(c, int) and 200 <= c < 300 for c in codes) else "other"
     if kind == "dsl":
         exprs = [str(e) for e in matcher.get("dsl") or []]
-        return bool(exprs) and all("compare_versions(" in e.replace(" ", "") for e in exprs)
+        if exprs and all(_compare_only(e, names) for e in exprs):
+            return "version"
+        if exprs and all(_STATUS_DSL.match(e) for e in exprs):
+            return "status"
+        if exprs and all(_CONTAINS.match(e) and all(_identity_word(a or b) for a, b in _strings(_CONTAINS.match(e).group(1)))
+                         for e in exprs):
+            return "identity"
+        return "other"
     if kind == "regex":
         patterns = [str(p) for p in matcher.get("regex") or []]
-        return bool(patterns) and all(_REGEX_VERSION.search(p) and not _REGEX_ADDRESS.search(p) for p in patterns)
+        if patterns and all(_REGEX_VERSION.search(p) and not _REGEX_ADDRESS.search(p) and not re.search(r"[<>'\"]", _REGEX_GROUP_SYNTAX.sub("", p))
+                            and len(p) <= 200 for p in patterns):
+            return "version"
+        return "other"
     if kind == "word":
         words = [str(w) for w in matcher.get("words") or []]
-        return bool(words) and all(_WORD_VERSION.search(w) for w in words)
-    return False
+        if not words:
+            return "other"
+        if all(_WORD_CHARS.match(w) and _WORD_VERSION.search(w) for w in words):
+            return "version"
+        if str(matcher.get("part", "")).lower() in ("header", "content_type") and all(_MIME.match(w.strip().lower()) for w in words):
+            return "identity"
+        if all(_identity_word(w) for w in words):
+            return "identity"
+    return "other"
 
 
-def _decided_by_version(block):
-    matchers = [m for m in block.get("matchers") or [] if isinstance(m, dict)]
-    content = [m for m in matchers if not _is_status_only(m)]
-    if not content:
+def _decided_by_version(block, names):
+    matchers = block.get("matchers")
+    if not isinstance(matchers, list) or not matchers or not all(isinstance(m, dict) for m in matchers):
+        return False
+    kinds = [_matcher_kind(m, names) for m in matchers]
+    if "other" in kinds or "version" not in kinds:
         return False
     if str(block.get("matchers-condition", "or")).lower() == "and":
-        return any(_version_matcher(m) for m in content)  # every matcher must hold, and one of them is the version
-    return all(_version_matcher(m) for m in content)  # any matcher can fire alone: each must be a version
+        return True  # every matcher must hold: one decides on the version, the rest only name the product or want a 2xx answer
+    return all(k == "version" for k in kinds)  # any matcher can fire alone: each must be a version
+
+
+def _extractor_names(doc):
+    names = set()
+    for proto in ("http", "requests", "network", "tcp"):
+        for block in doc.get(proto) or []:
+            for extractor in (block.get("extractors") or []) if isinstance(block, dict) else []:
+                if isinstance(extractor, dict) and extractor.get("name"):
+                    names.add(str(extractor["name"]))
+    return names
 
 
 def template_evidence(text):
-    """VERSION_EVIDENCE when a hit of this template (its YAML ``text``) shows only a version string, else BEHAVIOR_EVIDENCE. Pure. A
-    template is version-class when it has at least one block with matchers, every block only reads (GET or HEAD of a static path with the
-    ordinary headers and no body, or a network banner read with nothing sent: no query string, no ``..``, no payload, no other method)
-    and every block with matchers is decided by a version (``compare_versions``, a regex that spells a version number, words that carry
-    one; with ``matchers-condition: and`` one such matcher is enough, with ``or`` every content matcher must be one). An ssl or dns
-    block, a template it cannot parse and anything it does not recognise are behaviour, so a genuine hit is never read as a version."""
+    """VERSION_EVIDENCE when a hit of this template (its YAML ``text``) shows only a version string, else BEHAVIOR_EVIDENCE. Pure, and an
+    allowlist. A template is version-class only when:
+
+      * its top-level keys are ones this reads (id, info, http/requests, tcp/network, variables, stop-at-first-match, self-contained
+        false): ssl, dns, flow, websocket, headless, code and anything unknown are behaviour;
+      * every block only reads: GET or HEAD of a static path (no query, no ``..``, no escapes, no variable but ``{{BaseURL}}``), the
+        ordinary headers with ordinary values (Host only as ``{{Hostname}}``), no body; or a network banner read with nothing sent;
+      * every block has matchers (an extractor alone reports a result) and is decided by a version: ``compare_versions`` over an
+        extracted value, a regex that spells a version number, or product-and-version words. With ``matchers-condition: and`` the other
+        matchers may only name the product (plain product words with no payload or secret-like text, a MIME type) or want a 2xx status;
+        with ``or`` every content matcher must be a version.
+
+    A template it cannot parse is behaviour, so a genuine hit is never read as a version."""
     try:
         doc = load_template(text) if text else None
     except Exception:  # noqa: BLE001 - unreadable: never downgrade
         return BEHAVIOR_EVIDENCE
-    if not isinstance(doc, dict) or set(doc) & (FORBIDDEN_PROTOCOLS | {"ssl", "dns"}):
+    if not isinstance(doc, dict) or set(map(str, doc)) - _TEMPLATE_KEYS or doc.get("self-contained"):
         return BEHAVIOR_EVIDENCE
+    names = _extractor_names(doc)
     decided = False
     for proto in ("http", "requests", "network", "tcp"):
         blocks = doc.get(proto) or []
         if not isinstance(blocks, list):
             return BEHAVIOR_EVIDENCE
         for block in blocks:
-            if not isinstance(block, dict) or not _plain_requests(proto, block):
+            if not isinstance(block, dict) or not _plain_requests(proto, block) or not _decided_by_version(block, names):
                 return BEHAVIOR_EVIDENCE
-            if block.get("matchers"):
-                if not _decided_by_version(block):
-                    return BEHAVIOR_EVIDENCE
-                decided = True
+            decided = True
     return VERSION_EVIDENCE if decided else BEHAVIOR_EVIDENCE
 
 
@@ -918,9 +1009,12 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     log: a vulnerable host gets a Vulnerability (source 'nuclei-cve', linked to the CVE, with the matched request and response as
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
     tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
-    the version again, it did not show the flaw. Only hosts of ``project`` are touched: without one nothing is guessed. Returns the number
-    of findings saved."""
+    the version again, it did not show the flaw, so it never replaces a "vulnerable" result; and no result of a template replaces another
+    tester's confirmation (OpenVAS, testssl: OTHER_TESTERS). Only hosts of ``project`` are touched: without one nothing is guessed.
+    Returns the number of findings saved."""
     from django.utils import timezone
+
+    from django.db.models import Q
 
     from cveFeed.models import CVEMatch
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
@@ -939,8 +1033,13 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
         # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
         result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
                   else "vulnerable" if outcome["vulnerable"] else "no_match")
-        CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project).update(
-            template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        rows = CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project)
+        if result == VERSION_ONLY_RESULT:
+            rows = rows.exclude(template_result="vulnerable")  # a version read again never lowers a confirmation, whoever made it
+        else:
+            # another tester's confirmation (OpenVAS, testssl) is not this template's to clear: a miss or an error here leaves it
+            rows = rows.exclude(Q(template_result="vulnerable") & Q(template_id__regex=OTHER_TESTERS))
+        rows.update(template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
     for (name, _domain_id), sub in latest.items():
         outcome = by_host[name]
         hit = outcome.get("hit")
