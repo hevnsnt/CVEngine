@@ -50,10 +50,10 @@ LATER_PATCHED = """<script src="/js/jquery-3.1.1.js"></script>
 
 
 def fetcher(bodies, asked=None, **extra):
-    """A ``fetch(url)`` that serves ``bodies`` by path (404 for anything else) and records what was asked."""
-    def fetch(url):
+    """A ``fetch(url)`` that serves ``bodies`` by path (404 for anything else) and records what was asked (with the headers sent)."""
+    def fetch(url, headers=None):
         if asked is not None:
-            asked.append(url)
+            asked.append((url, headers) if headers else url)
         path = urlsplit(url).path
         if path not in bodies:
             return {'status': 404, 'body': 'not found', 'content_type': 'text/html'}
@@ -65,9 +65,14 @@ def same_host_only(url):
     return '' if js_libraries.kind_of(url, PAGE_URL) == 'same-host' else 'not read in this test'
 
 
-def read(page, bodies, asked=None, budget=None, vet=same_host_only, **extra):
+def reader(**kw):
+    return js_libraries.Reader(sleep=lambda s: None, **kw)
+
+
+def read(page, bodies, asked=None, budget=None, vet=same_host_only, scan=None, **extra):
     entries = js_libraries.parse_page(page, PAGE_URL)
-    return js_libraries.read_page(entries, PAGE_URL, fetcher(bodies, asked, **extra), vet, budget or {'left': js_libraries.MAX_SCRIPTS_PER_HOST})
+    return js_libraries.read_page(entries, PAGE_URL, fetcher(bodies, asked, **extra), vet, budget or {'left': js_libraries.MAX_SCRIPTS_PER_HOST},
+                                  reader=scan or reader())
 
 
 class NoCache:
@@ -180,9 +185,11 @@ class SeveralCopiesTests(NoCache, SimpleTestCase):
         record = records['jquery']
         self.assertEqual([(c['version'], c['state'], c['order']) for c in record['copies']], [('3.4.1', 'shadowed', 0), ('3.7.1', 'effective', 1)])
         self.assertEqual((record['version'], record['copies_unresolved']), ('3.7.1', False))
-        self.assertEqual(record['tech_names'], ['jQuery:3.7.1'])  # the shadowed copy is listed, not stored as a technology
+        self.assertEqual(record['tech_names'], ['jQuery:3.4.1', 'jQuery:3.7.1'])  # the shadowed copy is kept: correlation caps it
         libraries = js_libraries.HostLibraries(records)
-        self.assertEqual(libraries.judge('jQuery', '3.4.1'), (True, {}, None))
+        skip, evidence, cap = libraries.judge('jQuery', '3.4.1')
+        self.assertEqual((skip, evidence['copy_state'], cap), (False, 'shadowed', js_libraries.SHADOWED_CAP))
+        self.assertEqual(evidence['version_note'], 'shadowed by 3.7.1 loaded later; older code or closures may still use it')
         skip, evidence, cap = libraries.judge('jQuery', '3.7.1')
         self.assertEqual((skip, evidence['copy_state'], evidence['version_source'], cap), (False, 'effective', 'body', None))
         self.assertEqual([c['state'] for c in evidence['copies']], ['shadowed', 'effective'])
@@ -190,13 +197,13 @@ class SeveralCopiesTests(NoCache, SimpleTestCase):
     def test_a_patched_copy_loaded_after_a_vulnerable_one_shadows_it(self):
         records = read(LATER_PATCHED, {'/js/jquery-3.1.1.js': JQ_311_FULL, '/js/jquery-3.6.0.js': JQ_360_FULL, '/js/plugins.js': NO_BANNER})
         self.assertEqual({c['version']: c['state'] for c in records['jquery']['copies']}, {'3.1.1': 'shadowed', '3.6.0': 'effective'})
-        self.assertTrue(js_libraries.HostLibraries(records).judge('jQuery', '3.1.1')[0])
+        self.assertEqual(js_libraries.HostLibraries(records).judge('jQuery', '3.1.1')[2], js_libraries.SHADOWED_CAP)
 
     def test_a_vulnerable_copy_loaded_last_is_the_one_matched(self):
         page = '<script src="/js/jquery-3.6.0.js"></script><script src="/js/jquery-3.1.1.js"></script>'
         records = read(page, {'/js/jquery-3.1.1.js': JQ_311_FULL, '/js/jquery-3.6.0.js': JQ_360_FULL})
         self.assertEqual(records['jquery']['version'], '3.1.1')
-        self.assertTrue(js_libraries.HostLibraries(records).judge('jQuery', '3.6.0')[0])
+        self.assertEqual(js_libraries.HostLibraries(records).judge('jQuery', '3.1.1'), (False, mock.ANY, None))  # the copy that runs: as usual
 
     def test_defer_runs_after_the_ordinary_scripts(self):
         page = '<script defer src="/js/jquery-3.6.0.js"></script><script src="/js/jquery-3.1.1.js"></script>'
@@ -214,6 +221,7 @@ class SeveralCopiesTests(NoCache, SimpleTestCase):
             self.assertEqual(set(record['tech_names']), {'jQuery:3.1.1', 'jQuery:3.6.0'})
             skip, evidence, cap = js_libraries.HostLibraries({'jquery': record}).judge('jQuery', '3.1.1')
             self.assertEqual((skip, evidence['copies_unresolved'], evidence['copy_state'], cap), (False, True, 'unresolved', js_libraries.UNRESOLVED_CAP))
+            self.assertLessEqual(evidence['version_confidence'], js_libraries.UNRESOLVED_CAP)
 
     def test_a_copy_after_a_noconflict_call_is_marked(self):
         page = ('<script src="/js/jquery-3.6.0.js"></script><script>var $j = jQuery.noConflict(true);</script>'
@@ -268,7 +276,7 @@ class FetchLimitTests(NoCache, SimpleTestCase):
                 raise OSError('reset')
             return {'status': 200, 'body': '<html><title>Not found</title></html>', 'content_type': 'text/html'}  # a soft 404
         entries = js_libraries.parse_page('<script src="/js/jquery-3.4.1.js"></script><script src="/a.js"></script>', PAGE_URL)
-        records = js_libraries.read_page(entries, PAGE_URL, fetch, same_host_only, {'left': 6})
+        records = js_libraries.read_page(entries, PAGE_URL, fetch, same_host_only, {'left': 6}, reader=reader())
         self.assertEqual((records['jquery']['version'], records['jquery']['version_source']), ('3.4.1', 'filename'))
 
     def test_what_was_read_is_cached_by_url_with_its_validator(self):
@@ -291,8 +299,12 @@ class WhichHostsTests(NoCache, RouteFixture, TestCase):
             '<script src="https://other.example/js/jquery-1.0.0.min.js"></script>'
             '<script src="http://10.0.0.5/js/bootstrap.min.js"></script>')
 
-    def vet(self):
-        return js_libraries.vetter(PAGE_URL, self.project.id)
+    def setUp(self):
+        super().setUp()
+        self.scan_obj = self.scan(names=('www.rt.test', 'static.rt.test'))  # the static host is one of the project's own
+
+    def vet(self, target=None):
+        return js_libraries.vetter(PAGE_URL, self.project.id, target=target or self.domain)
 
     def test_the_kinds_of_host(self):
         kinds = [js_libraries.kind_of(e['url'], PAGE_URL) for e in js_libraries.parse_page(self.PAGE, PAGE_URL)]
@@ -326,7 +338,7 @@ class WhichHostsTests(NoCache, RouteFixture, TestCase):
         asked = []
         entries = js_libraries.parse_page(self.PAGE, PAGE_URL)
         records = js_libraries.read_page(entries, PAGE_URL, fetcher({'/jquery-3.6.0.min.js': '/*! jQuery v3.6.0 | (c) OpenJS */'}, asked), self.vet(),
-                                         {'left': 6})
+                                         {'left': 6}, reader=reader())
         self.assertEqual(asked, ['https://code.jquery.com/jquery-3.6.0.min.js'])
         copies = {c['url']: c for c in records['jquery']['copies']}
         self.assertEqual(copies['https://static.rt.test/js/jquery-3.4.1.min.js']['not_read'], 'excluded')
@@ -350,13 +362,14 @@ class RouteCheckTests(NoCache, RouteFixture, TestCase):
         self.assertEqual(root.evidence['libraries']['jquery']['version'], '3.7.1')
         names = root.evidence['fingerprint_names']
         self.assertIn('jQuery:3.7.1', names)
-        self.assertNotIn('jQuery:3.4.1', names)  # shadowed: on the record, not a technology
+        self.assertIn('jQuery:3.4.1', names)  # shadowed, kept: correlation holds it at a capped confidence
+        self.assertEqual([c['state'] for c in root.evidence['libraries']['jquery']['copies']], ['shadowed', 'effective'])
         self.assertIn('Bootstrap', names)
         self.assertFalse([n for n in names if '1.0.4' in n])
         route_auth.link_technologies(scan, {root.url: {'evidence': root.evidence}})
         sub = Subdomain.objects.get(scan_history=scan)
         stored = {t.name for t in sub.technologies.all()}
-        self.assertEqual({n for n in stored if n.startswith(('jQuery', 'Bootstrap'))}, {'Bootstrap', 'jQuery:3.7.1'})
+        self.assertEqual({n for n in stored if n.startswith(('jQuery', 'Bootstrap'))}, {'Bootstrap', 'jQuery:3.4.1', 'jQuery:3.7.1'})
 
 
 class ProbeTests(NoCache, SimpleTestCase):
@@ -367,7 +380,7 @@ class ProbeTests(NoCache, SimpleTestCase):
         found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
         self.assertEqual([(o['product'], o['version'], o['source'], o['confidence']) for o in found], [('jQuery', '3.7.1', 'script:body', 0.9)])
         self.assertEqual(len(found[0]['evidence']['library']['copies']), 2)
-        self.assertEqual(probes.technology_names(found), ['jQuery:3.7.1'])
+        self.assertEqual(probes.technology_names(found), ['jQuery:3.4.1', 'jQuery:3.7.1'])
 
     def test_an_unresolved_set_stores_each_versioned_copy(self):
         from tests.test_probes import answers, page
@@ -417,9 +430,14 @@ class CorrelationTests(RouteFixture, TestCase):
         with mock.patch.object(js_libraries, '_cache', return_value=None):
             return read(page, bodies)
 
-    def test_a_shadowed_vulnerable_copy_makes_no_match(self):
+    def test_a_shadowed_vulnerable_copy_stays_a_capped_labelled_candidate(self):
         records = self.records(TWO_COPIES, {'/assets/jquery-3.4.1.min.js': JQ_341_MIN, '/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN})
-        self.assertEqual(self.host('jQuery:3.4.1', 'jQuery:3.7.1', evidence={'libraries': records}), {})
+        matches = self.host('jQuery:3.4.1', 'jQuery:3.7.1', evidence={'libraries': records})
+        self.assertEqual(list(matches), [('3.4.1', 11023)])
+        match = matches[('3.4.1', 11023)]
+        self.assertEqual((match['confidence'], match['evidence']['copy_state']), (0.4, 'shadowed'))
+        self.assertIn('shadowed by 3.7.1 loaded later', match['evidence']['version_note'])
+        self.assertTrue(match['version_in_range'])  # a candidate the version-only ceiling holds at needs validation, never hidden
 
     def test_the_effective_vulnerable_copy_matches_with_its_file_and_the_copies(self):
         page = '<script src="/js/jquery-3.6.0.js"></script><script src="/js/jquery-3.1.1.js"></script>'
@@ -444,14 +462,15 @@ class CorrelationTests(RouteFixture, TestCase):
                                                 '/wp-content/themes/acme/js/bootstrap.min.js': BOOTSTRAP_4})
         self.assertEqual(self.host('jquery:1.0.4', 'bootstrap:1.0.4', 'jQuery:3.7.1', 'Bootstrap:4.6.0', evidence={'libraries': records}), {})
 
-    def test_before_1_3_2_one_string_read_as_two_libraries_is_dropped_and_a_name_alone_is_low_confidence(self):
-        legacy = {'fingerprints': [{'name': 'jQuery:1.0.4', 'source': 'script:name'}, {'name': 'Bootstrap:1.0.4', 'source': 'script:name'},
+    def test_before_1_3_2_a_name_or_query_version_is_kept_at_low_confidence_never_dropped(self):
+        # a real jquery-3.4.1.min.js next to a real bootstrap@3.4.1: one string, two libraries, both genuine
+        legacy = {'fingerprints': [{'name': 'jQuery:3.4.1', 'source': 'script:name'}, {'name': 'Bootstrap:3.4.1', 'source': 'script:name'},
                                    {'name': 'jQuery:1.12.4', 'source': 'script:name'}]}
-        matches = self.host('jQuery:1.0.4', 'Bootstrap:1.0.4', 'jQuery:1.12.4', evidence=legacy)
-        self.assertEqual(list(matches), [('1.12.4', 11023)])
-        match = matches[('1.12.4', 11023)]
-        self.assertEqual((match['confidence'], match['evidence']['version_source']), (0.4, 'filename'))
-        self.assertIn('1.3.2', match['evidence']['version_note'])
+        matches = self.host('jQuery:3.4.1', 'Bootstrap:3.4.1', 'jQuery:1.12.4', evidence=legacy)
+        self.assertEqual(set(matches), {('3.4.1', 11023), ('1.12.4', 11023)})  # Bootstrap 3.4.1 is out of its advisory's range
+        for match in matches.values():
+            self.assertEqual((match['confidence'], match['evidence']['version_source']), (0.4, 'filename'))
+            self.assertIn('1.3.2', match['evidence']['version_note'])
 
     def test_a_library_version_with_no_page_evidence_is_matched_as_before(self):
         match = self.host('jQuery:3.4.1')[('3.4.1', 11023)]
@@ -463,7 +482,7 @@ class CorrelationTests(RouteFixture, TestCase):
         ProbeObservation.objects.create(project=self.project, domain=self.domain, host='www.rt.test', probe='html-libraries', port=0, kind='version',
                                         product='jQuery', version='3.7.1', outcome='found', confidence=0.9, source='script:body',
                                         evidence={'library': records['jquery']})
-        self.assertEqual(self.host('jQuery:3.4.1', 'jQuery:3.7.1'), {})
+        self.assertEqual(self.host('jQuery:3.4.1', 'jQuery:3.7.1')[('3.4.1', 11023)]['evidence']['copy_state'], 'shadowed')
 
 
 class TriageTests(unittest.TestCase):
@@ -479,3 +498,267 @@ class TriageTests(unittest.TestCase):
         self.assertEqual([(c['version'], c['state']) for c in brief['copies_on_page']], [('3.7.1', 'shadowed'), ('1.12.4', 'effective')])
         self.assertNotIn('rt.test', str(brief))
         self.assertEqual(triage.library_brief({'source': 'tech', 'raw_version': '1.0'}), {})
+
+
+class ReviewProbeTests(NoCache, SimpleTestCase):
+    """The review's probes (1.3.2): a copy that never loads, a commented-out copy, a document.write fallback, nomodule and attribute tricks."""
+
+    def test_a_newer_copy_that_is_not_served_never_shadows_the_copy_that_was_read(self):
+        page = ('<script src="/js/jquery-1.12.4.min.js"></script>'
+                '<script src="/js/jquery-3.7.1.min.js"></script>')  # the newer one 404s: it may never load
+        record = read(page, {'/js/jquery-1.12.4.min.js': '/*! jQuery v1.12.4 | (c) jQuery Foundation | jquery.org/license */'})['jquery']
+        self.assertTrue(record['copies_unresolved'])
+        self.assertIn('not served', record['unresolved_reason'])
+        self.assertEqual((record['version'], record['version_source']), ('1.12.4', 'body'))  # the file that was read speaks for the set
+        skip, evidence, cap = js_libraries.HostLibraries({'jquery': record}).judge('jQuery', '1.12.4')
+        self.assertEqual((skip, evidence['copy_state'], cap), (False, 'unresolved', js_libraries.UNRESOLVED_CAP))
+
+    def test_a_file_name_never_beats_a_banner_for_which_copy_runs(self):
+        page = '<script src="/js/jquery-1.12.4.min.js"></script><script src="/js/jquery-3.7.1.min.js"></script>'
+        record = read(page, {'/js/jquery-1.12.4.min.js': JQ_341_MIN.replace('3.4.1', '1.12.4'), '/js/jquery-3.7.1.min.js': NO_BANNER})['jquery']
+        self.assertTrue(record['copies_unresolved'])
+        self.assertEqual({c['version']: c['source'] for c in record['copies']}, {'1.12.4': 'body', '3.7.1': 'filename'})
+
+    def test_a_commented_out_copy_is_not_a_copy(self):
+        page = ('<script src="/js/jquery-1.12.4.min.js"></script>\n'
+                '<!-- upgrade pending: <script src="/js/jquery-3.7.1.min.js"></script> -->')
+        asked = []
+        record = read(page, {'/js/jquery-1.12.4.min.js': '/*! jQuery v1.12.4 | (c) jQuery Foundation */'}, asked)['jquery']
+        self.assertEqual([(c['version'], c['state']) for c in record['copies']], [('1.12.4', 'effective')])
+        self.assertEqual(asked, ['https://www.rt.test/js/jquery-1.12.4.min.js'])
+
+    def test_a_document_write_fallback_never_replaces_the_copy_that_loaded(self):
+        page = ('<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>'
+                '<script>window.jQuery || document.write(\'<script src="/js/jquery-1.8.3.min.js"><\\/script>\')</script>')
+
+        def fetch(url, headers=None):
+            version = '3.7.1' if '3.7.1' in url else '1.8.3'
+            return {'status': 200, 'body': f'/*! jQuery v{version} | (c) */'}
+        entries = js_libraries.parse_page(page, PAGE_URL)
+        record = js_libraries.read_page(entries, PAGE_URL, fetch, lambda u: '', {'left': 6}, reader=reader())['jquery']
+        self.assertEqual([(c['version'], c['state']) for c in record['copies']], [('3.7.1', 'effective'), ('1.8.3', 'fallback')])
+        self.assertEqual(record['version'], '3.7.1')
+        skip, evidence, cap = js_libraries.HostLibraries({'jquery': record}).judge('jQuery', '1.8.3')
+        self.assertEqual((skip, evidence['copy_state'], cap), (False, 'fallback', js_libraries.SHADOWED_CAP))
+
+    def test_tags_inside_script_text_nomodule_and_quoted_attributes(self):
+        html = ('<script src="https://www.rt.test/a/jquery-1.8.3.min.js"></script>'
+                '<script nomodule src="/legacy/jquery-1.4.js"></script>'
+                '<script>var t = "<script src=\'/js/jquery-1.2.js\'></script>";</script>'
+                '<script data-x=" type=foo" src="/js/jquery.min.js?ver=1.0.4"></script>'
+                '<script src="javascript:alert(1)"></script><script src="https://evil.test\\@www.rt.test/jquery.js"></script>'
+                '<script src="https://a.test@evil.test/jquery.js"></script>'
+                '<script src=" https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js "></script>')
+        urls = [e['url'] for e in js_libraries.parse_page(html, PAGE_URL) if e['url']]
+        self.assertEqual(urls, ['https://www.rt.test/a/jquery-1.8.3.min.js', 'https://www.rt.test/js/jquery.min.js?ver=1.0.4',
+                                'https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js'])
+
+    def test_the_reviews_hostile_inputs_stay_fast(self):
+        import time
+        n = 300 * 1024
+        bodies = [('a' * 30 + '.fn=').ljust(40) * (n // 40), ('abc.fn=abc.prototype={' + ' ' * 5000) * (n // 5000), ' ' * n, '*' * n,
+                  '\n *' * (n // 3), ('jQuery UI ' + 'A' * 20 + ' ') * (n // 31), ('.extend( ' + 'a' * 30 + '.ui ,{ version : ') * (n // 60),
+                  'Modal.VERSION        ' * (n // 21), ('a.fn=a.prototype={' + 'jquery:' + 'b' * 31) * (n // 60), 'a' * n,
+                  ('a.fn' + ' ' * 8 + '=' + ' ' * 8 + 'a.prototype' + ' ' * 8 + '=' + ' ' * 8) * (n // 60), ' \t' * (n // 2)]
+        pages = [('<script ' + 'a' * 1999) * (256 * 1024 // 2006), ('<script>' + '.noConflict( ' * 5000 + '</script>') * 4,
+                 '<script>' * (256 * 1024 // 8), ('<script src= ' + ' ' * 1990 + '>') * 130, '<script type=x>' * 17000,
+                 ('<script>' + 'x' * 60000) * 5, '<!--' * 60000, ('<!-- -->' + '<script>') * 30000]
+        for body in bodies:
+            started = time.monotonic()
+            js_libraries.read_body(body)
+            self.assertLess(time.monotonic() - started, 0.5, body[:40])
+        for page in pages:
+            started = time.monotonic()
+            js_libraries.parse_page(page, PAGE_URL)
+            self.assertLess(time.monotonic() - started, 0.5, page[:40])
+        started = time.monotonic()
+        js_libraries.identify('https://x.com/' + 'a/' * 5000 + 'jquery' + '.min' * 1000 + '.js?' + 'v=1&' * 10000)
+        self.assertLess(time.monotonic() - started, 0.5)
+
+
+class BudgetTests(NoCache, SimpleTestCase):
+    def test_a_script_url_shared_by_many_page_hosts_is_read_once_per_scan(self):
+        asked, scan = [], reader()
+        for _host in range(3):  # three page hosts that load one shared static file
+            read('<script src="/js/jquery-3.4.1.min.js"></script>', {'/js/jquery-3.4.1.min.js': JQ_341_MIN}, asked, scan=scan)
+        self.assertEqual(len(asked), 1)
+
+    def test_the_scan_request_limit_and_the_script_host_limit(self):
+        page = ''.join(f'<script src="/js/jquery-3.{i}.0.js"></script>' for i in range(6))
+        asked = []
+        read(page, {}, asked, scan=reader(max_requests=2))
+        self.assertEqual(len(asked), 2)
+        asked, scan = [], reader()
+        with mock.patch.object(js_libraries, 'MAX_PER_SCRIPT_HOST', 3):
+            for _host in range(2):
+                read(page, {}, asked, budget={'left': 6}, scan=scan)
+        self.assertEqual(len(asked), 3)
+
+    def test_the_scan_time_limit(self):
+        now = [0.0]
+        scan = js_libraries.Reader(max_seconds=10, clock=lambda: now[0], sleep=lambda s: None)
+        now[0] = 11.0
+        asked = []
+        record = read('<script src="/js/jquery-3.4.1.min.js"></script>', {}, asked, scan=scan)['jquery']
+        self.assertEqual(asked, [])
+        self.assertEqual(record['copies'][0]['not_read'], 'scan time limit')
+
+    def test_requests_to_one_script_host_are_spaced(self):
+        waits = []
+        scan = js_libraries.Reader(clock=lambda: 100.0, sleep=waits.append)
+        for i in range(3):
+            self.assertEqual(scan.admit(f'https://static.example.com/{i}.js'), '')
+        self.assertEqual(scan.admit('https://other.example.com/x.js'), '')
+        self.assertEqual(waits, [js_libraries.SCRIPT_HOST_GAP, 2 * js_libraries.SCRIPT_HOST_GAP])
+
+    def test_the_off_switch_reads_nothing_and_keeps_the_file_name_hint(self):
+        asked = []
+        with mock.patch.dict('os.environ', {'CVENGINE_SCRIPT_BODY_READ': '0'}):
+            vet = js_libraries.vetter(PAGE_URL)
+            entries = js_libraries.parse_page('<script src="/js/jquery-3.4.1.min.js"></script>', PAGE_URL)
+            record = js_libraries.read_page(entries, PAGE_URL, fetcher({}, asked), vet, {'left': 6}, reader=reader())['jquery']
+        self.assertEqual(asked, [])
+        self.assertEqual((record['version'], record['version_source'], record['copies'][0]['not_read']),
+                         ('3.4.1', 'filename', 'script reading is off'))
+
+
+class CacheTests(SimpleTestCase):
+    URL = 'https://www.rt.test/js/jquery.min.js'
+    CDN = 'https://code.jquery.com/jquery-3.4.1.min.js'
+
+    def setUp(self):
+        super().setUp()
+        keys = [js_libraries._cache_key(self.URL, p) for p in (1, 2)] + [js_libraries._cache_key(self.CDN, 1)]
+        cache.delete_many(keys)
+        self.addCleanup(cache.delete_many, keys)
+        patcher = mock.patch.object(js_libraries, '_cache', return_value=cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_read(self, url, project, asked, scan=None, served=JQ_341_MIN, status=200):
+        def fetch(u, headers=None):
+            asked.append(headers or {})
+            return {'status': status, 'body': served, 'raw_headers': {'etag': '"v1"', 'content-length': '90'}}
+        page = f'<script src="{url}"></script>'
+        entries = js_libraries.parse_page(page, PAGE_URL)
+        return js_libraries.read_page(entries, PAGE_URL, fetch, lambda u: '', {'left': 6}, reader=scan or reader(project=project))
+
+    def test_a_projects_reading_is_never_used_for_another_project(self):
+        asked = []
+        self.run_read(self.URL, 1, asked)
+        self.run_read(self.URL, 1, asked)
+        self.assertEqual(len(asked), 1)
+        self.run_read(self.URL, 2, asked)  # another tenant: its own request (its addresses, its tailnet, its proxy)
+        self.assertEqual(len(asked), 2)
+        self.assertNotEqual(js_libraries._cache_key(self.URL, 1), js_libraries._cache_key(self.URL, 2))
+        self.assertEqual(js_libraries._cache_key(self.CDN, 1), js_libraries._cache_key(self.CDN, 2))  # a public CDN file is everyone's
+
+    def test_a_forced_re_test_asks_again_with_the_etag_and_a_304_keeps_the_reading(self):
+        asked = []
+        self.run_read(self.URL, 1, asked)
+        records = self.run_read(self.URL, 1, asked, scan=reader(project=1, fresh=True), served='', status=304)
+        self.assertEqual(asked[-1], {'If-None-Match': '"v1"'})
+        self.assertEqual(records['jquery']['version'], '3.4.1')
+        records = self.run_read(self.URL, 1, asked, scan=reader(project=1, fresh=True), served=JQ_371_MIN)
+        self.assertEqual(records['jquery']['version'], '3.7.1')  # the fix is seen at once
+
+    def test_a_due_entry_is_revalidated_and_an_unversioned_cdn_url_is_due_after_a_day(self):
+        self.assertEqual(js_libraries._fresh_for(self.CDN), js_libraries.CDN_CACHE_SECONDS)
+        self.assertEqual(js_libraries._fresh_for('https://code.jquery.com/jquery-latest.min.js'), js_libraries.CACHE_SECONDS)
+        self.assertEqual(js_libraries._fresh_for('https://cdn.jsdelivr.net/npm/jquery/dist/jquery.min.js'), js_libraries.CACHE_SECONDS)
+        asked = []
+        self.run_read(self.URL, 1, asked)
+        with mock.patch.object(js_libraries.time, 'time', return_value=js_libraries.time.time() + js_libraries.CACHE_SECONDS + 5):
+            self.run_read(self.URL, 1, asked, served='', status=304)
+        self.assertEqual(asked[-1], {'If-None-Match': '"v1"'})
+
+    def test_only_the_etag_header_may_be_added_to_an_anonymous_probe(self):
+        with self.assertRaises(ValueError):
+            route_auth.probe_url('https://www.rt.test/x.js', headers={'Cookie': 'a=b'})
+        with mock.patch.object(pinned_transport, 'resolve', side_effect=LookupError('stop before the network')):
+            with self.assertRaises(LookupError):
+                route_auth.probe_url('https://www.rt.test/x.js', headers={'If-None-Match': '"v1"'})
+
+
+class TargetScopeTests(NoCache, RouteFixture, TestCase):
+    STATIC = 'https://static.rt.test/js/jquery.js'
+
+    def setUp(self):
+        super().setUp()
+        self.scan_obj = self.scan(names=('www.rt.test', 'static.rt.test'))
+
+    def test_a_host_scoped_target_never_reads_a_sibling_host(self):
+        self.domain.scope_mode = 'host'
+        self.assertEqual(js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)(self.STATIC), 'host-scoped target')
+        self.assertEqual(js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)('https://www.rt.test/js/jquery.js'), '')
+
+    def test_a_host_the_project_does_not_hold_or_holds_only_manually_is_not_read(self):
+        from targetApp.models import Domain
+        self.assertEqual(js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)('https://cdn2.rt.test/jquery.js'),
+                         'not a host of this project')
+        manual = Domain.objects.create(name='manual.test', project=self.project, insert_date=self.domain.insert_date,
+                                       discovery_mode=Domain.DISCOVERY_MANUAL)
+        Subdomain.objects.filter(name='static.rt.test').update(target_domain=manual)
+        self.assertEqual(js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)(self.STATIC), 'not a host of this project')
+
+    def test_a_passive_or_manual_target_reads_nothing(self):
+        for mode in ('passive', 'manual'):
+            self.domain.discovery_mode = mode
+            self.assertEqual(js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)('https://www.rt.test/js/jquery.js'), f'{mode} target')
+
+    def test_only_web_ports(self):
+        vet = js_libraries.vetter(PAGE_URL, self.project.id, target=self.domain)
+        self.assertEqual(vet('https://static.rt.test:6379/jquery.js'), 'port')
+        self.assertEqual(vet('https://www.rt.test:8443/jquery.js'), 'port')
+        self.assertEqual(js_libraries.vetter('https://www.rt.test:8443/', self.project.id, target=self.domain)('https://www.rt.test:8443/a.js'), '')
+        self.assertEqual(vet('http://static.rt.test:80/jquery.js'), '')
+
+    def test_a_tenant_of_a_shared_platform_is_never_the_same_site(self):
+        for page, other in (('https://victim.blogspot.com/', 'https://other.blogspot.com/jquery.js'),
+                            ('https://victim.onrender.com/', 'https://other.onrender.com/jquery.js'),
+                            ('https://mine.herokuapp.com/', 'https://other.herokuapp.com/x.js'),
+                            ('https://a.github.io/', 'https://b.github.io/jquery.js')):
+            self.assertEqual(js_libraries.kind_of(other, page), 'third-party', other)
+
+
+class LegacyAndWorkedTests(RouteFixture, TestCase):
+    def test_a_front_page_read_before_1_3_2_is_checked_again_once(self):
+        from django.utils import timezone
+        self.scan()
+        RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.rt.test', path='/', url=PAGE_URL, auth_state='open',
+                                 http_status=200, checked_at=timezone.now(),
+                                 evidence={'fingerprints': [{'name': 'jQuery:1.0.4', 'source': 'script:name'}]})
+        from cveFeed import ledger
+        self.assertEqual(route_auth._legacy_root_urls(self.project.id, [PAGE_URL, 'https://www.rt.test/login']), {ledger._norm(PAGE_URL)})
+        RouteAuth.objects.filter(url=PAGE_URL).update(evidence={'fingerprints': [{'name': 'jQuery:3.7.1', 'source': 'script:body'}],
+                                                                 'libraries': {}})
+        self.assertEqual(route_auth._legacy_root_urls(self.project.id, [PAGE_URL]), set())
+
+    def test_a_library_match_a_person_worked_is_never_closed_by_a_new_reading(self):
+        from cveFeed.models import CVEEntry, CVEMatch
+        scan = self.scan()
+        sub = Subdomain.objects.get(scan_history=scan)
+        cve = CVEEntry.objects.create(cve_id='CVE-2020-11023', status='PUBLISHED', original_description='x')
+        worked = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='jquery', matched_version='1.0.4',
+                                         version_in_range=True, confidence=0.95, remediation_status='in_progress')
+        untouched = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='jQuery', matched_version='1.0.5',
+                                            version_in_range=True, confidence=0.95)
+        correlation.close_stale({}, ({sub.id}, {cve.id}))
+        worked.refresh_from_db()
+        untouched.refresh_from_db()
+        self.assertEqual((worked.ai_verdict, worked.remediation_status), ('', 'in_progress'))
+        self.assertEqual(untouched.ai_verdict, 'not_affected')
+
+
+class ProbePageTests(NoCache, SimpleTestCase):
+    def test_the_libraries_probe_reads_no_scripts_of_an_error_or_challenge_page(self):
+        from tests.test_probes import answers, page
+        for first in (page(404, body=TWO_COPIES), {**page(body=TWO_COPIES), 'challenge': 'Cloudflare'}):
+            asked = []
+
+            def get(url, first=first):
+                asked.append(url)
+                return first if url.endswith('/') else answers({})(url)
+            found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
+            self.assertEqual([o for o in found if o['kind'] == 'version'], [])
+            self.assertEqual(asked, ['https://www.rt.test/'])

@@ -1170,6 +1170,8 @@ def close_stale(current, covered):
             continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it
         if m.remediation_status != 'open' and m.version_in_range is None:
             continue  # worked by a person before the evidence policy, with no version behind it: their decision stands, it is not ours to close
+        if m.remediation_status != 'open' and m.source == 'tech' and js_libraries.is_library(m.matched_product):
+            continue  # a JavaScript library match a person worked: a script read differently (cveFeed.js_libraries) never closes it for them
         if m.ai_verdict == 'not_affected' and (m.ai_reason or '').startswith('Closed automatically:'):
             continue
         stale_keep.append(m)

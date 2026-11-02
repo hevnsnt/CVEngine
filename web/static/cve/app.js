@@ -934,7 +934,7 @@ const technologyTable = (h) => {
       const copies = Array.isArray(t.copies) ? t.copies : [];
       if (copies.length > 1 || t.copies_unresolved) {
         const where = copies.map((c) => `${c.version || "version unknown"} (${c.state || "?"}${c.version_source === "filename" ? ", from the file name" : ""}) ${c.path || ""}`).join("; ");
-        box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others."}`));
+        box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others; an earlier copy stays listed as a candidate, since older code may still use it."}`));
       }
     });
   }

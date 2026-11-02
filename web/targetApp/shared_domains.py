@@ -32,7 +32,11 @@ SHARED_DOMAINS = frozenset({
     # Google Cloud
     'appspot.com', 'cloudfunctions.net', 'run.app', 'googleusercontent.com',
     # CDNs
-    'fastly.net', 'akamaihd.net', 'akamaized.net', 'edgekey.net', 'edgesuite.net',
+    'fastly.net', 'akamaihd.net', 'akamaized.net', 'edgekey.net', 'edgesuite.net', 'b-cdn.net',
+    # app, blog and site hosts, tunnels and object storage whose customers each get a name under the provider's
+    'onrender.com', 'blogspot.com', 'fly.dev', 'railway.app', 'deno.dev', 'glitch.me', 'repl.co', 'replit.app', 'replit.dev',
+    'wixsite.com', 'squarespace.com', 'webflow.io', 'ondigitalocean.app', 'digitaloceanspaces.com', 'r2.dev',
+    'storage.googleapis.com', 'ngrok.io', 'ngrok-free.app', 'ngrok.app', 'trycloudflare.com', 'loca.lt',
 })
 
 

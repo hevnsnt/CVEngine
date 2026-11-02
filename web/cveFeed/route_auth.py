@@ -357,7 +357,7 @@ def _against_missing_page(answer, url, probe, known):
 
 # ----------------------------------------------------------------------------- network
 
-def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None):
+def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, reader=None, target=None):
     """Read the scripts the front page loads and record the libraries their own files state (cveFeed.js_libraries): the page's own host,
     the same site and public library CDNs only, each other host vetted (address, exclusions, bug bounty scope), at most
     ``budget['left']`` scripts for the host (js_libraries.MAX_SCRIPTS_PER_HOST over all its web bases) and MAX_SCRIPT_BYTES each, through
@@ -373,8 +373,9 @@ def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None):
     budget = budget if budget is not None else {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
     if isinstance(probe, functools.partial) and probe.func is probe_url:
         probe = functools.partial(probe, max_bytes=js_libraries.MAX_SCRIPT_BYTES)  # a library file is read further than a page
-    records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate), budget,
-                                     before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id))
+    records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate, target), budget,
+                                     before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id),
+                                     reader=reader, project=project)
     hints = {f['name'] for f in evidence.get('fingerprints') or [] if f.get('source') == 'script:filename' and js_libraries.is_library(f['name'])}
     kept = [f for f in evidence.get('fingerprints') or [] if f['name'] not in hints]
     found = fingerprint.extend(kept, js_libraries.names_of(records))
@@ -416,8 +417,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
     parsed = urlsplit(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username is not None or parsed.password is not None:
         raise ValueError('probe URL must be HTTP(S) without credentials')
-    if headers and any(key.lower() != 'host' for key in headers):
-        raise ValueError('only a Host override is allowed for anonymous probes')
+    if headers and any(key.lower() not in ('host', 'if-none-match') for key in headers):
+        raise ValueError('only a Host override (and the ETag of a cached script) is allowed for anonymous probes')
     host = parsed.hostname.encode('idna').decode('ascii')
     port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
     if connect_ip:
@@ -572,6 +573,18 @@ def _plan(scan, retired=None):
     return plan
 
 
+def _legacy_root_urls(project, urls):
+    """The ledger keys of the fresh root routes whose stored evidence names libraries by their script URLs only (recorded before the files
+    themselves were read): checked again now, inside their window, so the version comes from the file. Once each."""
+    from cveFeed import ledger
+    from cveFeed.models import RouteAuth
+    roots = [u for u in urls if (urlparse(u).path or '/') == '/']
+    if not roots:
+        return set()
+    rows = RouteAuth.objects.filter(project_id=project, url__in=roots, evidence__has_key='fingerprints').values_list('url', 'evidence')
+    return {ledger._norm(url) for url, evidence in rows if js_libraries.legacy_roots(evidence)}
+
+
 def run_route_auth(scan_id, probe=probe_url, force=False):
     """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes),
     recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
@@ -607,6 +620,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
     host_of = {url: host for host, urls in plan.items() for url in urls}
     all_urls = list(host_of)
     fresh = set() if force else ledger.fresh(SERVICE, all_urls, project)
+    fresh -= _legacy_root_urls(project, [u for u in all_urls if ledger._norm(u) in fresh])  # front pages read before 1.3.2: their scripts are read now
     todo = [u for u in all_urls if ledger._norm(u) not in fresh]
     with ledger.claim_many(f'{SERVICE}@{project}', todo) as won:
         won_set = set(won)
@@ -623,6 +637,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         probed, errors, blocked = {}, {}, 0
         from cveFeed.bounty_gate import Gate
         gate = Gate(blocked=())  # a script on another host of the same site is read only when the program's scope names that host
+        reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget; a forced re-test reads past the cache
 
         def probe_host(host, urls):
             if not host_allowed(host, project):
@@ -637,7 +652,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
                     time.sleep(PER_REQUEST_GAP)
                 try:
                     result = _against_missing_page(analyse(probe(url)), url, probe, missing_pages)
-                    _read_scripts(result, probe, scan_id, budget=scripts_left, project=project, gate=gate)
+                    _read_scripts(result, probe, scan_id, budget=scripts_left, project=project, gate=gate, reader=reader, target=domain)
                     out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
                     out.append((url, exc))
