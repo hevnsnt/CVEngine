@@ -11,6 +11,7 @@
 """
 import importlib
 import os
+from datetime import timedelta
 from unittest import mock
 
 from django.apps import apps
@@ -116,10 +117,10 @@ class BannerProofTests(Base):
 
 	def test_the_product_lists(self):
 		for name in ('OpenSSH', 'Apache httpd', 'nginx', 'MySQL', 'PHP', 'Exim smtpd', 'ISC BIND', 'Dovecot imapd', 'OpenSSL', 'Postfix smtpd',
-					 'PostgreSQL DB', 'Samba smbd', 'ProFTPD', 'vsftpd', 'Microsoft IIS httpd', 'Microsoft HTTPAPI httpd'):
-			self.assertTrue(match_policy.distro_packaged(name), name)
-		for name in ('Jenkins', 'FortiGate httpd', 'Citrix NetScaler', 'Ivanti Connect Secure', 'Atlassian Confluence', ''):
-			self.assertFalse(match_policy.distro_packaged(name), name)
+					 'PostgreSQL DB', 'Samba smbd', 'ProFTPD', 'vsftpd', 'Microsoft IIS httpd', 'Microsoft HTTPAPI httpd', ''):
+			self.assertFalse(match_policy.vendor_built(name), name)
+		for name in ('Jenkins', 'FortiGate httpd', 'Citrix NetScaler', 'Ivanti Connect Secure', 'Atlassian Confluence'):
+			self.assertTrue(match_policy.vendor_built(name), name)
 
 
 class JsonParityTests(Base):
@@ -177,6 +178,7 @@ class RescanPagingTests(Base):
 		fire_cve, smoke_cve = self.entry('CVE-2099-6303', []), self.entry('CVE-2099-6304', [])
 		fire = self.match_for(fire_cve, version='1', in_range=True, template_result='vulnerable', ai_verdict='uncertain')
 		smoke = self.match_for(smoke_cve, version='1', in_range=True, ai_verdict='uncertain')
+		CVEMatch.objects.update(created_at=timezone.now() - timedelta(days=1))  # made before the switch (a recent one waits for its own page)
 		self.assertEqual(notify.baseline_heat_policy(), 1)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=fire.pk).fire_notified_at)
 		self.assertIsNone(CVEMatch.objects.get(pk=smoke.pk).fire_notified_at)  # smoke: still pageable when proof arrives
@@ -184,14 +186,17 @@ class RescanPagingTests(Base):
 		self.assertEqual(self.sends, [])
 		legacy_fire = self.match_for(self.entry('CVE-2099-6305', [], kev=False, cvss=9.8), version='1', in_range=True,
 									 distro_status='vulnerable', ai_verdict='uncertain')
+		CVEMatch.objects.filter(pk=legacy_fire.pk).update(created_at=timezone.now() - timedelta(days=1))
 		with mock.patch.dict(os.environ, LEGACY):
-			self.assertEqual(notify.baseline_heat_policy(), 1)  # the switch to legacy: what legacy rates fire is baselined, not paged
+			# the switch to legacy: what legacy rates fire is marked for legacy, not paged (the template hit again, and the distro listing)
+			self.assertEqual(notify.baseline_heat_policy(), 2)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=legacy_fire.pk).fire_notified_at)
 		self.assertEqual(self.sends, [])
 
 	def test_the_migration_and_the_workers_run_the_baseline(self):
 		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
 		m = self.match_for(self.entry('CVE-2099-6306', []), version='1', in_range=True, template_result='vulnerable', ai_verdict='uncertain')
+		CVEMatch.objects.update(created_at=timezone.now() - timedelta(days=1))
 		migration = importlib.import_module('cveFeed.migrations.0137_heat_policy_baseline')
 		migration.baseline(apps, None)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)

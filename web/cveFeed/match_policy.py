@@ -158,30 +158,38 @@ PROVEN_LIBRARY_CONFIDENCE = 0.8  # js_libraries.CONFIDENCE: a file's comment ban
 # not on develop yet: once #384 is merged, import that constant here instead of this literal so the two cannot drift apart.
 VERSION_TEMPLATE_RESULT = 'version_only'
 
-# Products whose service banner never proves the version that runs: a distribution ships them and fixes them by backporting, so the banner keeps
-# the upstream version after the fix, and most distributions print no marker of themselves in it (RHEL and CentOS OpenSSH, SUSE and Amazon Linux
-# Apache httpd, nginx everywhere); or the operating system services them (IIS and HTTP.sys are patched by Windows Update, which keeps the version
-# string). Read as normalized prefixes of the scanner's product name ("Apache httpd" -> apachehttpd, "PostgreSQL DB" -> postgresql...): every
-# product ``distro.PACKAGES`` maps to a package, and the other daemons distributions commonly ship. Only a product NOT listed (a vendor's own
-# build: an appliance, Jenkins, Confluence, the VPN gateways the KEV is full of) has a banner that proves its version.
-DISTRO_PACKAGED_PREFIXES = (
-    'apache', 'nginx', 'openssh', 'openssl', 'mysql', 'mariadb', 'percona', 'postgresql', 'php', 'exim', 'postfix', 'sendmail', 'opensmtpd',
-    'dovecot', 'courier', 'cyrus', 'bind', 'iscbind', 'unbound', 'dnsmasq', 'proftpd', 'vsftpd', 'pureftpd', 'samba', 'lighttpd', 'squid',
-    'dropbear', 'openldap', 'slapd', 'cups', 'redis', 'memcached', 'ntp', 'chrony', 'netsnmp', 'haproxy', 'varnish', 'tomcat', 'rpcbind',
-    'nfs', 'xinetd', 'openvpn', 'strongswan', 'libreswan', 'perl', 'python', 'ruby', 'linux', 'gnu', 'debian', 'ubuntu', 'redhat', 'centos',
-    'freebsd', 'openbsd', 'netbsd',
-    # serviced by the operating system's own updates
-    'microsoftiis', 'microsofthttpapi', 'microsoftwindows', 'iis',
+# The products whose service banner proves the version that runs (a positive list, so it fails safe: a product cvENGINE does not know is no
+# proof). They are vendor-built and self-contained: an appliance's or a vendor's own server, shipped and updated as one build by its vendor, so
+# the version it prints is the build that runs; that is where KEV entries concentrate (VPN gateways, firewalls, file-transfer servers,
+# Jenkins, Confluence, ActiveMQ). Read as normalized prefixes of the scanner's product name ("Apache ActiveMQ" -> apacheactivemq). Everything
+# else is no proof by its banner, in particular what a distribution packages and patches by backporting with the upstream version unchanged,
+# often without printing a marker of itself (OpenSSH, Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, Postfix, BIND, Dovecot, PowerDNS,
+# Asterisk, Kerberos, Erlang, libssh, Tomcat, Jetty, Traffic Server, ...), and what the operating system services (IIS, HTTP.sys, Microsoft
+# ESMTP and ftpd): only the distribution's tracker or hard evidence proves those.
+VENDOR_PRODUCT_PREFIXES = (
+    # network appliances and remote access
+    'fortigate', 'fortinet', 'fortios', 'fortiweb', 'fortimail', 'fortimanager', 'fortianalyzer', 'fortiproxy', 'fortisiem', 'forticlientems',
+    'citrix', 'netscaler', 'ivanti', 'pulsesecure', 'pulseconnectsecure', 'paloalto', 'panos', 'globalprotect', 'sonicwall', 'f5bigip', 'bigip',
+    'ciscoasa', 'ciscoadaptivesecurity', 'ciscoise', 'barracuda', 'zyxel', 'sophos', 'watchguard', 'checkpoint', 'mikrotik', 'ubiquiti',
+    'qnap', 'synology', 'hikvision', 'dahua', 'mitel',
+    # vendor servers shipped as one build
+    'jenkins', 'atlassian', 'confluence', 'jira', 'bitbucket', 'bamboo', 'gitlab', 'teamcity', 'jetbrainsteamcity', 'zimbra', 'progressmoveit',
+    'moveit', 'goanywhere', 'fortragoanywhere', 'crushftp', 'wingftp', 'servu', 'solarwinds', 'manageengine', 'zohomanageengine', 'veeam',
+    'kaseya', 'screenconnect', 'connectwise', 'papercut', 'openfire', 'oracleweblogic', 'weblogic', 'coldfusion', 'adobecoldfusion',
+    'vmwarevcenter', 'vmwareesxi', 'vmwarehorizon', 'vmwareworkspace', 'sapnetweaver', 'grafana', 'kibana', 'elasticsearch',
+    # Apache projects shipped as the project's own build (not a distribution's)
+    'apacheactivemq', 'activemq', 'apachesolr', 'solr', 'apachespark', 'apacheds', 'apacheofbiz', 'apacheairflow', 'apachesuperset',
+    'apachedruid', 'apacheflink', 'apacheapisix', 'apacherocketmq', 'rocketmq', 'apachenifi', 'apachecouchdb', 'couchdb',
+    'apacheopenmeetings', 'apacheunomi', 'apachehugegraph',
 )
 
 
-def distro_packaged(product):
-    """Whether a service banner of ``product`` (the scanner's product name) can hide a backported fix: a product a distribution packages or
-    the operating system services (``DISTRO_PACKAGED_PREFIXES``). Its banner is never proof of the version, only the distribution's tracker
-    (``distro_status`` vulnerable) or hard evidence is. An empty name is not packaged (and never proves anything either)."""
-    from cveFeed import distro
+def vendor_built(product):
+    """Whether a service banner of ``product`` (the scanner's product name) states the version that runs: a vendor-built product on
+    ``VENDOR_PRODUCT_PREFIXES``. Anything else, an empty name included, is no proof by its banner (correlation records the answer as
+    ``evidence.vendor_banner``)."""
     token = re.sub(r'[^a-z0-9]', '', (product or '').lower())
-    return bool(token) and (token in distro.PACKAGES or token.startswith(DISTRO_PACKAGED_PREFIXES))
+    return bool(token) and token.startswith(VENDOR_PRODUCT_PREFIXES)
 
 
 def provenance_recorded(evidence):
@@ -192,6 +200,21 @@ def provenance_recorded(evidence):
     if not isinstance(evidence, dict) or evidence.get('source') != 'port':
         return True
     return 'vendor_banner' in evidence
+
+
+def proof_only_unrecorded(old, new_evidence, new_version, validation_status=''):
+    """Whether a match turns proven only because correlation now records a field it did not record before (``provenance_recorded``): the old
+    row (``old``: a CVEMatch as it was, or anything with its ``source``, ``evidence``, ``template_result``, ``distro_status`` and
+    ``matched_version``) at the same version, with that field filled in from the new evidence, was already proven. That is no news, so it is not
+    paged. Anything else is new proof (nmap now probes the service instead of guessing from the port, the version moved) and is paged."""
+    from types import SimpleNamespace
+    old_evidence = getattr(old, 'evidence', None)
+    if provenance_recorded(old_evidence) or (getattr(old, 'matched_version', '') or '') != (new_version or ''):
+        return False
+    filled = {**old_evidence, 'vendor_banner': bool((new_evidence or {}).get('vendor_banner'))}
+    probe = SimpleNamespace(source=getattr(old, 'source', ''), evidence=filled, template_result=getattr(old, 'template_result', '') or '',
+                            distro_status=getattr(old, 'distro_status', '') or '')
+    return version_proven(probe, validation_status=validation_status or '')
 
 
 _TYPEOF_REGISTERED = []
@@ -225,11 +248,11 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
         ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set);
       * a network service that answered nmap's version probe itself: ``evidence.source`` port, ``method`` probed (``table`` is nmap's
-        guess from the port number), a vendor-built product (``evidence.vendor_banner``: not ``distro_packaged``, recorded by correlation)
+        guess from the port number), a vendor-built product (``evidence.vendor_banner``: ``vendor_built``, recorded by correlation)
         and NO distribution packaging read from the banner (``evidence.distro``). A distribution backports fixes without changing the
-        upstream version it prints, and most print no marker of themselves, so the banner of a product a distribution packages (OpenSSH,
-        Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, BIND, Dovecot, ...) or the operating system services (IIS) proves nothing until the
-        distribution's own tracker gives a verdict (``distro_status`` vulnerable is hard evidence; patched is ice).
+        upstream version it prints, and most print no marker of themselves, so the banner of any product not on the vendor list (OpenSSH,
+        Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, BIND, Dovecot, IIS, an unknown product, ...) proves nothing until the distribution's own
+        tracker gives a verdict (``distro_status`` vulnerable is hard evidence; patched is ice).
 
     Never proof: a version from a script's file name, CDN path or ``?ver=`` query (``version_source`` filename, 0.4), a copy a later one
     replaces, a fallback or a copy of an unresolved set (their caps, 0.4 and 0.5, are below the bar), a library version another tool read

@@ -1046,12 +1046,15 @@ def _carry_remediation(fresh):
                for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
     if not by_host:
         return
-    # A finding is paged as fire once, not once per scan (cveFeed.notify): the new copy carries the page of any earlier copy of the same CVE
-    # on the same host, whichever product label or source it had.
+    # A finding is paged as fire once per heat rule, not once per scan (cveFeed.notify): the new copy carries the page, under the rule in force,
+    # of any earlier copy of the same CVE on the same host, whichever product label or source it had.
     from django.db.models import Max
     from django.utils import timezone
-    notified = {(c, d, n): at for c, d, n, at in base.order_by().values_list(*by_host_fields).annotate(at=Max("fire_notified_at"))
-                .filter(at__isnull=False).values_list(*by_host_fields, "at")}
+
+    from cveFeed import threat
+    rule = threat.heat_signature()
+    notified = {(c, d, n): at for c, d, n, at in base.filter(fire_notified_at__isnull=False, fire_notified_rule=rule).order_by()
+                .values_list(*by_host_fields).annotate(at=Max("fire_notified_at")).values_list(*by_host_fields, "at")}
     hot = None
     now = timezone.now()
     for match in fresh:
@@ -1063,19 +1066,19 @@ def _carry_remediation(fresh):
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
                 before.remediation_updated_at, before.remediation_by_id, before.assignee_id)
         if notified.get(key):
-            match.fire_notified_at = notified[key]
-        elif before is not None and not match_policy.provenance_recorded(before.evidence):
-            # The earlier copy was written before correlation recorded what proves its version (the first scan after the update): this copy
-            # is no new finding, and if it reads fire only because the proof is recorded now, that is no news either. It is marked as
-            # announced without a message, like everything that was fire when the heat policy took effect (notify.baseline_heat_policy).
-            from cveFeed import threat
+            match.fire_notified_at, match.fire_notified_rule = notified[key], rule
+        elif before is not None and match_policy.proof_only_unrecorded(before, match.evidence, match.matched_version):
+            # The earlier copy was written before correlation recorded what proves its version (the first scan after the update), and it
+            # already proved it but for that field: this copy is no new finding, and if it reads fire only because the proof is recorded now,
+            # that is no news. It is marked as announced without a message, like everything that was fire when the heat policy took effect
+            # (notify.baseline_heat_policy). New proof (nmap now probes the service, another version) is news and is paged.
             if threat.heat_policy() != threat.LEGACY_POLICY:
                 if hot is None:
                     from cveFeed.models import CVEEntry
                     hot = set(CVEEntry.objects.filter(threat.hot_q(), pk__in={m.cve_entry_id for m in fresh}).values_list("pk", flat=True))
                 if (match.cve_entry_id in hot and match.distro_status != distro_lib.PATCHED and not match_policy.version_unknown(match)
                         and match_policy.version_proven(match, validation_status="")):
-                    match.fire_notified_at = now
+                    match.fire_notified_at, match.fire_notified_rule = now, rule
 
 
 def save_matches(rows, covered=None):
@@ -1134,13 +1137,15 @@ def save_matches(rows, covered=None):
             fresh.append(CVEMatch(**row, **extra))
         elif any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
             # what fire needs, read BEFORE the new evidence is written (threat.unproven), so only a real change is rescored and paged
-            was_unproven, old_evidence = threat.unproven(match), match.evidence
+            was_unproven = threat.unproven(match)
+            quiet = was_unproven and match_policy.proof_only_unrecorded(match, row["evidence"], row["matched_version"],
+                                                                         match_policy._validation_status(match))
             for f in _MATCH_FIELDS:
                 setattr(match, f, row[f])
             if was_unproven != threat.unproven(match):
                 touched.add(match.subdomain_id)  # proof arrived (or went): the heat, and so the stored score, moved
                 if was_unproven and kev_policy and threat.is_hot(match.cve_entry.kev, match.cve_entry.exploit_db):
-                    (proved if match_policy.provenance_recorded(old_evidence) else backfilled).append(match.pk)
+                    (backfilled if quiet else proved).append(match.pk)
             if key in moved:
                 verdict = _seedable(verdicts.get(signature), row)
                 match.ai_verdict = verdict.ai_verdict if verdict else ""
@@ -1160,7 +1165,8 @@ def save_matches(rows, covered=None):
     if proved or backfilled:
         # Under the KEV policy proof mostly arrives here (nmap starts to probe the service, a later route check reads the library file):
         # a match it turns fire is paged once (notify.fire_confirmed, fire_notified_at). A row that turns fire only because correlation now
-        # records what proves it (written before the rule, match_policy.provenance_recorded) is marked as announced without a message, like
+        # records what proves it (written before the rule and already proven but for that field, match_policy.proof_only_unrecorded) is
+        # marked as announced without a message, like
         # everything that was fire when the policy took effect (notify.baseline_heat_policy). After the write is committed.
         from django.db import transaction
 
@@ -1290,9 +1296,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                 evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number, "protocol": port.protocol or "tcp",
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
                           "method": ((port.extra or {}).get("method") or ""),
-                          # a vendor's own build: its banner states the version that runs (a distribution-packaged or OS-serviced
-                          # product's does not, match_policy.distro_packaged); always written, so a row without it predates the rule
-                          "vendor_banner": not match_policy.distro_packaged(name)},
+                          # a vendor's own build: its banner states the version that runs (match_policy.vendor_built; a distribution-
+                          # packaged, OS-serviced or unknown product's does not); always written, so a row without it predates the rule
+                          "vendor_banner": match_policy.vendor_built(name)},
                 leads=leads)
     return rows
 

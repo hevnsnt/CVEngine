@@ -280,9 +280,14 @@ UNCONFIRMED_TAG = "qod-unconfirmed"  # cveFeed.openvas_scan: a result below CONF
 VERSION_READ_SOURCES = ("wpscan",)  # scanners whose CVE findings rest on a version they read, not on a check of the flaw
 
 
+CVE_NAME_BLANKS = " \t\n\r\x0b\x0c"  # what is trimmed off a stored CVE name, in Python and in SQL (BTRIM) alike
+
+
 def finding_cve_names(vuln):
-    """The CVE ids a Vulnerability names, upper-cased (its ``cve_ids``; a prefetch of ``cve_ids`` saves the query)."""
-    return sorted({(c.name or "").strip().upper() for c in vuln.cve_ids.all() if (c.name or "").strip()})
+    """The CVE ids a Vulnerability names, trimmed and upper-cased, empty ones left out (its ``cve_ids``; a prefetch of ``cve_ids`` saves the
+    query). ``finding_heat_rank_expr`` reads them the same way."""
+    names = {(c.name or "").strip(CVE_NAME_BLANKS).upper() for c in vuln.cve_ids.all()}
+    return sorted(n for n in names if n)
 
 
 def hot_cve_names(names):
@@ -336,23 +341,27 @@ def finding_heat_reason(vuln, heat, hot_names=None):
     return "on the KEV or a public exploit is known; not confirmed (a version or banner inference)"
 
 
-def finding_heat_rank_expr(capped=True):
+def finding_heat_rank_expr(capped=True, prefix=""):
     """The database form of ``HEAT_RANK.get(finding_heat(...), 0)`` over Vulnerability rows (3 fire, 2 smoke, 1 ice, 0 none): what the Findings
-    list, its heat facet, the reports and the graph read for scanner findings."""
-    from django.db.models import Case, Exists, IntegerField, OuterRef, Q, Value, When
+    list, its heat facet, the reports and the graph read for scanner findings. ``prefix`` reaches the finding from another model
+    ("vulnerability__" from a Triage row: the validation lanes)."""
+    from django.db.models import CharField, Case, Exists, F, Func, IntegerField, OuterRef, Q, Value, When
     from django.db.models.functions import Upper
 
     from cveFeed.models import CVEEntry
     from startScan.models import CveId, VulnerabilityTags
-    severity = severity_heat_rank_expr()
+    p = prefix
+    severity = severity_heat_rank_expr(p + "severity")
     if heat_policy() == LEGACY_POLICY:
         return severity
-    names = CveId.objects.filter(cve_ids=OuterRef("pk")).annotate(upper=Upper("name"))
+    trimmed = Func(F("name"), Value(CVE_NAME_BLANKS), function="BTRIM", output_field=CharField())
+    names = CveId.objects.filter(cve_ids=OuterRef(p + "pk")).annotate(upper=Upper(trimmed)).exclude(upper="")
     carries = Exists(names)
     hot = Exists(names.filter(upper__in=CVEEntry.objects.filter(hot_q()).values("cve_id")))
-    unconfirmed = (Q(source__in=VERSION_READ_SOURCES) | Q(Exists(VulnerabilityTags.objects.filter(vuln_tags=OuterRef("pk"), name=UNCONFIRMED_TAG))))
-    confirmed = Q(triage__validation_status="hit") | ~unconfirmed
-    whens = [When(~Q(severity__in=list(SEVERITY_HEAT)), then=Value(0)), When(Q(carries) & ~Q(hot), then=Value(HEAT_RANK[ICE]))]
+    unconfirmed = (Q(**{p + "source__in": VERSION_READ_SOURCES})
+                   | Q(Exists(VulnerabilityTags.objects.filter(vuln_tags=OuterRef(p + "pk"), name=UNCONFIRMED_TAG))))
+    confirmed = Q(**{p + "triage__validation_status": "hit"}) | ~unconfirmed
+    whens = [When(~Q(**{p + "severity__in": list(SEVERITY_HEAT)}), then=Value(0)), When(Q(carries) & ~Q(hot), then=Value(HEAT_RANK[ICE]))]
     if capped:
         whens += [When(Q(hot) & confirmed, then=Value(HEAT_RANK[FIRE])), When(Q(hot), then=Value(HEAT_RANK[SMOKE]))]
     else:

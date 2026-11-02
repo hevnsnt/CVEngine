@@ -19,7 +19,7 @@ from django.utils import timezone
 from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, ICE, LEGACY_POLICY, SMOKE, heat_policy, hot_q, validation_heat
+from cveFeed.threat import FIRE, HEAT_RANK, ICE, LEGACY_POLICY, SMOKE, finding_heat, finding_heat_rank_expr, heat_policy, hot_q, validation_heat
 
 PAGE = 100
 MAX_ENQUEUE = 20
@@ -80,7 +80,10 @@ def tier_for(row):
         vuln = row.vulnerability
         if not vuln.open_status:
             return None
-        return FIRE if vuln.severity >= 3 else SMOKE if vuln.severity == 2 else None
+        # its heat once confirmed (threat.finding_heat): its severity, or under the KEV policy, for a finding that names CVEs, the CVE rule
+        # (hot is the fire lane; not hot is ice, and a scanner finding is never an ice job)
+        heat = finding_heat(vuln, capped=False)
+        return heat if heat in (FIRE, SMOKE) else None
     if row.hygiene_id:
         finding = row.hygiene
         if finding.status != 'open':
@@ -131,12 +134,13 @@ def _candidate_rows(lane):
     severity = 3 if lane == FIRE else 2
     candidate = ((cve_fire if lane == FIRE else cve_smoke) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
                  & latest_scan_q('match__subdomain__') & match_scope)
-    candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity) & vuln_scope
+    # a scanner finding by its heat once confirmed (finding_heat_rank_expr, the form of tier_for): severity, or the CVE rule for one naming CVEs
+    candidate |= Q(vulnerability__open_status=True, finding_rank__gte=HEAT_RANK[lane]) & vuln_scope
     candidate |= Q(hygiene__status='open', hygiene__severity__gte=severity)
     if lane == SMOKE:
         candidate |= Q(route__auth_state='open') & (Q(route__sensitive_score__gt=0)
                       | Q(route__path__iregex=triage.ADMIN_PATH.pattern))
-    return Triage.objects.filter(candidate).select_related(
+    return Triage.objects.annotate(finding_rank=finding_heat_rank_expr(capped=False, prefix='vulnerability__')).filter(candidate).select_related(
         'match__cve_entry', 'match__subdomain__target_domain', 'vulnerability__subdomain',
         'vulnerability__target_domain', 'route__domain', 'hygiene__domain').order_by('pk')
 

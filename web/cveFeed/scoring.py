@@ -8,7 +8,7 @@ the Hosts page, search and the graph already read.
 | --- | --- | --- |
 | CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: under the KEV heat policy a KEV or exploited CVE is fire when its version is proven and smoke otherwise, anything else ice): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
-| Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
+| Open findings: critical/high 25, medium 10, low 3; under the KEV heat policy a finding that names CVEs counts by its heat instead (``threat.finding_heat``: fire 25, smoke 10, ice 3) | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
 | Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
 | Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS, cleartext Telnet, FTP and r-services): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
@@ -32,6 +32,7 @@ CVE_POINTS = {'fire': 40, 'smoke': 20, 'ice': 5}
 CVE_CAP, AI_BONUS = 50, 10
 VERSION_UNKNOWN_CAP = 2  # the most a host's score takes from CVE matches that have no affected version range (review, not exposure)
 FINDING_POINTS = {4: 25, 3: 25, 2: 10, 1: 3}
+FINDING_HEAT_POINTS = {'fire': 25, 'smoke': 10, 'ice': 3}  # a finding that names CVEs, under the KEV heat policy: by its heat, not its severity
 FINDING_NAMES = {4: 'Critical', 3: 'High', 2: 'Medium', 1: 'Low'}
 HYGIENE_POINTS = {4: 20, 3: 15, 2: 8, 1: 3}
 HYGIENE_CAP, HYGIENE_EXTRA = 20, 2
@@ -123,10 +124,14 @@ def score_host(inputs):
     ``{'label', 'points'}`` that add up to the score (at most 100)."""
     detail = _cve_lines(inputs.get('cves') or [])
     findings = [f for f in inputs.get('findings') or [] if f.get('severity') in FINDING_POINTS]
+
+    def points(f):
+        return FINDING_HEAT_POINTS[f['heat']] if f.get('heat') in FINDING_HEAT_POINTS else FINDING_POINTS[f['severity']]
     if findings:
-        worst = max(findings, key=lambda f: FINDING_POINTS[f['severity']] * 10 + f['severity'])
-        detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip(),
-                       'points': FINDING_POINTS[worst['severity']]})
+        worst = max(findings, key=lambda f: points(f) * 10 + f['severity'])
+        detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip()
+                       + (f' ({worst["heat"]}: its CVE rated by the heat policy)' if worst.get('heat') in FINDING_HEAT_POINTS else ''),
+                       'points': points(worst)})
     detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
     detail += _capped(_route_line(routes), ROUTE_CAP)
@@ -163,6 +168,25 @@ def _cve_inputs(sub):
             continue
         # the heat the host card shows (threat.match_heat: the heat policy)
         out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
+    return out
+
+
+def _hot_finding_cves(subs):
+    """The hot CVE ids among the CVEs the hosts' findings name (one query), or None under the legacy heat policy (severity only)."""
+    from cveFeed.threat import LEGACY_POLICY, finding_cve_names, heat_policy, hot_cve_names
+    if heat_policy() == LEGACY_POLICY:
+        return None
+    return hot_cve_names({n for sub in subs for v in sub.vulnerability_set.all() for n in finding_cve_names(v)})
+
+
+def _finding_input(v, hot):
+    """One open finding for ``score_host``: its severity and name, and under the KEV policy, for a finding that names CVEs, its heat."""
+    from cveFeed.threat import finding_cve_names, finding_heat
+    out = {'severity': v.severity, 'name': v.name}
+    if hot is not None and finding_cve_names(v):
+        heat = finding_heat(v, hot_names=hot)
+        if heat:
+            out['heat'] = heat
     return out
 
 
@@ -209,7 +233,8 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         newest = (usable_rows(Subdomain.objects.filter(target_domain__project_id=project_id, name__in=chunk))
                   .order_by('name', *row_preference(scan_id)).distinct('name')
                   .prefetch_related('ip_addresses', Prefetch('cve_matches', queryset=CVEMatch.objects.select_related('cve_entry', 'triage')),
-                                    'vulnerability_set'))  # a score reads a CVE's tier fields
+                                    'vulnerability_set', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
+                                    'vulnerability_set__triage'))  # a score reads a CVE's tier fields, and a finding's CVEs
         subs = {s.name.lower(): s for s in newest}
         routes, recent, zombies, hygiene = {}, {}, {}, {}
         for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
@@ -227,9 +252,10 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
             if any(r['zombie_since'] for r in items):
                 zombies.setdefault(host, {})['zombie_route'] = True
         scores = {}
+        hot = _hot_finding_cves(subs.values())
         for name, sub in subs.items():
             inputs = {'cves': _cve_inputs(sub),
-                      'findings': [{'severity': v.severity, 'name': v.name} for v in sub.vulnerability_set.all() if finding_is_live(v)],
+                      'findings': [_finding_input(v, hot) for v in sub.vulnerability_set.all() if finding_is_live(v)],
                       'hygiene': hygiene.get(name, []), 'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
             inputs.update(zombies.get(name, {}))
             scores[name] = score_host(inputs)

@@ -8,10 +8,12 @@ Each event is one message per call, and each call is made once per scan, per fee
 - ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``);
 - ``saved_search``: a saved search found new matches, lost some or reached its threshold (``send_interesting_notif``).
 
-A CVE match is paged as fire once (``CVEMatch.fire_notified_at``), not once per scan: a rescan's copy carries it (``correlation._carry_remediation``).
-When the heat policy changes (the update that introduced it, a switch on the Heat policy card or ``CVENGINE_HEAT_POLICY``, the legacy cap), every
-match that is fire under the new rule is marked as announced without a message (``baseline_heat_policy``): the switch itself is no news, so it
-never pages the backlog, and every later page is about something that changed after the rule was in force.
+A CVE match is paged as fire once per heat rule (``CVEMatch.fire_notified_at`` with ``fire_notified_rule``, ``unannounced_q``), not once per
+scan: a rescan's copy carries it (``correlation._carry_remediation``). When the heat rule changes (the update that introduced the policy, a switch
+on the Heat policy card or ``CVENGINE_HEAT_POLICY``, the legacy cap), every match that is fire under the new rule and was there before the switch
+is marked as announced under it without a message (``baseline_heat_policy``): the switch itself is no news, so it never pages the backlog. A mark
+made under one rule never holds back a page that is new under another, and a match still waiting for its page (its scan is running, or it was
+made just before the switch) is left to that page.
 
 The senders are the reNgine helpers (Slack, Discord, Telegram, Lark), which read the one Notification row and do nothing
 for a channel that is off or incomplete. Sending is best effort: a failure is logged without its text (a Telegram error
@@ -129,7 +131,7 @@ def fire_matches(since, scan=None, cve_ids=None):
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
         # and fire on the host: a match whose version is not proven shows smoke (and one that is not hot ice), so it is not paged as fire;
         # when evidence later makes it fire it is paged by ``template_hits`` (a template hit) or ``fire_confirmed`` (anything else)
-        rows = rows.annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).filter(fire_notified_at__isnull=True)
+        rows = rows.annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).filter(unannounced_q())
         # each match is paged as fire once (a guarded claim: what a concurrent call claimed first is not counted or sent here)
         claimed = _claim(rows.values_list('pk', flat=True)[:MAX_MARK])
         if claimed is None:
@@ -152,7 +154,7 @@ def fire_confirmed(match_ids):
     (``scoring.evidence_arrived``), so a match that was already fire (a distribution listing, a template hit) is never paged again
     because more evidence reached it. A template hit is announced by ``template_hits`` and is left out here.
 
-    Each match is paged as fire once: ``CVEMatch.fire_notified_at`` is claimed by a guarded UPDATE (WHERE it is NULL, one ``now``), so two
+    Each match is paged as fire once per heat rule: ``CVEMatch.fire_notified_at`` is claimed by a guarded UPDATE (``unannounced_q``, one ``now``), so two
     workers never both send it. Copies of the finding on older scans' host rows are claimed too but never announced: only the current
     inventory's rows (``latest_scan_q``) are counted and named, and hosts are counted by name. Never raises."""
     try:
@@ -162,7 +164,7 @@ def fire_confirmed(match_ids):
         ids = sorted({int(i) for i in match_ids if i})[:MAX_MARK]
         if not ids:
             return False
-        fire = list(CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).exclude(template_result='vulnerable')
+        fire = list(CVEMatch.objects.filter(unannounced_q(), pk__in=ids).exclude(template_result='vulnerable')
                     .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
                     .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True))
         claimed = _claim(fire)
@@ -182,28 +184,58 @@ def fire_confirmed(match_ids):
         return False
 
 
+MAX_TURNED_HOT_ROUNDS = 40  # claims of MAX_MARK matches one cves_turned_hot call makes; what is left waits for the next call
+TURNED_HOT_PENDING = 'cvengine:notify:turned-hot-pending'  # cache key: the CVEs whose proven matches one call could not finish
+
+
 def cves_turned_hot(cve_ids):
     """One message for the CVE matches that turned fire because their CVE joined the KEV or gained a known exploit (``cve_ids``: the CVEs
-    whose signals just went from neither to either; ``intel.reconcile`` and the cve.now refresh report them). Under the KEV heat policy only:
-    a match whose version is proven is fire now and is paged once (``fire_notified_at``, claimed like every page); one we only infer is smoke
-    and is not paged (it is validated first, in the fire lane, and paged when proof turns it fire). A template hit on such a CVE is paged
-    here too: ``template_hits`` left it out while the CVE was ice. Only the current inventory's rows are counted and named; a match the AI ruled
-    out, fixed, accepted as a risk or patched by the distribution is left out. Under ``legacy`` nothing is sent from here (the legacy
-    behaviour is unchanged). Never raises."""
+    whose signals just went from neither to either; ``intel.reconcile``, the cve.now refresh and the forced backfill report them). Under the
+    KEV heat policy only: a match whose version is proven is fire now and is paged once (claimed like every page); one we only infer is smoke
+    and is not paged (it is validated first, in the fire lane, and paged when proof turns it fire). A template hit on such a CVE is paged here
+    too: ``template_hits`` left it out while the CVE was ice. Only the current inventory's rows are counted and named; a match the AI ruled out,
+    fixed, accepted as a risk or patched by the distribution is left out. Every such match is claimed, ``MAX_MARK`` at a time, up to
+    ``MAX_TURNED_HOT_ROUNDS`` claims; the CVEs of a call that could not finish are kept (cache) and carried by the next call, so none is lost.
+    Under ``legacy`` nothing is sent from here (the legacy behaviour is unchanged). Never raises."""
     try:
+        from django.core.cache import cache
+
         from cveFeed.correlation import latest_scan_q
         from cveFeed.models import CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, heat_policy, match_heat_rank_expr
-        ids = sorted({int(i) for i in cve_ids or () if i})
-        if not ids or heat_policy() == LEGACY_POLICY:
+        if heat_policy() == LEGACY_POLICY:
             return False
-        fire = list(CVEMatch.objects.filter(cve_entry_id__in=ids, fire_notified_at__isnull=True).filter(latest_scan_q('subdomain__'))
-                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
-                    .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True)[:MAX_MARK])
-        claimed = _claim(fire)
-        if claimed is None:
+        try:
+            pending = list(cache.get(TURNED_HOT_PENDING) or [])
+        except Exception:  # noqa: BLE001 - a cache outage must not stop the page
+            pending = []
+        ids = sorted({int(i) for i in [*(cve_ids or ()), *pending] if i})
+        if not ids:
             return False
-        total = claimed.count()
+        rows = (CVEMatch.objects.filter(unannounced_q(), cve_entry_id__in=ids).filter(latest_scan_q('subdomain__'))
+                .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
+                .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]))
+        claimed_ids, left = [], False
+        for _round in range(MAX_TURNED_HOT_ROUNDS):
+            batch = list(rows.values_list('pk', flat=True)[:MAX_MARK])
+            if not batch:
+                break
+            claimed = _claim(batch)
+            if claimed is not None:
+                claimed_ids += list(claimed.values_list('pk', flat=True))
+        else:
+            left = rows.exists()
+        try:
+            if left:
+                cache.set(TURNED_HOT_PENDING, ids, timeout=7 * 24 * 3600)
+            elif pending:
+                cache.delete(TURNED_HOT_PENDING)
+        except Exception:  # noqa: BLE001
+            logger.warning('could not keep the CVEs whose turned-fire matches are still to be paged')
+        if not claimed_ids:
+            return False
+        claimed = CVEMatch.objects.filter(pk__in=claimed_ids)
+        total = len(claimed_ids)
         sample = list(claimed.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
         hosts = claimed.values('subdomain__name').distinct().count()
         text = (f'CVEngine: {total} CVE match{"es" if total != 1 else ""} turned fire-tier on {hosts} host{"s" if hosts != 1 else ""}: the CVE '
@@ -212,6 +244,15 @@ def cves_turned_hot(cve_ids):
     except Exception as exc:  # noqa: BLE001
         logger.warning('turned-hot notification failed (%s)', type(exc).__name__)
         return False
+
+
+def unannounced_q(rule=None):
+    """CVE matches not yet paged (or marked) as fire under ``rule`` (``threat.heat_signature()``, the rule in force, by default): never paged,
+    or paged under another rule. A mark made under one rule never holds back a page that is new under another."""
+    from django.db.models import Q
+
+    from cveFeed.threat import heat_signature
+    return Q(fire_notified_at__isnull=True) | ~Q(fire_notified_rule=rule or heat_signature())
 
 
 def mark_announced(match_ids):
@@ -224,46 +265,61 @@ def mark_announced(match_ids):
         ids = sorted({int(i) for i in match_ids or () if i})
         if not ids:
             return 0
-        fire = (CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).annotate(heat_rank=match_heat_rank_expr())
-                .filter(heat_rank=HEAT_RANK[FIRE]).values('pk'))
         from django.utils import timezone
-        return CVEMatch.objects.filter(pk__in=fire, fire_notified_at__isnull=True).update(fire_notified_at=timezone.now())
+
+        from cveFeed.threat import heat_signature
+        rule = heat_signature()
+        fire = (CVEMatch.objects.filter(unannounced_q(rule), pk__in=ids).annotate(heat_rank=match_heat_rank_expr())
+                .filter(heat_rank=HEAT_RANK[FIRE]).values('pk'))
+        return CVEMatch.objects.filter(unannounced_q(rule), pk__in=fire).update(fire_notified_at=timezone.now(), fire_notified_rule=rule)
     except Exception as exc:  # noqa: BLE001
         logger.warning('could not mark matches as announced (%s)', type(exc).__name__)
         return 0
 
 
-BASELINE_LANE = 'heat_baseline'  # BackgroundCursor.lane: last_pk holds which heat rule fire_notified_at was last baselined to (BASELINE_SIGNATURES)
+BASELINE_LANE = 'heat_baseline'  # BackgroundCursor.lane: last_pk holds which heat rule the pages were last baselined to (BASELINE_SIGNATURES)
 BASELINE_SIGNATURES = ('kev', 'legacy:fire', 'legacy:smoke', 'legacy:ice')  # threat.heat_signature() values; the stored number is index + 1
+BASELINE_GRACE_HOURS = 6  # a match made this recently is left to the page its run sends at its end (a feed sync judges its matches first)
+UNFINISHED_SCAN = (-1, 1)  # ScanHistory.scan_status initiated, running: its matches are paged when it ends (discovery.fire_matches)
 
 
-def baseline_heat_policy(match_model=None, cursor_model=None):
+def baseline_code(signature):
+    """The number ``BackgroundCursor.last_pk`` stores for a heat rule (0: none recorded)."""
+    return BASELINE_SIGNATURES.index(signature) + 1 if signature in BASELINE_SIGNATURES else len(BASELINE_SIGNATURES) + 1
+
+
+def baseline_heat_policy():
     """When the heat rule (``threat.heat_signature``: the policy, and under legacy the version-only cap) differs from the one the pages were last
-    baselined to, mark every CVE match that is fire under the rule now and was never paged as announced (``fire_notified_at``), without a message,
-    and record the rule. So a policy switch, and the update that introduced the policy, never pages the backlog: a page is always about
-    something that changed while the rule was in force (new matches, ``fire_confirmed``, ``cves_turned_hot``), and a smoke match is still paged
-    when proof turns it fire. Runs from migration 0137 (the update), when a worker starts and on the 30 second tick (a switch on the card);
-    one cheap read when nothing changed, and one locked row so two workers never both do it. ``match_model`` and ``cursor_model`` are the
-    migration's historical models. Returns how many matches it marked."""
+    baselined to, mark every CVE match that is fire under the rule now and not announced under it as announced under it (``fire_notified_at`` and
+    ``fire_notified_rule``), without a message, and record the rule. So a policy switch never pages the backlog: a page is always about something
+    that changed while the rule was in force (new matches, ``fire_confirmed``, ``cves_turned_hot``), a smoke match is still paged when proof turns
+    it fire, and a mark under this rule never holds back a page that is new under another (``unannounced_q``).
+
+    Matches still waiting for their page are left to it: those of a scan that has not finished (``fire_matches`` pages them when it ends), and
+    those made in the last ``BASELINE_GRACE_HOURS`` (a feed sync pages its new matches after the AI has judged them). The update itself is
+    baselined by migration 0137 (frozen rules of its own); this runs at worker start and on the 30 second tick. One cheap read when nothing
+    changed, and one locked row so two workers never both do it. Returns how many matches it marked."""
+    from datetime import timedelta
+
     from django.db import transaction
+    from django.db.models import Q
     from django.utils import timezone
 
+    from cveFeed.models import BackgroundCursor, CVEMatch
     from cveFeed.threat import FIRE, HEAT_RANK, heat_signature, match_heat_rank_expr
-    if match_model is None:
-        from cveFeed.models import CVEMatch as match_model
-    if cursor_model is None:
-        from cveFeed.models import BackgroundCursor as cursor_model
     signature = heat_signature()
-    code = BASELINE_SIGNATURES.index(signature) + 1 if signature in BASELINE_SIGNATURES else len(BASELINE_SIGNATURES) + 1
-    if cursor_model.objects.filter(lane=BASELINE_LANE, last_pk=code).exists():
+    code = baseline_code(signature)
+    if BackgroundCursor.objects.filter(lane=BASELINE_LANE, last_pk=code).exists():
         return 0
+    now = timezone.now()
     with transaction.atomic():
-        cursor, _ = cursor_model.objects.select_for_update().get_or_create(lane=BASELINE_LANE)
+        cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane=BASELINE_LANE)
         if cursor.last_pk == code:
             return 0
-        fire = (match_model.objects.filter(fire_notified_at__isnull=True).annotate(heat_rank=match_heat_rank_expr())
+        waiting = Q(created_at__gte=now - timedelta(hours=BASELINE_GRACE_HOURS)) | Q(scan_history__scan_status__in=UNFINISHED_SCAN)
+        fire = (CVEMatch.objects.filter(unannounced_q(signature)).exclude(waiting).annotate(heat_rank=match_heat_rank_expr())
                 .filter(heat_rank=HEAT_RANK[FIRE]).values('pk'))
-        marked = match_model.objects.filter(pk__in=fire, fire_notified_at__isnull=True).update(fire_notified_at=timezone.now())
+        marked = CVEMatch.objects.filter(unannounced_q(signature), pk__in=fire).update(fire_notified_at=now, fire_notified_rule=signature)
         cursor.last_pk = code
         cursor.save(update_fields=['last_pk', 'updated_at'])
     if marked:
@@ -277,13 +333,14 @@ def _claim(ids):
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
+    from cveFeed.threat import heat_signature
     ids = list(ids)
     if not ids:
         return None
-    now = timezone.now()
-    if not CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).update(fire_notified_at=now):
+    now, rule = timezone.now(), heat_signature()
+    if not CVEMatch.objects.filter(unannounced_q(rule), pk__in=ids).update(fire_notified_at=now, fire_notified_rule=rule):
         return None
-    return CVEMatch.objects.filter(pk__in=ids, fire_notified_at=now)
+    return CVEMatch.objects.filter(pk__in=ids, fire_notified_at=now, fire_notified_rule=rule)
 
 
 def _hot_only(hits):
