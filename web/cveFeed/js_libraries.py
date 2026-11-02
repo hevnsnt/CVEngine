@@ -769,6 +769,19 @@ def names_of(records):
 _TOKENS = {re.sub(r'[^a-z0-9]', '', n) for n in (*PRODUCTS, *LIBRARIES)}
 
 
+FRESH_DAYS = 8  # a front page's reading speaks for the host this long: the route check reads each front page again every 7 days
+
+
+def complete_page(row):
+    """Whether a stored root route (RouteAuth) is a front page read whole that is the site itself: it answered a page (2xx, or the 404 or
+    410 a hosted site serves for "/"), it is not a login, single sign-on or challenge, its scripts were parsed (``script_page``), it was not
+    cut at the read limit, and it is not a stand-in (a redirect stub, a maintenance, consent or loading page, a page with no script).
+    Only such a page proves that a library is absent or that the library's files state another version."""
+    script_page = (row.evidence or {}).get('script_page')
+    return (page_status(row.http_status) and row.auth_state in ('open', 'not_found') and isinstance(script_page, dict)
+            and not script_page.get('truncated') and not script_page.get('stub'))
+
+
 def page_status(status):
     """Whether a front page that answered ``status`` is a page whose scripts are the host's: 2xx, or the page a hosted site serves for a
     missing ``/`` (404, 410), which still loads its scripts."""
@@ -866,43 +879,52 @@ class HostLibraries:
     stored version may make a match and with what evidence. ``alias_of`` is the host the front page only redirects to (``redirect_alias_of``):
     such a host serves no scripts of its own, so no library version stored for it is matched."""
 
-    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, query_versions=None):
+    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, cache_busters=()):
         self.records = records or {}  # library key -> record
         self.legacy = legacy or {}    # (library key, version) -> source, from fingerprints that predate records
         self.alias_of = alias_of
-        self.page_read = page_read    # the front page was parsed for its scripts (script_page) or the 1.3.2 reader found a library on it
-        self.query_versions = dict(query_versions or {})  # ?ver= string -> the libraries whose scripts carry it ('' for any other script)
+        self.page_read = page_read    # every web port's front page was read whole, lately, and is the site itself (complete_page)
+        self.cache_busters = set(cache_busters)  # the ?ver= strings of the page's scripts that are no library's (a theme's, a plugin's)
 
     @classmethod
-    def for_subdomain(cls, subdomain):
+    def for_subdomain(cls, subdomain, now=None):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
         from cveFeed.models import ProbeObservation, RouteAuth
+        from cveFeed.route_auth import web_bases
         project = subdomain.target_domain.project_id if subdomain.target_domain_id else None
         if not project:
             return cls()
         host = subdomain.name.lower()
-        dated, legacy, roots, page_read, query_versions = [], {}, [], False, {}
-        # every root row, a retired one too: a root that now answers 404 is retired, and the page it serves still loads the host's scripts
+        cutoff = (now or timezone.now()) - timedelta(days=FRESH_DAYS)
+        bases = web_bases(subdomain, limit=None)
+        origins = {_origin(base) for base in bases}
+        dated, legacy, current = [], {}, {}
+        # every root row, a retired one too (a root that now answers 404 is retired, and the page it serves still loads the host's
+        # scripts), but only a row the route check wrote lately for a web port the host still has speaks for the host's page now
         for row in RouteAuth.objects.filter(project_id=project, host=host, path='/').only(
-                'evidence', 'checked_at', 'url', 'http_status', 'redirect_to'):
-            roots.append((row.url, row.http_status, row.redirect_to))
+                'evidence', 'checked_at', 'url', 'http_status', 'redirect_to', 'auth_state').order_by('checked_at'):
             evidence = row.evidence or {}
-            if isinstance(evidence.get('libraries'), dict):
-                dated += [(row.checked_at, key, rec) for key, rec in evidence['libraries'].items() if isinstance(rec, dict)]
-            script_page = evidence.get('script_page')
-            if page_status(row.http_status) and (isinstance(script_page, dict) or isinstance(evidence.get('libraries'), dict)):
-                page_read = True
-                for item in (script_page or {}).get('query_versions') or [] if isinstance(script_page, dict) else []:
-                    if isinstance(item, dict) and item.get('version'):
-                        query_versions.setdefault(str(item['version']), set()).add(str(item.get('library') or ''))
             for found in evidence.get('fingerprints') or []:
                 if isinstance(found, dict) and found.get('source') in FILENAME_SOURCES:
                     _legacy_add(legacy, found.get('name'), found['source'])
-        for row in ProbeObservation.objects.filter(project_id=project, host=host, kind='version', probe__in=('html-libraries', 'headers-root')) \
-                .only('product', 'version', 'source', 'evidence', 'observed_at'):
+            if row.checked_at is None or row.checked_at < cutoff:
+                continue
+            if isinstance(evidence.get('libraries'), dict):  # every recent reading adds the copies it saw (they match, never close)
+                dated += [(row.checked_at, key, rec) for key, rec in evidence['libraries'].items() if isinstance(rec, dict)]
+            try:
+                origin = _origin(row.url)
+            except ValueError:
+                continue
+            if origin in origins:
+                current[origin] = row  # the newest row of each web port the host still has
+        for row in ProbeObservation.objects.filter(project_id=project, host=host, kind='version', probe__in=('html-libraries', 'headers-root'),
+                                                   observed_at__gte=cutoff).only('product', 'version', 'source', 'evidence', 'observed_at'):
             record = (row.evidence or {}).get('library')
             if isinstance(record, dict) and PRODUCTS.get(str(record.get('product', '')).lower()):
                 dated.append((row.observed_at, PRODUCTS[str(record['product']).lower()], record))
-                page_read = True  # the html-libraries probe read the front page
             elif row.source in FILENAME_SOURCES and row.version:
                 _legacy_add(legacy, f'{row.product}:{row.version}', row.source)
         records = {}
@@ -914,12 +936,16 @@ class HostLibraries:
             # version one of them read from a file is never lost
             seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
             records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
-        for key, record in records.items():
-            for copy in record['copies']:
-                if isinstance(copy, dict) and copy.get('query_version'):
-                    query_versions.setdefault(str(copy['query_version']), set()).add(key)
-        from cveFeed.route_auth import web_bases
-        return cls(records, legacy, redirect_alias_of(roots, host, web_bases(subdomain, limit=None)) if roots else '', page_read, query_versions)
+        roots = [(row.url, row.http_status, row.redirect_to) for row in current.values()]
+        # the host's page is known only when every web port's front page was read whole, lately, and is the site itself
+        page_read = bool(origins) and all(origin in current and complete_page(current[origin]) for origin in origins)
+        cache_busters = set()
+        if page_read:
+            for row in current.values():
+                for item in (row.evidence or {}).get('script_page', {}).get('query_versions') or []:
+                    if isinstance(item, dict) and item.get('version') and not item.get('library'):
+                        cache_busters.add(str(item['version']))
+        return cls(records, legacy, redirect_alias_of(roots, host, bases) if roots else '', page_read, cache_busters)
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
@@ -943,7 +969,7 @@ class HostLibraries:
             if (key, version) in self.legacy:
                 return self._judge_legacy(key, version)
             if self.page_read:  # the front page was read and loads no script of this library: the version came from somewhere else
-                return True, {'reason': (_cache_buster(name, version) if self._cache_busted(key, version) else
+                return True, {'reason': (_cache_buster(name, version) if version in self.cache_busters else
                                          f'the front page loads no {name} script; the {version} came from a technology scan')}, None
             return self._judge_legacy(key, version)
         copies = [c for c in record.get('copies') or [] if isinstance(c, dict)]
@@ -981,9 +1007,9 @@ class HostLibraries:
             # the string a script's query or name carries, where the file itself was read and states otherwise or nothing
             return True, {'reason': (f'the page\'s own scripts say {name} {said}; the {version} came from a script\'s name or query string'
                                      if said else f'the {name} script\'s own file does not state {version}')}, None
-        if stated:  # the page's files state the library's version(s), and this one is none of them: another tool's misreading
+        if stated and self.page_read:  # the whole page's files state the library's version(s), and this one is none of them
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
-        if self._cache_busted(key, version):  # a theme's or plugin's ?ver= cache-buster on the same page, read as the library's version
+        if self.page_read and version in self.cache_busters:  # a theme's or plugin's ?ver= cache-buster, read as the library's version
             return True, {'reason': _cache_buster(name, version)}, None
         if named:  # the script was never read: its query or name string is all there is, kept at the file-name confidence
             copy = named[0]
@@ -994,12 +1020,6 @@ class HostLibraries:
         # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
         # says, and trusted no further than a file name
         return False, {'copies': summary, **_other()}, CONFIDENCE['filename']
-
-    def _cache_busted(self, key, version):
-        """Whether ``version`` is the ``?ver=`` string of a script on the page that is not this library's own copy (another library's, a
-        theme's or a plugin's): a cache-buster, never this library's version. Its own copy's ``?ver=`` may be the real version (WordPress
-        puts core jQuery's there), so that alone proves nothing."""
-        return bool(self.query_versions.get(version, set()) - {key})
 
     def _judge_legacy(self, key, version):
         """A version stored before records existed, from a script's name or its query string (one cannot be told from the other any more):
@@ -1027,6 +1047,16 @@ def _legacy_add(legacy, name, source):
     key = PRODUCTS.get(product.strip().lower())
     if key and version:
         legacy.setdefault((key, version.strip()), source)
+
+
+def unrecorded_page(evidence, status):
+    """Whether a stored front page names a library but its scripts were not recorded (``script_page``, before 1.3.3): read again at the
+    next scan so a technology scan's version can be checked against the page."""
+    evidence = evidence or {}
+    if not page_status(status) or 'script_page' in evidence:
+        return False
+    return isinstance(evidence.get('libraries'), dict) or any(
+        isinstance(f, dict) and is_library(f.get('name')) for f in evidence.get('fingerprints') or [])
 
 
 def legacy_roots(evidence):

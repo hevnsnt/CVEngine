@@ -179,6 +179,8 @@ class RedirectAliasCorrelationTests(Hosts):
         self.assertIn(('jquery', '3.2.1'), self.matches('www.rt.test', 'jQuery:3.2.1'))
 
     def test_a_host_with_any_other_answer_at_its_root_is_not_judged_an_alias(self):
+        from startScan.models import Port
+        self.sub('blog.rt.test').ip_addresses.first().ports.add(Port.objects.create(number=80, service_name='http', state='open'))
         self.root('blog.rt.test', 301, redirect_to='https://rt.test/')
         self.root('blog.rt.test', 403, scheme='http')
         self.assertIn(('jquery', '3.2.1'), self.matches('blog.rt.test', 'jQuery:3.2.1'))
@@ -501,3 +503,320 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
         self.assertEqual(result['closed_by_reason'], {'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1})
         self.assertIn('closed 18 of', '\n'.join(logs.output))
         self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1}, proven=False)
+
+
+def synthesized_page(key, cut):
+    """A live front page rebuilt from its script tags at their original byte offsets (everything else is padding), as the route check reads
+    it: the first ``cut`` bytes, marked truncated when the page is longer."""
+    import json
+    with open(os.path.join(ORACLE, 'front-page-script-offsets.json'), encoding='utf-8') as handle:
+        page = json.load(handle)[key]
+    body = bytearray(b' ' * page['size'])
+    for offset, tag in page['scripts']:
+        raw = tag.encode('utf-8')
+        body[offset:offset + len(raw)] = raw
+    body = bytes(body)
+    return {'body': body[:cut].decode('utf-8', 'ignore'), 'bytes': min(len(body), cut), 'read_limit': cut, 'truncated': len(body) > cut}
+
+
+class RawLiveSiteOracleTests(LiveSiteOracleTests):
+    """The same live case with the pages at their real length: the WordPress page is 248,915 bytes and its theme, plugin and Bootstrap
+    scripts sit 229 KB in. The route check reads a front page up to ROOT_READ_BYTES, so the whole page is known and every closure carries
+    a true reason; read at the old 64 KiB, the page is truncated and proves no absence, so nothing on it closes."""
+
+    CUT = None
+
+    def read_front_pages(self):
+        from cveFeed import route_auth
+        cut = self.CUT or route_auth.ROOT_READ_BYTES
+
+        def probe(url, **_kw):
+            body = self.SCRIPTS.get(url.split('?', 1)[0])
+            return ({'status': 200, 'body': body, 'url': url, 'content_type': 'application/javascript', 'headers': {}} if body is not None
+                    else {'status': 404, 'body': 'not found', 'url': url, 'content_type': 'text/html', 'headers': {}})
+        answers = {'bg.test': {'status': 200, **synthesized_page('wordpress', cut)},
+                   'info.bg.test': {'status': 404, **synthesized_page('hosted_404', cut)}}
+        answers.update({host: {'status': 301, 'location': target, 'body': '<html><head><title>301 Moved Permanently</title></head></html>'}
+                        for host, target in self.REDIRECTS.items()})
+        for host, answer in answers.items():
+            url = f'https://{host}/'
+            result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, 'title': '', **answer})
+            with mock.patch.object(js_libraries, '_cache', return_value=None):
+                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                                         target=self.site)
+            RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
+                                     http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
+                                     evidence=result['evidence'], checked_at=timezone.now())
+
+    def test_every_closure_on_the_whole_page_says_what_the_page_really_shows(self):
+        self.correlate()
+        self.read_front_pages()
+        self.correlate()
+        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2, 'cache_buster': 1})
+        _rows, _open, closed = self.open_and_closed()
+        reasons = [m.ai_reason for m in closed if m.subdomain.name == 'bg.test']
+        self.assertFalse([r for r in reasons if 'loads no' in r], reasons)  # the page loads Bootstrap: never "loads no Bootstrap script"
+        bootstrap = next(m.ai_reason for m in closed if m.subdomain.name == 'bg.test' and m.cve_entry.cve_id == 'CVE-2026-114538')
+        self.assertIn('1.0.4 is the ?ver= cache-buster of a script on the same page', bootstrap)
+
+    def test_the_page_cut_at_64_kib_proves_no_absence_so_only_the_aliases_close(self):
+        from cveFeed import route_auth
+        self.CUT = route_auth.ROUTE_SAMPLE_BYTES
+        self.correlate()
+        self.read_front_pages()
+        self.correlate()
+        _rows, is_open, closed = self.open_and_closed()
+        self.assertEqual({js_libraries.closure_kind(m.ai_reason) for m in closed}, {'redirect_alias'})
+        self.assertEqual(len(closed), 15)
+        self.assertEqual(sorted((m.subdomain.name, m.cve_entry.cve_id) for m in is_open),
+                         [('bg.test', 'CVE-2020-11022'), ('bg.test', 'CVE-2020-11023'), ('bg.test', 'CVE-2026-114538'),
+                          ('info.bg.test', 'CVE-2020-11023')])
+        self.assertTrue(all(m.confidence <= js_libraries.CONFIDENCE['filename'] for m in is_open if m.subdomain.name == 'bg.test'))
+
+    def test_the_reconcile_sweep_closes_the_same_eighteen_without_a_rescan(self):
+        super().test_the_reconcile_sweep_closes_the_same_eighteen_without_a_rescan()
+
+    def test_the_next_correlation_closes_eighteen_and_keeps_the_real_one(self):
+        super().test_the_next_correlation_closes_eighteen_and_keeps_the_real_one()
+
+
+class ReviewScenarioBase(RouteFixture, TestCase):
+    """Hosts, front pages and correlation for the review scenarios, through the real classify, script read, correlation and sweep code."""
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import CVEEntry
+        from startScan.models import ScanHistory
+        from targetApp.models import Domain
+        self.site = Domain.objects.create(name='x.test', project=self.project, insert_date=timezone.now())
+        self.scan_obj = ScanHistory.objects.create(domain=self.site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2,
+                                                   tasks=[], results_dir='x')
+        self.jq = CVEEntry.objects.create(cve_id='CVE-2020-11023', kev=True, cvss=6.9, published_at=timezone.now(),
+                                          affected=[{'vendor': 'jquery', 'product': 'jquery', 'ranges': [{'introduced': '1.0.3', 'fixed': '3.5.0'}]}])
+        self.bs = CVEEntry.objects.create(cve_id='CVE-2024-6484', cvss=6.4, published_at=timezone.now(),
+                                          affected=[{'vendor': 'getbootstrap', 'product': 'bootstrap', 'ranges': [{'introduced': '3.0.0', 'fixed': '4.0.0'}]}])
+        self.entries = [self.jq, self.bs]
+
+    def host(self, name, techs, ports=(443,)):
+        from startScan.models import IpAddress, Port
+        ip = IpAddress.objects.create(address=f'203.0.113.{100 + Subdomain.objects.count()}')
+        for number in ports:
+            ip.ports.add(Port.objects.create(number=number, service_name='https' if number == 443 else 'http', state='open'))
+        sub = Subdomain.objects.create(name=name, target_domain=self.site, scan_history=self.scan_obj)
+        sub.ip_addresses.add(ip)
+        sub.technologies.add(*[Technology.objects.get_or_create(name=t)[0] for t in techs])
+        return sub
+
+    def read_root(self, host, status, body='', scheme='https', location='', scripts=None, **extra):
+        from cveFeed import route_auth
+        url = f'{scheme}://{host}/'
+        result = route_auth.analyse({'url': url, 'status': status, 'body': body, 'content_type': 'text/html', 'headers': {}, 'location': location,
+                                     **extra})
+
+        def probe(target, **_kw):
+            text = (scripts or {}).get(target.split('?', 1)[0])
+            return ({'status': 200, 'body': text, 'url': target, 'content_type': 'application/javascript', 'headers': {}} if text is not None
+                    else {'status': 404, 'body': 'nf', 'url': target, 'content_type': 'text/html', 'headers': {}})
+        with mock.patch.object(js_libraries, '_cache', return_value=None):
+            route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id), target=self.site)
+        RouteAuth.objects.update_or_create(project=self.project, url=url, defaults={
+            'domain': self.site, 'host': host, 'path': '/', 'auth_state': result['state'], 'http_status': status,
+            'redirect_to': result['evidence'].get('redirect_to', ''), 'evidence': result['evidence'], 'checked_at': timezone.now()})
+        return result
+
+    def correlate(self, *subs):
+        from cveFeed.models import CVEMatch
+        index = correlation.build_product_index(self.entries)
+        correlation.correlate_subdomains(Subdomain.objects.filter(pk__in=[s.pk for s in subs]).prefetch_related('technologies', 'ip_addresses__ports'),
+                                         index, {e.id: e for e in self.entries})
+        return {(m.subdomain.name, m.cve_entry.cve_id, m.matched_version): m
+                for m in CVEMatch.objects.filter(subdomain__in=subs).select_related('subdomain', 'cve_entry')}
+
+
+
+class ReviewScenarioTests(ReviewScenarioBase):
+    """The review of #388: E1 to E5, standing, freshness, flapping and the sweep."""
+
+    FILLER = '<div>' + ('x' * 70000) + '</div>'
+
+    def test_e1_a_script_past_the_read_limit_is_never_called_absent(self):
+        from cveFeed import route_auth
+        sub = self.host('big.x.test', ['Bootstrap:3.4.1'])
+        page = ('<html><head><script src="/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script></head><body>' + self.FILLER +
+                '<script src="/js/bootstrap.min.js"></script></body></html>')
+        cut = page.encode()[:route_auth.ROUTE_SAMPLE_BYTES].decode('utf-8', 'ignore')  # what a 64 KiB read returns
+        self.read_root('big.x.test', 200, cut, scripts={'https://big.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN})
+        self.assertTrue(RouteAuth.objects.get(host='big.x.test').evidence['script_page']['truncated'])
+        match = self.correlate(sub)[('big.x.test', 'CVE-2024-6484', '3.4.1')]
+        self.assertEqual((match.ai_verdict, match.confidence), ('', js_libraries.CONFIDENCE['filename']))
+
+    def test_e1b_an_old_copy_past_the_read_limit_is_not_contradicted_by_the_new_one_before_it(self):
+        from cveFeed import route_auth
+        sub = self.host('big2.x.test', ['jQuery:1.8.3', 'jQuery:3.7.1'])
+        page = ('<html><head><script src="/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script></head><body>' + self.FILLER +
+                '<script src="/legacy/jquery-1.8.3.min.js"></script></body></html>')
+        cut = page.encode()[:route_auth.ROUTE_SAMPLE_BYTES].decode('utf-8', 'ignore')
+        self.read_root('big2.x.test', 200, cut, scripts={'https://big2.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN})
+        self.assertEqual(self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')].ai_verdict, '')
+        # read whole (the route check reads a front page up to ROOT_READ_BYTES), the old copy is on the page: matched from its name
+        self.read_root('big2.x.test', 200, page, scripts={'https://big2.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN},
+                       bytes=len(page), read_limit=route_auth.ROOT_READ_BYTES, truncated=False)
+        match = self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')]
+        self.assertEqual((match.ai_verdict, match.evidence['version_source']), ('', 'filename'))
+
+    def test_e2_every_web_port_must_show_its_page_before_anything_is_absent(self):
+        sub = self.host('app.x.test', ['jQuery:1.12.4'], ports=(80, 443))
+        self.read_root('app.x.test', 200, '<html><body>It works!</body></html>', scheme='http')  # the default page on :80
+        self.read_root('app.x.test', 302, '', location='/login')  # the application on :443 sends visitors to its own /login
+        self.assertEqual(self.correlate(sub)[('app.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
+        # a stand-in on every port proves nothing either: a meta refresh, a maintenance page
+        self.read_root('app.x.test', 200, '<meta http-equiv="refresh" content="0;url=/app/"><script src="/a.js"></script>')
+        self.assertEqual(self.correlate(sub)[('app.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
+        self.read_root('app.x.test', 200, '<title>Down for maintenance</title><script src="/a.js"></script>', title='Down for maintenance')
+        self.assertEqual(self.correlate(sub)[('app.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
+
+    def test_e3_another_librarys_own_ver_is_not_a_cache_buster(self):
+        for name, prefix in (('pair.x.test', 'https://cdn.vendor-assets.test/js/'), ('pair2.x.test', '/js/')):
+            sub = self.host(name, ['jQuery:3.4.1', 'Bootstrap:3.4.1'])
+            self.read_root(name, 200, f'<script src="{prefix}jquery.min.js?ver=3.4.1"></script><script src="{prefix}bootstrap.min.js?ver=3.4.1"></script>')
+            found = self.correlate(sub)
+            self.assertEqual(found[(name, 'CVE-2020-11023', '3.4.1')].ai_verdict, '', name)
+            self.assertEqual(found[(name, 'CVE-2024-6484', '3.4.1')].ai_verdict, '', name)
+
+    def test_e4_a_vouched_for_library_match_is_never_closed_by_a_page_reading(self):
+        from django.contrib.auth import get_user_model
+        from cveFeed.models import CVEMatch, FindingComment, Triage
+        user = get_user_model().objects.create(username='reviewer')
+        cases = {'assigned': lambda m: CVEMatch.objects.filter(pk=m.pk).update(assignee=user),
+                 'ai-affected': lambda m: CVEMatch.objects.filter(pk=m.pk).update(ai_verdict='affected', ai_reason='Validated: file read'),
+                 'commented': lambda m: FindingComment.objects.create(project=self.project, finding_kind='match', finding_id=m.pk, author=user, text='checking'),
+                 'validation hit': lambda m: Triage.objects.filter(match=m).update(validation_status='hit'),
+                 'confirmed': lambda m: Triage.objects.filter(match=m).update(classification='confirmed')}
+        for label, vouch in cases.items():
+            name = f'w{len(label)}{label[:3]}.x.test'.replace(' ', '')
+            sub = self.host(name, ['jQuery:3.4.1'])
+            match = self.correlate(sub)[(name, 'CVE-2020-11023', '3.4.1')]
+            from cveFeed import triage
+            triage.track(CVEMatch.objects.filter(pk=match.pk).select_related('cve_entry', 'subdomain__target_domain'))
+            vouch(match)
+            before = CVEMatch.objects.get(pk=match.pk).ai_verdict
+            self.read_root(name, 200, '<script src="/site.js"></script>')  # the page loads no jQuery
+            after = self.correlate(sub)[(name, 'CVE-2020-11023', '3.4.1')]
+            self.assertEqual(after.ai_verdict, before, label)
+            from cveFeed.tasks import reconcile_library_provenance
+            reconcile_library_provenance()
+            self.assertEqual(CVEMatch.objects.get(pk=match.pk).ai_verdict, before, label)
+
+    def test_e5_a_closure_about_one_hosts_page_is_never_shared_and_reopens(self):
+        from cveFeed.models import CVEEntry, CVEMatch, MatchVerdict, TriageVerdict
+        from cveFeed.tasks import reconcile_library_provenance
+        kev = CVEEntry.objects.create(cve_id='CVE-2099-0001', kev=True, cvss=9.0, published_at=timezone.now(),
+                                      affected=[{'vendor': 'jquery', 'product': 'jquery'}])  # no version bound: an unbounded KEV candidate
+        self.entries = [kev]
+        a = self.host('a.x.test', ['jQuery:1.12.4'])
+        self.correlate(a)
+        self.read_root('a.x.test', 200, '<script src="/site.js"></script>')
+        self.assertEqual(reconcile_library_provenance()['closed'], 1)
+        closed = CVEMatch.objects.get(subdomain=a)
+        self.assertTrue(closed.ai_reason.startswith(js_libraries.LIBRARY_CLOSED))
+        self.assertFalse(MatchVerdict.objects.filter(ai_reason__startswith=js_libraries.LIBRARY_CLOSED).exists())
+        self.assertFalse(TriageVerdict.objects.filter(reason__startswith=js_libraries.LIBRARY_CLOSED).exists())
+        b = self.host('b.x.test', ['jQuery:1.12.4'])  # another host (any project) with the same version: its own page was never read
+        self.assertEqual(self.correlate(b)[('b.x.test', 'CVE-2099-0001', '1.12.4')].ai_verdict, '')
+        self.read_root('a.x.test', 200, '<script src="/js/jquery-1.12.4.min.js"></script>')  # the page now loads it
+        reopened = self.correlate(a)[('a.x.test', 'CVE-2099-0001', '1.12.4')]
+        self.assertEqual((reopened.pk, reopened.ai_verdict), (closed.pk, ''))
+        self.assertIn('library_reopened_at', reopened.evidence)
+
+    def test_a_match_reopens_when_only_its_confidence_comes_back(self):
+        from cveFeed.models import CVEMatch
+        sub = self.host('c.x.test', ['jQuery:3.4.1'])
+        match = self.correlate(sub)[('c.x.test', 'CVE-2020-11023', '3.4.1')]
+        # closed by the page with every field as correlation computes it again (the closure kept the confidence)
+        CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='not_affected', ai_reason=js_libraries.closed_reason('the front page loads no jQuery'))
+        reopened = self.correlate(sub)[('c.x.test', 'CVE-2020-11023', '3.4.1')]
+        self.assertEqual((reopened.ai_verdict, reopened.ai_reason), ('', ''))
+
+    def test_a_stale_or_vanished_port_reading_closes_nothing_and_a_retired_404_root_still_counts(self):
+        from datetime import timedelta
+        sub = self.host('old.x.test', ['jQuery:1.12.4'])
+        self.read_root('old.x.test', 200, '<script src="/site.js"></script>')
+        RouteAuth.objects.filter(host='old.x.test').update(checked_at=timezone.now() - timedelta(days=js_libraries.FRESH_DAYS + 1))
+        self.assertEqual(self.correlate(sub)[('old.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')  # too old to speak for the page
+        gone = self.host('gone.x.test', ['jQuery:1.12.4'])
+        self.read_root('gone.x.test', 200, '<script src="/site.js"></script>', scheme='http')  # a port the host no longer has
+        self.assertEqual(self.correlate(gone)[('gone.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
+        # a front page that answered 200 once and now answers 404 is retired, and the hosted 404 page it serves is the page now
+        hosted = self.host('hosted.x.test', ['jQuery:1.12.4', 'jQuery:1.11.2'])
+        self.read_root('hosted.x.test', 404, '<script src="/hs/jquery-1.11.2.js"></script>',
+                       scripts={'https://hosted.x.test/hs/jquery-1.11.2.js': oracle('jquery-1.11.2-head.js')})
+        RouteAuth.objects.filter(host='hosted.x.test').update(retired_at=timezone.now(), previous_state='open')
+        found = self.correlate(hosted)
+        self.assertEqual(found[('hosted.x.test', 'CVE-2020-11023', '1.11.2')].evidence['version_source'], 'body')
+        self.assertTrue(all(m.ai_verdict != 'not_affected' or m.matched_version == '1.12.4' for m in found.values()))
+        self.assertEqual(found[('hosted.x.test', 'CVE-2020-11023', '1.11.2')].ai_verdict, '')
+
+    def test_a_library_match_that_reopened_lately_is_not_closed_again_on_weak_grounds(self):
+        from cveFeed.models import CVEMatch
+        sub = self.host('flap.x.test', ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root('flap.x.test', 200, '<script src="/site.js"></script>')
+        self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+        self.read_root('flap.x.test', 200, '<script src="/js/jquery-1.12.4.min.js"></script>')  # variant B of the page loads it
+        self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
+        self.read_root('flap.x.test', 200, '<script src="/site.js"></script>')  # variant A again: an absence, weak, reopened lately
+        held = self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual(held.ai_verdict, '')
+        from cveFeed.tasks import reconcile_library_provenance
+        reconcile_library_provenance()
+        self.assertEqual(CVEMatch.objects.get(pk=held.pk).ai_verdict, '')
+        # ... but the library's own file stating another version is strong: it closes even so
+        self.read_root('flap.x.test', 200, '<script src="/js/jquery.min.js"></script>', scripts={'https://flap.x.test/js/jquery.min.js': JQ_371_MIN})
+        self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+
+    def test_the_library_sweep_looks_only_at_open_matches_in_bounded_batches(self):
+        from cveFeed.models import BackgroundCursor, CVEMatch
+        from cveFeed.tasks import reconcile_library_provenance
+        subs = [self.host(f'h{i}.x.test', ['jQuery:1.12.4']) for i in range(4)]
+        self.correlate(*subs)
+        for sub in subs:
+            self.read_root(sub.name, 200, '<script src="/site.js"></script>')
+        first = reconcile_library_provenance(limit=2)
+        self.assertEqual((first['reviewed'], first['closed'], first['closed_by_reason']), (2, 2, {'no_such_script': 2}))
+        second = reconcile_library_provenance(limit=2)
+        self.assertEqual(second['closed'], 2)
+        self.assertEqual(CVEMatch.objects.filter(subdomain__in=subs, ai_verdict='not_affected').count(), 4)
+        self.assertEqual(reconcile_library_provenance(limit=2)['reviewed'], 0)  # closed ones are never looked at again
+        # out of time: the next run starts where this one stopped
+        more = [self.host(f'k{i}.x.test', ['jQuery:1.12.4']) for i in range(3)]
+        self.correlate(*more)
+        for sub in more:
+            self.read_root(sub.name, 200, '<script src="/site.js"></script>')
+        BackgroundCursor.objects.filter(lane='library_provenance').update(last_pk=0)
+        ticks = iter([0, 0, 0, 1000, 1000, 1000, 1000])
+        stopped = reconcile_library_provenance(limit=10, seconds=10, clock=lambda: next(ticks))
+        self.assertEqual(stopped['closed'], 2)
+        self.assertEqual(reconcile_library_provenance(limit=10)['closed'], 1)
+
+
+class LibrarySweepCostTests(ReviewScenarioBase):
+    """The sweep reads each host's page once a run for all its matches, and a match costs a few queries of its own (who vouches for it)."""
+
+    def queries(self, hosts, tag):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from cveFeed.models import BackgroundCursor
+        from cveFeed.tasks import reconcile_library_provenance
+        subs = [self.host(f'{tag}{i}.x.test', ['jQuery:1.12.4', 'Bootstrap:3.3.7']) for i in range(hosts)]
+        self.correlate(*subs)  # no page read: nothing closes, every match is looked at
+        BackgroundCursor.objects.filter(lane='library_provenance').delete()
+        with CaptureQueriesContext(connection) as captured:
+            result = reconcile_library_provenance(limit=500)
+        self.assertEqual(result['closed'], 0)
+        return len(captured.captured_queries), result['libraries']
+
+    def test_a_handful_of_queries_per_match_and_none_per_match_for_the_page(self):
+        few, looked_few = self.queries(2, 'a')
+        many, looked_many = self.queries(8, 'b')
+        per_match = (many - few) / (looked_many - looked_few)
+        self.assertLessEqual(per_match, 6)  # measured: 4.0 (who vouches for it: 3; its host's page, read once for both its matches: 1)

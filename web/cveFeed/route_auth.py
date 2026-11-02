@@ -40,6 +40,9 @@ PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeou
 ROUTE_SAMPLE_BYTES = 64 * 1024
 MAX_PROBE_BYTES = 256 * 1024  # the most a version probe may ask for (a JavaScript bundle names its framework version deep inside)
 MAX_READ_BYTES = 300 * 1024  # the most any probe reads of one decoded body: a library file (cveFeed.js_libraries.MAX_SCRIPT_BYTES)
+# a front page is read further than another route: the script tags of a large WordPress page (the theme's and plugins' scripts sit in its
+# footer, 230 KB in) decide which libraries the host serves; a page still longer than this is marked truncated and proves no absence
+ROOT_READ_BYTES = MAX_READ_BYTES
 # what an ordinary browser sends. Some CDNs answer an obvious scanner request with a challenge page instead of the site, so the version
 # probes (never the route check) present as a browser; the headers say nothing a browser would not, and no cookie or credential is sent.
 BROWSER_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
@@ -194,6 +197,31 @@ def _redirect_state(location, base_url):
     return 'redirect', ''
 
 
+def _truncated(probe):
+    """Whether the body of a probe answer stopped at the read limit (a page longer than what was read)."""
+    if 'truncated' in probe:
+        return bool(probe['truncated'])
+    size = probe.get('bytes')
+    if size is None:
+        size = len((probe.get('body') or '').encode('utf-8', 'ignore'))
+    return size >= int(probe.get('read_limit') or ROUTE_SAMPLE_BYTES)
+
+
+_STUB_TITLE_RE = re.compile(r'maintenance|under construction|coming soon|cookie|consent|privacy preferences|just a moment|redirect|loading',
+                            re.I)
+_JS_REDIRECT_RE = re.compile(r'(?:window|document|top|self)\.location(?:\.href)?\s{0,4}=|location\.(?:replace|assign)\(', re.I)
+
+
+def _stub_page(body, title, page_scripts):
+    """Whether a front page is a stand-in rather than the site: a meta refresh or script redirect, a maintenance, consent or loading page,
+    or a page that loads no script of its own. Such a page proves nothing about which libraries the site loads."""
+    if META_REFRESH_RE.search(body or '') or _STUB_TITLE_RE.search(title or ''):
+        return True
+    if not any(entry.get('url') for entry in page_scripts):
+        return True
+    return len(body or '') < 4096 and bool(_JS_REDIRECT_RE.search(body or ''))
+
+
 def classify(probe):
     """``(state, evidence)`` for one probe (the dict ``probe_url`` returns: status, location, www_authenticate, cookies,
     content_type, body, title, url). ``evidence`` carries the markers matched, the bytes sampled and the cookie names; it
@@ -223,9 +251,11 @@ def classify(probe):
     if any(entry['url'] for entry in page_scripts):
         evidence['page_scripts'] = {'page': page_url, 'scripts': page_scripts}  # read by _read_scripts, which removes it before anything is stored
     if script_root:
-        # the front page was parsed for its scripts: a library no script of it is cannot be this page's, and a ?ver= string a script of
-        # another library or of no library carries is that script's cache-buster (cveFeed.js_libraries.HostLibraries.judge)
-        evidence['script_page'] = js_libraries.script_page(page_scripts)
+        # the front page was parsed for its scripts: a library no script of it is cannot be this page's, and a ?ver= string a theme's or
+        # plugin's script carries is that script's cache-buster (cveFeed.js_libraries.HostLibraries.judge). Only a complete page that is
+        # the site itself proves an absence: one cut at the read limit, a redirect stub or a page that loads no script at all does not
+        evidence['script_page'] = {**js_libraries.script_page(page_scripts), 'truncated': _truncated(probe),
+                                   'stub': _stub_page(body, probe.get('title') or '', page_scripts)}
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
@@ -365,6 +395,14 @@ def _against_missing_page(answer, url, probe, known):
 
 # ----------------------------------------------------------------------------- network
 
+def _read_route(probe, url):
+    """One route probe: a front page is read up to ROOT_READ_BYTES (its footer scripts are the host's too), any other route up to the
+    usual sample."""
+    if (urlparse(url).path or '/') == '/' and isinstance(probe, functools.partial) and probe.func is probe_url:
+        return probe(url, max_bytes=ROOT_READ_BYTES)
+    return probe(url)
+
+
 def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, reader=None, target=None):
     """Read the scripts the front page loads and record the libraries their own files state (cveFeed.js_libraries): the page's own host,
     the same site and public library CDNs only, each other host vetted (address, exclusions, bug bounty scope), at most
@@ -502,7 +540,8 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         return {'url': url, 'status': response.status, 'location': response.getheader('Location', ''),
                 'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
                 'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
-                'body': text, 'title': title, 'bytes': len(raw), 'server': response.getheader('Server', ''),
+                'body': text, 'title': title, 'bytes': len(raw), 'read_limit': max_bytes, 'truncated': len(raw) >= max_bytes,
+                'server': response.getheader('Server', ''),
                 'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
                 'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
                                 if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
@@ -586,14 +625,16 @@ def _plan(scan, retired=None):
 
 def _legacy_root_urls(project, urls):
     """The ledger keys of the fresh root routes whose stored evidence names libraries by their script URLs only (recorded before the files
-    themselves were read): checked again now, inside their window, so the version comes from the file. Once each."""
+    themselves were read), or that name a library but were read before the page's scripts were recorded (``script_page``, 1.3.3): checked
+    again now, inside their window, so the version comes from the file and the page's own scripts are known. Once each."""
     from cveFeed import ledger
     from cveFeed.models import RouteAuth
     roots = [u for u in urls if (urlparse(u).path or '/') == '/']
     if not roots:
         return set()
-    rows = RouteAuth.objects.filter(project_id=project, url__in=roots, evidence__has_key='fingerprints').values_list('url', 'evidence')
-    return {ledger._norm(url) for url, evidence in rows if js_libraries.legacy_roots(evidence)}
+    rows = RouteAuth.objects.filter(project_id=project, url__in=roots).values_list('url', 'evidence', 'http_status')
+    return {ledger._norm(url) for url, evidence, status in rows
+            if js_libraries.legacy_roots(evidence) or js_libraries.unrecorded_page(evidence, status)}
 
 
 def run_route_auth(scan_id, probe=probe_url, force=False):
@@ -662,7 +703,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
                 if i:
                     time.sleep(PER_REQUEST_GAP)
                 try:
-                    result = _against_missing_page(analyse(probe(url)), url, probe, missing_pages)
+                    result = _against_missing_page(analyse(_read_route(probe, url)), url, probe, missing_pages)
                     _read_scripts(result, probe, scan_id, budget=scripts_left, project=project, gate=gate, reader=reader, target=domain)
                     out.append((url, result))
                 except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
