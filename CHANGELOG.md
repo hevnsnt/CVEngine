@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **The 1.3.2 upgrade no longer fails on an install with an agent held back by the old suspension rule.** Migration `agentapi` 0009 aborted with `cannot CREATE INDEX "agentapi_agent" because it has pending trigger events` on any database with a suspended agent carrying the old "another agent of this user is suspended or revoked" note: its backfill updated those rows in the same transaction that added the deferred `held_by` foreign key, so a key check was still pending when Django created that column's index. The backfill now checks keys as each statement ends (PostgreSQL) and updates each row once before naming the agent that held it back; what it fills in is unchanged, and so is the schema. An install that already applied 0009 is unaffected; one where it failed can run the update again.
+
 ## v1.3.2 (2026-11-01)
 
 ### Upgrade notes
