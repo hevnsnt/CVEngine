@@ -247,6 +247,28 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
+def outside_exact_host(event, domain):
+    """True when a bbot event names a host other than ``domain`` itself and ``domain`` is exactly one host (``Domain.exact_host_only``):
+    bbot already runs with --strict-scope there, and this keeps a module that reports a child anyway out of the inventory and the live
+    feed. An event that names no host (SCAN, a statistic) is kept."""
+    from urllib.parse import urlsplit
+    names = [event.get('host')]
+    payload = event.get('data_json') if event.get('data_json') is not None else event.get('data')
+    kind = event.get('type')
+    if kind == 'DNS_NAME' and isinstance(payload, str):
+        names.append(payload)
+    elif kind == 'URL' and isinstance(payload, str):
+        names.append(urlsplit(payload).hostname)
+    elif kind == 'OPEN_TCP_PORT' and isinstance(payload, str):
+        names.append(payload.rpartition(':')[0].strip('[]'))
+    elif isinstance(payload, dict):
+        names.append(payload.get('host'))
+        if payload.get('url'):
+            names.append(urlsplit(str(payload['url'])).hostname)
+    from targetApp.target_types import IP, classify_target
+    return any(n and classify_target(str(n)) != IP and not domain.includes_host(n) for n in names)
+
+
 MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
 
 
@@ -293,6 +315,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     if bbot_lib.trufflehog_allowed(scan.domain.project_id):  # opt-in (CVENGINE_BBOT_TRUFFLEHOG=1), never for a bug bounty project
         extra_args = [*extra_args, bbot_lib.TRUFFLEHOG_FLAG]
     strict_scope = scan.domain.is_host_scoped()  # a tenant on a shared provider domain: this host only, never its parent or siblings
+    exact_host = scan.domain.exact_host_only()  # added as exactly this host (=example.com): no event about a name under it is kept
     batch, hosts, observed = bbot_lib.BbotResult(), {}, []
     shown = set()  # bbot reports the same name from several modules; show each thing once
     bbot_scan_name = ''  # bbot's own directory name for this run (~/.bbot/scans/<name>/), from its SCAN event
@@ -327,6 +350,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                                strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
                     if not bbot_scan_name and event.get('type') == 'SCAN':
                         bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
+                    if exact_host and outside_exact_host(event, scan.domain):
+                        continue
                     if event.get('type') in web_events:
                         web_events[event['type']] += 1
                     seen = bbot_lib.parse_event(event, batch, hosts)
@@ -515,8 +540,9 @@ def covering_scan(scan):
     runs = ServiceRun.objects.filter(service='bbot', project_id=domain.project_id, asset__in=names, status='done',
                                      finished_at__gte=cutoff, scan__isnull=False).exclude(scan__domain_id=domain.id) \
         .select_related('scan__domain').order_by('-finished_at')
+    under = Q(name=name) if domain.exact_host_only() else Q(name=name) | Q(name__endswith='.' + name)  # exactly one host: only its own row counts
     for run in runs:
-        if Subdomain.objects.filter(scan_history=run.scan).filter(Q(name=name) | Q(name__endswith='.' + name)).exists():
+        if Subdomain.objects.filter(scan_history=run.scan).filter(under).exists():
             return run.scan, run.scan.domain.name
     return None
 
@@ -529,7 +555,8 @@ def seed_from_scan(scan, source):
     name = scan.domain.name.lower()
     fields = ('name', 'http_url', 'screenshot_path', 'discovered_date', 'cname', 'is_cdn', 'cdn_name', 'http_status',
               'content_type', 'response_time', 'webserver', 'content_length', 'page_title')
-    originals = list(Subdomain.objects.filter(scan_history=source).filter(Q(name=name) | Q(name__endswith='.' + name))
+    under = Q(name=name) if scan.domain.exact_host_only() else Q(name=name) | Q(name__endswith='.' + name)  # =example.com: nothing under it is copied
+    originals = list(Subdomain.objects.filter(scan_history=source).filter(under)
                      .prefetch_related('ip_addresses', 'technologies').order_by('id'))
     from cveFeed.exclusions import excluded_names
     banned = excluded_names(scan.domain.project_id)  # an excluded host is never copied back into the inventory
@@ -880,13 +907,12 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
-    suffix = domain.name.lower()
     if not by_person and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's own request takes its hosts through the stages
         return {'status': 'inconclusive', 'hosts': 0, 'error': 'the target is set to manual only; nothing was scanned'}
     wanted = sorted({n.strip().lower().rstrip('.') for n in names if n and n.strip()})
     requested = list(wanted)
     from cveFeed.exclusions import drop_excluded
-    in_target = [n for n in wanted if n == suffix or n.endswith('.' + suffix)]
+    in_target = [n for n in wanted if domain.includes_host(n)]  # the target or a name under it; only the target itself when it is exactly one host
     wanted = drop_excluded(domain.project_id, in_target)[:MAX_PIPELINE_HOSTS]
     not_excluded = set(wanted)
     from cveFeed.archive_rediscovery import archived_names

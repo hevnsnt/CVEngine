@@ -512,6 +512,9 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
         task_mode, needs = agent_tasks.describe(match, kind, mode)
     except ApiError as exc:
         return exc.message
+    from targetApp.models import narrowed_names
+    if task_mode == 'network' and narrowed_names(project.pk, [match.subdomain.name]):  # an agent's remote checks are a scan of the name
+        return 'its target is set to this host only: a name under it is not scanned'
     sub = match.subdomain
     try:
         with transaction.atomic():
