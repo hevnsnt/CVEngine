@@ -3198,8 +3198,8 @@ def list_matches(ctx, slug, params):
 # --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
 
 FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
-# the Findings list's status facet: actionable (the default), every remediation status on its own, closed (any closing one), or all
-FINDING_STATUS_FACETS = ('actionable', 'open', 'in_progress', 'fixed', 'accepted_risk', 'false_positive', 'closed', 'all')
+# the Findings list's status facet: actionable (the default), closed (any closing status), one closing status on its own, or all
+FINDING_STATUS_FACETS = ('actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'all')
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
 
@@ -3217,8 +3217,8 @@ def _finding_sources(project, params):
 
     "Actionable" (the default) is what heats a host on its card: a CVE match the AI did not rule out, an open scanner finding
     above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out). ``status=closed``
-    is the findings a person closed (fixed, accepted_risk or false_positive), and a single remediation status (``false_positive``, ...)
-    exactly that one, whatever the scan or the AI says about them."""
+    is the findings a person closed (fixed, accepted_risk or false_positive), and one of those three exactly that one, whatever the scan
+    or the AI says about them."""
     from django.db.models import Case, F, IntegerField, Q, Value, When
 
     from cveFeed.models import HygieneFinding
@@ -3230,12 +3230,12 @@ def _finding_sources(project, params):
     kev = _kev_only(params)
     if kev:
         wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
-    from cveFeed.closure import CLOSED, STATUSES
+    from cveFeed.closure import CLOSED
     status = params.get('status') or 'actionable'
     if status not in FINDING_STATUS_FACETS:
         raise ApiError(400, f'status must be {", ".join(FINDING_STATUS_FACETS[:-1])} or {FINDING_STATUS_FACETS[-1]}')
-    # closed: any closing remediation status; a single remediation status (open ... false_positive): exactly that one
-    by_status = Q(remediation_status__in=CLOSED) if status == 'closed' else Q(remediation_status=status) if status in STATUSES else None
+    # closed: any closing remediation status; fixed, accepted_risk or false_positive: exactly that one
+    by_status = Q(remediation_status__in=CLOSED) if status == 'closed' else Q(remediation_status=status) if status in CLOSED else None
     heat, severity = params.get('heat') or 'all', params.get('severity') or 'all'
     inverse = {v: k for k, v in SEVERITY_NAMES.items() if k >= 0}
     if heat != 'all' and heat not in HEAT_FACETS:
@@ -3507,11 +3507,6 @@ def _record_status_change(project, kind, finding_id, before, after, actor, note=
                                       after={'status': after, **({'note': note} if note is not None else {})})
 
 
-def _status_words(status):
-    from cveFeed import closure
-    return closure.label(status).lower()
-
-
 def _log_status(project, message, before, status, note, **detail):
     """The activity feed's line for a status change: the new status in words, and in its detail the statuses before and after and the
     note (clipped), so the feed and the audit trail agree."""
@@ -3564,7 +3559,7 @@ def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
         before = m.remediation_status
         _apply_remediation(m, status, note, ctx.user)
         _record_status_change(project, 'match', m.id, before, status, ctx.user, note)
-        _log_status(project, f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {_status_words(status)}',
+        _log_status(project, f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
                     before, status, note, finding_kind='match', finding_id=m.id)
     if assignee is not UNSET:
         _apply_assignee(project, 'match', m, new_user, ctx.user)
@@ -3597,7 +3592,7 @@ def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, a
         before = obj.remediation_status
         _apply_remediation(obj, status, note, ctx.user)
         _record_status_change(project, kind, finding_id, before, status, ctx.user, note)
-        _log_status(project, f'{kind} finding #{finding_id} marked {_status_words(status)}', before, status, note,
+        _log_status(project, f'{kind} finding #{finding_id} marked {status}', before, status, note,
                     finding_kind=kind, finding_id=finding_id)
     if assignee is not UNSET:
         _apply_assignee(project, kind, obj, new_user, ctx.user)
@@ -3642,7 +3637,7 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
     _rescore_hosts(hosts)  # once per host, not once per finding
     # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
-    activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {_status_words(status)}', project=project, count=updated,
+    activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
                  hosts=len(hosts), failed=len(failed), after=status, **({'note': note[:500]} if note else {}))
     return {'updated': updated, 'failed': failed}
 

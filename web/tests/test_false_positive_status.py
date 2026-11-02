@@ -135,7 +135,7 @@ class RestTests(Fixture, TestCase):
 		self.assertEqual((trail[0]['event'], trail[0]['actor']['username']), ('status', 'fpalice'))
 		self.assertEqual((trail[0]['before'], trail[0]['after']), ({'status': 'open'}, {'status': 'false_positive', 'note': 'library file never served'}))
 		line = AgentActivity.objects.filter(kind='remediation').latest('id')
-		self.assertIn('false positive', line.message)
+		self.assertIn('marked false_positive', line.message)
 		self.assertEqual((line.detail['after'], line.detail['before'], line.detail['note']), ('false_positive', 'open', 'library file never served'))
 
 	def test_a_bulk_close_puts_the_note_on_every_finding_and_audits_each(self):
@@ -149,7 +149,7 @@ class RestTests(Fixture, TestCase):
 		self.assertEqual(sorted(e.finding_kind for e in events), ['hygiene', 'match', 'vulnerability'])
 		self.assertTrue(all(e.after == {'status': 'false_positive', 'note': 'same page on every host'} for e in events))
 		line = AgentActivity.objects.filter(kind='remediation').latest('id')
-		self.assertIn('false positive', line.message)
+		self.assertIn('marked 3 finding(s) on 1 host(s) false_positive', line.message)
 		self.assertEqual(line.detail['note'], 'same page on every host')
 
 	def test_a_bulk_close_with_a_bad_note_is_refused_before_anything_is_written(self):
@@ -181,7 +181,8 @@ class ListAndCountTests(Fixture, TestCase):
 		self.assertEqual(sorted((r['type'], r['status']) for r in closed['results']), [('cve', 'false_positive'), ('hygiene', 'fixed'), ('scanner', 'false_positive')])
 		only = call(self.t_alice, 'GET', f'{self.base}/findings?status=false_positive')[1]
 		self.assertEqual(sorted(r['type'] for r in only['results']), ['cve', 'scanner'])
-		self.assertEqual(call(self.t_alice, 'GET', f'{self.base}/findings?status=bogus')[0], 400)
+		for bad in ('bogus', 'open', 'in_progress'):  # open would read as actionable but is not: only the closing statuses stand alone
+			self.assertEqual(call(self.t_alice, 'GET', f'{self.base}/findings?status={bad}')[0], 400, bad)
 
 	def test_the_matches_list_filters_by_it_and_by_closed(self):
 		self.close('match', self.match)
