@@ -175,20 +175,30 @@ def _valid_saved(tunable, saved):
     return isinstance(saved, int) and not isinstance(saved, bool) and tunable.low <= saved <= tunable.high
 
 
+def env_pin(tunable, env=None):
+    """Whether the environment pins this key: its variable is set AND differs from the built-in default. The compose files pass some variables
+    to every container with the default as a fallback (``DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}``), so a value equal to the
+    default cannot be told from no value and is not a pin; any other value is the operator's own choice, which the auto-tuner never moves."""
+    env = env_value(tunable) if env is None else env
+    return env is not None and env != tunable.default
+
+
 def resolve(key, stored=None, auto=None):
-    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``auto`` (what the auto-tuner chose, mode Auto only, for
-    a tunable that opts in), ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached
+    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``environment`` when the variable pins it (set and not the
+    default, ``env_pin``), ``auto`` (what the auto-tuner chose, mode Auto only, for a tunable that opts in), ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached
     copies the processes use."""
     tunable = BY_KEY[key]
     values = stored_values() if stored is None else stored
     saved = values.get(key)
     if _valid_saved(tunable, saved):
         return {'value': saved, 'source': 'admin'}
+    env = env_value(tunable)
+    if env_pin(tunable, env):
+        return {'value': env, 'source': 'environment'}  # an operator's own number in .env pins the key: the tuner never moves it
     if tunable.auto_tunable:
         tuned = (resources.auto_values() if auto is None else auto).get(key)
         if _valid_saved(tunable, tuned):
             return {'value': tuned, 'source': 'auto'}
-    env = env_value(tunable)
     if env is not None:
         return {'value': env, 'source': 'environment'}
     return {'value': tunable.default, 'source': 'default'}

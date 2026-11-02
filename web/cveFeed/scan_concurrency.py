@@ -120,19 +120,29 @@ def env_value(field, environ=None):
     return number
 
 
+def env_pin(field, env=None):
+    """Whether the environment pins this key: its variable is set AND differs from the built-in default. The compose files pass some variables
+    to every container with the default as a fallback (``DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}``), so a value equal to the
+    default cannot be told from no value and is not a pin; any other value is the operator's own choice, which the auto-tuner never moves."""
+    env = env_value(field) if env is None else env
+    return env is not None and env != field.default
+
+
 def resolve(key, stored=None, auto=None):
-    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``auto`` (what the auto-tuner chose, mode Auto only),
-    ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached copies the workers use."""
+    """{'value', 'source'} for one key: ``admin`` (saved on the page: it pins the key), ``environment`` when the variable
+    pins it (set and not the default, ``env_pin``), ``auto`` (what the auto-tuner chose, mode Auto only), ``environment`` or ``default``. ``stored`` is the saved mapping and ``auto`` the tuned one; by default the cached copies the workers use."""
     field = BY_KEY[key]
     values = stored_values() if stored is None else stored
     saved = values.get(key)
     if isinstance(saved, int) and not isinstance(saved, bool) and field.low <= saved <= field.high:
         return {'value': saved, 'source': 'admin'}
+    env = env_value(field)
+    if env_pin(field, env):
+        return {'value': env, 'source': 'environment'}  # an operator's own number in .env pins the key: the tuner never moves it
     if field.auto_tunable:
         tuned = (resources.auto_values() if auto is None else auto).get(key)
         if isinstance(tuned, int) and not isinstance(tuned, bool) and field.low <= tuned <= field.high:
             return {'value': tuned, 'source': 'auto'}
-    env = env_value(field)
     if env is not None:
         return {'value': env, 'source': 'environment'}
     return {'value': field.default, 'source': 'default'}

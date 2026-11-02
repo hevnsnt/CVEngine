@@ -369,12 +369,23 @@ def _auto_cap(kind):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
 
 
+def env_cap_pin(kind):
+    """HEAVY_MAX_<KIND> when it pins the kind: set, a usable number, and not the built-in default (a value equal to the default cannot be told
+    from no value). None otherwise."""
+    raw = _env_float('HEAVY_MAX_' + kind.upper().replace('-', '_'))
+    value = int(raw) if raw else None
+    return value if value and value >= 1 and value != MAX_CONCURRENT.get(kind, 2) else None
+
+
 def base_cap(kind):
-    """The cap in effect: what a person saved (it pins the kind), else what the auto-tuner chose (mode Auto only), else HEAVY_MAX_<KIND>, else
-    the built-in default."""
+    """The cap in effect: what a person saved (it pins the kind), else HEAVY_MAX_<KIND> when it pins the kind (set and not the default), else
+    what the auto-tuner chose (mode Auto only), else the environment or the built-in default."""
     saved = _admin_cap(kind)
     if saved is not None:
         return saved
+    pinned = env_cap_pin(kind)
+    if pinned is not None:
+        return pinned
     tuned = _auto_cap(kind)
     return tuned if tuned is not None else _static_cap(kind)
 

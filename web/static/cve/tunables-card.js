@@ -18,7 +18,10 @@ function row(field, onInput, save, mode, reload) {
   });
   input.value = String(field.value);
   input.dataset.key = field.key;
-  input.oninput = () => onInput();
+  input.oninput = () => {
+    input.dataset.touched = "1"; // typed in: the same number may be saved on purpose, to pin it
+    onInput();
+  };
   const reset = button("Reset to default", async () => {
     await save({ [field.key]: null }, input.id);
     toast(`${field.label} is back to its default`);
@@ -60,13 +63,14 @@ async function build(host, groupId, focusId = "", ctx = {}) {
   card.append(el("h2", "", group.title, { style: "margin-bottom:12px" }), el("p", "note", group.intro || "", { style: "margin:0 0 12px" }));
   const inputs = [];
   const drafts = () => Object.fromEntries(inputs.map((i) => [i.dataset.key, i.value]));
+  const touched = () => new Set(inputs.filter((i) => i.dataset.touched).map((i) => i.dataset.key));
   const problem = el("p", "msg err", "", { style: "margin:8px 0 0", hidden: "", role: "alert" });
   const save = async (values, focus = "") => {
     await api("PUT", PATH, { values });
     await build(host, groupId, focus || (document.activeElement && document.activeElement.id) || "", ctx);
   };
   const saveButton = button("Save", async () => {
-    const { changes, error } = changesFrom(fields, drafts());
+    const { changes, error } = changesFrom(fields, drafts(), touched());
     if (error) throw new Error(error);
     await save(changes, inputId(Object.keys(changes)[0]));
     toast("Saved. The new numbers apply within a few seconds.");
@@ -74,7 +78,7 @@ async function build(host, groupId, focusId = "", ctx = {}) {
   const warnings = [];
   const refresh = () => {
     const current = drafts();
-    const { error, changes } = changesFrom(fields, current);
+    const { error, changes } = changesFrom(fields, current, touched());
     problem.textContent = error || "";
     problem.hidden = !error; // an empty error bar must not show
     saveButton.disabled = !!error || !Object.keys(changes).length;

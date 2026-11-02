@@ -117,6 +117,22 @@ def _saved_rows():
     return out
 
 
+def pin_of(m, rows):
+    """Who pins a setting, or None: ``(text, 'saved')`` for a value a person saved on the page, ``(text, 'environment')`` for an environment
+    variable that is set and differs from the built-in default (``env_pin`` of its registry: a value equal to the default cannot be told from the
+    compose files' own fallback). Neither is ever moved by the tuner."""
+    saved, meta, row = rows[m.registry]
+    if m.key in saved:
+        by = (meta.get(m.key) or {}).get('by') or (row.updated_by.username if row.updated_by_id else 'an administrator')
+        return by, 'saved'
+    module = _registry(m.registry)
+    field = module.BY_KEY[m.key]
+    env = module.env_value(field)
+    if module.env_pin(field, env):
+        return f'the environment ({m.env_name}={env:g})' if isinstance(env, float) else f'the environment ({m.env_name}={env})', 'environment'
+    return None
+
+
 # --- mode and the published copy ----------------------------------------------------------------------------------------
 
 def killed():
@@ -269,12 +285,16 @@ def _record(**fields):
 
 
 def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, actor=None, action=None, phase=''):
-    """Set a tuned number (mode Auto) and record it. Returns the decision."""
+    """Set a tuned number (mode Auto) and record it. Returns the decision, or None when, checked again under the row's lock, the mode is no
+    longer Auto (a person chose Off or Suggest while this run was working, or the kill switch is set) or the setting was pinned meanwhile:
+    nothing is written then."""
     from django.db import transaction
 
     from cveFeed.models import AutoTuneSettings
     with transaction.atomic():
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
+        if effective_mode(row) != 'auto' or pin_of(m, _saved_rows()) is not None:
+            return None
         values = dict(row.values or {})
         before = values.get(m.key)
         values[m.key] = new
@@ -321,8 +341,14 @@ def _latest_applied(key):
 def _decision(decision_id):
     from cveFeed.models import TuningDecision
     try:
-        return TuningDecision.objects.get(pk=int(decision_id))
-    except (TuningDecision.DoesNotExist, TypeError, ValueError):
+        number = int(decision_id)
+    except (TypeError, ValueError, OverflowError):
+        raise TuningError(404, 'no such tuning decision')
+    if not 0 < number < 2 ** 63:  # a bigint primary key: anything else would be a database error, not an answer
+        raise TuningError(404, 'no such tuning decision')
+    try:
+        return TuningDecision.objects.get(pk=number)
+    except TuningDecision.DoesNotExist:
         raise TuningError(404, 'no such tuning decision')
 
 
@@ -369,6 +395,8 @@ def revert(user, decision_id):
     decision = _decision(decision_id)
     if not decision.applied or decision.resolution == 'reverted' or decision.action == 'revert':
         raise TuningError(409, 'only an applied change can be reverted')
+    if decision.action == 'release':
+        raise TuningError(409, 'handing a setting to auto-tuning cannot be reverted: save a value for it to pin it again')
     latest = _latest_applied(decision.setting)
     if latest is None or latest.pk != decision.pk:
         raise TuningError(409, 'a later change of this setting exists: revert that one first')
@@ -411,7 +439,8 @@ def revert(user, decision_id):
 
 def release(user, key):
     """"Let auto-tune manage this": the saved value of a pinned setting is removed and the same number becomes the tuned one, so nothing jumps;
-    from the next run the tuner may move it (in mode Auto)."""
+    the tuner may move it once the change cooldowns have passed (a release counts as a change, so there is no immediate jump), in mode Auto.
+    It is a row in the history, like any change."""
     from django.db import transaction
 
     from cveFeed.models import AutoTuneSettings
@@ -435,7 +464,7 @@ def release(user, key):
         _registry(m.registry).update({key: None}, user)
     publish(row)
     done = _record(setting=key, old_value=number, new_value=number, mode=effective_mode(row), source='person', action='release', layer='auto',
-                   old_layer_value=before, applied=False, resolution='released', reason=f'{user.username} let auto-tune manage this setting',
+                   old_layer_value=before, applied=True, reason=f'{user.username} let auto-tune manage this setting',
                    signals={}, actor=user)
     _activity(f'{user.username} let auto-tuning manage {m.label} (from {number})', setting=key, decision_id=done.pk)
     _audit(user, 'autotune.release', key, value=number)
@@ -559,7 +588,7 @@ def _history(key, now_dt):
     """This setting's applied changes in the last two days, as the policy reads them, and a revert's hold (seconds since the epoch)."""
     from cveFeed.models import TuningDecision
     rows = (TuningDecision.objects.filter(setting=key, applied=True, created_at__gte=now_dt - timedelta(days=2))
-            .exclude(action='release').values('created_at', 'old_value', 'new_value', 'pressure', 'action', 'phase'))
+            .values('created_at', 'old_value', 'new_value', 'pressure', 'action', 'phase'))
     m = by_key()[key]
     from cveFeed.autotune_policy import direction_of
     return [{'at': r['created_at'].timestamp(), 'direction': direction_of(m.setting, r['old_value'] or 0, r['new_value'] or 0),
@@ -683,12 +712,18 @@ def run(now_dt=None):
     now = now_dt.timestamp()
     if not ledger.sweep_claim('autotune', 300):
         return {'skipped': 'another round is running'}
+    from django.db import InterfaceError, OperationalError
+    try:
+        row = settings_row()
+    except (OperationalError, InterfaceError):
+        return emergency_backoff(now)  # the database does not answer (out of connections, or down): back off from Redis alone
     try:
         purge(now_dt)
     except Exception:  # noqa: BLE001
         logger.debug('auto-tune: old decisions could not be purged', exc_info=False)
-    row = settings_row()
     mode = effective_mode(row)
+    record_emergency(now_dt)
+    row = settings_row()
     publish(row)
     summary = {'at': now_dt.isoformat(), 'mode': mode, 'killed': killed(), 'settings': {}, 'changes': [], 'advisor': None, 'held': None}
     if mode == 'off':
@@ -712,12 +747,14 @@ def run(now_dt=None):
                                                   'hosts', 'targets', 'disk_free_percent')}
     summary['sized_for'] = policy.sized_for_text(facts)
     plans, offered = {}, {}
+    ready = policy.facts_ready(facts)
     for m in managed():
-        saved, meta, saved_row = rows[m.registry]
         info = {'label': m.label}
-        if m.key in saved:
-            by = (meta.get(m.key) or {}).get('by') or (saved_row.updated_by.username if saved_row.updated_by_id else 'an administrator')
-            info.update(state='pinned', pinned_by=by, value=saved[m.key], why_not_raised=f'pinned by {by}')
+        pin = pin_of(m, rows)
+        if pin is not None:
+            by, where = pin
+            info.update(state='pinned', pinned_by=by, pinned_from=where, value=_effective(m, rows[m.registry][0], tuned),
+                        why_not_raised=f'pinned by {by}')
             summary['settings'][m.key] = info
             continue
         baseline = _baseline(m)
@@ -726,11 +763,11 @@ def run(now_dt=None):
             info.update(state='off', value=value, why_not_raised='turned off (0) by its environment value')
             summary['settings'][m.key] = info
             continue
-        target, target_reason = policy.size_for(m.setting, facts, current=value)
+        target, target_reason, target_known = policy.size_for(m.setting, facts, current=value)
         hard_cap = policy.memory_cap(m.setting.kind.split(':', 1)[1], samples[-1]) if m.setting.kind.startswith('heavy:') and samples else None
         plan = policy.decide(m.setting, value, baseline, samples, _history(m.key, now_dt), now=now, boot_at=float(boot['at']),
                              target=target, target_reason=target_reason, cooldown=cooldown, probe_cooldown=probe_cooldown,
-                             hold_until=_hold_until(row, m.key), hard_cap=hard_cap)
+                             hold_until=_hold_until(row, m.key), hard_cap=hard_cap, target_known=target_known, ready=ready)
         plans[m.key] = (m, value, baseline, plan)
         info.update(state='managed', value=value, starting_value=baseline, target=target, target_reason=target_reason, ceiling=plan['ceiling'],
                     why_not_raised=plan['why_not_raised'] if plan['direction'] != 'more' else '', controller=plan['reason'])
@@ -762,11 +799,103 @@ def run(now_dt=None):
             decision = apply_tuned(m, value, new, mode=mode, source=source, reason=reason, signals=signals_used, pressure=pressured, phase=phase)
         else:
             decision = recommend(m, value, new, mode=mode, source=source, reason=reason, signals=signals_used, pressure=pressured, phase=phase)
+        if decision is None and mode == 'auto':
+            summary['settings'][key]['why_not_raised'] = 'not applied: the mode changed or the setting was pinned during this run'
         if decision is not None:
             summary['changes'].append({'setting': key, 'from': value, 'to': new, 'source': source, 'applied': mode == 'auto', 'id': decision.pk})
             summary['settings'][key]['value'] = new if mode == 'auto' else value
     remember(summary)
     return summary
+
+
+EMERGENCY_KEY = 'cvengine:autotune:emergency'
+EMERGENCY_KEYS = ('discovery_concurrency', 'work_depth')  # the settings whose tasks each hold a database connection
+
+
+def emergency_backoff(now):
+    """The fallback path when the database does not answer (out of connections, or down): nothing can be read or recorded there, so this works
+    from Redis alone. The published tuned numbers of the discovery pool and the conductor (the settings whose tasks hold a database
+    connection each) are backed off (``autotune_policy.backoff``) and published again with a newer version, so the 30 second tick cannot put
+    the old numbers back while the database is away; the discovery workers are resized directly with celery's ``autoscale`` remote control; and
+    the change is kept in Redis (``EMERGENCY_KEY``) to be recorded as a back-off in the history by the first run that reaches the database
+    again (``record_emergency``). A setting that is pinned, or not tuned, is not touched; nothing happens in Off or Suggest, or with the kill
+    switch, as the published copy says."""
+    from cveFeed import autotune_policy as policy
+    summary = {'at': datetime.fromtimestamp(now, dt_timezone.utc).isoformat(), 'mode': None, 'settings': {}, 'changes': [], 'advisor': None,
+               'held': 'the database does not answer: emergency back-off from Redis only'}
+    client = _redis()
+    if client is None or killed():
+        summary['held'] = 'the database does not answer, and there is no Redis copy to back off from'
+        remember(summary)
+        return summary
+    try:
+        copy = json.loads(client.get(VALUES_KEY) or '{}')
+    except ValueError:
+        copy = {}
+    summary['mode'] = copy.get('mode')
+    values = dict(copy.get('values') or {})
+    if copy.get('mode') != 'auto':
+        remember(summary)
+        return summary
+    keys, changed = by_key(), {}
+    for key in EMERGENCY_KEYS:
+        if isinstance(values.get(key), int) and key in keys:
+            new = policy.backoff(keys[key].setting, values[key])
+            if new < values[key]:
+                changed[key] = [values[key], new]
+                values[key] = new
+    if changed:
+        version = float(copy.get('v') or 0) + 1  # newer than the database row, so the tick's publish of the old row is skipped
+        client.set(VALUES_KEY, json.dumps({**copy, 'values': values, 't': time.time(), 'v': version, 'emergency': True}))
+        resources.invalidate_auto()
+        try:
+            pending = json.loads(client.get(EMERGENCY_KEY) or '{}')
+        except ValueError:
+            pending = {}
+        for key, (old, new) in changed.items():
+            pending[key] = [pending.get(key, [old])[0], new]
+        client.set(EMERGENCY_KEY, json.dumps(pending), ex=7 * 86400)
+        if 'discovery_concurrency' in changed:
+            _resize_discovery_directly(changed['discovery_concurrency'][1])
+        summary['changes'] = [{'setting': k, 'from': o, 'to': n, 'source': 'controller', 'applied': True, 'emergency': True}
+                              for k, (o, n) in changed.items()]
+    remember(summary)
+    return summary
+
+
+def _resize_discovery_directly(ceiling):
+    """Resize every discovery worker that answers, without the database (``scan_concurrency.apply_discovery`` reads it)."""
+    try:
+        from cveFeed import scan_concurrency
+        from reNgine.celery import app
+        names = list(scan_concurrency.discovery_workers(app))
+        if names:
+            app.control.broadcast('autoscale', arguments={'max': ceiling}, destination=names, reply=False)
+    except Exception:  # noqa: BLE001
+        logger.warning('auto-tune: the discovery workers could not be resized during the emergency back-off')
+
+
+def record_emergency(now_dt):
+    """Record what ``emergency_backoff`` did while the database was away, as back-offs in the history (and in the tuned numbers), once it
+    answers again. Never raises."""
+    client = _redis()
+    try:
+        pending = json.loads(client.get(EMERGENCY_KEY) or '{}') if client is not None else {}
+    except Exception:  # noqa: BLE001
+        return
+    if not pending:
+        return
+    keys = by_key()
+    for key, (old, new) in pending.items():
+        m = keys.get(key)
+        if m is None:
+            continue
+        try:
+            apply_tuned(m, old, new, mode='auto', source='controller', pressure=True, phase='back_off', signals={},
+                        reason='the database did not answer (out of connections or down): emergency back-off from Redis')
+        except Exception:  # noqa: BLE001
+            logger.warning('auto-tune: the emergency back-off of %s could not be recorded', key)
+    client.delete(EMERGENCY_KEY)
 
 
 # --- what the page, the API and the system status show ---------------------------------------------------------------------
@@ -790,7 +919,7 @@ def list_decisions(setting=None, limit=50, offset=0):
     out = []
     for d in rows[:limit]:
         item = serialize(d)
-        if d.applied and d.resolution != 'reverted' and d.action != 'revert':
+        if d.applied and d.resolution != 'reverted' and d.action not in ('revert', 'release'):
             if d.setting not in latest:
                 newest = _latest_applied(d.setting)
                 latest[d.setting] = newest.pk if newest else None
@@ -812,10 +941,9 @@ def status():
     pinned = []
     rows = _saved_rows()
     for m in managed():
-        saved, meta, saved_row = rows[m.registry]
-        if m.key in saved:
-            pinned.append({'setting': m.key, 'label': m.label, 'value': saved[m.key],
-                           'by': (meta.get(m.key) or {}).get('by') or (saved_row.updated_by.username if saved_row.updated_by_id else None)})
+        pin = pin_of(m, rows)
+        if pin is not None:
+            pinned.append({'setting': m.key, 'label': m.label, 'value': _effective(m, rows[m.registry][0], {}), 'by': pin[0], 'from': pin[1]})
     return {
         'mode': row.mode, 'effective_mode': mode, 'killed': killed(), 'kill_switch': KILL_ENV, 'advisor': advisor_state(row),
         'changed_by': row.changed_by.username if row.changed_by_id else None, 'changed_at': _iso(row.changed_at),
@@ -848,7 +976,10 @@ def annotate(fields):
         if m is None:
             f['autotune'] = {'managed': False}
             continue
-        item = {'managed': True, 'pinned': f.get('source') == 'admin', 'pinned_by': f.get('set_by') if f.get('source') == 'admin' else None,
+        env_pinned = f.get('source') == 'environment' and _registry(m.registry).env_pin(_registry(m.registry).BY_KEY[m.key])
+        item = {'managed': True, 'pinned': f.get('source') == 'admin' or env_pinned,
+                'pinned_by': f.get('set_by') if f.get('source') == 'admin' else None,
+                'pinned_env': f'{f.get("env_name")}={f.get("env_value")}' if env_pinned else None,
                 'tuned': f.get('source') == 'auto', 'min': m.setting.low, 'max': m.setting.high, 'step': m.setting.step,
                 'why_not_raised': (last.get(f['key']) or {}).get('why_not_raised') or None,
                 'target': (last.get(f['key']) or {}).get('target'), 'target_reason': (last.get(f['key']) or {}).get('target_reason'),

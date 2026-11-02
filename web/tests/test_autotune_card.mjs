@@ -174,3 +174,31 @@ test('the settings page loads the Auto-tuning card before the other cards', () =
   const at = src.indexOf('autotune-card.js');
   assert.ok(at > 0 && at < src.indexOf('scan-concurrency-card.js') && at < src.indexOf('tunables-card.js'));
 });
+
+test('typing the number auto-tuning chose and saving pins it; an untouched box is never sent', async () => {
+  const tuned = {key: 'heavy.nmap', label: 'nmap', min: 1, max: 8, value: 4, source: 'auto'};
+  const saved = {key: 'heavy.nuclei', label: 'nuclei', min: 1, max: 8, value: 2, source: 'admin'};
+  assert.deepEqual(logic.changesFrom([tuned, saved], {'heavy.nmap': '4', 'heavy.nuclei': '2'}).changes, {});
+  assert.deepEqual(logic.changesFrom([tuned, saved], {'heavy.nmap': '4', 'heavy.nuclei': '2'}, new Set(['heavy.nmap', 'heavy.nuclei'])).changes, {'heavy.nmap': 4});
+  const fraction = {key: 'g', label: 'gap', min: 0, max: 720, value: 0.5, source: 'environment'};
+  assert.deepEqual(logic.changesFrom([fraction], {g: '0.5'}, new Set(['g'])), {changes: {}, error: null});  // put back, not invalid
+  const host = new Node('div');
+  await maxxing.cards()[1].build(host);
+  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
+  const save = buttonNamed(host, 'Save')[0];
+  assert.equal(save.disabled, true);
+  nmap.value = '3';
+  nmap.oninput();
+  nmap.value = '3';  // the auto-tuned number of this row is 3: typed in again on purpose
+  nmap.oninput();
+  assert.equal(save.disabled, false);
+  calls.length = 0;
+  await save.onclick();
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {'heavy.nmap': 3}}});
+});
+
+test('an environment pin says where it comes from and offers no hand-back', () => {
+  const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'HEAVY_MAX_NMAP=1'}}, 'auto');
+  assert.equal(line.text, 'Pinned by the environment (HEAVY_MAX_NMAP=1): remove it from .env, or save a value here');
+  assert.equal(line.release, false);
+});

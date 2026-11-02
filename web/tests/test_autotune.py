@@ -55,7 +55,7 @@ BASE = {
     'boot': 'b', 'paused': False, 'updating': False,
     'memory': {'reported': True, 'free_frac': 0.6, 'budget_mb': 6000, 'kills': 0, 'kills_by_kind': {}, 'waiting': {'nmap': 1.0},
                'running': {'nmap': 2}, 'cost_mb': {'nmap': 400, 'nuclei': 1000}},
-    'db': {'used': 20, 'max': 300}, 'load': 0.3, 'cores': 4, 'size': {'hosts': 500, 'targets': 50, 'disk_free_percent': 50.0},
+    'db': {'used': 20, 'max': 300}, 'load': 0.3, 'load_kind': 'loadavg', 'cores': 8, 'size': {'hosts': 500, 'targets': 50, 'disk_free_percent': 50.0},
     'discovery': {'replying': True, 'ceiling': 8, 'active': 4, 'queued': 0},
     'sentinel': {'live': 0, 'slots': 0, 'in_use': 0, 'queued': 0, 'oldest_queued_s': None, 'timeouts': 0, 'fallbacks': 0},
     'assess': {'queued': 0, 'running': 0, 'oldest_s': None},
@@ -93,6 +93,7 @@ class SizingTests(SimpleTestCase):
     def test_unknown_facts_give_the_optimistic_values_never_the_minimum(self):
         got = self.targets({})
         self.assertEqual(got, {s.key: s.optimistic for s in SETTINGS})
+        self.assertFalse(any(policy.size_for(s, {})[2] for s in SETTINGS))  # not known: it never lowers anything
         self.assertTrue(all(got[s.key] > s.low for s in SETTINGS if s.sense == 'more' and s is not BBOT_DEEP))  # bbot deep: one at a time
         self.assertIn('optimistic', policy.size_for(NMAP8, {})[1])
 
@@ -100,7 +101,7 @@ class SizingTests(SimpleTestCase):
         facts = {'cores': 2, 'memory_budget_mb': 3000, 'cost_mb': self.COSTS, 'db_max': 300, 'db_used': 20, 'sentinel_live': 0, 'sentinel_slots': 0,
                  'hosts': 40, 'targets': 10}
         got = self.targets(facts)
-        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (2, 1, 1))  # the two cores decide, then memory
+        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (1, 1, 1))  # two cores shared by every kind
         self.assertEqual((got['discovery_concurrency'], got['work_depth'], got['assess_batch']), (4, 3, 8))
         self.assertEqual(got['work_min_gap_hours'], 2)
 
@@ -112,7 +113,8 @@ class SizingTests(SimpleTestCase):
         self.assertEqual(got['assess_batch'], 18)
         self.assertEqual(got['stage_parallel'], 9)
         self.assertEqual(got['work_depth'], 7)
-        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (8, 3, 1))  # 3456 MB holds three nuclei, one bbot deep
+        self.assertEqual((got['heavy.nmap'], got['heavy.nuclei'], got['heavy.bbot-deep']), (4, 2, 1))  # their shares of eight cores, inside 3456 MB
+        self.assertTrue(all(policy.size_for(s, facts, current=16)[2] for s in SETTINGS))
         self.assertEqual((got['work_min_gap_hours'], got['sentinel_refresh_gap_hours']), (1, 3))
         self.assertIn('twice the 9 Sentinel slots plus 4', policy.size_for(DISCOVERY32, facts, current=16)[1])
 
@@ -133,7 +135,7 @@ class SizingTests(SimpleTestCase):
 
     def test_low_disk_keeps_every_target_modest(self):
         facts = {'cores': 32, 'memory_budget_mb': 48000, 'cost_mb': self.COSTS, 'disk_free_percent': 5}
-        target, why = policy.size_for(NMAP8, facts)
+        target, why, _known = policy.size_for(NMAP8, facts)
         self.assertEqual(target, NMAP8.optimistic)
         self.assertIn('disk', why)
 
@@ -150,6 +152,77 @@ class SizingTests(SimpleTestCase):
         self.assertIsNone(policy.facts_of(merge(BASE, {'memory': {'reported': False}}))['memory_budget_mb'])
 
 
+class CpuAndDatabaseSizingTests(SimpleTestCase):
+    COSTS = SizingTests.COSTS
+
+    def test_the_scanner_kinds_share_the_cores_instead_of_each_taking_all_of_them(self):
+        facts = {'cores': 8, 'memory_budget_mb': 100000, 'cost_mb': self.COSTS}
+        kinds = [s for s in (policy.Setting(f'heavy.{k}', f'heavy:{k}', k, 1, 16, 1, 'more', 2) for k in policy.CPU_SHARE)]
+        used = sum(policy.size_for(s, facts)[0] * policy.CORES_PER_RUN[s.kind.split(':')[1]] for s in kinds)
+        self.assertLessEqual(used, policy.CPU_BUDGET * 8 + len(kinds) * 1)  # the budget, plus at most the one run every kind always gets
+
+    def test_an_old_database_with_100_connections_holds_the_pool(self):
+        facts = {'cores': 32, 'sentinel_live': 4, 'sentinel_slots': 40, 'db_max': 100, 'db_used': 10, 'discovery_active': 0}
+        target, why, _known = policy.size_for(DISCOVERY32, facts, current=8)
+        self.assertEqual(target, 32)  # 84 wanted; 70 - 30 = 40 is what 100 connections give, then the range's 32
+        self.assertIn('max_connections 100', why)
+        target, why, _known = policy.size_for(DISCOVERY32, dict(facts, db_max=60), current=8)
+        self.assertEqual(target, int(0.7 * 60) - policy.RESERVED_CONNECTIONS)  # 42 - 30 = 12
+
+    def test_the_database_guard_counts_the_connections_in_use_not_the_ceiling(self):
+        busy = {'cores': 8, 'sentinel_live': 2, 'sentinel_slots': 9, 'db_max': 300, 'db_used': 200, 'discovery_active': 2}
+        self.assertEqual(policy.size_for(DISCOVERY32, busy, current=32)[0], 12)  # 2 running + (210 - 200): not 32 + 10
+        self.assertEqual(policy.size_for(DISCOVERY32, dict(busy, discovery_active=None), current=32)[0], 10)
+
+    def test_ready_needs_memory_and_a_sentinel_report(self):
+        self.assertFalse(policy.facts_ready({'memory_budget_mb': 3000}))
+        self.assertFalse(policy.facts_ready({'sentinel_live': 0}))
+        self.assertTrue(policy.facts_ready({'memory_budget_mb': 3000, 'sentinel_live': 0}))
+
+
+class CpuSignalTests(SimpleTestCase):
+    def cgroup(self, files):
+        import tempfile
+        root = tempfile.mkdtemp()
+        for name, text in files.items():
+            path = os.path.join(root, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(text)
+        return root
+
+    def test_the_cpu_limit_from_cgroup_v2_and_v1(self):
+        with mock.patch('os.cpu_count', return_value=16):
+            self.assertEqual(signals.cpu_limit(self.cgroup({'cpu.max': '200000 100000'})), 2.0)
+            self.assertEqual(signals.cpu_limit(self.cgroup({'cpu.max': 'max 100000'})), 16.0)
+            self.assertEqual(signals.cpu_limit(self.cgroup({'cpu/cpu.cfs_quota_us': '150000', 'cpu/cpu.cfs_period_us': '100000'})), 1.5)
+            self.assertEqual(signals.cpu_limit(self.cgroup({'cpu/cpu.cfs_quota_us': '-1', 'cpu/cpu.cfs_period_us': '100000'})), 16.0)
+            self.assertEqual(signals.cores(self.cgroup({'cpu.max': '50000 100000'})), 1)
+
+    def test_load_is_the_share_of_the_limit_used_since_the_last_measurement(self):
+        class Store(dict):
+            def get(self, key):
+                return super().get(key)
+
+            def set(self, key, value, ex=None):
+                self[key] = value
+        store = Store()
+        root = self.cgroup({'cpu.max': '200000 100000', 'cpu.stat': 'usage_usec 100000000\n'})
+        with mock.patch('os.getloadavg', return_value=(3.0, 0, 0)):
+            self.assertEqual(signals.load(1000.0, root, store), (1.5, 'loadavg'))  # no earlier reading: the load average per core of the limit
+            with open(os.path.join(root, 'cpu.stat'), 'w') as f:
+                f.write('usage_usec 700000000\n')  # 600 CPU seconds in 600 s on a 2-core limit
+            self.assertEqual(signals.load(1600.0, root, store), (0.5, 'cgroup'))
+        v1 = self.cgroup({'cpuacct/cpuacct.usage': '5000000000'})
+        self.assertEqual(signals.cpu_used_seconds(v1), 5.0)
+
+    def test_load_thresholds_follow_the_kind_of_measurement(self):
+        hot = history(2, load=0.97, load_kind='cgroup', memory={'running': {'nmap': 3}})
+        self.assertTrue(decide(NMAP8, 6, 2, hot, past=SETTLED)['pressure'])
+        warm = history(2, load=0.97, load_kind='loadavg', memory={'running': {'nmap': 3}})
+        self.assertFalse(decide(NMAP8, 6, 2, warm, past=SETTLED)['pressure'])
+
+
 class ControllerTests(SimpleTestCase):
     def test_aims_high_at_its_first_decision_after_a_restart(self):
         got = decide(NMAP8, 2, 2, history(1), target=6, target_reason='8 cores')
@@ -160,9 +233,24 @@ class ControllerTests(SimpleTestCase):
         self.assertEqual(decide(NMAP8, 2, 2, history(1), past=before_boot, target=6)['phase'], 'aim_high')
         self.assertIsNone(decide(NMAP8, 6, 2, history(1), past=SETTLED, target=6)['new'])  # aimed already since the restart
 
-    def test_aim_brings_a_value_above_the_target_down_to_it(self):
-        got = decide(DISCOVERY32, 30, 30, history(1), target=22)
-        self.assertEqual((got['direction'], got['new'], got['phase']), ('less', 22, 'aim_high'))
+    def test_a_value_above_a_known_target_comes_down_to_it_at_once(self):
+        got = decide(DISCOVERY32, 32, 8, history(1), past=[change(60, 22, 32, 'probe')], target=8, target_reason='two per core (4 cores)')
+        self.assertEqual((got['direction'], got['new'], got['phase'], got['pressure']), ('less', 8, 'cap', False))  # the Sentinels left
+        self.assertIn('the target for this machine is 8', got['reason'])
+        stage = decide(STAGE16, 14, 4, history(1), past=SETTLED, target=6)
+        self.assertEqual((stage['new'], stage['phase']), (6, 'cap'))
+        gap = decide(WORK_GAP, 1, 2, history(1), past=SETTLED, target=2)
+        self.assertEqual((gap['new'], gap['phase']), (2, 'cap'))  # a gap shorter than the target is lengthened
+        unknown = decide(DISCOVERY32, 30, 30, history(1), past=SETTLED, target=16, target_known=False)
+        self.assertIsNone(unknown['new'])  # an optimistic stand-in never lowers anything
+        aim = decide(DISCOVERY32, 30, 30, history(1), target=16, target_known=False)
+        self.assertIsNone(aim['new'])  # and the aim only ever goes up
+
+    def test_the_aim_waits_for_ten_minutes_and_for_memory_and_sentinels_to_report(self):
+        self.assertIn('warming up', decide(NMAP8, 2, 2, history(1), boot_at=NOW - 300, target=6)['why_not_raised'])
+        self.assertIn('warming up', decide(NMAP8, 2, 2, history(1), boot_at=NOW - 900, target=6, ready=False)['why_not_raised'])
+        self.assertEqual(decide(NMAP8, 2, 2, history(1), boot_at=NOW - 900, target=6)['phase'], 'aim_high')
+        self.assertEqual(decide(NMAP8, 2, 2, history(1), boot_at=NOW - 1900, target=6, ready=False)['phase'], 'aim_high')  # the fallback
 
     def test_aim_never_reaches_a_level_that_caused_trouble_until_it_ages_out(self):
         trouble = [change(3 * 3600, 6, 4, 'back_off', pressure=True)]
@@ -399,11 +487,11 @@ class RunTests(Isolated, TestCase):
         self.assertEqual(resources.max_concurrent('nmap'), 2)
         summary = self.run_with(n=1)  # the first run after a restart: no warm-up for aiming high
         changes = {c['setting']: c for c in summary['changes']}
-        # 4 cores and a 6000 MB budget: nmap (400 MB, one core a run) to 4, nuclei (1000 MB, two cores a run) to 2
+        # 8 cores and a 6000 MB budget: nmap (400 MB, its 30% of the cores at half a core a run) to 4, nuclei (25%, a core a run) to 2
         self.assertEqual((changes['heavy.nmap']['from'], changes['heavy.nmap']['to'], changes['heavy.nmap']['applied']), (2, 4, True))
         self.assertEqual((changes['heavy.nuclei']['from'], changes['heavy.nuclei']['to']), (1, 2))
-        self.assertEqual(summary['sized_for'], '4 cores, 5.9 GB memory budget')
-        self.assertEqual(summary['settings']['heavy.nmap']['target_reason'], '6000 MB budget / 400 MB a run and 4 cores')
+        self.assertEqual(summary['sized_for'], '8 cores, 5.9 GB memory budget')
+        self.assertEqual(summary['settings']['heavy.nmap']['target_reason'], '6000 MB budget / 400 MB a run and its share of 8 cores')
         resources.invalidate_auto()
         self.assertEqual(resources.max_concurrent('nmap'), 4)
         self.assertEqual(sc.resolve('heavy.nmap'), {'value': 4, 'source': 'auto'})
@@ -577,23 +665,119 @@ class RunTests(Isolated, TestCase):
         self.assertFalse(TuningDecision.objects.filter(pk=old.pk).exists())
 
 
+class ReviewFixTests(Isolated, TestCase):
+    """Environment pins, the checks under the lock, release, bad ids and the fallback when the database does not answer."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = User.objects.create_superuser('fix_root', 'f@x.io', 'x')
+
+    run_with = RunTests.run_with
+
+    def test_an_operator_environment_value_pins_the_setting_and_the_compose_default_does_not(self):
+        os.environ.update(CVENGINE_WORK_MIN_GAP_HOURS='24', HEAVY_MAX_NMAP='1', DISCOVERY_CONCURRENCY='4')
+        summary = self.run_with({'conductor': {'state': 'idle'}, 'sentinel': {'live': 2, 'slots': 9}})
+        moved = {c['setting'] for c in summary['changes']}
+        self.assertFalse(moved & {'work_min_gap_hours', 'heavy.nmap', 'discovery_concurrency'}, summary['changes'])
+        settings = summary['settings']
+        self.assertEqual(settings['heavy.nmap']['pinned_by'], 'the environment (HEAVY_MAX_NMAP=1)')
+        self.assertEqual(settings['work_min_gap_hours']['pinned_from'], 'environment')
+        self.assertEqual(sc.resolve('discovery_concurrency', {}, autotune.applied_values())['value'], 4)
+        self.assertEqual(resources.max_concurrent('nmap'), 1)
+        os.environ['DISCOVERY_CONCURRENCY'] = '8'  # what compose passes when .env sets nothing
+        resources.redis_client().delete('cvengine:sweep:autotune')
+        AutoTuneSettings.objects.update(values={})
+        summary = self.run_with({'sentinel': {'live': 2, 'slots': 9}}, now=timezone.now() + timedelta(seconds=1))
+        self.assertNotEqual(summary['settings']['discovery_concurrency'].get('state'), 'pinned')
+        data = send(client_for(self.root), 'GET', 'scan_concurrency')[1]
+        nmap = next(f['autotune'] for f in data['fields'] if f['key'] == 'heavy.nmap')
+        self.assertEqual((nmap['pinned'], nmap['pinned_env'], nmap['pinned_by']), (True, 'HEAVY_MAX_NMAP=1', None))
+
+    def test_apply_tuned_checks_mode_kill_switch_and_pins_under_the_lock(self):
+        m = autotune.by_key()['heavy.nmap']
+        autotune.set_mode(self.root, 'off')
+        self.assertIsNone(autotune.apply_tuned(m, 2, 4, mode='auto', source='controller', reason='x', signals={}))
+        autotune.set_mode(self.root, 'auto')
+        os.environ['CVENGINE_AUTOTUNE'] = '0'
+        self.assertIsNone(autotune.apply_tuned(m, 2, 4, mode='auto', source='controller', reason='x', signals={}))
+        del os.environ['CVENGINE_AUTOTUNE']
+        sc.update({'heavy.nmap': 2}, self.root)
+        self.assertIsNone(autotune.apply_tuned(m, 2, 4, mode='auto', source='controller', reason='x', signals={}))
+        self.assertEqual(AutoTuneSettings.current().values, {})
+        self.assertFalse(TuningDecision.objects.filter(setting='heavy.nmap').exists())
+
+    def test_release_is_a_history_row_and_no_immediate_jump(self):
+        sc.update({'heavy.nmap': 2}, self.root)
+        autotune.release(self.root, 'heavy.nmap')
+        row = TuningDecision.objects.get(setting='heavy.nmap', action='release')
+        self.assertTrue(row.applied)
+        summary = self.run_with()
+        self.assertNotIn('heavy.nmap', [c['setting'] for c in summary['changes']])  # aimed high for the others, not for the one just handed over
+        self.assertIn('heavy.nuclei', [c['setting'] for c in summary['changes']])
+        with self.assertRaises(autotune.TuningError) as raised:
+            autotune.revert(self.root, row.pk)
+        self.assertEqual(raised.exception.status, 409)
+        listed = {d['id']: d for d in autotune.list_decisions('heavy.nmap')['results']}
+        self.assertFalse(listed[row.pk]['can_revert'])
+
+    def test_a_decision_id_out_of_range_is_404(self):
+        _, token = create_token(self.root, 'rw')
+        for bad in ('99999999999999999999', '9223372036854775808'):
+            self.assertEqual(call(token, 'POST', f'/api/v1/tuning/decisions/{bad}/apply', {})[0], 404, bad)
+            self.assertEqual(send(client_for(self.root), 'POST', f'autotune/decisions/{bad}/revert', {})[0], 404, bad)
+        error, text = tool_call(token, 'revert_tuning_decision', {'decision_id': 10 ** 30})
+        self.assertTrue(error)
+
+    def test_when_the_database_does_not_answer_the_pool_backs_off_from_redis_and_is_recorded_later(self):
+        from django.db import OperationalError
+        row = AutoTuneSettings.current()
+        row.values = {'discovery_concurrency': 24, 'work_depth': 8}
+        row.save()
+        autotune.publish(row)
+        resources.redis_client().delete('cvengine:sweep:autotune')
+        with mock.patch.object(autotune, 'settings_row', side_effect=OperationalError('too many clients')), \
+                mock.patch.object(autotune, '_resize_discovery_directly') as resize:
+            summary = autotune.run()
+        self.assertIn('emergency', summary['held'])
+        resize.assert_called_once_with(18)
+        resources.invalidate_auto()
+        self.assertEqual(resources.auto_values()['discovery_concurrency'], 18)
+        autotune.reconcile()  # the 30 second tick, with the database back, must not put 24 back before the run records it
+        resources.invalidate_auto()
+        self.assertEqual(resources.auto_values()['discovery_concurrency'], 18)
+        self.run_with(n=1)
+        recorded = TuningDecision.objects.get(setting='discovery_concurrency', phase='back_off')
+        self.assertEqual((recorded.old_value, recorded.new_value, recorded.pressure), (24, 18, True))
+        self.assertIsNone(resources.redis_client().get(autotune.EMERGENCY_KEY))
+
+
 class PrecedenceTests(Isolated, TestCase):
     def setUp(self):
         super().setUp()
         self.root = User.objects.create_superuser('prec_root', 'p@x.io', 'x')
 
-    def test_saved_then_tuned_then_environment_then_default(self):
+    def test_saved_then_environment_pin_then_tuned_then_default(self):
         self.assertEqual(tunables.resolve('stage_parallel'), {'value': 4, 'source': 'default'})
-        os.environ['CVENGINE_STAGE_PARALLEL'] = '6'
-        self.assertEqual(tunables.resolve('stage_parallel')['source'], 'environment')
+        os.environ['CVENGINE_STAGE_PARALLEL'] = '4'  # the default: what compose passes when nothing is set, so not a pin
         row = AutoTuneSettings.current()
-        row.values = {'stage_parallel': 5, 'triage_max_per_day': 9}
+        row.values = {'stage_parallel': 5, 'triage_max_per_day': 9, 'discovery_concurrency': 16, 'heavy.nmap': 6}
         row.save()
         autotune.publish()
         tunables.invalidate()
         resources.invalidate_auto()
         self.assertEqual(tunables.resolve('stage_parallel'), {'value': 5, 'source': 'auto'})
+        os.environ['CVENGINE_STAGE_PARALLEL'] = '6'  # the operator's own number: it pins
+        self.assertEqual(tunables.resolve('stage_parallel'), {'value': 6, 'source': 'environment'})
         self.assertEqual(tunables.value('triage_max_per_day'), 2000)  # never auto-tuned, whatever the row holds
+        os.environ['DISCOVERY_CONCURRENCY'] = '8'  # compose's own fallback: not a pin
+        self.assertEqual(sc.resolve('discovery_concurrency'), {'value': 16, 'source': 'auto'})
+        os.environ['DISCOVERY_CONCURRENCY'] = '4'
+        self.assertEqual(sc.resolve('discovery_concurrency'), {'value': 4, 'source': 'environment'})
+        self.assertEqual(resources.max_concurrent('nmap'), 6)
+        os.environ['HEAVY_MAX_NMAP'] = '2'  # the built-in default: not a pin
+        self.assertEqual(resources.max_concurrent('nmap'), 6)
+        os.environ['HEAVY_MAX_NMAP'] = '1'
+        self.assertEqual(resources.max_concurrent('nmap'), 1)
         tunables.update({'stage_parallel': 3}, self.root)
         self.assertEqual(tunables.resolve('stage_parallel'), {'value': 3, 'source': 'admin'})
 

@@ -8,7 +8,8 @@ Every probe is wrapped: one that fails leaves its numbers out (None), and a rule
   keeps), the memory budget, memory kills (by scanner kind), how often each scanner kind had a run waiting for its turn and the most that ran
   at once, and what one run of each kind costs (the learned peak with its margin, or the estimate);
 * the database: client connections in use and ``max_connections``;
-* the CPU: the one-minute load per core;
+* the CPU: the share of the container's CPU limit (cgroup v2 ``cpu.max`` or v1 CFS quota) it used since the last measurement, from the
+  cgroup's own accounting (the load average per core of that limit where the cgroup cannot be read);
 * the discovery worker: whether it answers (the 30 second tick's record), its ceiling, the tasks it runs now and the messages waiting;
 * Sentinels: live ones, their slots and the slots in use, queued work and its age, and the waits that timed out and ran locally instead;
 * assessments: queued and running, and the age of the oldest queued one;
@@ -95,17 +96,83 @@ def database():
     return {'used': used, 'max': top}
 
 
-def cores():
-    """The CPU cores this container may use: its cgroup v2 quota (``cpu.max``) when one is set, else the machine's count."""
-    count = os.cpu_count() or 1
+CGROUP = '/sys/fs/cgroup'
+CPU_KEY = 'cvengine:autotune:cpu:'
+
+
+def _read_first(*paths):
+    for path in paths:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return None
+
+
+def cpu_limit(root=CGROUP):
+    """The CPUs this container may use, as a number of cores (may be a fraction): the cgroup v2 quota (``cpu.max``), else the cgroup v1 CFS
+    quota (``cpu.cfs_quota_us`` / ``cpu.cfs_period_us``), never more than the machine's count; the machine's count when no quota is set."""
+    count = float(os.cpu_count() or 1)
+    raw = _read_first(f'{root}/cpu.max')
     try:
-        with open('/sys/fs/cgroup/cpu.max') as f:
-            quota, period = f.read().split()[:2]
-        if quota != 'max':
-            count = min(count, max(1, int(int(quota) / int(period))))
-    except (OSError, ValueError):
+        if raw:
+            quota, period = raw.split()[:2]
+            if quota != 'max':
+                return max(0.1, min(count, int(quota) / int(period)))
+            return count
+        quota = _read_first(f'{root}/cpu/cpu.cfs_quota_us', f'{root}/cpu,cpuacct/cpu.cfs_quota_us')
+        period = _read_first(f'{root}/cpu/cpu.cfs_period_us', f'{root}/cpu,cpuacct/cpu.cfs_period_us')
+        if quota and period and int(quota) > 0:
+            return max(0.1, min(count, int(quota) / int(period)))
+    except (TypeError, ValueError):
         pass
     return count
+
+
+def cores(root=CGROUP):
+    """Whole cores this container may use (at least 1)."""
+    return max(1, int(cpu_limit(root)))
+
+
+def cpu_used_seconds(root=CGROUP):
+    """CPU time this container has used, in seconds (cgroup v2 ``cpu.stat`` usage_usec, else cgroup v1 ``cpuacct.usage``), or None."""
+    stat = _read_first(f'{root}/cpu.stat')
+    if stat:
+        for line in stat.splitlines():
+            name, _, value = line.partition(' ')
+            if name == 'usage_usec':
+                return int(value) / 1e6
+    raw = _read_first(f'{root}/cpuacct/cpuacct.usage', f'{root}/cpu,cpuacct/cpuacct.usage')
+    return int(raw) / 1e9 if raw and raw.isdigit() else None
+
+
+def load(now=None, root=CGROUP, store=None):
+    """(share of the container's CPU limit used since the previous measurement, 'cgroup') from the cgroup's own accounting; where that cannot
+    be read (or on the first measurement), (one-minute load average per core of the limit, 'loadavg'). The previous reading is kept in Redis
+    per container, so the interval is the real time between two measurements."""
+    import socket
+    now = now or time.time()
+    limit = cpu_limit(root)
+    used = cpu_used_seconds(root)
+    client = store if store is not None else _redis()
+    previous = None
+    if used is not None and client is not None:
+        key = CPU_KEY + socket.gethostname()
+        try:
+            previous = json.loads(client.get(key) or 'null')
+            client.set(key, json.dumps({'used': used, 't': now}), ex=3 * 3600)
+        except Exception:  # noqa: BLE001
+            previous = None
+    if isinstance(previous, dict) and now - float(previous.get('t', now)) >= 60 and used >= float(previous.get('used', 0)):
+        share = (used - float(previous['used'])) / ((now - float(previous['t'])) * limit)
+        return round(max(0.0, share), 3), 'cgroup'
+    return round(os.getloadavg()[0] / limit, 2), 'loadavg'
+
+
+def _redis():
+    from reNgine import resources
+    return resources.redis_client()
 
 
 def size():
@@ -123,11 +190,6 @@ def size():
     if usage.total:
         out['disk_free_percent'] = round(usage.free * 100 / usage.total, 1)
     return out
-
-
-def load():
-    per_core = os.getloadavg()[0] / (os.cpu_count() or 1)
-    return round(per_core, 2)
 
 
 def discovery(now):
@@ -239,12 +301,12 @@ def updating():
 def collect(now=None, boot=''):
     """One measurement (a plain dictionary of numbers). ``now`` in seconds since the epoch."""
     now = now or time.time()
-    return {
+    sample = {
         't': now, 'boot': boot,
         'paused': _probe('pause', paused, True), 'updating': _probe('update', updating, False),
         'memory': _probe('memory', lambda: memory(now), {'reported': False}),
         'db': _probe('database', database, {}),
-        'load': _probe('load', load),
+        'load': None, 'load_kind': None,
         'cores': _probe('cores', cores),
         'size': _probe('size', size, {}),
         'discovery': _probe('discovery', lambda: discovery(now), {'replying': None}),
@@ -253,6 +315,10 @@ def collect(now=None, boot=''):
         'conductor': _probe('conductor', conductor_state, {}),
         'failures': _probe('failures', lambda: capacity_failures(now), {}),
     }
+    measured = _probe('load', lambda: load(now))
+    if measured:
+        sample['load'], sample['load_kind'] = measured
+    return sample
 
 
 def summarise(samples):

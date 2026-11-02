@@ -45,16 +45,22 @@ export function checkDraft(field, draft) {
   return { ok: true, value };
 }
 
-// {key: number} for the boxes that differ from what is in effect now, and the first problem if one is invalid.
-export function changesFrom(fields, drafts) {
+// {key: number} for the boxes that differ from what is in effect now, and the first problem if one is invalid. `touched` (the keys of the boxes the
+// person typed in) lets the same number be saved on purpose: typing the number auto-tuning chose (or the environment's) and saving pins it.
+export function changesFrom(fields, drafts, touched = new Set()) {
   const changes = {};
   let error = null;
   fields.forEach((field) => {
     if (!(field.key in drafts)) return;
-    // A box the person did not touch is not theirs to get right: an environment value above the page's range, or a fraction of an hour, is shown as
-    // it is and must neither block the save of another box nor be sent back.
-    if (String(drafts[field.key] ?? "").trim() === String(field.value)) return;
+    const same = String(drafts[field.key] ?? "").trim() === String(field.value);
     const checked = checkDraft(field, drafts[field.key]);
+    if (same) {
+      // A box left at (or put back to) the number in effect is not the person's to get right: an environment value above the page's range, or a
+      // fraction of an hour, is shown as it is and must neither block the save of another box nor be sent back. Typed in on purpose and valid, the
+      // same number is saved, which pins it (auto-tuning then leaves it alone).
+      if (touched.has(field.key) && field.source !== "admin" && checked.ok) changes[field.key] = checked.value;
+      return;
+    }
     if (!checked.ok) {
       error = error || checked.error;
       return;
@@ -162,12 +168,13 @@ export const AUTOTUNE_MODES = [
   ["off", "Off: hand tuning, nothing is measured or changed"],
 ];
 export const AUTOTUNE_INTRO =
-  "Auto-tuning is on by default. It aims high: after each restart or update it sets the throughput settings below to the most this machine sensibly " +
+  "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
   "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
   "time-outs, a busy database, a silent worker, Sentinel waits that ran locally), then probes upward again one step at a time after two healthy hours. " +
   "It never changes AI spend caps, never changes anything while scanning is paused or an update is applied, and every change is listed here with its reason and a Revert button.";
 export const AUTOTUNE_OFF_HELP =
-  "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it: a saved number is pinned and the tuner leaves it alone. " +
+  "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it (even the number shown): a saved number is pinned and the tuner leaves it alone, " +
+  "and so is one set in .env to anything other than its default. " +
   "CVENGINE_AUTOTUNE=0 in .env turns auto-tuning off for the whole instance, whatever is chosen here.";
 export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person: "a person" };
 
@@ -177,6 +184,9 @@ export function autoTuneLine(field, mode, formatDate = (x) => x) {
   const at = field && field.autotune;
   const none = { text: "", kind: "", release: false, suggestion: null };
   if (!at || !at.managed || !mode || mode === "off") return none;
+  if (at.pinned && at.pinned_env && !at.pinned_by) {
+    return { text: `Pinned by the environment (${at.pinned_env}): remove it from .env, or save a value here`, kind: "pinned", release: false, suggestion: null };
+  }
   if (at.pinned) {
     return { text: `Pinned by ${at.pinned_by || "an administrator"}: auto-tuning leaves this number alone`, kind: "pinned", release: mode === "auto", suggestion: null };
   }
