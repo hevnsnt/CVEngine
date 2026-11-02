@@ -84,6 +84,12 @@ Before a stage runs its tool, it asks for a live, eligible Sentinel with the rig
 
 Two exceptions never run locally: targets inside an internal network, and OpenVAS while Sentinel-only mode is on. Each dispatch shows as a line in the AI activity feed. Timings are in [CONFIGURATION.md](CONFIGURATION.md).
 
+What runs locally is governed: on a cloud server, connections to port 25 are counted and paced (`CVENGINE_LOCAL_PORT_BUDGETS`, default 400 an hour, never skipped), at most 30 nmap and 10 naabu stages an hour fall back to the server (the rest wait for the next run), and when Sentinel tasks keep falling back the activity log and `get_system_status` say so and name the Sentinels that are offline or full ([Cloud hosts and port 25](CONFIGURATION.md#cloud-hosts-and-port-25)). Sentinels themselves are never paced: they run on other networks. For SMTP checks on a provider that blocks or throttles port 25, put a Sentinel on a network that allows it.
+
+### Future: Sentinel egress capabilities
+
+Not built yet (planned for 1.4's capability-aware placement): a Sentinel would declare which egress ports it can reach, found by itself with a canary connection at start-up (for example, whether outbound port 25 works from its network), and the server would route the stages that need port 25 only to Sentinels that can reach it, instead of to any Sentinel with the tool. Today any eligible Sentinel takes the work, and a Sentinel whose own network blocks port 25 reports that port as filtered.
+
 ## Security model
 
 A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md)).

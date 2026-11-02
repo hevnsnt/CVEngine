@@ -14,7 +14,7 @@ import socket
 import time
 import zlib
 
-from cveFeed import egress_proxy
+from cveFeed import egress_proxy, local_egress
 from targetApp.target_types import is_scannable_ip
 
 
@@ -61,6 +61,9 @@ def open_socket(addresses, timeout, project=None, host=None, proxy=_AUTO):
     ``proxy`` is the choice a caller already made, None for a direct connection)."""
     if proxy is _AUTO:
         proxy = _proxy_for(addresses, host)
+    for _family, address in addresses[:1]:
+        # the opt-in skip list and the egress governor (cveFeed.local_egress): raises PortHeld, an OSError, for a held port; counts the attempt
+        local_egress.check_connect(address[1], address=address[0])
     deadline = time.monotonic() + timeout
     last_error = OSError('no probe address available')
     for family, address in addresses:
@@ -129,6 +132,7 @@ class HTTPConnection(http.client.HTTPConnection):
         if not self.addresses:
             raise OSError('no probe address available')
         _family, address = self.addresses[0]
+        local_egress.check_connect(address[1], address=address[0])
         numeric = f'[{address[0]}]' if ':' in address[0] else address[0]
         sock = egress_proxy.connect_proxy(proxy, self.timeout)
         self._forward = (proxy, f'{numeric}:{address[1]}')

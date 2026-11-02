@@ -1,0 +1,659 @@
+"""The server-side egress safeguard (cveFeed.local_egress): the ledger of this server's own outbound connections, the governor that paces
+budgeted ports (25 by default) without dropping work, the cap on local fallback runs, and the opt-in skip list. Sentinels are never affected.
+
+Every test starts and ends with the module's Redis state cleared: the governor's buckets are shared state, and a test that drains one must not
+change the command lines of the next."""
+import json
+import os
+from unittest import mock
+
+from cveFeed import local_egress, naabu_scan, nmap_scan, testssl_scan
+from cveFeed.models import AgentActivity, ServiceRun
+from dashboard.models import Org, Project
+from django.contrib.auth.models import User
+from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
+from scanEngine.models import EngineType
+from startScan.models import IpAddress, Port, ScanHistory, Subdomain
+from targetApp.models import Domain
+
+T0 = 1_900_800_000.0  # a fixed clock on the hour, well clear of the real one (the bucket keys are cleared around every test)
+NO_SKIP = {'CVENGINE_LOCAL_SKIP_PORTS': ''}
+
+
+def _clear():
+    client = local_egress._client()
+    if client is None:
+        return
+    keys = list(client.scan_iter(f'{local_egress.PREFIX}:*', count=1000))
+    if keys:
+        client.delete(*keys)
+
+
+class Clean:
+    def setUp(self):
+        super().setUp()
+        _clear()
+        self.addCleanup(_clear)
+
+
+def _messages():
+    return list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
+
+
+def report(*hosts):
+    body = ''.join(f'<host><address addr="{ip}" addrtype="ipv4"/><ports>'
+                   + ''.join(f'<port protocol="tcp" portid="{n}"><state state="open"/><service name="smtp"/></port>' for n in ports)
+                   + '</ports></host>' for ip, ports in hosts)
+    return f'<?xml version="1.0"?><nmaprun>{body}<runstats><finished exit="success"/></runstats></nmaprun>'
+
+
+# --- settings -------------------------------------------------------------------------------------------------------------
+
+class SettingParsingTests(SimpleTestCase):
+    def test_ports_ranges_junk_and_whitespace(self):
+        self.assertEqual(local_egress.parse_ports('25'), {25})
+        self.assertEqual(local_egress.parse_ports(' 25 , 465-467 ,587'), {25, 465, 466, 467, 587})
+        self.assertEqual(local_egress.parse_ports('470-468'), {468, 469, 470})  # a range either way round
+        self.assertEqual(local_egress.parse_ports('smtp, 25x, -, 0, 70000, 1-70000, 22;23'), {22, 23})  # junk is skipped, never an error
+        self.assertEqual(local_egress.parse_ports(''), frozenset())
+        self.assertEqual(local_egress.parse_ports(None), frozenset())
+        self.assertEqual(local_egress.parse_ports('   '), frozenset())
+
+    def test_empty_skip_list_is_the_default_and_skips_nothing(self):
+        env = dict(os.environ)
+        env.pop('CVENGINE_LOCAL_SKIP_PORTS', None)
+        self.assertEqual(local_egress.skipped_ports(env), frozenset())
+        self.assertEqual(local_egress.skipped_ports({'CVENGINE_LOCAL_SKIP_PORTS': ''}), frozenset())
+        self.assertEqual(local_egress.skipped_ports({'CVENGINE_LOCAL_SKIP_PORTS': '25, 587'}), {25, 587})
+
+    def test_budgets(self):
+        self.assertEqual(local_egress.parse_budgets('25:400/hour'), {25: 400})
+        self.assertEqual(local_egress.parse_budgets('25:400/hour, 587 : 100/h,465:50, 23:0, x:1, 3389:9/hours'), {25: 400, 587: 100, 465: 50, 3389: 9})
+        self.assertEqual(local_egress.parse_budgets(''), {})
+        self.assertEqual(local_egress.parse_budgets('0'), {})
+        self.assertEqual(local_egress.budgets({}), {25: 400})  # the default
+        self.assertEqual(local_egress.budgets({'CVENGINE_LOCAL_PORT_BUDGETS': ''}), {})  # empty turns pacing off
+        self.assertEqual(local_egress.budgets({'CVENGINE_LOCAL_PORT_BUDGETS': '0'}), {})
+        self.assertEqual(local_egress.budgets({'CVENGINE_LOCAL_PORT_BUDGETS': '25:10,587:5', 'CVENGINE_LOCAL_SKIP_PORTS': '587'}), {25: 10})
+
+    def test_the_port_25_tunable_overrides_and_zero_turns_it_off(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT25_PER_HOUR': '120'}):
+            self.assertEqual(local_egress.budgets(), {25: 120})
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT25_PER_HOUR': '0'}):
+            self.assertEqual(local_egress.budgets(), {})
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:50/hour,465:20'}):
+            os.environ.pop('CVENGINE_LOCAL_PORT25_PER_HOUR', None)
+            self.assertEqual(local_egress.budgets(), {25: 50, 465: 20})
+
+    def test_default_watch_list(self):
+        self.assertEqual(local_egress.watched_ports({}), (23, 25, 465, 587, 3389))
+
+
+# --- command lines ----------------------------------------------------------------------------------------------------------
+
+class CommandLineTests(SimpleTestCase):
+    def test_nmap_exclude(self):
+        flags = ['-sV', '-p', '22,25,80,443', '-Pn']
+        self.assertEqual(local_egress.nmap_exclude(flags, {25}), ['-sV', '-p', '22,80,443', '-Pn', '--exclude-ports', '25'])
+        self.assertEqual(local_egress.nmap_exclude(['-sV', '-p', '20-30'], {25}), ['-sV', '-p', '20-24,26-30', '--exclude-ports', '25'])
+        self.assertEqual(local_egress.nmap_exclude(nmap_scan.FAST_FLAGS, {25}), [*nmap_scan.FAST_FLAGS, '--exclude-ports', '25'])
+        self.assertEqual(local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, {25, 587}), [*nmap_scan.FULL_PORT_FLAGS, '--exclude-ports', '25,587'])
+        self.assertIsNone(local_egress.nmap_exclude(['-sV', '-p', '25'], {25}))  # nothing else to scan
+        self.assertEqual(local_egress.nmap_exclude(flags, set()), flags)
+        udp = ['-sU', '-sV', '-p', 'U:25,161']
+        self.assertEqual(local_egress.nmap_exclude(udp, {25}), udp)  # a UDP-only run is not a TCP connection to port 25
+
+    def test_naabu_exclude_and_the_default_naabu_command_is_unchanged(self):
+        legacy = ['/bin/naabu', '-list', '/tmp/l', '-p', '-', '-rate', '1000', '-retries', '2', '-c', '25', '-warm-up-time', '2', '-json', '-silent', '-nc']
+        self.assertEqual(naabu_scan.build_command('/bin/naabu', '/tmp/l', 1000), legacy)
+        self.assertEqual(naabu_scan.build_command('/bin/naabu', '/tmp/l', 1000, {25}), [*legacy, '-exclude-ports', '25'])
+
+    def test_the_plan_estimate(self):
+        self.assertEqual(local_egress.nmap_plan_ports(['-p', '22,25,80'])[0], 3)
+        self.assertIn(25, local_egress.nmap_plan_ports(['-p', '22,25,80'])[1])
+        self.assertEqual(local_egress.nmap_plan_ports(nmap_scan.FULL_PORT_FLAGS)[0], 65535)
+        self.assertEqual(local_egress.nmap_plan_ports([*nmap_scan.FULL_PORT_FLAGS, '--exclude-ports', '25'])[0], 65534)
+        self.assertNotIn(25, local_egress.nmap_plan_ports([*nmap_scan.FAST_FLAGS, '--exclude-ports', '25'])[1])
+        self.assertEqual(local_egress.nmap_plan_ports(['-sU', '-p', 'U:161']), (0, set()))
+
+
+# --- the opt-in skip list ---------------------------------------------------------------------------------------------------
+
+class _Popen:
+    calls = []
+
+    def __init__(self, cmd, **kwargs):
+        _Popen.calls.append(cmd)
+        self.returncode = 0
+        self.cmd = cmd
+
+    def communicate(self, timeout=None):
+        if self.cmd[0].endswith('naabu'):
+            return '{"ip":"198.51.100.1","port":22}\n', ''
+        return report(), ''
+
+
+class _Job:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def attach(self, proc):
+        pass
+
+    def raise_if_killed(self):
+        pass
+
+
+class SkipListTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        _Popen.calls = []
+        for target, kwargs in (('reNgine.resources.heavy_job', {'side_effect': lambda *a, **k: _Job()}),
+                               ('targetApp.target_types.refuse_local', {})):
+            patcher = mock.patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_nmap_carries_exclude_ports_and_no_port_list_holds_25(self):
+        with mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            nmap_scan.run_nmap_xml(['198.51.100.1'], ['-sV', '-p', '22,25,80', '-Pn'], '8m')
+            nmap_scan.run_nmap_xml(['198.51.100.1'], nmap_scan.FAST_FLAGS, '8m')
+        first, second = _Popen.calls
+        self.assertEqual(first[first.index('-p') + 1], '22,80')
+        self.assertEqual(first[first.index('--exclude-ports') + 1], '25')
+        self.assertEqual(second[second.index('--exclude-ports') + 1], '25')
+        self.assertIn('nmap: port 25 not scanned from this server: CVENGINE_LOCAL_SKIP_PORTS; a Sentinel does this', _messages())
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_a_run_asking_only_for_a_skipped_port_sends_nothing(self):
+        with mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            out = nmap_scan.run_nmap_xml(['198.51.100.1'], ['-sV', '-p', '25'], '8m')
+        self.assertEqual(_Popen.calls, [])
+        self.assertEqual(nmap_scan.parse_xml(out, strict=True), [])
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_naabu_has_exclude_ports(self):
+        with mock.patch.object(naabu_scan.subprocess, 'Popen', _Popen):
+            naabu_scan.run_naabu(['198.51.100.1'], binary='/bin/naabu')
+        (cmd,) = _Popen.calls
+        self.assertEqual(cmd[cmd.index('-exclude-ports') + 1], '25')
+        self.assertIn('naabu: port 25 not scanned from this server: CVENGINE_LOCAL_SKIP_PORTS; a Sentinel does this', _messages())
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_the_naabu_to_nmap_handoff_never_reintroduces_a_skipped_port(self):
+        build = naabu_scan.flags_for({'a': [22, 25], 'b': [25]}, nmap_scan.FAST_FLAGS)
+        flags = build(['a', 'b'])
+        self.assertNotIn('25', flags[flags.index('-p') + 1].split(','))
+        self.assertIsNone(naabu_scan.flags_for({'b': [25]}, nmap_scan.FAST_FLAGS, os_probe=False)(['b']))  # only port 25 open: nothing to do here
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_a_single_port_probe_or_validation_check_is_not_run(self):
+        with mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            with self.assertRaises(local_egress.PortHeld) as held:
+                nmap_scan.run_nmap_args(['-sV', '-Pn', '-p', '25', '-oX', '-', '198.51.100.1'], '198.51.100.1:25', 10)
+        self.assertEqual((held.exception.port, held.exception.reason), (25, 'skipped'))
+        self.assertEqual(_Popen.calls, [])
+        from cveFeed import validation
+        with mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            out = validation.run_nmap_sv({'argv': ['nmap', '-sV', '-Pn', '-p', '25', '198.51.100.1'], 'target': '198.51.100.1:25', 'timeout': 10,
+                                          'params': {'port': 25}})
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('skipped on the server: port 25', out['summary'])
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_an_in_process_connection_is_refused_before_anything_is_sent(self):
+        from cveFeed import pinned_transport
+        with mock.patch.object(pinned_transport.socket, 'socket') as sock:
+            with self.assertRaises(local_egress.PortHeld):
+                pinned_transport.open_socket(((2, ('198.51.100.1', 25)),), 3, proxy=None)
+        sock.assert_not_called()
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_the_coverage_reason(self):
+        from cveFeed import check_coverage
+        self.assertEqual(check_coverage._skip_note('nmap', None), 'skipped on the server: port 25')
+        self.assertEqual(check_coverage._skip_note('wpscan', None), '')
+        self.assertEqual(local_egress.coverage_note(), 'skipped on the server: port 25')
+
+    def test_with_the_setting_empty_every_command_line_is_byte_for_byte_the_old_one(self):
+        for env in ({}, NO_SKIP, {'CVENGINE_LOCAL_SKIP_PORTS': ' , junk'}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                if not env:
+                    os.environ.pop('CVENGINE_LOCAL_SKIP_PORTS', None)
+                _Popen.calls = []
+                with mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen), mock.patch.object(naabu_scan.subprocess, 'Popen', _Popen):
+                    nmap_scan.run_nmap_xml(['198.51.100.1'], nmap_scan.FAST_FLAGS, '8m')
+                    naabu_scan.run_naabu(['198.51.100.1'], binary='/bin/naabu')
+                    nmap_scan.run_nmap_args(['-sV', '-Pn', '-p', '25', '-oX', '-', '198.51.100.1'], 'x', 10)
+                nmap_cmd, naabu_cmd, probe_cmd = _Popen.calls
+                self.assertEqual(nmap_cmd[:-6], [nmap_scan.NMAP_BIN, *nmap_scan.FAST_FLAGS])
+                self.assertEqual(nmap_cmd[-6:-2], ['--host-timeout', '8m', '-oX', '-'])
+                self.assertEqual(naabu_cmd[:2] + naabu_cmd[3:], ['/bin/naabu', '-list', '-p', '-', '-rate', str(naabu_scan.rate()), '-retries', '2', '-c', '25',
+                                                                 '-warm-up-time', '2', '-json', '-silent', '-nc'])
+                self.assertEqual(probe_cmd, [nmap_scan.NMAP_BIN, '-sV', '-Pn', '-p', '25', '-oX', '-', '198.51.100.1'])
+                self.assertEqual(naabu_scan.flags_for({'a': [22, 25]}, nmap_scan.FAST_FLAGS)(['a'])[nmap_scan.FAST_FLAGS.index('--top-ports') + 1], '1,3,22,25')
+
+
+class TestsslSkipTests(Clean, TestCase):
+    """testssl.sh STARTTLS on port 25: skipped here when the operator asks, but a Sentinel's dispatch payload still names the port."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_route_auth import RouteFixture
+        fixture = RouteFixture()
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        self.project = fixture.project
+        fixture.scan(names=('mx.rt.test',), ports=((25, 'smtp'), (443, 'https')))
+        self.calls = []
+        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+
+    def runner(self, args, env, timeout):
+        self.calls.append(args)
+        from tests.test_testssl_scan import CLEAN
+        with open(args[args.index('--jsonfile') + 1], 'w') as out:
+            json.dump(CLEAN, out)
+
+    def sweep(self):
+        return testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
+
+    def test_default_tests_port_25_starttls_locally_as_before(self):
+        with mock.patch.dict(os.environ, NO_SKIP):
+            self.sweep()
+        self.assertEqual(sorted(c[-1] for c in self.calls), ['mx.rt.test:25', 'mx.rt.test:443'])
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_skipped_locally_and_the_pair_stays_due(self):
+        self.sweep()
+        self.assertEqual([c[-1] for c in self.calls], ['mx.rt.test:443'])
+        self.assertFalse(ServiceRun.objects.filter(asset='mx.rt.test:25').exists())  # neither done nor failed: still due
+        self.assertTrue(any('not run from this server: skipped on the server: port 25' in m for m in _messages()))
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+    def test_a_sentinel_dispatch_payload_keeps_port_25(self):
+        from agentapi import sentinel_dispatch
+        seen = []
+
+        def dispatch(project, kind, target, **kwargs):
+            seen.append(target)
+            return {'items': []}
+        with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
+                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch):
+            self.sweep()
+        self.assertIn({'host': 'mx.rt.test', 'ip': '203.0.113.5', 'port': 25, 'starttls': 'smtp'}, seen)
+        self.assertEqual(self.calls, [])
+
+
+# --- the ledger -------------------------------------------------------------------------------------------------------------
+
+class LedgerTests(Clean, TestCase):
+    def test_counts_by_watched_port_and_in_total(self):
+        with local_egress.context(kind='nmap', project=7):
+            local_egress.record_nmap(['-p', '22,25,80'], ['a', 'b'], kind='nmap')
+        local_egress.record_naabu(['a'])
+        local_egress.record_one(443, 'route-probe')
+        snap = local_egress.snapshot()
+        self.assertEqual(snap['hour']['all'], 6 + 65535 + 1)
+        self.assertEqual(snap['hour']['p25'], 2 + 1)
+        self.assertNotIn('p443', snap['hour'])  # not a watched port: in the total only
+        self.assertEqual(snap['sources']['nmap|7|25'], 2)
+
+    def test_status_shows_the_numbers_and_that_they_are_estimates(self):
+        local_egress.record('nmap', 10, {25: 4})
+        out = local_egress.status([])
+        port25 = next(p for p in out['watched'] if p['port'] == 25)
+        self.assertEqual((port25['last_hour'], port25['last_24h'], port25['budget_per_hour']), (4, 4, 400))
+        self.assertIn('estimate', out['estimate_note'])
+        self.assertEqual([p['port'] for p in out['watched']], [23, 25, 465, 587, 3389])
+
+    def test_old_hours_age_out_of_the_hour_view_but_stay_in_the_day(self):
+        local_egress.record('nmap', 5, {25: 5}, now=T0 - 3 * 3600)
+        snap = local_egress.snapshot(now=T0)
+        self.assertEqual(snap['hour'].get('p25', 0), 0)
+        self.assertEqual(snap['day']['p25'], 5)
+
+
+# --- the governor ----------------------------------------------------------------------------------------------------------
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:8/hour', 'CVENGINE_LOCAL_SKIP_PORTS': ''})
+class GovernorTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        os.environ.pop('CVENGINE_LOCAL_PORT25_PER_HOUR', None)
+
+    def test_token_bucket_with_a_fake_clock(self):
+        # 8 per hour, a quarter of it at once: a bucket of 2, one token back every 450 seconds
+        self.assertEqual(local_egress.take(25, 5, now=T0), 2)
+        self.assertEqual(local_egress.take(25, 1, now=T0), 0)
+        self.assertEqual(local_egress.take(25, 5, now=T0 + 450), 1)
+        self.assertEqual(local_egress.take(25, 5, now=T0 + 3600 * 2), 2)  # never more than the bucket
+        self.assertEqual(local_egress.take(443, 1000, now=T0), 1000)  # a port with no budget is never paced
+
+    def test_over_budget_defers_and_does_not_drop_and_resumes_next_hour(self):
+        addresses = [f'198.51.100.{i}' for i in range(1, 6)]
+        with local_egress.context(kind='nmap', org_id=None, project=None):
+            held = local_egress.plan(addresses, {25, 80}, 'nmap', now=T0)
+        self.assertEqual(sorted(held), addresses[2:])  # two granted, three held back
+        self.assertTrue(all(ports == {25} for ports in held.values()))
+        self.assertEqual(sorted(a for _o, a, _p in local_egress.owed(25)), addresses[2:])
+        self.assertIn('port 25 paced: 2 of 5 hosts this hour (nmap); the other 3 are scanned now without port 25, which is probed later '
+                      'from this server', _messages())
+        probed = []
+
+        def runner(targets, flags, host_timeout):
+            probed.append((list(targets), flags))
+            return report(*[(t, [25]) for t in targets])
+        with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **k: list(hosts)):
+            self.assertEqual(local_egress.catch_up(runner=runner, now=T0)[25], {'probed': 0, 'left': 3})  # the bucket is empty this hour
+            out = local_egress.catch_up(runner=runner, now=T0 + 3600)  # the next hour: the bucket has refilled
+        self.assertEqual(out[25], {'probed': 2, 'left': 1})
+        self.assertEqual(probed[0][1][probed[0][1].index('-p') + 1], '25')  # the paced pass is port 25 alone
+        self.assertEqual(Port.objects.filter(number=25, ports__address__in=probed[0][0]).count(), 2)
+        with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **k: list(hosts)):
+            out = local_egress.catch_up(runner=runner, now=T0 + 7200)
+        self.assertEqual(out[25], {'probed': 1, 'left': 0})  # every host gets its port 25 probe in the end
+
+    def test_alerts_at_50_80_and_100_percent_once_each(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:40/hour'}):
+            for i in range(12):
+                local_egress.take(25, 4, now=T0 + i * 300)
+        lines = [m for m in _messages() if m.startswith('port 25:')]
+        self.assertEqual([m.split('(')[1].split('%')[0] for m in lines], ['50', '80', '100'])
+
+
+class _ScanFixture:
+    def make_scan(self, addresses):
+        patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        org = Org.objects.create(name='E', slug='egress')
+        self.project = Project.objects.create(name='E', slug='egress-p', insert_date=timezone.now(), org=org)
+        self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
+        engine = EngineType.objects.create(engine_name='e-egress', yaml_configuration='x', default_engine=True)
+        self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=1, results_dir='/tmp')
+        sub = Subdomain.objects.create(scan_history=self.scan, name='www.example.test')
+        for address in addresses:
+            sub.ip_addresses.add(IpAddress.objects.create(address=address))
+
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': ''})
+class NmapStageTests(Clean, _ScanFixture, TestCase):
+    ADDRESSES = [f'192.0.2.{i}' for i in range(10, 15)]
+
+    def setUp(self):
+        super().setUp()
+        os.environ.pop('CVENGINE_LOCAL_PORT25_PER_HOUR', None)
+        self.make_scan(self.ADDRESSES)
+        self.calls = []
+
+    def runner(self, targets, flags, host_timeout):
+        self.calls.append((list(targets), list(flags)))
+        return report(*[(t, [22]) for t in targets])
+
+    def test_under_budget_the_pass_and_its_coverage_are_unchanged(self):
+        os.environ.pop('CVENGINE_LOCAL_PORT_BUDGETS', None)
+        result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner, naabu_runner=mock.Mock(side_effect=RuntimeError('off')), dispatch=False)
+        self.assertEqual(self.calls, [(self.ADDRESSES, nmap_scan.FAST_FLAGS)])
+        self.assertNotIn('deferred', result)
+        self.assertEqual(set(ServiceRun.objects.filter(service='nmap-fast', status='done').values_list('asset', flat=True)), set(self.ADDRESSES))
+        self.assertEqual(local_egress.owed(25), [])
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:8/hour'})
+    def test_over_budget_the_rest_are_scanned_without_port_25_and_port_25_is_owed(self):
+        nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner, naabu_runner=mock.Mock(side_effect=RuntimeError('off')), dispatch=False)
+        self.assertEqual(self.calls[0], (self.ADDRESSES[:2], nmap_scan.FAST_FLAGS))  # the granted ones exactly as before
+        held_targets, held_flags = self.calls[1]
+        self.assertEqual(held_targets, self.ADDRESSES[2:])
+        self.assertEqual(held_flags, [*nmap_scan.FAST_FLAGS, '--exclude-ports', '25'])
+        # every address had the rest of its ports fingerprinted: the stage is done for all of them; only port 25 waits for the paced pass
+        self.assertEqual(set(ServiceRun.objects.filter(service='nmap-fast', status='done').values_list('asset', flat=True)), set(self.ADDRESSES))
+        self.assertEqual(sorted(a for _o, a, _p in local_egress.owed(25)), self.ADDRESSES[2:])
+        self.assertEqual({p for _o, _a, p in local_egress.owed(25)}, {self.project.id})
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:8/hour'})
+    def test_naabu_handoff_over_budget_strips_port_25_from_the_held_addresses(self):
+        ports = {a: [22, 25] for a in self.ADDRESSES}
+        nmap_scan.run_nmap_for_scan(self.scan.id, runner=self.runner, naabu_runner=lambda ips: dict(ports), dispatch=False)
+        for targets, flags in self.calls:
+            if set(targets) & set(self.ADDRESSES[2:]):
+                self.assertNotIn('25', flags[flags.index('-p') + 1].split(','))
+                self.assertFalse(set(targets) & set(self.ADDRESSES[:2]))
+
+
+# --- naabu --------------------------------------------------------------------------------------------------------------------
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:8/hour', 'CVENGINE_LOCAL_SKIP_PORTS': ''})
+class NaabuGovernorTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        os.environ.pop('CVENGINE_LOCAL_PORT25_PER_HOUR', None)
+        _Popen.calls = []
+        patcher = mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: _Job())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_sweep_is_split_and_the_held_addresses_exclude_port_25(self):
+        lists = []
+
+        class Proc(_Popen):
+            def __init__(self, cmd, **kwargs):
+                super().__init__(cmd, **kwargs)
+                lists.append(open(cmd[cmd.index('-list') + 1]).read().split())
+        ips = [f'198.51.100.{i}' for i in range(1, 6)]
+        with mock.patch.object(naabu_scan.subprocess, 'Popen', Proc), mock.patch('targetApp.target_types.refuse_local'):
+            naabu_scan.run_naabu(ips, binary='/bin/naabu')
+        first, second = _Popen.calls
+        self.assertNotIn('-exclude-ports', first)
+        self.assertEqual(second[second.index('-exclude-ports') + 1], '25')
+        self.assertEqual(lists, [ips[:2], ips[2:]])
+        self.assertEqual(sorted(a for _o, a, _p in local_egress.owed(25)), ips[2:])
+
+
+# --- the fallback cap and its warning --------------------------------------------------------------------------------------
+
+class FallbackTests(Clean, _ScanFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.make_scan(['192.0.2.10', '192.0.2.11'])
+
+    def make_sentinel(self, name, live=True, capabilities=('nmap', 'naabu')):
+        from agentapi.auth import create_token
+        from agentapi.models import Agent
+        user = User.objects.create_user(f'owner-{name}', password='x')
+        token, _raw = create_token(user, f'token-{name}')
+        return Agent.objects.create(token=token, name=name, kind='scanner', status='active',
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, capabilities=list(capabilities),
+                                    last_seen=timezone.now() if live else timezone.now() - timezone.timedelta(days=1))
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '2'})
+    def test_admit_fallback_caps_per_hour_and_zero_is_unlimited(self):
+        self.assertEqual([local_egress.admit_fallback('nmap', now=T0) for _ in range(3)], [True, True, False])
+        self.assertTrue(local_egress.admit_fallback('nmap', now=T0 + 3600))  # the next hour
+        self.assertTrue(any('did not fall back to local execution: 2 local fallback runs of nmap this hour is the cap' in m for m in _messages()))
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '0'}):
+            self.assertTrue(all(local_egress.admit_fallback('nmap', now=T0) for _ in range(50)))
+        self.assertTrue(all(local_egress.admit_fallback('nuclei_light', now=T0) for _ in range(50)))  # only nmap and naabu are capped
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '1'})
+    def test_an_nmap_stage_over_the_cap_defers_and_the_addresses_stay_due(self):
+        from agentapi import sentinel_dispatch
+        local_egress.admit_fallback('nmap')  # the hour's one fallback run is used
+        runner = mock.Mock(return_value=report())
+        with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
+                mock.patch.object(sentinel_dispatch, 'wrap_naabu_runner', return_value=None), \
+                mock.patch.object(sentinel_dispatch, 'try_nmap', side_effect=lambda project, scan, targets, **k: (list(targets), {'ports': 0, 'hosts_with_os': 0}, None)):
+            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner, naabu_runner=mock.Mock(side_effect=RuntimeError('off')))
+        runner.assert_not_called()
+        self.assertEqual(result['deferred'], 2)
+        self.assertFalse(ServiceRun.objects.filter(service='nmap-fast').exists())  # not recorded: still due
+
+    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR': '1'})
+    def test_naabu_over_the_cap_is_deferred_and_not_recorded(self):
+        from agentapi import sentinel_dispatch
+        self.make_sentinel('quiet')
+        local_egress.admit_fallback('naabu')
+        local = mock.Mock(return_value={})
+        with mock.patch('cveFeed.naabu_scan.run_naabu', local), \
+                mock.patch.object(sentinel_dispatch, 'dispatch_many', side_effect=lambda project, kind, chunks, **k: (x for x in [(0, None)])):
+            runner = sentinel_dispatch.wrap_naabu_runner(self.project, self.scan, timeout=0.2)
+            found = naabu_scan.discover(['192.0.2.10', '192.0.2.11'], self.scan, runner)
+        local.assert_not_called()
+        self.assertEqual(found, {})
+        self.assertFalse(ServiceRun.objects.filter(service='naabu').exists())
+
+    def test_the_warning_names_offline_and_full_sentinels_and_a_system_problem_follows(self):
+        self.make_sentinel('edge-1', live=False)
+        for _ in range(local_egress.FALLBACK_WARN_AT):
+            local_egress.note_fallback('nmap', self.project.id)
+        warnings = [m for m in _messages() if 'fell back to local execution in the last hour' in m]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('5 stages fell back to local execution in the last hour: check your Sentinels (offline: edge-1)', warnings[0])
+        problems = []
+        local_egress.status(problems)
+        self.assertTrue(any(p.startswith('egress: 5 stages fell back') for p in problems))
+        local_egress.note_fallback('nmap', self.project.id)
+        self.assertEqual(len([m for m in _messages() if 'fell back to local execution in the last hour' in m]), 1)  # once per hour
+
+
+# --- Sentinels are never paced ----------------------------------------------------------------------------------------------
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:4/hour', 'CVENGINE_LOCAL_SKIP_PORTS': '25'})
+class SentinelNotPacedTests(Clean, _ScanFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.make_scan(['192.0.2.10'])
+
+    def test_a_sentinel_naabu_chunk_asks_neither_the_governor_nor_the_skip_list(self):
+        from agentapi import sentinel_dispatch
+        targets = []
+
+        def many(project, kind, chunks, **kwargs):
+            targets.extend(chunks)
+            return (x for x in [(0, {'ports': {'192.0.2.10': [22, 25]}})])
+        with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
+                mock.patch.object(sentinel_dispatch, 'dispatch_many', side_effect=many), \
+                mock.patch.object(local_egress, 'take') as take, mock.patch('cveFeed.naabu_scan.run_naabu') as local:
+            found = sentinel_dispatch.wrap_naabu_runner(self.project, self.scan)(['192.0.2.10'])
+        self.assertEqual(found, {'192.0.2.10': [22, 25]})  # port 25 from a Sentinel is kept
+        self.assertEqual(targets, [['192.0.2.10']])
+        take.assert_not_called()
+        local.assert_not_called()
+
+
+# --- the configMaxxing card ----------------------------------------------------------------------------------------------------
+
+class TunableTests(Clean, SimpleTestCase):
+    def test_the_defaults_equal_the_module_constants(self):
+        from cveFeed import tunables
+        self.assertEqual(tunables.BY_KEY['egress_port25_per_hour'].default, local_egress.DEFAULT_PORT25_PER_HOUR)
+        self.assertEqual(local_egress.parse_budgets(local_egress.DEFAULT_BUDGETS)[25], local_egress.DEFAULT_PORT25_PER_HOUR)
+        self.assertEqual(tunables.BY_KEY['fallback_nmap_per_hour'].default, local_egress.DEFAULT_FALLBACK_NMAP_PER_HOUR)
+        self.assertEqual(tunables.BY_KEY['fallback_naabu_per_hour'].default, local_egress.DEFAULT_FALLBACK_NAABU_PER_HOUR)
+        self.assertFalse(any(tunables.BY_KEY[k].auto_tunable for k in ('egress_port25_per_hour', 'fallback_nmap_per_hour', 'fallback_naabu_per_hour')))
+
+
+# --- the connection log --------------------------------------------------------------------------------------------------------
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:8/hour'})
+class ConnectionLogTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        os.environ.pop('CVENGINE_LOCAL_PORT25_PER_HOUR', None)
+        for name in ('CVENGINE_EGRESS_LOG_DAYS', 'CVENGINE_EGRESS_LOG_MAX', 'CVENGINE_EGRESS_LOG_PORTS'):
+            os.environ.pop(name, None)
+
+    def test_one_record_per_address_and_logged_port_saying_exact_or_estimated_sent_or_paced(self):
+        org = Org.objects.create(name='R', slug='rec-org')
+        project = Project.objects.create(name='R', slug='rec-p', insert_date=timezone.now(), org=org)
+        with local_egress.context(kind='nmap', project=project.id, scan_id=9):
+            local_egress.record_nmap(nmap_scan.FAST_FLAGS, ['198.51.100.1', '198.51.100.2'])  # an external tool: estimated
+            local_egress.plan(['198.51.100.1', '198.51.100.2', '198.51.100.3'], {25}, 'nmap')  # 2 granted, 1 paced
+        local_egress.record_one(465, 'route-probe', address='198.51.100.4')  # in-process: exact
+        local_egress.record_one(443, 'route-probe', address='198.51.100.4')  # not a logged port
+        records = local_egress.connection_log()['records']
+        rows = sorted((r['address'], r['port'], r['mode'], r['outcome'], r['kind'], r['project'], r['scan_id']) for r in records)
+        self.assertEqual(rows, [
+            ('198.51.100.1', 25, 'estimated', 'sent', 'nmap', project.id, 9), ('198.51.100.1', 465, 'estimated', 'sent', 'nmap', project.id, 9),
+            ('198.51.100.1', 587, 'estimated', 'sent', 'nmap', project.id, 9),
+            ('198.51.100.2', 25, 'estimated', 'sent', 'nmap', project.id, 9), ('198.51.100.2', 465, 'estimated', 'sent', 'nmap', project.id, 9),
+            ('198.51.100.2', 587, 'estimated', 'sent', 'nmap', project.id, 9),
+            ('198.51.100.3', 25, 'exact', 'paced', 'nmap', project.id, 9),
+            ('198.51.100.4', 465, 'exact', 'sent', 'route-probe', None, None)])
+
+    def test_an_in_process_connection_is_logged_exactly_with_its_address(self):
+        from cveFeed import pinned_transport
+        sock = mock.Mock()
+        with mock.patch.object(pinned_transport.socket, 'socket', return_value=sock), \
+                mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True):
+            pinned_transport.open_socket(((2, ('198.51.100.7', 587)),), 3, proxy=None)
+        (record,) = local_egress.connection_log()['records']
+        self.assertEqual((record['address'], record['port'], record['mode'], record['outcome']), ('198.51.100.7', 587, 'exact', 'sent'))
+
+    def test_filters_and_pages(self):
+        for i in range(5):
+            local_egress.log_connections([f'198.51.100.{i}'], [25 if i % 2 else 587], 'nmap', project=1 if i < 3 else 2, now=T0 + i)
+        self.assertEqual([r['address'] for r in local_egress.connection_log(port=25)['records']], ['198.51.100.3', '198.51.100.1'])
+        self.assertEqual([r['address'] for r in local_egress.connection_log(project=2)['records']], ['198.51.100.4', '198.51.100.3'])
+        self.assertEqual([r['address'] for r in local_egress.connection_log(since=T0 + 1, until=T0 + 2)['records']], ['198.51.100.2', '198.51.100.1'])
+        first = local_egress.connection_log(limit=2)
+        second = local_egress.connection_log(limit=2, cursor=first['next'])
+        third = local_egress.connection_log(limit=2, cursor=second['next'])
+        self.assertEqual([r['address'] for page in (first, second, third) for r in page['records']], [f'198.51.100.{i}' for i in (4, 3, 2, 1, 0)])
+
+    def test_rotation_by_age_and_by_size(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_EGRESS_LOG_DAYS': '14'}):
+            local_egress.log_connections(['198.51.100.1'], [25], 'nmap', now=T0)
+            local_egress.log_connections(['198.51.100.2'], [25], 'nmap', now=T0 + 13 * 86400)
+            self.assertEqual(len(local_egress.connection_log()['records']), 2)
+            local_egress.log_connections(['198.51.100.3'], [25], 'nmap', now=T0 + 15 * 86400)  # the first one is now older than 14 days
+        self.assertEqual([r['address'] for r in local_egress.connection_log()['records']], ['198.51.100.3', '198.51.100.2'])
+        with mock.patch.dict(os.environ, {'CVENGINE_EGRESS_LOG_MAX': '100'}):
+            local_egress.log_connections([f'203.0.113.{i}' for i in range(1, 151)], [25], 'naabu', now=T0 + 16 * 86400)
+            records = local_egress.connection_log(limit=1000)['records']
+        self.assertEqual(len(records), 100)  # the cap: the oldest are dropped first
+        self.assertEqual(records[-1]['address'], '203.0.113.51')
+
+    def test_only_logged_ports_are_logged_and_the_list_is_configurable(self):
+        local_egress.log_connections(['198.51.100.1'], [23, 3389, 443], 'nmap')
+        self.assertEqual(local_egress.connection_log()['records'], [])
+        with mock.patch.dict(os.environ, {'CVENGINE_EGRESS_LOG_PORTS': '3389'}):
+            local_egress.log_connections(['198.51.100.1'], [25, 3389], 'nmap')
+            self.assertEqual([r['port'] for r in local_egress.connection_log()['records']], [3389])
+
+    def test_admin_only_over_rest_and_mcp_and_the_csv_export(self):
+        from agentapi.auth import create_token
+        from django.test import Client
+
+        from tests.test_agentapi import call, tool_call
+        from tests.test_tenancy import client_for
+        org = Org.objects.create(name='L', slug='log-org')
+        project = Project.objects.create(name='L', slug='log-p', insert_date=timezone.now(), org=org)
+        local_egress.log_connections(['198.51.100.9'], [25], 'naabu', mode=local_egress.ESTIMATED, project=project.id, scan_id=4)
+        root = User.objects.create_superuser('egress-root', 'r@example.test', 'x')
+        member = User.objects.create_user('egress-member', password='x')
+        _, root_token = create_token(root, 'r')
+        _, member_token = create_token(member, 'm')
+        status, data = call(root_token, 'GET', '/api/v1/egress/connections?port=25&project=log-p')
+        self.assertEqual(status, 200)
+        self.assertEqual([(r['address'], r['project'], r['mode']) for r in data['records']], [('198.51.100.9', 'log-p', 'estimated')])
+        self.assertIn('estimated', data['note'])
+        self.assertEqual(call(member_token, 'GET', '/api/v1/egress/connections')[0], 403)
+        error, data = tool_call(root_token, 'list_egress_connections', {'port': 25})
+        self.assertFalse(error)
+        self.assertEqual(data['records'][0]['address'], '198.51.100.9')
+        self.assertTrue(tool_call(member_token, 'list_egress_connections')[0])
+        response = Client().get('/api/v1/egress/connections?format=csv', HTTP_AUTHORIZATION=f'Bearer {root_token}')
+        self.assertEqual((response.status_code, response['Content-Type']), (200, 'text/csv; charset=utf-8'))
+        lines = response.content.decode().splitlines()
+        self.assertEqual(lines[0], 'time_utc,destination_address,destination_port,outcome,exact_or_estimated,tool,project,scan_id')
+        self.assertTrue(lines[1].endswith(',198.51.100.9,25,sent,estimated,naabu,log-p,4'))
+        self.assertEqual(Client().get('/api/v1/egress/connections?format=csv', HTTP_AUTHORIZATION=f'Bearer {member_token}').status_code, 403)
+        page = client_for(root).get('/cve/api/settings/egress/connections.csv')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('198.51.100.9', page.content.decode())
+        self.assertEqual(client_for(member).get('/cve/api/settings/egress/connections.csv').status_code, 403)

@@ -170,6 +170,11 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
         flags = ['-6', *[f for f in flags if f != '-6']]
     from targetApp.target_types import refuse_local
     refuse_local('nmap')
+    flags = _local_flags(flags, targets)
+    if flags is None:  # every port asked for is on the opt-in skip list: nothing is sent, and no host is reported
+        return EMPTY_REPORT
+    from cveFeed import local_egress
+    local_egress.record_nmap(flags, targets)
     from reNgine import resources
     timeout = HOST_GROUPS_ALLOWED * _minutes(host_timeout) * 60 + PROCESS_TIMEOUT_BUFFER
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
@@ -196,11 +201,48 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
         os.unlink(path)
 
 
+EMPTY_REPORT = '<?xml version="1.0"?>\n<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>\n'
+
+
+def _local_flags(flags, targets=()):
+    """``flags`` for a run on THIS server: unchanged unless the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``) is set, in which case its ports
+    leave every ``-p`` list and are named in ``--exclude-ports`` (one activity line says so). None when nothing else was asked for. A Sentinel's
+    nmap never comes through here."""
+    from cveFeed import local_egress
+    skip = local_egress.skipped_ports()
+    if not skip:
+        return list(flags)
+    trimmed = local_egress.nmap_exclude(flags, skip)
+    if trimmed != list(flags):
+        local_egress.note_skipped('nmap', skip, targets)
+    return trimmed
+
+
+def _target_port(args):
+    """The ports of a single-target nmap command (``-p 25``), for the governor."""
+    if '-p' in args and args.index('-p') + 1 < len(args):
+        from cveFeed import local_egress
+        return sorted(local_egress._expand(args[args.index('-p') + 1]) or ())
+    return []
+
+
 def run_nmap_args(args, label, timeout):
     """Run nmap with exactly ``args`` (after the binary) and return its stdout, waiting its turn for memory like run_nmap_xml. Used by
     the validation check, which must be able to show the exact command it ran. Raises subprocess.TimeoutExpired, or
-    reNgine.resources.MemoryKill if it had to be stopped to protect the container."""
+    reNgine.resources.MemoryKill if it had to be stopped to protect the container. Raises ``local_egress.PortHeld`` (an OSError) without
+    running anything when its port is on the opt-in skip list or over its hourly budget (the probes and validation checks run one port)."""
+    from cveFeed import local_egress
     from reNgine import resources
+    ports = _target_port(args)
+    target = args[-1] if args and not str(args[-1]).startswith('-') else label
+    if 0 < len(ports) <= 16:
+        for port in ports:
+            reason = local_egress.admit_one(port, 'nmap', target)
+            if reason:
+                if reason == 'skipped':
+                    local_egress.note_skipped('nmap', {port})
+                raise local_egress.PortHeld(port, reason)
+    local_egress.record_nmap(args, [target])
     with resources.heavy_job('nmap', label=label) as job:
         proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         job.attach(proc)
@@ -457,6 +499,32 @@ def _plural(n, word):
     return f'{n} {word}{"s" if n != 1 else ""}'
 
 
+def _planned_ports(local_ports, flags):
+    """``address -> ports`` the fingerprinting pass would probe: naabu's open ports for an address it answered for, else the pass's own list."""
+    from cveFeed import local_egress
+    listed = local_egress._expand(flags[flags.index('-p') + 1]) if '-p' in flags else None
+    default = frozenset(listed) if listed is not None else frozenset(local_egress.TOP_PORTS_WATCHED)
+
+    def ports(ip):
+        if local_ports is not None and ip in local_ports:
+            return local_ports[ip]
+        return default
+    return ports
+
+
+def _groups(targets, topped_up, held):
+    """``(addresses, os_probe, held ports)`` groups of a pass, in a stable order: the plain and the topped-up addresses as before, each split
+    by the ports the governor held back for them (none in the common case, which is then exactly the two groups of before)."""
+    out = []
+    for os_probe, members in ((True, [i for i in targets if i not in topped_up]), (False, [i for i in targets if i in topped_up])):
+        by_keep = {}
+        for ip in members:
+            by_keep.setdefault(held.get(ip, frozenset()), []).append(ip)
+        for keep in sorted(by_keep, key=lambda k: (len(k), sorted(k))):
+            out.append((by_keep[keep], os_probe, keep))
+    return out
+
+
 def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=False, dispatch=True):
     """Fingerprint the scan's discovered IPs that no scan has covered recently, in one ``-O -sV --top-ports 1000`` pass (the full-port
     sweep is the background task in cveFeed.fullscan). Only IPs are scanned, each at most once per TTL across all scans (see
@@ -509,38 +577,55 @@ def run_nmap_for_scan(scan_id, runner=run_nmap_xml, naabu_runner=None, force=Fal
             note += f' ({busy} being scanned by another scan)' if busy else ''
             fast_running = activity.log('run_check', f'nmap is fingerprinting {len(targets)} new IP(s) for {domain.name}{note} '
                                         f'(-O -sV, the top 1000 ports plus {len(EXTRA_PORTS)} high-risk ones), scan #{scan_id}', project=project, status='running', scan_id=scan.id)
+            from cveFeed import local_egress
+            deferred = []  # addresses the local fallback cap held back: not scanned here now, and not recorded, so they stay due
             try:
-                effective_naabu_runner = naabu_runner
-                sentinel_targets, sentinel_totals = targets, {'ports': 0, 'hosts_with_os': 0}
-                if dispatch:
-                    from agentapi import sentinel_dispatch
-                    if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
-                        effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
-                ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
-                local_ports = ports_by_ip
-                if dispatch:
-                    sentinel_targets, sentinel_totals, local_ports = sentinel_dispatch.try_nmap(
-                        domain.project, scan, targets, org_id=org_id, ports_by_ip=ports_by_ip)
-                flags = fast_flags()
-                # An address a Sentinel already fingerprinted has its operating system from the Sentinel: its top-up pass over the ports the
-                # Sentinel missed gets no closed probe port, so nmap's OS detection does not run and cannot replace that guess with a weaker one.
-                topped_up = {ip for ip in sentinel_targets if local_ports is not None and ports_by_ip is not None and ip in local_ports
-                             and local_ports[ip] != ports_by_ip.get(ip)}
-                fast = {'ports': 0, 'hosts_with_os': 0}
-                for group, os_probe in (([i for i in sentinel_targets if i not in topped_up], True), ([i for i in sentinel_targets if i in topped_up], False)):
-                    if not group:
-                        continue
-                    done = scan_in_chunks(runner, group, flags, HOST_TIMEOUT_FAST,
-                                          flags_for=naabu_scan.flags_for(local_ports, flags, os_probe) if local_ports is not None else None,
-                                          org_id=org_id)
-                    fast = {key: fast.get(key, 0) + done.get(key, 0) for key in set(fast) | set(done)}
-                fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
+                with local_egress.context(kind='nmap', project=project, org_id=org_id, scan_id=scan.id):
+                    effective_naabu_runner = naabu_runner
+                    sentinel_targets, sentinel_totals = targets, {'ports': 0, 'hosts_with_os': 0}
+                    had_sentinel = False
+                    if dispatch:
+                        from agentapi import sentinel_dispatch
+                        if naabu_runner is None:  # a caller's own override (tests) is never second-guessed
+                            effective_naabu_runner = sentinel_dispatch.wrap_naabu_runner(domain.project, scan)
+                        had_sentinel = sentinel_dispatch.any_scanner_for(domain.project, 'nmap')
+                    ports_by_ip = naabu_scan.discover(targets, scan, effective_naabu_runner)
+                    local_ports = ports_by_ip
+                    if dispatch:
+                        sentinel_targets, sentinel_totals, local_ports = sentinel_dispatch.try_nmap(
+                            domain.project, scan, targets, org_id=org_id, ports_by_ip=ports_by_ip)
+                    flags = fast_flags()
+                    # An address a Sentinel already fingerprinted has its operating system from the Sentinel: its top-up pass over the ports the
+                    # Sentinel missed gets no closed probe port, so nmap's OS detection does not run and cannot replace that guess with a weaker one.
+                    topped_up = {ip for ip in sentinel_targets if local_ports is not None and ports_by_ip is not None and ip in local_ports
+                                 and local_ports[ip] != ports_by_ip.get(ip)}
+                    # Addresses no Sentinel reported although one was eligible fall back to this server: at most so many such runs an hour
+                    # (cveFeed.local_egress.admit_fallback); over it they are not scanned here and stay due. A top-up of a Sentinel's pass is not one.
+                    fell_back = [ip for ip in sentinel_targets if ip not in topped_up]
+                    if had_sentinel and fell_back and not local_egress.admit_fallback('nmap', project):
+                        deferred, sentinel_targets = fell_back, [ip for ip in sentinel_targets if ip in topped_up]
+                    # The egress governor (cveFeed.local_egress): a budgeted port (25 by default) over its hourly budget is left out of this
+                    # pass for the addresses beyond the budget and probed later by the paced catch-up pass. Within budget nothing changes.
+                    held = local_egress.plan(sentinel_targets, _planned_ports(local_ports, flags), 'nmap')
+                    fast = {'ports': 0, 'hosts_with_os': 0}
+                    for group, os_probe, keep in _groups(sentinel_targets, topped_up, held):
+                        group_flags = local_egress.nmap_exclude(flags, keep) if keep else flags
+                        group_ports = local_ports
+                        if keep and local_ports is not None:
+                            group_ports = {ip: [p for p in ports if p not in keep] for ip, ports in local_ports.items()}
+                        done = scan_in_chunks(runner, group, group_flags, HOST_TIMEOUT_FAST,
+                                              flags_for=naabu_scan.flags_for(group_ports, group_flags, os_probe) if group_ports is not None else None,
+                                              org_id=org_id)
+                        fast = {key: fast.get(key, 0) + done.get(key, 0) for key in set(fast) | set(done)}
+                    fast = {key: fast.get(key, 0) + sentinel_totals.get(key, 0) for key in set(fast) | set(sentinel_totals)}
             except Exception as exc:  # noqa: BLE001 - a bad nmap run must not take the rest of the pipeline down
                 logger.exception('nmap fast scan failed for scan %s', scan_id)
-                ledger.record('nmap-fast', targets, project, scan, 'failed')
+                ledger.record('nmap-fast', [t for t in targets if t not in set(deferred)], project, scan, 'failed')
                 activity.settle(fast_running, 'failed', message=f'nmap failed for {domain.name}: {exc}')
                 return {**result, 'error': str(exc)}
-            ledger.record('nmap-fast', targets, project, scan)
+            ledger.record('nmap-fast', [t for t in targets if t not in set(deferred)], project, scan)
+            if deferred:
+                result['deferred'] = len(deferred)
             activity.settle(fast_running, 'done', message=(
                 f'nmap fingerprinted {domain.name}: {_plural(fast["ports"], "service")}, '
                 f'{fast["hosts_with_os"]} OS guess{"es" if fast["hosts_with_os"] != 1 else ""}'), **fast)

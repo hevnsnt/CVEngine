@@ -50,8 +50,9 @@ Tunable = namedtuple('Tunable', 'key label help group env default low high unit 
                      'auto_tunable auto_min auto_max auto_step auto_sense auto_optimistic',
                      defaults=(LIVE, False, None, None, None, None, None, None, 1, 'more', None))
 HOURS_CEILING = 24 * 365 * 10  # an environment value in hours is held to ten years before it reaches a timedelta
-USED_SINCE = {'utc_day': 'since UTC midnight', 'rolling_day': 'in the last 24 hours'}
-WINDOW_TEXT = {'run': 'at the next run', 'utc_day': 'at the next UTC midnight', 'rolling_day': 'as the oldest of the last 24 hours ages out'}
+USED_SINCE = {'utc_day': 'since UTC midnight', 'rolling_day': 'in the last 24 hours', 'utc_hour': 'this hour'}
+WINDOW_TEXT = {'run': 'at the next run', 'utc_day': 'at the next UTC midnight', 'rolling_day': 'as the oldest of the last 24 hours ages out',
+               'utc_hour': 'at the start of each hour'}
 
 GROUPS = [
     Group('ai_spend', 'AI spend',
@@ -64,6 +65,10 @@ GROUPS = [
     Group('autotune_pace', 'Auto-tuning pace',
           'The auto-tuner aims high for this machine first, backs off at once on trouble, then probes upward slowly. These say how slowly, and how much '
           'history it reads. Longer waits make it calmer, shorter ones let it follow a changing load sooner. The AI advisor\'s own budget is under AI spend.'),
+    Group('egress', 'Outbound connections',
+          'What this server\'s own scanners may send when a stage runs here instead of on a Sentinel. Hosting providers watch outbound port 25 '
+          'and may block it after a burst; these numbers pace it (nothing is dropped: a port over budget is probed later) and cap how often a stage '
+          'falls back to local execution. Sentinels are never paced by these. The counts per port are in get_system_status (egress).'),
 ]
 
 TUNABLES = [
@@ -136,6 +141,19 @@ TUNABLES = [
             'How often the auto-tuner asks the AI advisor for a second opinion, when an AI provider is set up and the advisor is on. Between questions, '
             'and whenever the advisor is unavailable or over its daily budget, the deterministic controller tunes alone.',
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
+    Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
+            'New connections this server\'s own scanners may open to port 25 in an hour, shared by every worker (at most a quarter of it at once). '
+            'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
+            'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
+            'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
+    Tunable('fallback_nmap_per_hour', 'Local nmap fallback runs per hour',
+            'How many nmap stages may run on this server in an hour because no Sentinel took them in time. Over it, the addresses wait for the '
+            'next run instead. 0 is unlimited.',
+            'egress', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR', 30, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
+    Tunable('fallback_naabu_per_hour', 'Local naabu fallback runs per hour',
+            'How many naabu port sweeps may run on this server in an hour because no Sentinel took them in time. Over it, the addresses wait for '
+            'the next run instead. 0 is unlimited.',
+            'egress', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR', 10, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}
 GROUP_BY_ID = {g.id: g for g in GROUPS}
@@ -436,8 +454,11 @@ def usage_today():
     from cveFeed import triage, validation
     out = {}
     from cveFeed import autotune
+    from cveFeed import local_egress
     for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
-                      ('autotune_ai_max_per_day', autotune.advisor_calls_today)):
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25)),
+                      ('fallback_nmap_per_hour', lambda: local_egress.fallback_runs_this_hour('nmap')),
+                      ('fallback_naabu_per_hour', lambda: local_egress.fallback_runs_this_hour('naabu'))):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001

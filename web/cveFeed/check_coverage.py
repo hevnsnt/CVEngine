@@ -862,6 +862,7 @@ EXCLUDED = {
         'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
         'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
+        'egress-catch-up': 'the paced pass over ports the egress governor held back (cveFeed.local_egress); it finishes the nmap pass of an address, whose own check (nmap-fast) is already judged',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
@@ -921,6 +922,25 @@ def _sentinel_online(h, ev):
     return state
 
 
+SKIP_AWARE = ('nmap', 'naabu', 'full-ports', 'tls-audit')  # the checks a port on the opt-in skip list (CVENGINE_LOCAL_SKIP_PORTS) leaves incomplete when run here
+
+
+def _skip_note(check_id, h):
+    """``skipped on the server: port 25`` for a port-scanning check while the opt-in skip list is set (the TLS audit only for a host that has a
+    skipped TLS port), else ''. The check's state is unchanged: what a Sentinel ran still counts, and nothing pretends the server ran it."""
+    if check_id not in SKIP_AWARE:
+        return ''
+    from cveFeed import local_egress
+    skip = local_egress.skipped_ports()
+    if not skip:
+        return ''
+    if check_id == 'tls-audit':
+        skip = skip & set(_tls_numbers(h, starttls=True))
+        if not skip:
+            return ''
+    return f'skipped on the server: port {", ".join(str(p) for p in sorted(skip))}'
+
+
 def coverage(h, ev, rich=False, paused=''):
     """``{'done', 'applicable', 'paused', 'checks': [...]}`` for one host. ``paused`` (``excluded`` or ``archived``) makes every check not
     apply: an excluded host is never scanned and an archived one has left scan scheduling."""
@@ -939,6 +959,9 @@ def coverage(h, ev, rich=False, paused=''):
             entry['detail'] = plan
         else:
             state, last, detail = _judge(check, plan, ev.now)
+            skipped = _skip_note(check.id, h)
+            if skipped:
+                detail = f'{detail}; {skipped}' if detail else skipped
             if h.internal and state == 'due' and not last and not _sentinel_online(h, ev):
                 detail = f'{detail}; no Sentinel inside the network is online' if detail else 'no Sentinel inside the network is online'
             entry.update(state=state, last_run=last.isoformat() if last else None, detail=detail)

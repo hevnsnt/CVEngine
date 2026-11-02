@@ -161,6 +161,14 @@ class _Dispatch:
     def finished(self):
         return self.task.status in TERMINAL
 
+    def _fell_back(self):
+        """Count one task that falls back to local execution (``cveFeed.local_egress.note_fallback``: the warning when it keeps happening)."""
+        try:
+            from cveFeed.local_egress import note_fallback
+            note_fallback(self.kind, getattr(self.project, 'pk', self.project))
+        except Exception:  # noqa: BLE001 - bookkeeping never changes the dispatch
+            pass
+
     def step(self, now, no_sentinel_left=False):
         """Act on the task as it was just read: start the completion clock once it is claimed, and give it up (expire it, so the stage falls back)
         when the wait for a Sentinel or for its report ran out. Returns True once the task is over. ``no_sentinel_left`` is set by the loop
@@ -172,6 +180,7 @@ class _Dispatch:
         if no_sentinel_left and task.status == 'queued':
             self.never_claimed = True  # the last live Sentinel went away while the task waited: nothing will take it
             sentinel_broker.expire(task, 'no live Sentinel is left to take the task; the stage fell back to local execution')
+            self._fell_back()
             return True
         if task.status in ('claimed', 'running') and self.run_deadline is None:
             self.run_deadline = now + self.timeout
@@ -188,9 +197,11 @@ class _Dispatch:
             self.never_claimed = True
             sentinel_broker.expire(task, ('no Sentinel slot freed up in time; the stage fell back to local execution' if self.busy
                                           else 'no Sentinel claimed the task in time; the stage fell back to local execution'))
+            self._fell_back()
             return True
         if self.run_deadline is not None and now >= self.run_deadline:
             sentinel_broker.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
+            self._fell_back()
             return True
         return False
 
@@ -527,9 +538,16 @@ def wrap_naabu_runner(project, scan, timeout=None):
                     unserved.append(index)
                 else:
                     found.update(dict(result.get('ports') or {}))
+        from cveFeed.local_egress import admit_fallback
+        from cveFeed.naabu_scan import PortMap
+        deferred = []
         if unserved:
-            found.update(run_naabu([ip for index in sorted(unserved) for ip in chunks[index]]))
-        return found
+            left = [ip for index in sorted(unserved) for ip in chunks[index]]
+            if admit_fallback('naabu', getattr(project, 'pk', project)):
+                found.update(run_naabu(left))
+            else:  # over the local fallback cap: not scanned here now; discover leaves them due for the next run
+                deferred = left
+        return PortMap(found, deferred=deferred)
     return runner
 
 
