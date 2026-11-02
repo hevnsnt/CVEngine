@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from unittest import mock
 
@@ -37,6 +38,12 @@ class FeedAnnouncementTests(TestCase):
 			patcher.start()
 			self.addCleanup(patcher.stop)
 		Notification.objects.create(send_to_slack=True, slack_hook_url='https://hooks.invalid/x')
+		# The host's only evidence is its nginx banner, a version-only match: since 1.3.2 that is smoke on the host, never paged as fire
+		# (test_version_only_heat). These tests are about the announcement's plumbing, so they run with the cap the owner can set to
+		# restore the old rating; test_with_the_default_cap_a_banner_version_alone_is_not_paged covers the default.
+		cap = mock.patch.dict(os.environ, {'CVENGINE_VERSION_ONLY_MAX_HEAT': 'fire'})
+		cap.start()
+		self.addCleanup(cap.stop)
 
 	def cve(self, affected=NGINX, cve_id='CVE-2099-60'):
 		return CVEEntry.objects.create(cve_id=cve_id, kev=True, cvss=9.8, published_at=timezone.now(), affected=affected)
@@ -51,6 +58,17 @@ class FeedAnnouncementTests(TestCase):
 		self.assertEqual(len(self.slack()), 1)
 		self.assertIn('1 new fire-tier CVE match on 1 host', self.slack()[0])
 		self.assertTrue(CVEMatch.objects.get().scan_history_id)  # the case the old scan=None filter could never see
+
+	def test_with_the_default_cap_a_banner_version_alone_is_not_paged(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_VERSION_ONLY_MAX_HEAT': ''}):
+			cve = self.cve()
+			auto_fire_new_cves([cve.pk])
+			match = CVEMatch.objects.get()
+			self.assertEqual((match.version_in_range, match.template_result, match.source), (True, '', 'port'))
+			self.assertEqual(self.slack(), [])
+			CVEMatch.objects.update(template_result='vulnerable')  # a template test confirmed it: now it is fire, and pageable
+			self.assertTrue(notify.fire_matches(timezone.now() - timedelta(minutes=5)))
+		self.assertIn('1 new fire-tier CVE match on 1 host', self.slack()[0])
 
 	def test_with_auto_fire_off_only_the_new_cves_are_announced_not_the_backlog(self):
 		self.cve(cve_id='CVE-2099-61')  # an older hot CVE nobody fired
@@ -112,6 +130,7 @@ class FeedAnnouncementTests(TestCase):
 		cve = self.cve()
 		auto_fire_new_cves([cve.pk])
 		self.sent.clear()
+		CVEMatch.objects.update(fire_notified_at=None)  # a match is paged as fire once (1.3.2): forget that page to test the scan filter again
 		other = ScanHistory.objects.create(domain=self.scan.domain, scan_type=self.scan.scan_type, scan_status=1, start_scan_date=timezone.now())
 		self.assertFalse(notify.fire_matches(timezone.now() - timedelta(minutes=5), other))
 		self.assertTrue(notify.fire_matches(timezone.now() - timedelta(minutes=5), self.scan))

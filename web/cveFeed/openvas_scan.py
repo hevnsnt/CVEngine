@@ -484,6 +484,8 @@ def _names(items):
 
 
 HOT = ('fire', 'smoke')  # the heats OpenVAS is spent on: a run is slow (hours per host), so it goes where it matters
+# OpenVAS is a confirmer: it selects and orders hosts by the validation heat (threat.validation_heat, no version-only cap), as hot_validation
+# does, so a known-exploited match that rests on its version alone keeps its Fire priority here, whatever CVENGINE_VERSION_ONLY_MAX_HEAT says
 HOT_WINDOW = 500  # hot-looking names looked at in one step, per project
 EPOCH_DAYS = 36500
 
@@ -500,7 +502,7 @@ def hot_names(project_id, limit=HOT_WINDOW):
     closed = ('fixed', 'accepted_risk')
     # The current inventory only (not every scan's copy of a name), hottest first, so a large project's fire hosts fall inside the window.
     names = set(CVEMatch.objects.filter(latest_scan_q('subdomain__'), subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')
-                .exclude(remediation_status__in=closed).annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank__gte=2)
+                .exclude(remediation_status__in=closed).annotate(heat_rank=match_heat_rank_expr(capped=False)).filter(heat_rank__gte=2)
                 .values('subdomain__name').annotate(top=Max('heat_rank')).order_by('-top', 'subdomain__name').values_list('subdomain__name', flat=True)[:limit])
     names |= set(Vulnerability.objects.filter(latest_scan_q('subdomain__'), target_domain__project_id=project_id, open_status=True, severity__gte=2)
                  .exclude(remediation_status__in=closed).values('subdomain__name').annotate(top=Max('severity')).order_by('-top', 'subdomain__name')
@@ -509,8 +511,9 @@ def hot_names(project_id, limit=HOT_WINDOW):
 
 
 def host_heat(project_id, names):
-    """``{name: (heat, (fire reasons, smoke reasons))}`` for each of ``names`` that is a host of the project: the host card's own colour (its
-    CVE matches as they apply to it and its open findings, hottest first), read from the latest stored row of the name."""
+    """``{name: (heat, (fire reasons, smoke reasons))}`` for each of ``names`` that is a host of the project: the host card's rules (its CVE matches
+    as they apply to it and its open findings, hottest first), read from the latest stored row of the name, with each CVE match rated by its
+    validation heat (no version-only cap: OpenVAS is how such a match is confirmed, see ``HOT``)."""
     from agentapi import services
     from startScan.models import Subdomain
     wanted = sorted(_names(names))
@@ -520,7 +523,7 @@ def host_heat(project_id, names):
             .prefetch_related('cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage'))
     out = {}
     for sub in rows:
-        reasons = services._heat_reasons(sub)
+        reasons = services._heat_reasons(sub, capped=False)
         out[sub.name.lower()] = (services._host_heat(sub, reasons),
                                  (sum(1 for r in reasons if r['temp'] == 'fire'), sum(1 for r in reasons if r['temp'] == 'smoke')))
     return out

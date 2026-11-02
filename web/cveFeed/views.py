@@ -19,11 +19,11 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
-from cveFeed import match_policy, snapshot_cache
+from cveFeed import snapshot_cache
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
-from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_temperature
+from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_heat
 from startScan.models import OPEN_PORT_STATES, open_services
 from targetApp.target_types import is_public_address
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
@@ -80,7 +80,7 @@ def _host_tip(sub, live_matches, severities, aliases=()):
     host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
     worst = None
     for match in live_matches:
-        tier = match_temperature(_tier(match.cve_entry), match.cve_entry.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
+        tier = match_heat(match)
         if worst is None or TIER_RANK.get(tier, 0) > TIER_RANK.get(worst[1], 0):
             worst = (match.cve_entry.cve_id, tier)
     reasons = [r.get('label', '') for r in (sub.score_detail or [])][:3] if hasattr(sub, 'score_detail') else []
@@ -111,8 +111,9 @@ def graph_payload(domain_id=None, scan_id=None):
 
     from django.db.models import Prefetch
     # a match needs its CVE's tier fields only: never the prose columns
-    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev',
-                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry')
+    # (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
+    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev',
+                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status').select_related('cve_entry', 'triage')
     subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
         'ip_addresses', Prefetch('cve_matches', queryset=matches))
     if domain_id:
@@ -155,8 +156,8 @@ def graph_payload(domain_id=None, scan_id=None):
     sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
     if sibling_ids:
         for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
-                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
-                'cve_entry__exploit_db', 'cve_entry__cvss').select_related('cve_entry'):
+                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
+                'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status').select_related('cve_entry', 'triage'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
         for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .values_list('subdomain_id', 'severity', 'name'):
@@ -197,7 +198,7 @@ def graph_payload(domain_id=None, scan_id=None):
                     sev.append(severity)
         if status != 'vulnerable' and (live or sev):
             status = 'vulnerable'
-        tiers = [match_temperature(_tier(m.cve_entry), m.cve_entry.cvss, m.ai_verdict, m.distro_status, match_policy.version_unknown(m)) for m in live]
+        tiers = [match_heat(m) for m in live]
         heat = host_heat(status, tiers, sev)
         given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
@@ -330,6 +331,9 @@ def stats_payload():
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': CVEEntry.objects.count(),
         'matches': counts.exposed_matches().count(),
+        # the same matches as the Findings list draws them grouped: one script on sibling hosts is one row (cveFeed.finding_groups).
+        # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
+        **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings

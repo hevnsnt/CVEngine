@@ -152,8 +152,9 @@ class VersionUnknownTests(Fixture):
 		match = self.only_match()
 		self.assertEqual((match.version_in_range, match.evidence.get('unbounded')), (True, None))
 		self.assertFalse(match_policy.version_unknown(match))
-		self.assertEqual(self.heat_rank(), HEAT_RANK[FIRE])
-		self.assertEqual(self.host_score(), scoring.CVE_POINTS['fire'])
+		# judged on its version like any match: a version alone is smoke at most, KEV or not (1.3.2, test_version_only_heat)
+		self.assertEqual(self.heat_rank(), HEAT_RANK[SMOKE])
+		self.assertEqual(self.host_score(), scoring.CVE_POINTS['smoke'])
 		row = Triage.objects.get(match=match)
 		self.assertEqual((row.classification, row.status), ('', 'pending'))  # the old review state is gone with the old evidence
 		self.assertNotEqual(match.ai_reason, match_policy.REASON_VERSION_UNKNOWN)
@@ -181,8 +182,13 @@ class VersionUnknownTests(Fixture):
 		self.assertEqual((ranged.version_in_range, ranged.evidence.get('unbounded')), (True, None))
 		self.assertFalse(match_policy.version_unknown(ranged))
 		rank = CVEMatch.objects.annotate(h=match_heat_rank_expr()).filter(cve_entry=other).values_list('h', flat=True).get()
+		self.assertEqual(rank, HEAT_RANK[SMOKE])  # a version in the range alone: smoke at most, KEV or not (1.3.2)
+		self.assertEqual(self.host_score(), scoring.CVE_POINTS['smoke'] + 1)  # the ranged match plus one point for the unknown one
+		CVEMatch.objects.filter(pk=ranged.pk).update(template_result='vulnerable')  # hard evidence: now it is fire
+		rank = CVEMatch.objects.annotate(h=match_heat_rank_expr()).filter(cve_entry=other).values_list('h', flat=True).get()
 		self.assertEqual(rank, HEAT_RANK[FIRE])
-		self.assertEqual(self.host_score(), scoring.CVE_POINTS['fire'] + 1)  # the fire match plus one point for the unknown one
+		self.assertEqual(self.host_score(), scoring.CVE_POINTS['fire'] + 1)
+		CVEMatch.objects.filter(pk=ranged.pk).update(template_result='')  # back to the version alone for the triage below
 		p = provider()
 		p.complete.return_value = '{"classification": "likely", "reason": "banner matches"}'
 		match = triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain').filter(pk=ranged.pk))

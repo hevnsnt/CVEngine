@@ -251,6 +251,20 @@ class QueueAndMatchingTests(AgentBrokerTestCase):
 		self.assertIn('nothing for an agent to validate with', body['skipped'][0]['reason'])
 
 	def test_selector_queues_open_matches_by_tier_and_host(self):
+		# the KEV match rests on its version alone: since 1.3.2 it shows smoke (remediation follows the heat shown) but is fire work for
+		# validation (the validation heat has no version-only cap), so a validating agent still gets it first
+		_, body = call(self.t['alice'], 'POST', A, {'kind': 'remediate', 'tier': 'fire', 'host': 'win1'})[0:2]
+		self.assertEqual(body['queued'], [])
+		self.assertEqual([s['reason'] for s in body['skipped']], ['its tier is smoke, not fire'])
+		_, body = call(self.t['alice'], 'POST', A, {'kind': 'validate', 'tier': 'fire', 'host': 'win1'})[0:2]
+		self.assertEqual([t['host'] for t in body['queued']], ['win1.a.example'])
+		self.assertEqual(AgentTask.objects.get(match=self.m_win, kind='validate').priority, agent_tasks.PRIORITY['fire'])
+		_, body = call(self.t['alice'], 'POST', A, {'kind': 'remediate', 'tier': 'smoke', 'host': 'win1'})[0:2]
+		self.assertEqual([t['host'] for t in body['queued']], ['win1.a.example'])
+		self.assertEqual(AgentTask.objects.get(match=self.m_win, kind='remediate').priority, agent_tasks.PRIORITY['smoke'])
+		# with hard evidence it is fire for both
+		AgentTask.objects.all().delete()
+		CVEMatch.objects.filter(pk=self.m_win.pk).update(template_result='vulnerable')
 		_, body = call(self.t['alice'], 'POST', A, {'kind': 'remediate', 'tier': 'fire', 'host': 'win1'})[0:2]
 		self.assertEqual([t['host'] for t in body['queued']], ['win1.a.example'])
 

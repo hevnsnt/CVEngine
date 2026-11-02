@@ -2,12 +2,14 @@
 projects a user may see never lets one scope read another's numbers.
 
 Nothing here sleeps or waits on the wall clock. The snapshots' clock (``snapshot_cache._now``) and the bookkeeping clock around them (hot scopes,
-the refresher's heartbeat, the counters: ``_clock``) are one fake clock a test moves by hand; the entries' real expiry in Redis (tens of seconds)
+the refresher's heartbeat, the counters: ``_clock``) and the refresher's time budget (``live_refresh.time.monotonic``) are one fake clock a
+test moves by hand; the entries' real expiry in Redis (tens of seconds)
 is far longer than a test runs."""
 import contextlib
 import json
 import os
 import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -57,6 +59,13 @@ class Fresh(World):
             patch = mock.patch.object(snapshot_cache, name, self.clock)
             patch.start()
             self.addCleanup(patch.stop)
+        # The refresher's time budget (2.5 s a run) and its overrun check read ``time.monotonic``: on the real clock a run that computes the twenty
+        # scopes of the isolation test (about 2 s here) runs out of budget on a slower or busier machine, leaves the last scopes to the requests
+        # and fails a test that expects every scope refreshed in one run. Its monotonic clock is the fake one too, so a run takes no time unless
+        # a test says so (the budget tests below patch it with their own ticks).
+        patch = mock.patch.object(live_refresh, 'time', SimpleNamespace(monotonic=self.clock, sleep=time.sleep))
+        patch.start()
+        self.addCleanup(patch.stop)
         patch = mock.patch.object(membership_cache, 'CACHE_IN_TRANSACTION', True)  # a test case is one open transaction: these tests are about the cache
         patch.start()
         self.addCleanup(patch.stop)

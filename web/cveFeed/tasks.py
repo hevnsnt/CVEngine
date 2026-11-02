@@ -2009,18 +2009,21 @@ def generate_report(self, export_id):
 
 
 @app.task(name="rescore_all_hosts", bind=False, queue="cve_feed_queue")
-def rescore_all_hosts():
+def rescore_all_hosts(force=False):
     """Daily: recompute every host's score (the latest finished scan's hosts and the certificate watch's), per project, 500 at a
     time and at most MAX_RESCORE_HOSTS a project, least recently scored first, so "new this week" decays and CVE feed updates
-    land on the score."""
+    land on the score. ``force`` (a changed version-only heat cap, ``scoring.rescore_if_heat_cap_changed``) runs it even when another
+    pass holds the sweep claim, and takes the claim afresh so the daily pass does not repeat it within the hour."""
     from django.db.models import F
 
     from cveFeed import ledger, scoring
     from cveFeed.correlation import latest_scan_q
     from dashboard.models import Project
     from startScan.models import Subdomain
-    if not ledger.sweep_claim("rescore", 3600):
+    if not ledger.sweep_claim("rescore", 3600) and not force:
         return {"hosts": 0, "skipped": "another rescore is running"}
+    if force:
+        ledger.sweep_claim_renew("rescore", 3600)
     total = 0
     for project_id in Project.objects.values_list("id", flat=True):
         names = Subdomain.objects.filter(target_domain__project_id=project_id).filter(latest_scan_q()).order_by(

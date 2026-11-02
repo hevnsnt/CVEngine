@@ -13,7 +13,8 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
 * **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
-* **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view.
+* **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view. Counted per host: the same jQuery file on
+  six sibling hosts is six matches. ``match_group_count`` counts them as the grouped Findings list shows them (one row for the six).
 * **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
@@ -201,6 +202,14 @@ def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
+
+
+def match_group_count():
+    """``(rows, truncated)``: the exposed CVE matches (``exposed_matches``) counted as the grouped Findings list draws them, the same
+    client-side library file on sibling hosts of one site being one (``cveFeed.finding_groups``). One values() pass, capped like the
+    list's; ``truncated`` says the cap was reached, and the number is then not exact."""
+    from cveFeed import finding_groups
+    return finding_groups.row_count(exposed_matches())
 
 
 def actionable_findings(qs):

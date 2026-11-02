@@ -501,7 +501,9 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
     """Queue one match; returns why it was skipped, or None after adding the task to ``created``."""
     if not _open(match) or not match.subdomain_id:
         return 'the finding is closed or has no host'
-    match_tier = agent_tasks.tier_of(match)
+    # validation work is chosen and ordered by the validation heat (no version-only cap): a known-exploited match that rests on its version
+    # alone shows smoke but is fire work for a validating agent, because validation is how it earns fire. Remediation follows the heat shown.
+    match_tier = agent_tasks.validation_tier_of(match) if kind == 'validate' else agent_tasks.tier_of(match)
     if tier and match_tier != tier:
         return f'its tier is {match_tier}, not {tier}'
     if AgentTask.objects.filter(match=match, kind=kind, created_at__gte=timezone.now() - timedelta(days=1)).count() >= MAX_ATTEMPTS_PER_DAY:
@@ -515,7 +517,8 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
         with transaction.atomic():
             task = AgentTask.objects.create(
                 project=project, match=match, kind=kind, mode=task_mode, required_capabilities=needs, host=sub.name[:500],
-                os_family=agent_tasks.host_os_family(sub), ips=agent_tasks.host_ips(sub), priority=agent_tasks.PRIORITY.get(match_tier, 1),
+                os_family=agent_tasks.host_os_family(sub), ips=agent_tasks.host_ips(sub),
+                priority=agent_tasks.PRIORITY.get(match_tier, 1),
                 created_by=ctx.user)
     except IntegrityError:
         return 'already queued or in progress'
