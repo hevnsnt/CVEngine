@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import changes, correlation, scoring
-from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, HygieneFinding, RouteAuth
+from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, HygieneFinding, RouteAuth, Triage
 from cveFeed.tasks import rescore_all_hosts
 from cveFeed.views import graph_payload
 from dashboard.models import Org, Project, ProjectMembership
@@ -137,7 +137,11 @@ class RescoreTests(ChangeFixture, TestCase):
 			sub.ip_addresses.add(self.ip)
 			self.rows.append(sub)
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, cvss=9.8, title='t', published_at=now)
-		CVEMatch.objects.create(cve_entry=cve, subdomain=self.rows[1], confidence=0.9)
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=self.rows[1], confidence=0.9)
+		# fire on the host needs hard evidence since 1.3.2 (a version-only KEV match is smoke): one of cvENGINE's checks reproduced it.
+		# A validation hit, not a template hit: that would give the match the standing the closure tests below must not see.
+		Triage.objects.create(project=self.project, domain=self.domain, host='www.ct.test', kind='cve_match', match=match,
+							  validation_status='hit')
 		RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.ct.test', url='https://www.ct.test/admin', path='/admin',
 			auth_state='open')
 		RouteAuth.objects.create(project=self.project, domain=self.domain, host='www.ct.test', url='https://www.ct.test/api', path='/api',
@@ -265,7 +269,8 @@ class RescoreTests(ChangeFixture, TestCase):
 		bad.matched_product = 'AWS Service -'
 		bad.save(update_fields=['matched_product'])
 		other_cve = CVEEntry.objects.create(cve_id='CVE-2099-6', kev=True, cvss=9.8, title='Other', published_at=timezone.now())
-		CVEMatch.objects.create(cve_entry=other_cve, subdomain=self.rows[1], confidence=0.9, matched_product='other')
+		CVEMatch.objects.create(cve_entry=other_cve, subdomain=self.rows[1], confidence=0.9, matched_product='other',
+								template_result='vulnerable')  # hard evidence: fire on the host
 		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
 		self.assertTrue(correlation.close_invalid_correlation(bad))
 		self.rows[1].refresh_from_db()

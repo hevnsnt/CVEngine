@@ -4,7 +4,9 @@ The sweep only selects findings already in an owned inventory. The worker rechec
 evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual), 6 (Smoke) and
 9 (Ice, every other CVE match) on the reserved validation worker; a duplicate delivery after
 promotion is harmless. A CVE match of any confidence is queued by itself, hottest first; the
-per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave.
+per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave. A CVE match's lane is its
+``threat.validation_heat``, the heat without the version-only cap: a known-exploited match that rests on its version alone shows Smoke
+but is still validated in the Fire lane, because a validation hit is the evidence that makes it Fire.
 """
 import os
 from datetime import timedelta
@@ -16,7 +18,7 @@ from django.utils import timezone
 from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, match_temperature
+from cveFeed.threat import FIRE, ICE, SMOKE, validation_heat
 
 PAGE = 100
 MAX_ENQUEUE = 20
@@ -25,12 +27,21 @@ PROJECT_ICE_CAP = 5  # Ice stops here, so a project's cold matches cannot fill t
 PRIORITY = {FIRE: 0, SMOKE: 6, ICE: 9}  # Redis steps: 0 Fire, 3 manual, 6 Smoke, 9 Ice
 HOST_REPORTED = 'host'  # CVEMatch.source of a match the host reported itself (cveFeed.inventory_match): no outside check can see what it rests on
 MAX_ATTEMPTS = 7  # failed tries of the same evidence before it is left alone (a changed signature starts again)
+MIN_GAP_HOURS = 12.0  # CVENGINE_VALIDATE_MIN_GAP_HOURS: between two automatic validations of one host, CVE, product and version
 
 
 def validate_all_matches():
     """Whether every CVE match is validated automatically, not only the Fire and Smoke ones. On unless
     CVENGINE_AUTO_VALIDATE_ALL_MATCHES is 0, false, no or off."""
     return os.environ.get('CVENGINE_AUTO_VALIDATE_ALL_MATCHES', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def min_gap_hours():
+    """The least time between two automatic validations of the same host, CVE, product and version whose evidence did not change, from
+    what an App Admin saved on Settings, configMaxxing, else CVENGINE_VALIDATE_MIN_GAP_HOURS (default 12; 0 or any negative number turns it off; a
+    value that is not a number is the default), read on every use (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    return max(0.0, float(tunables.value('validate_min_gap_hours', MIN_GAP_HOURS)))
 
 
 def retry_after(attempts, capped_only=False):
@@ -55,14 +66,15 @@ def next_attempt_number(previous, signature, signature_of):
 
 
 def tier_for(row):
-    """The canonical asset finding tier, or None when this finding is no longer current/open."""
+    """The validation lane of a finding (fire, smoke or ice), or None when this finding is no longer current/open. For a CVE match it is
+    ``threat.validation_heat``: the heat the match would have without the version-only cap, so KEV still decides how soon it is checked."""
     if row.kind == 'cve_match' and row.match_id:
         match = row.match
         if match.ai_verdict == 'not_affected' or match.distro_status == 'patched' or not match.subdomain_id:
             return None
-        cve = match.cve_entry
-        return match_temperature(classify_threat_tier(cve.kev, cve.epss_reached, cve.exploit_db, cve.cvss),
-                                 cve.cvss, match.ai_verdict, match.distro_status, match_policy.version_unknown(match))
+        # the validation lane, not the heat shown: a known-exploited match that rests on its version alone shows smoke
+        # (threat.version_only_max_heat) but is validated in the fire lane, first, because a validation hit is how it earns fire
+        return validation_heat(match)
     if row.vulnerability_id:
         vuln = row.vulnerability
         if not vuln.open_status:
@@ -183,6 +195,31 @@ def _inherited_fresh(row, now):
     return row.validated_at > now - timedelta(days=1 if row.status in ('not_triaged', 'error') else 7)
 
 
+def match_is_current(match_id):
+    """Whether the match is still part of its host's current inventory (``latest_scan_q``): a later scan's match replaced it otherwise, and a
+    validation of it spends AI calls on a finding nobody sees any more."""
+    from cveFeed.models import CVEMatch
+    return CVEMatch.objects.filter(pk=match_id).filter(latest_scan_q('subdomain__')).exists()
+
+
+def _inside_min_gap(row, now):
+    """Whether a validation of the very same finding already finished inside the minimum gap: another match row of the same host, CVE,
+    product and version (a rescan makes a new one each time) whose job recorded the same ``revalidation_key``, the evidence it answered
+    for (which also carries the match's source, so a port match and a tech match are two findings). A changed key (a KEV listing, a new score, a new template result) is not inside it, and neither is a job that recorded no key
+    (written before the gap existed) or one that failed (its own backoff governs the retry)."""
+    hours = min_gap_hours()
+    if not hours or not row.match_id:
+        return False
+    match, sub = row.match, row.match.subdomain
+    results = OnDemandValidation.objects.filter(
+        project_id=row.project_id, status='completed', finished_at__gte=now - timedelta(hours=hours),
+        match__cve_entry_id=match.cve_entry_id, match__matched_product=match.matched_product, match__matched_version=match.matched_version,
+        match__subdomain__target_domain_id=sub.target_domain_id, match__subdomain__name=sub.name,
+    ).order_by('-id').values_list('result', flat=True)[:20]
+    keys = {(result or {}).get('revalidation_key') for result in results} - {None, ''}
+    return bool(keys) and triage.revalidation_key(triage.describe(match)) in keys
+
+
 def enqueue(row, lane):
     """Idempotent dispatch of this persisted finding. No target argument reaches the broker."""
     from cveFeed.tasks import automatic_validate_finding, validate_match_on_demand
@@ -209,9 +246,15 @@ def enqueue(row, lane):
                 return 'fresh'
             elif carried is not None and carried.status not in ('queued', 'running') and _job_current(carried, now):
                 return 'fresh'  # the finding's earlier match was handled, and that stands for this one (its evidence is the same)
-            elif previous is None and carried is None and _inherited_fresh(row, now):
+            elif previous is None and _inherited_fresh(row, now):
+                # the row's own inherited validation is looked at whether or not an earlier match's job is known: that job may be a day
+                # old (the AI could not answer) while the validation this row carries is minutes old (issue 338)
                 return 'fresh'
             else:
+                if not match_is_current(row.match_id):
+                    return 'stale'  # a later scan replaced this match: nothing to validate
+                if _inside_min_gap(row, now):
+                    return 'min_gap'
                 if _active_count(row.project_id) >= cap:
                     return 'project_cap'
                 if carried is not None:
@@ -276,7 +319,7 @@ def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
     page = max(1, min(int(page), PAGE))
     max_jobs = max(1, min(int(max_jobs), MAX_ENQUEUE))
     stats = {'projects': _backfill_projects(), 'fire': 0, 'smoke': 0, 'ice': 0, 'promoted': 0,
-             'fresh': 0, 'inflight': 0, 'project_cap': 0, 'failed': 0}
+             'fresh': 0, 'inflight': 0, 'project_cap': 0, 'failed': 0, 'stale': 0, 'min_gap': 0}
     for lane in (FIRE, SMOKE, ICE) if validate_all_matches() else (FIRE, SMOKE):
         cursor, _ = HotValidationCursor.objects.get_or_create(lane=lane)
         base = _candidate_rows(lane)

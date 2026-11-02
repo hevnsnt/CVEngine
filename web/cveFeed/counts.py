@@ -13,7 +13,8 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
 * **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
-* **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view.
+* **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view. Counted per host: the same jQuery file on
+  six sibling hosts is six matches. ``match_group_count`` counts them as the grouped Findings list shows them (one row for the six).
 * **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
@@ -63,23 +64,24 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-def running_scans(qs=None):
+def running_scans(qs=None, window=None):
+    """``window``: the running window when the caller already read it (it is a settings lookup)."""
     from startScan.models import ScanHistory
     qs = ScanHistory.objects.all() if qs is None else qs
-    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - running_window())
+    return qs.filter(scan_status=1, start_scan_date__gte=timezone.now() - (running_window() if window is None else window))
 
 
 BACKGROUND_WINDOW = timedelta(hours=3)  # a "running" activity line older than this is a casualty of a restart, not work in progress
 BACKGROUND_KINDS = ("run_check", "discovery", "scan", "hygiene", "validate")
 
 
-def background_running(now=None):
+def background_running(now=None, window=None):
     """The activity lines of background work in progress: a check, sweep, rescan or assessment that runs under a scan record that is
     no longer running (the weekly deep nuclei pass, a host rescan, an assessment), so it is invisible to ``running_scans``. A line that
     belongs to a scan ``running_scans`` already counts is left out, so the two never count the same work twice."""
     from cveFeed.models import AgentActivity
     now = now or timezone.now()
-    under_a_running_scan = list(running_scans().values_list("id", flat=True))
+    under_a_running_scan = list(running_scans(window=window).values_list("id", flat=True))
     qs = AgentActivity.objects.filter(status="running", kind__in=BACKGROUND_KINDS, created_at__gte=now - BACKGROUND_WINDOW)
     if under_a_running_scan:
         # a missing key is not "in": filter first, then exclude by id. The inner query repeats the status, kind and age bounds (the lines it
@@ -200,6 +202,14 @@ def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
+
+
+def match_group_count():
+    """``(rows, truncated)``: the exposed CVE matches (``exposed_matches``) counted as the grouped Findings list draws them, the same
+    client-side library file on sibling hosts of one site being one (``cveFeed.finding_groups``). One values() pass, capped like the
+    list's; ``truncated`` says the cap was reached, and the number is then not exact."""
+    from cveFeed import finding_groups
+    return finding_groups.row_count(exposed_matches())
 
 
 def actionable_findings(qs):

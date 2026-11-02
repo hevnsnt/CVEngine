@@ -119,7 +119,7 @@ class Fixture:
         self.project = Project.objects.create(name='Alpha', slug='sup-a', insert_date=now, org=self.org1)
         self.other_project = Project.objects.create(name='Beta', slug='sup-b', insert_date=now, org=self.org2)
         for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'),
-                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.delay')):
+                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None)):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.own = Domain.objects.create(name='example.test', project=self.project, insert_date=now)
@@ -1118,3 +1118,29 @@ class PageTests(Fixture, TestCase):
         self.assertContains(response, '/cve/sup-a/suppliers/')
         self.assertEqual(client_for(self.stranger).get('/cve/sup-a/suppliers/').status_code, 404)
         self.assertEqual(client_for(self.admin).get('/cve/sup-a/hosts/').status_code, 200)
+
+
+class PolicyBodyEncodingTests(SimpleTestCase):
+    """The MTA-STS policy of a supplier is read the way every in-process reader reads a body: a server that sends gzip despite identity is decoded."""
+    POLICY = b'version: STSv1\nmode: testing\nmx: mail.acme.example\nmax_age: 86400\n'
+
+    def fetch(self, body, encoding):
+        from tests.test_pinned_transport import FakeResponse
+        response = FakeResponse(body, encoding)
+        response.status = 200
+        with mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
+            factory.return_value.getresponse.return_value = response
+            return ss.Network().mta_sts_policy('acme.example', ['203.0.113.10'])
+
+    def test_gzip_and_deflate_policies_are_read(self):
+        import gzip
+        import zlib
+        self.assertIn('mode: testing', self.fetch(gzip.compress(self.POLICY), 'gzip'))
+        self.assertIn('mode: testing', self.fetch(zlib.compress(self.POLICY), 'deflate'))
+        self.assertIn('mode: testing', self.fetch(self.POLICY, None))
+
+    def test_a_bomb_a_bad_stream_and_an_unreadable_encoding_are_no_policy(self):
+        import gzip
+        self.assertIsNone(self.fetch(gzip.compress(b'x' * 10_000_000, compresslevel=9), 'gzip'))
+        self.assertIsNone(self.fetch(b'garbage', 'gzip'))
+        self.assertIsNone(self.fetch(self.POLICY, 'br'))

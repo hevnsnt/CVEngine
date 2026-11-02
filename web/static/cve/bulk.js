@@ -77,7 +77,8 @@ export async function runBulk(items, worker, onProgress) {
  * @param {(item) => string} cfg.labelOf
  * @param {(item) => boolean} [cfg.selectable]
  * @param {string} [cfg.hint]           shown while selecting (what can and cannot be selected)
- * @param {Array} cfg.actions           {label, verb, done, run(item, value), confirm?(n), danger?, select?: {label, options}, prompt?: {...}}
+ * @param {Array} cfg.actions           {label, verb, done, run(item, value), confirm?(n, items, value) (null: do not ask), confirmTitle?(items, value),
+ *                                      danger?, select?: {label, options}, prompt?: {...}}; runBatch may return {ok, failed, summary}
  * @param {() => void} cfg.afterRun     refresh the list
  */
 export function createBulk({
@@ -156,9 +157,11 @@ export function createBulk({
   async function perform(action, value) {
     const items = [...selected.values()];
     if (!items.length) return;
-    if (action.confirm) {
-      const sure = await ask(action.confirm(items.length), {
-        title: `${action.label} ${items.length} ${noun}${items.length === 1 ? "" : "s"}?`,
+    // confirm(n, items, value) may answer null: nothing to ask about this selection
+    const question = action.confirm ? action.confirm(items.length, items, value) : null;
+    if (question) {
+      const sure = await ask(question, {
+        title: action.confirmTitle ? action.confirmTitle(items, value) : `${action.label} ${items.length} ${noun}${items.length === 1 ? "" : "s"}?`,
         ok: action.label,
         danger: Boolean(action.danger),
       });
@@ -187,7 +190,8 @@ export function createBulk({
     selected.clear();
     result.failed.forEach((f) => selected.set(keyOf(f.item), f.item));
     const undoable = result.ok.filter((i) => priors.get(keyOf(i)) !== undefined);
-    const doneText = `${action.done}: ${result.ok.length} ${noun}${result.ok.length === 1 ? "" : "s"}`;
+    // a batch that knows better (a grouped row stands for several hosts) says what it changed in its own words
+    const doneText = result.summary ? `${action.done}: ${result.summary}` : `${action.done}: ${result.ok.length} ${noun}${result.ok.length === 1 ? "" : "s"}`;
     if (!result.failed.length) {
       if (undoable.length && (action.restore || action.restoreBatch)) {
         undoNotice(doneText, async () => {

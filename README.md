@@ -48,9 +48,9 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 
 ## New in 1.3
 
-### Sentinels: scan from anywhere, including inside your network
+### Sentinels: scale out, and scan inside your network
 
-Run a **Sentinel** on any machine and cvENGINE scans through it. Put one outside your network to see what the internet sees. Put one inside to reach what no outside scanner can: declare a private range, and the Sentinel finds the live hosts in it and runs the same nmap, naabu, Nuclei, TLS, UDP, WordPress, and OpenVAS checks on them, with the same CVE matching and the same dashboard. Provisioning is one copy-paste: press **Provision** on the Sentinels page, then `docker compose up -d` with the blob it gives you. Update and configure every Sentinel from cvENGINE. The client lives in [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel). [Sentinels guide](docs/SENTINELS.md)
+Run a **Sentinel** on any machine and cvENGINE hands it scan work. Deploy one or a hundred to spread scanning across machines. Put one outside your network to see what the internet sees. Put one inside to reach what no outside scanner can: declare a private range, and the Sentinel finds the live hosts in it and runs the same nmap, naabu, Nuclei, TLS, UDP, WordPress, and OpenVAS checks on them, with the same CVE matching and the same dashboard. Provisioning is one copy-paste: press **Provision** on the Sentinels page, then `docker compose up -d` with the blob it gives you. Update and configure every Sentinel from cvENGINE. The client lives in [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel). [Sentinels guide](docs/SENTINELS.md)
 
 ### OpenVAS, built in and off by default
 
@@ -100,7 +100,7 @@ flowchart LR
         A["AI triage<br/>and validation"] --> O["Changes, host score,<br/>dashboard, API, alerts"]
     end
 
-    H["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA"]
+    H["Hygiene<br/>TLS, SPF, DKIM, DMARC, CAA, cleartext services"]
 
     T --> FIND --> PROBE --> MATCH --> DECIDE
     DECIDE -.-> H
@@ -164,7 +164,7 @@ Read-only checks, no password lists, and no scanning of loopback, link-local, or
 | [Tenancy](docs/TENANCY.md), [Agent API](docs/AGENT-API.md), [AI usage](docs/AI-USAGE.md) | Teams, the REST API and MCP, and AI cost |
 | [Bug bounty](docs/BUG-BOUNTY.md) and [Front end](docs/FRONTEND.md) | The bounty workbench and the interface |
 | [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
-| [Sentinels](docs/SENTINELS.md) | Running scanners on your own network, internal networks included |
+| [Sentinels](docs/SENTINELS.md) | Scaling scans across machines, and scanning private networks |
 | [Tailscale](docs/TAILSCALE.md) | Scanning a tailnet and its Tailscale checks |
 | [OpenVAS](docs/OPENVAS.md) | The optional Greenbone scanner: enabling it, its resource floor and what it imports |
 

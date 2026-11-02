@@ -1,6 +1,7 @@
 from django.apps import apps
 from django.db import models
 from dashboard.models import Project
+from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 
 
 class HistoricalIP(models.Model):
@@ -138,6 +139,9 @@ class Domain(models.Model):
 	h1_team_handle = models.CharField(max_length=100, blank=True, null=True)
 	ip_address_cidr = models.CharField(max_length=100, blank=True, null=True)
 	description = models.TextField(blank=True, null=True)
+	# what a person calls this target and a few lines about it (targetApp.alias_note): shown beside the name, never in place of it
+	alias = models.CharField(max_length=ALIAS_MAX, blank=True, default='', db_default='')
+	note = models.CharField(max_length=NOTE_MAX, blank=True, default='', db_default='')
 	insert_date = models.DateTimeField(null=True)
 	start_scan_date = models.DateTimeField(null=True)
 	request_headers = models.JSONField(null=True, blank=True)
@@ -148,6 +152,12 @@ class Domain(models.Model):
 	SCOPE_AUTO, SCOPE_HOST, SCOPE_PARENT = 'auto', 'host', 'parent'
 	SCOPE_MODES = ((SCOPE_AUTO, 'auto'), (SCOPE_HOST, 'host'), (SCOPE_PARENT, 'parent'))
 	scope_mode = models.CharField(max_length=8, choices=SCOPE_MODES, default=SCOPE_AUTO)
+	# How this target is discovered each time something starts discovery on its own (the work conductor, the assessment review, a move):
+	# the mode chosen when it was added, or later. 'manual' is "just add it, do not scan yet": nothing automatic ever scans it, only a person
+	# who picks a mode. The database default keeps every row from before the column on 'standard', what they were always scanned with.
+	DISCOVERY_STANDARD, DISCOVERY_DEEP, DISCOVERY_PASSIVE, DISCOVERY_MANUAL = 'standard', 'deep', 'passive', 'manual'
+	DISCOVERY_MODES = ((DISCOVERY_STANDARD, 'standard'), (DISCOVERY_DEEP, 'deep'), (DISCOVERY_PASSIVE, 'passive'), (DISCOVERY_MANUAL, 'manual'))
+	discovery_mode = models.CharField(max_length=8, choices=DISCOVERY_MODES, default=DISCOVERY_STANDARD, db_default=DISCOVERY_STANDARD)
 
 	class Meta:
 		constraints = [

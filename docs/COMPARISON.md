@@ -34,7 +34,7 @@
 | Open ports | naabu by default (all 65,535 ports), a background full sweep, then nmap | naabu | Even |
 | UDP exposure | A slow background scan of 18 UDP ports that matter (DNS, NTP, SNMP, IKE, IPMI, SSDP, memcached and the like), once a week per address, with findings for memcached, public SNMP, NTP control queries, SSDP and IPMI; a port counts only when it answered | naabu scans UDP only when asked, and nuclei has network templates for individual UDP services. No scheduled UDP sweep or stored UDP inventory stated. | cvENGINE |
 | Service detail | nmap at version intensity 7 with 18 reviewed scripts: versions, CPEs, banners, SSH and TLS facts, database greetings, RDP and SMB facts | HTTP probing, technology fingerprinting, and certificate evaluation. Port and version depth not stated. | cvENGINE |
-| Screenshots | Deep-mode screenshots, side-by-side diffs when a front page changes, and RDP login screens | Screenshots and visualization | Even |
+| Screenshots | A browser screenshot of every web page of every host (after each scan, on demand, and hourly for hosts that have none), side-by-side diffs when a front page changes, and RDP login screens | Screenshots and visualization | Even |
 | Exclusions | Per-organization host exclusions, private ranges off by default, and shared platform addresses never port-scanned | Exclusions by subdomain, IP, or wildcard | Even |
 | Labels | Detection labels (such as a WAF), owner, criticality, and saved views | AI-generated and custom labels, with bulk labeling | ProjectDiscovery |
 

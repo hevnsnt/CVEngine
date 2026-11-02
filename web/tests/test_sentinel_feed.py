@@ -1,5 +1,6 @@
 """Keeping the Sentinels fed: hosts with no address are not a backlog, IPv6 is scanned with -6, the caps grow with the Sentinels' slots, and the
 work queued behind a Sentinel is twice its capacity."""
+import os
 from datetime import timedelta
 from unittest import mock
 
@@ -86,6 +87,8 @@ class Base(TestCase):
         self.user = User.objects.create_user('feed-owner', password='x')
         self.n = 0
         mock.patch('cveFeed.scan_control.pause_requested', return_value=False).start()
+        # these tests pin the caps and the feed as they count one host per pipeline run; hosts carried in batches are tests/test_assess_batch.py's
+        mock.patch.dict(os.environ, {'CVENGINE_ASSESS_BATCH': '1'}).start()
         self.addCleanup(mock.patch.stopall)
 
     def host(self, name, unresolved=0, note='', last=None):

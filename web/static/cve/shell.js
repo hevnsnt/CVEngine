@@ -99,7 +99,7 @@ if (acct) {
 
 // --- mobile sheets: "More" (pages) and "Account" (the desktop account menu) -----------------------
 const scrim = $("#sheet-scrim");
-const sheets = [[$("#sheet"), $("#more-btn")], [$("#acct-sheet"), $("#acct-btn")]].filter(([s, b]) => s && b);
+const sheets = [[$("#sheet"), $("#more-btn")], [$("#acct-sheet"), $("#acct-btn")], [$("#scope-sheet"), $("#scope-btn")]].filter(([s, b]) => s && b);
 let openSheet = null;
 function setSheet(pair, open) {
   sheets.forEach(([s, b]) => {
@@ -111,7 +111,7 @@ function setSheet(pair, open) {
   document.body.classList.toggle("noscroll", open);
   const was = openSheet;
   openSheet = open ? pair : null;
-  if (open) $("a, select, button", pair[0]).focus();
+  if (open) ($("[aria-current]", pair[0]) || $("a, select, button", pair[0])).focus(); // the project you are on, in the switch sheet
   else if (was) was[1].focus();
 }
 sheets.forEach((pair) => pair[1].addEventListener("click", () => setSheet(pair, openSheet !== pair)));
@@ -121,6 +121,71 @@ if (scrim) {
     if (e.key === "Escape" && openSheet) setSheet(null, false);
   });
 }
+
+// --- the phone and tablet project bar: who you are looking at, and a sheet to switch it --------------------------
+// Every project as a row big enough to tap, grouped by organization, with "All projects" for each; a find box past six projects.
+const scopeSheet = $("#scope-sheet");
+if (scopeSheet) {
+  scopeSheet.addEventListener("click", (e) => {
+    const row = e.target.closest("button[data-scope]");
+    // Only a project slug (or the reserved "_all") and an organization slug may become part of the address.
+    if (!row || !/^[-\w]+$/.test(row.dataset.scope) || !/^[-\w]*$/.test(row.dataset.org)) return;
+    if (row.hasAttribute("aria-current")) return setSheet(null, false);
+    if (row.dataset.scope !== "_all") {
+      try {
+        localStorage.setItem(LAST_KEY, JSON.stringify({ ...lastByOrg(), [row.dataset.org]: row.dataset.scope }));
+      } catch (_) {
+        /* private window: nothing to remember */
+      }
+    }
+    window.location.href = projectHref(row.dataset.scope, scopeSheet.dataset.section, row.dataset.org);
+  });
+  const find = $(".scope-q", scopeSheet);
+  if (find) {
+    find.addEventListener("input", () => {
+      const q = find.value.trim().toLowerCase();
+      let shown = 0;
+      $$("button[data-scope]", scopeSheet).forEach((b) => {
+        const org = b.closest(".scope-org")?.querySelector("h3"); // naming an organization finds its projects
+        const hit = !q || (b.dataset.scope !== "_all" && b.textContent.toLowerCase().includes(q)) || Boolean(org && org.textContent.toLowerCase().includes(q));
+        b.hidden = !hit;
+        shown += hit ? 1 : 0;
+      });
+      $$(".scope-org", scopeSheet).forEach((g) => {
+        g.hidden = !$$("button[data-scope]", g).some((b) => !b.hidden);
+      });
+      $(".scope-none", scopeSheet).hidden = shown > 0;
+    });
+    find.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") $$("button[data-scope]", scopeSheet).find((b) => !b.hidden)?.click();
+    });
+  }
+}
+
+// --- tab strips: fade the edge a narrow screen cuts off. Strips are drawn by the page scripts, so new ones are picked up as they appear
+const seenTabs = new WeakSet();
+const fadeTabs = (strip) => {
+  strip.classList.toggle("cut-start", strip.scrollLeft > 2);
+  strip.classList.toggle("cut-end", strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 2);
+};
+let tabsQueued = false;
+const watchTabs = () => {
+  if (tabsQueued) return;
+  tabsQueued = true;
+  requestAnimationFrame(() => {
+    tabsQueued = false;
+    $$("[role=tablist]").forEach((strip) => {
+      if (!seenTabs.has(strip)) {
+        seenTabs.add(strip);
+        strip.addEventListener("scroll", () => fadeTabs(strip), { passive: true });
+      }
+      fadeTabs(strip);
+    });
+  });
+};
+new MutationObserver(watchTabs).observe(document.body, { childList: true, subtree: true });
+window.addEventListener("resize", watchTabs);
+watchTabs();
 
 // --- palette ------------------------------------------------------------------------------
 // Jump to a page, project or action, or search hosts the Shodan way (filter:value, "phrases", -negation). Pages and actions

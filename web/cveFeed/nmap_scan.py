@@ -284,7 +284,8 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
     from startScan.models import TCP_PROTOCOLS, IpAddress, Port
     ports_written = hosts_with_os = 0
     now = timezone.now()
-    if os_reliable is None:
+    from_here = os_reliable is None
+    if from_here:
         os_reliable = not os_detection.unreliable()
     for host in inventory:
         ip_addr = host.get('ip')
@@ -294,7 +295,9 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
         if host.get('os_guess') and os_reliable and not keeps_reported_os(ip_obj):  # the host's own report outranks a network guess
             ip_obj.os_guess = host['os_guess']
             ip_obj.os_accuracy = host.get('os_accuracy')
-            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_source': 'nmap'}
+            # where the guess was made: a Sentinel measured it on its own network, this server's scanner on its own path
+            # (cveFeed.os_detection.guess_believed), and the two are told apart later
+            ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'os_source': 'nmap' if from_here else 'sentinel'}
             ip_obj.last_seen = now
             fit_columns(ip_obj)
             ip_obj.save(update_fields=['os_guess', 'os_accuracy', 'last_seen', 'fingerprint'])

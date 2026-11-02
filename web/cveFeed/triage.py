@@ -26,7 +26,6 @@ import contextvars
 import hashlib
 import json
 import logging
-import os
 import re
 from datetime import timedelta
 from urllib.parse import urlparse
@@ -34,6 +33,7 @@ from urllib.parse import urlparse
 from django.utils import timezone
 
 from cveFeed import match_policy
+from cveFeed.secret_redaction import mask_extracted, redact_text
 from reNgine.ai_providers import AIProviderError, clean_text, triage_finding
 
 logger = logging.getLogger(__name__)
@@ -59,11 +59,10 @@ def rank(classification):
 
 
 def cap(name):
-    """A triage cap, overridable by CVENGINE_<NAME> in the environment."""
-    try:
-        return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
-    except ValueError:
-        return DEFAULT_CAPS[name]
+    """A triage cap: what an App Admin saved on Settings, configMaxxing, else CVENGINE_<NAME> in the environment, else the default
+    (``cveFeed.tunables``; read on every use, so a change applies within seconds)."""
+    from cveFeed import tunables
+    return tunables.value(name.lower(), DEFAULT_CAPS[name])
 
 
 def verdict_for(classification):
@@ -203,6 +202,20 @@ def evidence_key_for(kind, fields, review_nonce=''):
     return hashlib.sha1(json.dumps(blob, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()
 
 
+REVALIDATION_IGNORES = ('context', 'host_text')  # what a validation itself writes about the host (probe results, earlier checks)
+
+
+def revalidation_key(description):
+    """The sha1 of what a finished validation answered for, to tell whether the finding changed since: the signature fields without what a
+    validation itself writes into the host context (probe results, earlier checks), and without the nonce a fresh review adds. It keeps the
+    CVE feed's intelligence (a KEV listing, a new score), the matched product and version, the source and the template result, so a real
+    change in evidence still counts as one (hot_validation's minimum gap between two automatic validations)."""
+    fields = description['signature_fields']
+    kept = {k: v for k, v in fields.items() if k not in REVALIDATION_IGNORES} if isinstance(fields, dict) else fields
+    blob = json.dumps([description['kind'], kept], sort_keys=True, default=str, separators=(',', ':'))
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
 def effective_signature(description, review_nonce=''):
     """Evidence signature, with a persisted nonce only for an explicit fresh review."""
     return (signature_for(description['kind'], [description['signature_fields'], review_nonce])
@@ -313,16 +326,53 @@ def describe_cve_match(m):
     guidance = detection.prompt_guidance(cve)  # earlier notes on what makes this CVE apply or not: a hint, the evidence above decides
     if guidance:
         payload['cve']['guidance'] = guidance
+    library = library_brief(evidence, names)
+    if library:
+        payload['library'] = library
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',
               **({'version_unknown': True} if facts['version_unknown'] else {}),
+              **({'library': hashlib.sha1(json.dumps(library, sort_keys=True).encode()).hexdigest()[:16]} if library else {}),
               'intelligence': hashlib.sha1(json.dumps([cve.affected, cve.cvss, cve.kev, cve.epss_reached, cve.exploit_db,
                                                        cve.original_description or cve.summary], sort_keys=True, default=str).encode()).hexdigest()[:16]}
     cvss = cve.cvss
     base = 4 if cvss and cvss >= 9 else 3 if cvss and cvss >= 7 else 2 if cvss and cvss >= 4 else 1 if cvss else 0
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
             'priority': (9, 0) if facts['version_unknown'] else (0 if floor else 3, -base)}
+
+
+LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',
+                   'filename': 'only the script\'s file name or CDN path; the file could not be read or states no version',
+                   'other': 'another fingerprinting tool; the page\'s own scripts were read and are listed under copies'}
+
+
+def library_brief(evidence, names=()):
+    """What a JavaScript library match's evidence says about where its version came from and the other copies on the page
+    (cveFeed.js_libraries), for the prompt: paths only, no host. Empty for any other match."""
+    source = evidence.get('version_source')
+    copies = [c for c in evidence.get('copies') or [] if isinstance(c, dict)]
+    if not source and not copies:
+        return {}
+    out = {'version_source': _s(LIBRARY_SOURCES.get(source, source or ''), 140),
+           'version_confidence': evidence.get('version_confidence') if isinstance(evidence.get('version_confidence'), (int, float)) else None}
+    if evidence.get('script_url'):
+        out['script'] = _path_only(evidence['script_url'], names)
+    if evidence.get('copy_state'):
+        out['this_copy'] = _s(evidence['copy_state'], 20)
+    if copies:
+        out['copies_on_page'] = [{'script': _path_only(c.get('url'), names), 'version': _s(c.get('version'), 40, names) or 'unknown',
+                                  'version_from': _s(c.get('source') or 'nothing readable', 20), 'state': _s(c.get('state'), 20),
+                                  **({'loaded_after_noconflict': True} if c.get('loaded_after_noconflict') else {})} for c in copies[:8]]
+        out['note'] = ('Scripts run in document order and a later full copy of a library takes over the global an earlier one set, so the '
+                       'effective copy is the one most page code uses; a shadowed copy may still be used by older code or closures that '
+                       'captured it, and a fallback runs only when its condition is met.')
+    if evidence.get('copies_unresolved'):
+        out['copies_unresolved'] = True
+        out['note'] = 'The page does not show which copy runs (async loading or jQuery.noConflict(true)): each copy is only a candidate.'
+    if evidence.get('version_note'):
+        out['version_note'] = _s(evidence['version_note'], 200)
+    return out
 
 
 def _status_of(response):
@@ -361,15 +411,19 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     except the response's status code, parsed, never quoted."""
     kind = kind_of_vulnerability(v)
     names = _vuln_names(v)
-    extracted = [_s(e, 120, names) for e in (v.extracted_results or [])[:5]]
+    values = list((v.extracted_results or [])[:5])
+    signed = [_s(e, 120, names) for e in values]  # what the signature hashes: unchanged, so the verdicts already stored keep their key
+    # What the model sees: a value a secret template extracted is masked whole (provider class, length, keyed fingerprint), anything else
+    # passes the generic secret patterns. The signature is a hash of ``signed``; no prompt carries it.
+    extracted = [_s(e, 120, names) for e in mask_extracted(values, v.template_id if kind == 'nuclei' else '', tags if kind == 'nuclei' else ())]
     severity = v.severity if v.severity is not None else 0
     source = v.source or ''
     if kind == 'db_exposure':
         label = (v.template_id or '').replace('db-exposure-', '', 1)
         number = _safe_url_port(v.http_url)
-        reply = extracted[0] if extracted else ''
+        reply = signed[0] if signed else ''
         facts = {'reply': reply}
-        payload = {'service': _s(label, 40), 'port': number, 'server_reply': reply,
+        payload = {'service': _s(label, 40), 'port': number, 'server_reply': extracted[0] if extracted else '',
                    'product': _s((port or ('', ''))[0], 120, names), 'version': _s((port or ('', ''))[1], 120, names),
                    'name': _prose(v.name, 200, names)}
         fields = {'label': label, 'port': number, 'reply': reply}
@@ -377,7 +431,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
     elif kind == 'bbot':
         facts = {}
         payload = {'module': _s(v.template_id, 60, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
-                   'description': _prose(v.description, 1000, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1000, names), 'path': _path_only(v.http_url, names),
                    'snippet': (extracted or [''])[0][:200]}
         fields = {'module': v.template_id or '', 'name': v.name, 'severity': severity}
         priority = (4, -severity)
@@ -387,10 +441,10 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
         payload = {'template_id': _s(v.template_id, 120, names), 'name': _prose(v.name, 200, names), 'severity': SEVERITY_NAMES.get(severity),
                    'matcher_name': matcher, 'extracted_results': extracted, 'cve_ids': sorted(_s(c, 40) for c in cves)[:10],
                    'cwe_ids': sorted(_s(c, 40) for c in cwes)[:10], 'tags': sorted(_s(t, 40) for t in tags)[:15],
-                   'description': _prose(v.description, 1500, names), 'path': _path_only(v.http_url, names),
+                   'description': _prose(redact_text(v.description), 1500, names), 'path': _path_only(v.http_url, names),
                    'http_status': _status_of(v.response), 'source': _s(source, 40)}
         fields = {'source': source, 'template_id': v.template_id or '', 'matcher': v.matcher_name or '', 'name': v.name,
-                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(extracted)}
+                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(signed)}
         priority = (0, 0) if source == 'nuclei-cve' else (3, -severity)
     return {'kind': kind, 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': severity, 'priority': priority}
 
@@ -495,7 +549,7 @@ def attach_host_context(d, match):
     except Exception:  # noqa: BLE001
         logger.exception('could not read the host context of match %s', match.pk)
         return
-    d['host_context'] = _strip_deep(host_context.clipped(context))
+    d['host_context'] = _strip_deep(host_context.clipped(context, stable=True))  # the model is shown the stable view (see bind_host_text)
     d['facts']['closure_basis'] = basis
     digest = host_context.signal_digest(context)
     if digest:
@@ -508,13 +562,29 @@ def bind_host_text(d):
     """Key a CVE match's verdict to the host-controlled text the model was shown (banner extras, CPE, host metadata) when no hard
     evidence bounds the answer. The verdict is shared by every host and organization with the same signature, so without this one
     host's crafted banner could set the stored verdict of every other host with the same product and version. A match with a floor
-    needs no such key: the model can only raise it, never clear it."""
+    needs no such key: the model can only raise it, never clear it.
+
+    What the model is shown of the host (``d['host_context']``) is ``host_context.stable_view`` of the context, and this key is made from that
+    same view: a value the model was shown is in the key, and a value that changes while the host does not (a certificate's days left, a
+    probe's observed date, a request id, a cache state, a banner's clock) is in neither, so it no longer moves the signature every day and every
+    rescan no longer asks the same question again (one AI call per match without a floor, per rescan). The key hashes ``d['host_context']`` itself, so the
+    agreement holds by construction (a path that forgot ``stable=True`` would show and key the raw context). The hash formula is the one it always was, so a row
+    keyed before this change keeps its key only where the old and the new view agree; for the others the signature moves once, which queues one
+    review per such match (the verdict, classification and validation record stay until it answers), bounded by the daily triage caps
+    (``_rereview_fields``, ``DEFAULT_CAPS``). Deliberate: the AI's verdicts on the host's other matches are blanked in the view, so another CVE's
+    verdict flipping does not re-ask this match; the host inventory's package count is not in it, so a package change alone does not either."""
     if d['kind'] != 'cve_match' or hard_evidence('cve_match', d['facts'])[0]:
         return
+    key = host_text_key(d)
+    if key:
+        d['signature_fields']['host_text'] = key
+
+
+def host_text_key(d):
+    """The host text key of a description (see ``bind_host_text``), whether or not the match has a floor; '' when there is no text."""
     payload = d['payload']
-    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]
-    if any(text):
-        d['signature_fields']['host_text'] = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    text = [payload.get('cpe'), payload.get('service_extra'), d.get('host_context')]  # exactly what the model is shown: nothing is made of it here
+    return hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16] if any(text) else ''
 
 
 def describe(finding):
@@ -616,16 +686,18 @@ def _twins(pending):
     """``{match pk: Triage row}`` for the CVE matches in ``pending`` (``[(match, description)]``, none with a Triage row yet). A rescan
     makes new host rows and so new match rows, and a new row used to start with no record: every match was judged and validated again
     although nothing about it had changed (issue 206). The twin of a match is the newest row of another match with the same project,
-    host, CVE, source and matched product whose asset evidence is the same: one CVE can be matched twice on one host (Apache 2.4.58 from the
-    port scan and again from the web fingerprint, with different evidence), and each of the two inherits from its own predecessor, not from
-    whichever row of the pair is newest. That test is made with the twin's own review nonce, because a validation sets one on its row and
+    host, CVE, source, matched product and matched version whose asset evidence is the same: one CVE can be matched twice on one host (Apache
+    2.4.58 from the port scan and again from the web fingerprint, with different evidence), and each of the two inherits from its own
+    predecessor, not from whichever row of the pair is newest. "Newest" is the newest MATCH (the latest scan's), never the row written last:
+    a template run or a validation writes ``updated_at`` on rows of older matches too, and ranking on it made a rescan's row inherit from,
+    and point its job history at, a match several scans back (issue 338). That test is made with the twin's own review nonce, because a validation sets one on its row and
     the nonce is part of the stored evidence key."""
     from cveFeed.models import Triage
     pending = [(f, d) for f, d in pending if d['kind'] == 'cve_match']
     if not pending:
         return {}
     from django.db.models import Q
-    # one row per finding (host, CVE, source, matched product): the newest that holds a record, within the window. DISTINCT ON bounds what comes
+    # one row per finding (host, CVE, source, matched product and version): the row of the newest match that holds a record, within the window. DISTINCT ON bounds what comes
     # back (one row per finding), not what is read: PostgreSQL sorts every row of these hosts and CVEs inside TWIN_WINDOW to pick the newest, and
     # every rescan adds a row per finding that nothing prunes. Measured with 500 findings and 60 scans kept: 30,000 rows sorted, an external
     # merge of 8 MB, about 250 ms per chunk, linear in the scans kept (sorting only the key columns and fetching the rows after it is about 85 ms,
@@ -636,12 +708,14 @@ def _twins(pending):
                                   host__in={d['host'][:500] for _, d in pending},
                                   match__cve_entry_id__in={f.cve_entry_id for f, _ in pending})
             .exclude(match_id__in=[f.pk for f, _ in pending]).select_related('match')
-            .order_by('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', '-updated_at', '-id')
-            .distinct('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product'))
-    newest = {(row.project_id, row.host, row.match.cve_entry_id, row.match.source, row.match.matched_product): row for row in rows}
+            .order_by('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', 'match__matched_version',
+                      '-match_id', '-id')
+            .distinct('project_id', 'host', 'match__cve_entry_id', 'match__source', 'match__matched_product', 'match__matched_version'))
+    newest = {(row.project_id, row.host, row.match.cve_entry_id, row.match.source, row.match.matched_product, row.match.matched_version): row
+              for row in rows}
     out = {}
     for f, d in pending:
-        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id, f.source, f.matched_product))
+        row = newest.get((d['project_id'], d['host'][:500], f.cve_entry_id, f.source, f.matched_product, f.matched_version))
         if row is not None and row.evidence_key == evidence_key_for(d['kind'], d['signature_fields'], row.review_nonce):
             out[f.pk] = row
     return out
@@ -680,7 +754,7 @@ def _track(findings):
     order given; a finding with no owning project is skipped (nothing is stored without a tenancy scope)."""
     from cveFeed.models import CVEMatch, Triage
     now = timezone.now()
-    pairs, reset_matches = [], []
+    pairs, reset_matches, carried_hits = [], [], []
     findings = [f for f in findings if f is not None]
     for start in range(0, len(findings), CHUNK):
         described = [(f, describe(f)) for f in findings[start:start + CHUNK]]
@@ -717,6 +791,7 @@ def _track(findings):
                 row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
             changed.append(row)
         if new_rows:
+            carried_hits.extend(r.match_id for r in new_rows if r.match_id and r.validation_status == 'hit')
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
             for fk in set(KIND_FK[d['kind']] for _, d in described):
                 existing[fk].update(_fetch(fk, [f.pk for f, d in described if KIND_FK[d['kind']] == fk and f.pk not in existing[fk]]))
@@ -735,6 +810,11 @@ def _track(findings):
             m.ai_verdict = m.ai_reason = m.ai_model = ''
         from cveFeed import scoring
         scoring.rescore_for_matches(reset_matches)
+    if carried_hits:
+        # a rescan's match carried its predecessor's validation hit (hard evidence): the score and the snapshots follow. Not paged: the
+        # finding is not new
+        from cveFeed import scoring
+        scoring.evidence_arrived(carried_hits)
     return pairs
 
 
@@ -1053,7 +1133,8 @@ def recap_version_only():
     version = Q(match__version_in_range=True) | Q(match__version_in_range__isnull=True, match__evidence__has_key='branch_unlisted')
     rows = (Triage.objects.filter(version, kind='cve_match', status='triaged', classification__in=('likely', 'confirmed'))
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
-            .exclude(match__source='host').exclude(match__evidence__has_key='runzero'))  # the key is removed when runZero stops reporting it
+            .exclude(match__source='host').exclude(match_policy.evidence_flag_q('host_reported', 'match__'))
+            .exclude(match_policy.evidence_flag_q('runzero', 'match__')))  # the key is removed when runZero stops reporting it
     ids = list(rows.values_list('pk', flat=True))
     changed = 0
     now = timezone.now()

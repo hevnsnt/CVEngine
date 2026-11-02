@@ -12,7 +12,7 @@ from tests.test_tenancy import client_for
 class DashboardDefaultTests(AllProjectsBase):
 	def setUp(self):
 		cache.clear()
-		views._STATS_CACHE.clear()  # the stats cache is a per-process dict keyed by (user, project); clear it between tests
+		views.clear_stats_cache()  # the stats cache is a per-process dict keyed by (user, project); clear it between tests
 
 	def _html(self, user, qs=''):
 		r = client_for(user).get('/cve/' + qs)
@@ -77,7 +77,7 @@ class ScopeCarriesTests(AllProjectsBase):
 
 	def setUp(self):
 		cache.clear()
-		views._STATS_CACHE.clear()
+		views.clear_stats_cache()
 
 	def _page(self, c, path):
 		r = c.get(path)

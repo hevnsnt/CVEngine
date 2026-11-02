@@ -27,6 +27,21 @@ class NginxTests(SimpleTestCase):
 		self.assertIn('sandbox', block)
 		self.assertIn('nosniff', block)
 
+	def test_json_and_assets_are_gzipped_but_html_and_binaries_are_not(self):
+		conf = read('config', 'nginx', 'rengine.conf')
+		self.assertRegex(conf, r'(?m)^\s*gzip\s+on;')
+		types = re.search(r'gzip_types\s+([^;]+);', conf).group(1).split()
+		self.assertIn('application/json', types)
+		self.assertIn('text/css', types)
+		self.assertIn('application/javascript', types)
+		for compressed in ('text/html', 'image/png', 'image/jpeg', 'application/gzip', 'application/zip', 'application/octet-stream'):
+			self.assertNotIn(compressed, types)  # html carries the CSRF token (BREACH); the rest is already compressed
+		self.assertRegex(conf, r'gzip_vary\s+on;')
+		self.assertGreaterEqual(int(re.search(r'gzip_min_length\s+(\d+);', conf).group(1)), 256)
+		self.assertRegex(conf, r'gzip_proxied\s+any;')
+		# gzip sits in the 443 server block, before the locations that proxy the application
+		self.assertLess(conf.index('gzip   '), conf.index('location / {'))
+
 
 class ScriptTests(SimpleTestCase):
 	def test_the_entrypoint_no_longer_downloads_a_template_from_a_branch(self):

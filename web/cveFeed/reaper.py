@@ -49,6 +49,37 @@ def _hours(name, default):
         return default
 
 
+NO_LIMIT_CEILING_HOURS = 12  # the longest a batch is given when the discovery queue has no time limit (``CVENGINE_TIME_LIMITS=0``)
+BATCH_HOSTS_PER_FACTOR = 4  # a batch of this many hosts (or fewer) is given the limit of one host; each further few hosts add another
+
+
+def batch_shield(hours, now):
+    """The running host assessments of a batch (``host_assessment.enqueue_batch``: its rows share one Celery task id) that are past ``hours`` but
+    still inside the longer limit a batch gets: ``hours`` for each ``BATCH_HOSTS_PER_FACTOR`` hosts, never longer than the discovery queue's hard
+    time limit (``reNgine.time_limits``, just under the broker's redelivery window), which ends the one task they share. A batch is one pipeline
+    over all its hosts, so it takes longer than one host does; the age limit is only the backstop for a task that is gone, which
+    ``expire_orphaned_running`` closes within a tick whenever the broker can be asked. Returns the pks to leave alone."""
+    from django.db.models import Count, Q
+
+    from cveFeed.models import HostAssessment
+    from reNgine import time_limits
+    cutoff = now - timedelta(hours=hours)
+    rows = list(HostAssessment._base_manager.filter(Q(started_at__lt=cutoff) | Q(started_at__isnull=True, created_at__lt=cutoff), status='running')
+                .exclude(celery_id='').values_list('pk', 'celery_id', 'started_at', 'created_at'))
+    if not rows:
+        return set()
+    sizes = dict(HostAssessment._base_manager.filter(celery_id__in={r[1] for r in rows}).values('celery_id').annotate(n=Count('pk'))
+                 .values_list('celery_id', 'n'))
+    found = time_limits.limits_for('discovery_queue')
+    ceiling = max(hours, math.ceil(found[1] / 3600)) if found else max(hours, NO_LIMIT_CEILING_HOURS)  # no task limit: a dead batch still goes within a day
+    shielded = set()
+    for pk, celery_id, started, created in rows:
+        allowed = min(hours * math.ceil(sizes.get(celery_id, 1) / BATCH_HOSTS_PER_FACTOR), ceiling)
+        if (started or created) >= now - timedelta(hours=allowed):
+            shielded.add(pk)
+    return shielded
+
+
 REDISPATCH_AFTER_MINUTES = 30  # a queued assessment nobody started in this long is asked for again
 REDISPATCH_EVERY_HOURS = 2  # and no more often than this, so a long but healthy queue does not fill with copies
 
@@ -93,13 +124,24 @@ REDISPATCH_SCAN_AFTER_MINUTES = 30  # a queued scan the broker holds no message 
 REDISPATCH_SCAN_EVERY_HOURS = 2  # and no more often than this per scan
 
 
+def redispatch_mode(scan):
+    """The bbot mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
+    target's own, and a manual only target (which no automatic start ever queues, so this is a scan someone asked for before changing it) is
+    sent as passive: a recovery never widens what was asked for, and never sends traffic the target's mode does not allow."""
+    from targetApp.models import Domain
+    if scan.discovery_mode:
+        return scan.discovery_mode
+    mode = scan.domain.discovery_mode
+    return Domain.DISCOVERY_PASSIVE if mode == Domain.DISCOVERY_MANUAL else mode
+
+
 def redispatch_queued_scans(now=None, live=None):
     """Queue again the discovery scans (``ScanHistory`` rows queued, -1) whose worker message was lost, e.g. in a worker or update restart:
     the row says queued forever and the dashboard shows "queued, none running" until someone intervenes. A queued scan records no Celery id
     until it starts, so the broker is asked whether any message still exists for its scan id (``broker_recovery.live_tasks``: a queue, an
     unacknowledged hold or a worker). Only a scan the broker holds nothing for, and only when that can be told, is sent again: a long queue
     after a bulk add is waiting its turn and is left alone. A second message is harmless (the domain lock answers 'duplicate', and a finished
-    scan is not run again). The bbot mode is not stored on the row, so a recovered scan runs in the default mode. ``live`` is the scan ids
+    scan is not run again). The bbot mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
     the broker holds (None: cannot be told), injectable for tests. Returns how many were queued again."""
     from cveFeed import broker_recovery, ledger
     from cveFeed.discovery import QUEUED
@@ -117,7 +159,7 @@ def redispatch_queued_scans(now=None, live=None):
     client = getattr(resources.get_store(), 'r', None)
     queued = 0
     for scan in ScanHistory.objects.filter(scan_status=QUEUED, start_scan_date__lt=now - timedelta(minutes=REDISPATCH_SCAN_AFTER_MINUTES)
-                                           ).order_by('id')[:50]:
+                                           ).select_related('domain').order_by('id')[:50]:
         if scan.id in live or scan.celery_ids:
             continue
         key = f'cvengine:scan:redispatch:{scan.pk}'
@@ -129,7 +171,8 @@ def redispatch_queued_scans(now=None, live=None):
         from reNgine.celery import app
         # a scan of an internal target (cveFeed.internal_scan) is its own task; sent by name so this module needs no import of it
         name = 'run_internal_scan' if 'internal_pipeline' in (scan.tasks or []) else 'run_bbot_discovery'
-        app.send_task(name, args=[scan.pk], queue='discovery_queue')
+        args = [scan.pk] if name == 'run_internal_scan' else [scan.pk, redispatch_mode(scan)]
+        app.send_task(name, args=args, queue='discovery_queue')
         queued += 1
     return queued
 
@@ -199,6 +242,8 @@ def reap(now=None):
         else:
             fields['error'] = reason
         stuck = model.objects.filter(old, status=state)
+        if name == 'HostAssessment' and state == 'running':
+            stuck = stuck.exclude(pk__in=batch_shield(hours, now))
         if name in VALIDATION_MODELS:
             # due again at once while attempts remain; a job that keeps killing its worker stops at MAX_ATTEMPTS like any failure
             from cveFeed.hot_validation import MAX_ATTEMPTS

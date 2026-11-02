@@ -24,7 +24,9 @@ export const FILTERS = [
   { name: "os", hint: "operating system", example: "os:ubuntu" },
   { name: "proto", hint: "an open port over tcp or udp", example: "proto:udp", values: ["tcp", "udp"] },
   { name: "ip", hint: "an address or a CIDR range", example: "ip:10.0.0.0/24" },
-  { name: "host", hint: "part of a host name", example: "host:staging" },
+  { name: "host", hint: "part of a host name or its alias", example: "host:staging" },
+  { name: "alias", hint: "the display name given to a host or target", example: "alias:printer" },
+  { name: "note", hint: "the note written on a host or target", example: 'note:"rack 3"' },
   { name: "cve", hint: "hosts matched by a CVE", example: "cve:CVE-2026-1101" },
   { name: "vuln", hint: "an open finding by name", example: "vuln:jenkins" },
   {
@@ -136,7 +138,7 @@ export const hostRow = (slug, h) => {
     why,
   ].filter(Boolean);
   return {
-    label: h.host,
+    label: h.alias ? `${h.host} (${h.alias})` : h.host, // the alias beside the address (the row is text, never markup)
     sub: parts.join(" · "),
     hint: h.heat && h.heat !== "unscanned" ? h.heat : "host",
     heat: h.heat,
@@ -168,7 +170,7 @@ export function syntaxHelp() {
       ["-host:www", "A leading minus excludes what matches."],
       [
         "nginx",
-        "A bare word searches names, addresses, technologies, banners, page titles and CVE ids.",
+        "A bare word searches names, aliases, notes, addresses, technologies, banners, page titles and CVE ids.",
       ],
     ].forEach(([q, what]) =>
       rules.append(el("dt", "mono", q), el("dd", "", what)),

@@ -186,6 +186,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotRegex(text, r'git archive[^\n]*\bHEAD\b')  # the archives are of the tag, not of whatever the checkout is on
         self.assertIn('git checkout --quiet "refs/tags/$TAG"', text)
 
+    def test_a_recut_deletes_the_release_and_tag_only_on_a_manual_run_that_asks_for_it(self):
+        workflow = self.load('release.yml')
+        triggers = workflow.get('on') or workflow.get(True)
+        self.assertIn('recut', triggers['workflow_dispatch']['inputs'])
+        self.assertFalse(triggers['workflow_dispatch']['inputs']['recut']['default'])
+        step = self.steps('release.yml', 'release')['♻️ Replace the existing release (re-cut only)']
+        self.assertEqual(step['if'], "github.event_name == 'workflow_dispatch' && github.event.inputs.recut == 'true'")
+        self.assertIn('gh release delete "$TAG" --yes --cleanup-tag', step['run'])
+        names = list(self.steps('release.yml', 'release'))
+        # it runs after the tag is resolved (master-only and version checks) and before the tag is created again
+        self.assertLess(names.index('🏷️ Resolve the tag'), names.index('♻️ Replace the existing release (re-cut only)'))
+        self.assertLess(names.index('♻️ Replace the existing release (re-cut only)'), names.index('🏷️ Create the tag (manual run only)'))
+
     def test_the_tool_checks_send_a_token_for_the_github_api(self):
         for workflow in ('tool-release-gate.yml', 'tool-releases.yml', 'release.yml'):
             self.assertIn('GITHUB_TOKEN: ${{ github.token }}', (ROOT / '.github' / 'workflows' / workflow).read_text(), workflow)

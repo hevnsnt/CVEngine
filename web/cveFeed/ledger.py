@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 24, 'naabu': 7 * 24, 'nuclei': 24,
                      'nuclei-deep-target': 7 * 24, 'nuclei-deep-host': 7 * 24, 'bbot': 7 * 24,
-                     'ct-watch': 24, 'hygiene': 24, 'bbot-deep': 7 * 24, 'route-auth': 7 * 24, 'retest': 24, 'validate': 24, 'archive-urls': 7 * 24,
+                     'ct-watch': 24, 'ct-watch-failed': 6, 'hygiene': 24, 'bbot-deep': 7 * 24, 'route-auth': 7 * 24, 'retest': 24, 'validate': 24, 'archive-urls': 7 * 24,
                      'wpscan': 7 * 24, 'wpscan-partial': 24, 'wpscan-thorough': 30 * 24, 'wpscan-thorough-partial': 24, 'wp-probe': 24, 'probe': 72,
                      'testssl': 14 * 24, 'testssl-failed': 3 * 24, 'buckets': 7 * 24, 'buckets-failed': 24, 'vhost': 7 * 24, 'vhost-ip': 3 * 24, 'subapp': 7 * 24,
                      'nuclei-auth': 24, 'nuclei-auth-refused': 24, 'route-auth-signed': 24, 'udp-scan': 7 * 24, 'udp-scan-failed': 24,
@@ -156,6 +156,18 @@ def sweep_claim(name, seconds):
         return bool(client.set(f'cvengine:sweep:{name}', _owner(), nx=True, ex=max(60, int(seconds))))
     except Exception:  # noqa: BLE001
         return True
+
+
+def sweep_claim_renew(name, seconds):
+    """Take the ``name`` sweep's claim for the next ``seconds`` whoever held it (a run that must not wait for it). Never raises."""
+    from reNgine import resources
+    client = getattr(resources.get_store(), 'r', None)
+    if client is None:
+        return
+    try:
+        client.set(f'cvengine:sweep:{name}', _owner(), ex=max(60, int(seconds)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _key(service, asset):

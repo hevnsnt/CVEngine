@@ -77,15 +77,16 @@ class DecisionTests(SimpleTestCase):
         self.assertIsNone(summarize(data[:100], 130 * 60))
         self.assertEqual(summarize(data, 130 * 60)['samples'], 130)
 
-    def test_live_cap_uses_shared_override_and_clamps_to_operator_bounds(self):
+    def test_the_retired_reviews_redis_step_no_longer_moves_the_live_cap(self):
+        """The three-hour review used to keep a step in Redis (cvengine:adaptive:max:<kind>) that admission read; the auto-tuner owns the cap
+        now (cveFeed.autotune), so whatever such a step says, the cap is the saved, tuned, environment or default value."""
         store = mock.Mock()
         store.r.get.return_value = json.dumps({'value': 3}).encode()
-        with mock.patch.object(resources, 'get_store', return_value=store), \
-             mock.patch.dict(os.environ, {'HEAVY_TUNE_MAX_NMAP': '3'}):
-            self.assertEqual(resources.max_concurrent('nmap'), 3)
-            store.r.get.return_value = json.dumps({'value': 99}).encode()
-            self.assertEqual(resources.max_concurrent('nmap'), 3)
-            store.r.get.side_effect = ConnectionError('broker unavailable')
+        with mock.patch.object(resources, 'get_store', return_value=store), mock.patch.object(resources, 'auto_values', return_value={}), \
+             mock.patch.object(resources, 'saved_values', return_value={}), mock.patch.dict(os.environ, {'HEAVY_TUNE_MAX_NMAP': '3'}):
+            os.environ.pop('HEAVY_MAX_NMAP', None)
+            self.assertEqual(resources.max_concurrent('nmap'), 2)
+            store.r.get.return_value = json.dumps({'value': 1}).encode()
             self.assertEqual(resources.max_concurrent('nmap'), 2)
 
 
@@ -134,13 +135,16 @@ class ScheduledReviewTests(TestCase):
              mock.patch.object(resources, 'adaptive_history', return_value=samples), \
              mock.patch.object(resources, 'max_concurrent', side_effect=lambda kind: 3 if kind == 'nmap' else 2 if kind == 'nuclei' else 1), \
              mock.patch.object(resources, 'adaptive_bounds', side_effect=lambda kind: (1, 4) if kind == 'nmap' else (1, 3) if kind == 'nuclei' else (1, 1)), \
-             mock.patch.object(performance_review, '_model_agrees', return_value=(True, 'agreed')):
+             mock.patch('reNgine.ai_settings.get_configured_provider') as provider:
             result = performance_review.review(now)
-        self.assertEqual((result['status'], result['kind'], result['before'], result['after']), ('changed', 'nuclei', 2, 1))
+        # it still works out which kind the failures point at, but only reports it: the auto-tuner owns the limits, and no AI is asked
+        self.assertEqual((result['status'], result['candidate']['kind'], result['candidate']['direction']), ('no_change', 'nuclei', 'down'))
+        self.assertIn('auto-tuning', result['note'])
+        provider.assert_not_called()
         self.assertEqual(result['stage_outcomes'], {
             'nmap': {'runs': 20, 'failures': 0, 'capacity_failures': 0, 'configuration_failures': 0},
             'nuclei': {'runs': 20, 'failures': 5, 'capacity_failures': 5, 'configuration_failures': 0}})
-        self.assertEqual(client.set.call_count, 2)
+        client.set.assert_not_called()
 
     def test_failure_cause_separates_capacity_from_configuration(self):
         for message in ('nmap on web1 waited too long for memory (210 MB free, needs 600 MB)', 'Nuclei timed out',
@@ -186,7 +190,7 @@ class ScheduledReviewTests(TestCase):
              mock.patch.object(resources, 'adaptive_history', return_value=samples), \
              mock.patch.object(resources, 'max_concurrent', side_effect=lambda kind: 2), \
              mock.patch.object(resources, 'adaptive_bounds', side_effect=lambda kind: (1, 3)), \
-             mock.patch.object(performance_review, '_model_agrees') as model:
+             mock.patch('reNgine.ai_settings.get_configured_provider') as model:
             result = performance_review.review(now)
         model.assert_not_called()
         self.assertEqual(result['status'], 'no_change')

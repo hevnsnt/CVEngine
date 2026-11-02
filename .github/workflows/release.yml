@@ -19,6 +19,11 @@ on:
         type: boolean
         required: false
         default: false
+      recut:
+        description: "Make this version's release again: delete its existing release and tag, then publish from master's tip (only when a release has to be re-cut; its tag and downloads change)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -82,6 +87,23 @@ jobs:
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: ♻️ Replace the existing release (re-cut only)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.recut == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # For a release that has to be made again from master's tip, because a fix had to be in it. Without this, a manual run
+          # publishes from the tag that already exists. The release (with its downloads) and the tag are deleted here; the steps
+          # below create both again from this checkout.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            git push origin ":refs/tags/$TAG"
+          fi
+          echo "The release and tag $TAG were deleted; they are made again from $(git rev-parse --short HEAD)."
 
       - name: 🏷️ Create the tag (manual run only)
         if: github.event_name == 'workflow_dispatch'

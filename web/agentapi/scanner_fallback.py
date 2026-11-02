@@ -20,8 +20,9 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-# Why a stage ran (or was allowed to run) locally. ``over_chunk`` is the one beyond the five a stage can name when the Sentinel was asked and
-# answered: a port sweep carries more addresses than one task does, so the rest runs here. ``disabled_everywhere`` is a ``no_scanner`` with a cause: a
+# Why a stage ran (or was allowed to run) locally, one row per task (or chunk task) that runs here. ``over_chunk`` is the one beyond the five a
+# dispatched task can name: a chunk of a stage that was never sent, because an earlier chunk of the same stage went unclaimed and the stage stopped
+# sending (``sentinel_dispatch.dispatch_many``), so it runs here. ``disabled_everywhere`` is a ``no_scanner`` with a cause: a
 # live Sentinel has the kind and an administrator's capability policy (or its machine) keeps it off every one (``sentinel_policy``). The column is a plain
 # ``CharField(24)`` with no ``choices``, so a new value needs no migration.
 REASONS = ('no_scanner', 'not_claimed_in_time', 'slot_busy', 'failed_then_local', 'completion_timeout', 'over_chunk', 'disabled_everywhere')

@@ -304,6 +304,8 @@ def load(entries, now=None):
         h = ev.facts[sub.id] = HostFacts.from_rows(sub, others, pid)
         names.add(h.name)
         assets.add(h.name)
+        if h.target_name:
+            assets.add(h.target_name)  # the whole-target hygiene run is recorded on the target
         heads.add(h.name)
         if h.scan_id:
             scans.add(h.scan_id)
@@ -423,7 +425,7 @@ def plan_ct_watch(h, ev):
         return 'a shared provider domain is never enumerated'
     if h.project_id in ev.blocked:
         return BOUNTY_REASON
-    return _one(h, ev, ('ct-watch',))
+    return _one(h, ev, ('ct-watch', 'ct-watch-failed'))
 
 
 def plan_archive(h, ev):
@@ -650,6 +652,33 @@ def plan_certificates(h, ev):
     return units
 
 
+def _cleartext_ports(h):
+    """The open TCP ports of the host the cleartext check would report on: Telnet, FTP and the r-services on an address that is not a CDN edge
+    or a tailnet one (the same rule ``cveFeed.cleartext.evaluate`` applies). Stored facts only."""
+    from cveFeed import cleartext
+    out = []
+    for entry in h.addresses.values():
+        if entry.is_cdn or cleartext._tailnet(entry.address):
+            continue
+        out += [(entry.address, p.number) for p in entry.ports if p.protocol in TCP and cleartext.classify(p)]
+    return sorted(set(out))[:MAX_UNITS]
+
+
+def plan_cleartext(h, ev):
+    """Cleartext administration services (``cveFeed.cleartext``): derived from the ports and route pages the scans already stored, so it needs no
+    address a scanner may use and no Sentinel (an internal host's ports come from its Sentinel's nmap). It runs inside the hygiene check, whole
+    target (the ``hygiene`` ledger kind, recorded on the target) or for the hosts of one scan (the ``host_hygiene`` stage)."""
+    from cveFeed import cleartext
+    if not cleartext.enabled():
+        return 'the cleartext service check is switched off (CVENGINE_HYGIENE_CLEARTEXT=0)'
+    if not _cleartext_ports(h) and not (h.web and (h.project_id, h.name) in ev.routes):
+        return 'no open Telnet, FTP, rlogin, rsh or rexec port, and no web route checked for a login page'
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON  # the hygiene sweep skips the project, so nothing refreshes it
+    runs = ev.ledger_runs(('hygiene',), h.project_id, h.target_name) if h.target_name else []
+    return [Unit(h.name, runs + ev.stage_runs(h.scan_id, 'host_hygiene'))]
+
+
 def plan_openvas(h, ev):
     """OpenVAS is slow (hours per host), so it is spent only on hosts on fire or smoke, unless someone forced the host, and never on a CDN or a
     platform other customers share (``openvas_scan.assess`` decides the same way, and says why a host that is ready is not chosen yet)."""
@@ -769,6 +798,7 @@ INTERNAL_PLANS = {
     'nuclei-tech': plan_internal_nuclei_tech,
     'nuclei': plan_internal_nuclei,
     'tls-audit': plan_internal_testssl,
+    'cleartext': plan_cleartext,
     'wpscan': plan_internal_wpscan,
     'cve-correlation': plan_correlation,
     'openvas': plan_openvas,
@@ -778,7 +808,7 @@ INTERNAL_PLANS = {
 CHECKS = (
     Check('discovery', 'Subdomain discovery (bbot)', plan_discovery, kinds=('bbot',), stages=('bbot_discovery',)),
     Check('deep-discovery', 'Weekly deep discovery', plan_deep_discovery, kinds=('bbot-deep',), sweeps=('deep-apex',)),
-    Check('ct-watch', 'Certificate transparency watch', plan_ct_watch, kinds=('ct-watch',), sweeps=('ct-watch',)),
+    Check('ct-watch', 'Certificate transparency watch', plan_ct_watch, kinds=('ct-watch', 'ct-watch-failed'), sweeps=('ct-watch',)),
     Check('archive-urls', 'Web archive history', plan_archive, kinds=('archive-urls',)),
     Check('email-auth', 'Email authentication (SPF, DKIM, DMARC, CAA)', plan_mail, kinds=('hygiene',), sweeps=('hygiene',)),
     Check('nmap', 'Service fingerprint (nmap)', plan_nmap, kinds=('nmap-fast',), stages=('nmap_scan',)),
@@ -803,6 +833,7 @@ CHECKS = (
     Check('tls-audit', 'TLS configuration audit (testssl.sh)', plan_testssl, kinds=('testssl', 'testssl-failed'), sweeps=('testssl',),
           ttl_kind='testssl'),
     Check('certificates', 'Certificate and legacy TLS check', plan_certificates, stages=('host_hygiene',), ttl_kind='hygiene'),
+    Check('cleartext', 'Cleartext services (Telnet, FTP, rlogin, plain-HTTP login)', plan_cleartext, stages=('host_hygiene',), ttl_kind='hygiene'),
     Check('openvas', 'OpenVAS scan (optional add-on)', plan_openvas, kinds=('openvas', 'openvas-failed'), ttl_kind='openvas'),
     Check('nuclei-signed-in', 'Nuclei, signed in', plan_auth_nuclei, kinds=('nuclei-auth', 'nuclei-auth-refused')),
     Check('routes-signed-in', 'Web routes, signed in', plan_auth_routes, kinds=('route-auth-signed',)),
@@ -823,16 +854,19 @@ EXCLUDED = {
     'sweeps': {
         'buckets': 'cloud storage candidates belong to the project, not to one host',
         'conductor': 'the scheduler that keeps discovery queued; it does no check',
+        'autotune': 'the auto-tuner of the configMaxxing throughput settings (cveFeed.autotune); it measures the instance and checks no host',
         'distro-sync': 'a feed sync, not a check of a host',
         'triage': 'AI review of findings, not a check of a host',
         'validate': 'validation of CVE matches, recorded on the match',
         'rescore': 'recomputes host scores from stored data',
         'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
+        'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
+        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for the screenshot worker (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
         'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
         'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
         'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',

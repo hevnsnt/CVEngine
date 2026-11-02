@@ -50,8 +50,10 @@ ALLOWED = {
         'agentapi/services.py',
         'agentapi/system_status.py',
         'celery-entrypoint.sh',
+        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/changes.py',
         'cveFeed/check_coverage.py',
+        'cveFeed/cleartext.py',  # 1.3.2 cleartext hygiene (develop): reads stored nmap service rows, runs nothing
         'cveFeed/correlation.py',
         'cveFeed/coverage_topup.py',
         'cveFeed/db_exposure.py',
@@ -63,6 +65,7 @@ ALLOWED = {
         'cveFeed/egress_proxy.py',
         'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
+        'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
         'cveFeed/host_inventory.py',
         'cveFeed/intel.py',
@@ -83,13 +86,17 @@ ALLOWED = {
         'cveFeed/report_data.py',
         'cveFeed/route_auth.py',
         'cveFeed/runzero_sync.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/service_intel.py',
+        'cveFeed/settings_api.py',  # 1.3.2 settings API (develop): setting help text, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
         'cveFeed/testssl_scan.py',
+        'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
+        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',
@@ -112,6 +119,7 @@ ALLOWED = {
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
         'cveFeed/auth_nuclei.py',
+        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
         'cveFeed/counts.py',
@@ -124,8 +132,10 @@ ALLOWED = {
         'cveFeed/egress_proxy.py',
         'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
+        'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
         'cveFeed/migrations/0079_nuclei_templates_every_six_hours.py',
@@ -138,12 +148,15 @@ ALLOWED = {
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
         'cveFeed/safeyaml.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
+        'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
         'cveFeed/template_fixtures.py',
         'cveFeed/templategen.py',
         'cveFeed/triage.py',
+        'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/validation.py',
         'cveFeed/views.py',
         'cveFeed/waf_scan.py',
@@ -164,10 +177,14 @@ ALLOWED = {
         'cveFeed/check_coverage.py',
         'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
+        'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
         'cveFeed/report_data.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
+        'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
+        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/resources.py',
     ],
     'wpscan': [
@@ -180,6 +197,7 @@ ALLOWED = {
         'agentapi/system_status.py',
         'celery-entrypoint.sh',
         'cveFeed/api_credentials.py',
+        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/cms.py',
         'cveFeed/conductor.py',
@@ -189,10 +207,12 @@ ALLOWED = {
         'cveFeed/host_context.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/models.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/probes.py',
         'cveFeed/report_data.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tasks.py',
         'cveFeed/wp_correlation.py',
         'cveFeed/wpscan_scan.py',
@@ -206,6 +226,7 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',
+        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
         'cveFeed/egress_proxy.py',
@@ -215,6 +236,7 @@ ALLOWED = {
         'cveFeed/ledger.py',
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tasks.py',
         'cveFeed/testssl_scan.py',
         'reNgine/input_guard.py',
@@ -228,6 +250,7 @@ ALLOWED = {
         'celery-entrypoint.sh',
         'cveFeed/admin_api.py',
         'cveFeed/api_credentials.py',
+        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/changes.py',
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
@@ -248,14 +271,18 @@ ALLOWED = {
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
         'cveFeed/route_auth.py',
+        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
+        'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
         'cveFeed/shots.py',
         'cveFeed/supplier_scan.py',
         'cveFeed/tasks.py',
         'cveFeed/triage.py',
         'cveFeed/versions.py',
         'cveFeed/views.py',
+        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/bbot.py',
         'reNgine/common_func.py',
+        'reNgine/gevent_autoscale.py',  # 1.3.2 gevent autoscaler (develop): a comment about the bbot queue, runs nothing
         'reNgine/resources.py',
         'reNgine/tasks.py',
     ],
@@ -273,7 +300,7 @@ ALLOWED = {
         'agentapi/services.py',
         'cveFeed/discovery.py',
         'cveFeed/shots.py',
-        'cveFeed/views.py',
+        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/bbot.py',
     ],
     'aardwolf': [
@@ -293,6 +320,7 @@ ALLOWED = {
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/waf_scan.py',
+        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
         'reNgine/bbot.py',
         'reNgine/resources.py',

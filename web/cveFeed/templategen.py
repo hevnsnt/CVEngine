@@ -672,7 +672,11 @@ GENERATION_DEFAULTS = {'TEMPLATE_GEN_MAX_PER_DAY': 10, 'TEMPLATE_GEN_CVE_DAYS': 
 
 
 def generation_limit(name):
-    """A template-generation limit, overridable by CVENGINE_<NAME> in the environment."""
+    """A template-generation limit: for the daily budget what an App Admin saved on Settings, configMaxxing (``cveFeed.tunables``), else
+    CVENGINE_<NAME> in the environment, else the default."""
+    from cveFeed import tunables
+    if name.lower() in tunables.BY_KEY:
+        return tunables.value(name.lower(), GENERATION_DEFAULTS[name])
     try:
         return max(1, int(os.environ.get(f'CVENGINE_{name}', '')))
     except ValueError:
@@ -720,9 +724,10 @@ def _generate_template(cve, provider, project):
     from cveFeed import activity
     with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
                        project=project, cve_id=cve.cve_id) as handle:
-        from reNgine.ai_providers import usage_stage
+        from reNgine.ai_providers import request_options, usage_stage
         try:
-            with usage_stage('template_generation'):
+            # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the prompt is masked
+            with usage_stage('template_generation'), request_options(redact_reply=False):
                 text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
         except Exception as exc:
             # a failed provider call is still a billable attempt: leave the ledger row, so the next run does not retry this CVE at once

@@ -88,13 +88,13 @@ def _remember_cursor(pk):
 def _top_up(now, only_sentinel_projects):
     from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
-    from cveFeed.host_assessment import active_count, caps, enqueue
+    from cveFeed.host_assessment import active_slots, batch_size_for, batches, caps, enqueue_batch
     from cveFeed.scan_control import pause_requested
     from cveFeed import unresolved_archive
     from startScan.models import Subdomain
 
     now = now or timezone.now()
-    result = {'projects_checked': 0, 'hosts_queued': 0, 'skipped': None}
+    result = {'projects_checked': 0, 'hosts_queued': 0, 'batches_queued': 0, 'skipped': None}
     if pause_requested(fail_closed=True):
         result['skipped'] = 'paused'
         return result
@@ -103,12 +103,12 @@ def _top_up(now, only_sentinel_projects):
     except Exception:  # noqa: BLE001 - a DNS problem must never stop the feed
         logger.exception('coverage top-up: could not re-resolve hosts with no address')
     global_cap, _project_cap = caps()
-    global_active = active_count()
+    global_active = active_slots()  # the caps are in pipeline runs (worker slots): a batch of hosts is one, however many hosts it carries
     if global_active >= global_cap:
         result['skipped'] = 'global capacity'
         return result
     blocked = bounty_blocked_projects()
-    budget = min(global_cap - global_active, MAX_PER_RUN_BASE + (global_cap - 20))
+    budget = min(global_cap - global_active, MAX_PER_RUN_BASE + (global_cap - 20))  # runs this sweep may start
     from agentapi import sentinel_broker
     last = None
     for project in _projects(blocked):
@@ -118,33 +118,36 @@ def _top_up(now, only_sentinel_projects):
         if only_sentinel_projects and not sentinel_broker.project_slots(project):
             continue
         result['projects_checked'] += 1
-        free = min(caps(project)[1] - active_count(project), budget)
+        free = min(caps(project)[1] - active_slots(project), budget)  # runs this project may start
         if free <= 0:
             continue
-        _, due_ids = host_coverage_due(project, now, limit=free, need_count=False)
+        size = batch_size_for(project)
+        _, due_ids = host_coverage_due(project, now, limit=free * size, need_count=False)  # up to ``size`` hosts for each run
         if not due_ids:
             continue
         subs = {s.pk: s for s in Subdomain.objects.filter(pk__in=due_ids).select_related('target_domain')}
-        for host_id in due_ids:
-            if budget <= 0:
+        for group in batches([subs[i] for i in due_ids if i in subs], size):  # hosts of one target are one run: the Sentinel gets many targets per task
+            if budget <= 0 or free <= 0:
                 break
-            sub = subs.get(host_id)
-            if not sub:
-                continue
             try:
-                job, created = enqueue(project, sub, source='topup')
+                jobs, skipped = enqueue_batch(project, group, source='topup')
             except (ValueError, RuntimeError) as exc:
-                logger.info('coverage top-up could not queue host %s of project %s: %s', host_id, project.pk, exc)
+                logger.info('coverage top-up could not queue hosts %s of project %s: %s', [g.pk for g in group], project.pk, exc)
                 continue
-            if created and job.status == 'queued':
-                result['hosts_queued'] += 1
+            for sub, why in skipped:
+                logger.info('coverage top-up could not queue host %s of project %s: %s', sub.pk, project.pk, why)
+            if jobs:
+                result['hosts_queued'] += len(jobs)
+                result['batches_queued'] += 1
                 budget -= 1
+                free -= 1
     if last is not None:
         _remember_cursor(last)
     if result['hosts_queued']:
         from cveFeed import activity
+        runs = f" in {result['batches_queued']} run{'s' if result['batches_queued'] != 1 else ''}" if result['batches_queued'] != result['hosts_queued'] else ''
         activity.log('discovery', f"Coverage top-up queued {result['hosts_queued']} host assessment"
-                     f"{'s' if result['hosts_queued'] != 1 else ''} across {result['projects_checked']} project"
+                     f"{'s' if result['hosts_queued'] != 1 else ''}{runs} across {result['projects_checked']} project"
                      f"{'s' if result['projects_checked'] != 1 else ''}", status='done',
                      hosts_queued=result['hosts_queued'])
     return result
@@ -155,12 +158,10 @@ REFRESH_PER_RUN = 20           # most assessments one refresh pass queues across
 
 
 def refresh_gap():
-    """How long a host rests between refresh assessments (``CVENGINE_SENTINEL_REFRESH_GAP_HOURS``, default 6; ``0`` turns the refresh off)."""
-    import os
-    try:
-        hours = float(os.environ.get('CVENGINE_SENTINEL_REFRESH_GAP_HOURS', REFRESH_GAP_DEFAULT_HOURS))
-    except ValueError:
-        hours = REFRESH_GAP_DEFAULT_HOURS
+    """How long a host rests between refresh assessments (what an App Admin saved on Settings, configMaxxing, else
+    ``CVENGINE_SENTINEL_REFRESH_GAP_HOURS``, default 6; ``0`` turns the refresh off). Read on every pass (``cveFeed.tunables``)."""
+    from cveFeed import tunables
+    hours = float(tunables.value('sentinel_refresh_gap_hours', REFRESH_GAP_DEFAULT_HOURS))
     return None if hours <= 0 else timedelta(hours=hours)
 
 
@@ -173,9 +174,11 @@ def stalest_hosts(project, now, limit, gap):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment
     from startScan.models import Subdomain
+    from targetApp.models import Domain
 
     last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
-    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
+    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).select_related('target_domain')
+            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
             .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
             .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
             .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])
@@ -199,7 +202,7 @@ def refresh_for_sentinels(now=None):
     summary; never raises for one project."""
     from agentapi import sentinel_broker
     from cveFeed.conductor import bounty_blocked_projects
-    from cveFeed.host_assessment import active_count, caps, enqueue
+    from cveFeed.host_assessment import active_slots, batch_size_for, batches, caps, enqueue_batch
     from cveFeed.scan_control import pause_requested
 
     now = now or timezone.now()
@@ -212,7 +215,7 @@ def refresh_for_sentinels(now=None):
         out['skipped'] = 'paused'
         return out
     global_cap, _ = caps()
-    budget = min(global_cap - active_count(), REFRESH_PER_RUN)
+    budget = min(global_cap - active_slots(), REFRESH_PER_RUN)  # pipeline runs, as in the top-up
     if budget <= 0:
         out['skipped'] = 'global capacity'
         return out
@@ -221,19 +224,25 @@ def refresh_for_sentinels(now=None):
             break
         if not sentinel_broker.project_slots(project):
             continue
-        free = min(caps(project)[1] - active_count(project), budget)
+        free = min(caps(project)[1] - active_slots(project), budget)
         if free <= 0:
             continue
-        cand = stalest_hosts(project, now, free, gap)
-        for sub in cand:
+        size = batch_size_for(project)
+        cand = stalest_hosts(project, now, free * size, gap)
+        for group in batches(cand, size):
+            if budget <= 0 or free <= 0:
+                break
             try:
-                job, created = enqueue(project, sub, source='refresh')
+                jobs, skipped = enqueue_batch(project, group, source='refresh')
             except (ValueError, RuntimeError) as exc:
-                logger.info('refresh could not queue host %s of project %s: %s', sub.pk, project.pk, exc)
+                logger.info('refresh could not queue hosts %s of project %s: %s', [g.pk for g in group], project.pk, exc)
                 continue
-            if created and job.status == 'queued':
-                out['refreshed'] += 1
+            for sub, why in skipped:
+                logger.info('refresh could not queue host %s of project %s: %s', sub.pk, project.pk, why)
+            if jobs:
+                out['refreshed'] += len(jobs)
                 budget -= 1
+                free -= 1
     if out['refreshed']:
         from cveFeed import activity
         activity.log('discovery', f"Refresh queued {out['refreshed']} host assessment{'s' if out['refreshed'] != 1 else ''} so the Sentinels keep working",

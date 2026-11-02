@@ -227,7 +227,9 @@ class AgentApiTests(TestCase):
 		status, data = call(self.t_alice, 'GET', f'{base}/work')
 		self.assertEqual([i['host'] for i in data['results']], ['www.a.example'])  # only A's host
 		item = data['results'][0]
-		self.assertEqual((item['cve']['tier'], item['fixed_in'], item['ips']), ('fire', ['1.20.0'], ['203.0.113.5']))
+		# a banner version in the range of a KEV CVE, nothing else: smoke on the host since 1.3.2, with the KEV flag and fire for validation
+		self.assertEqual((item['cve']['tier'], item['fixed_in'], item['ips']), ('smoke', ['1.20.0'], ['203.0.113.5']))
+		self.assertEqual((item['cve']['kev'], item['cve']['feed_tier'], item['cve']['validation_tier'], item['version_only']), (True, 'fire', 'fire', True))
 		# register assets: unrelated asset empties the list, matching asset keeps it
 		self.assertEqual(call(self.t_alice, 'PUT', '/api/v1/assets', {'assets': ['other.example']})[0], 200)
 		self.assertEqual(call(self.t_alice, 'GET', f'{base}/work')[1]['count'], 0)
@@ -1051,7 +1053,7 @@ class HostHeatTests(TestCase):
 		hot = Subdomain.objects.create(name='hot.heat.example', target_domain=domain, http_status=200)
 		Subdomain.objects.create(name='cold.heat.example', target_domain=domain, http_status=200)
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-7', kev=True, cvss=9.8, title='t', published_at=now)
-		CVEMatch.objects.create(cve_entry=cve, subdomain=hot, confidence=0.9)
+		CVEMatch.objects.create(cve_entry=cve, subdomain=hot, confidence=0.9, template_result='vulnerable')  # fire needs hard evidence (1.3.2)
 		user = User.objects.create_user('heat-admin', password='x', is_superuser=True)
 		heat = {h['host']: h['heat'] for h in list_hosts(Ctx(user=user), 'heat-p', {})['results']}
 		self.assertEqual(heat, {'hot.heat.example': 'fire', 'cold.heat.example': 'unscanned'})
@@ -1096,8 +1098,14 @@ class MatchTemperatureTests(TestCase):
 		domain = Domain.objects.create(name='php.example', project=project, insert_date=now)
 		sub = Subdomain.objects.create(name='www.php.example', target_domain=domain, http_status=200)
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-9', cvss=7.5, title='PHP-CGI RCE', published_at=now)  # high, no KEV flag
-		CVEMatch.objects.create(cve_entry=cve, subdomain=sub, confidence=0.9, ai_verdict='affected')
+		m = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, confidence=0.9, ai_verdict='affected')
 		user = User.objects.create_user('m-admin', password='x', is_superuser=True)
+		# 1.3.2: the AI's word is not evidence about the host, so with nothing else the confirmed high CVE stays smoke (validated as fire)
+		host = list_hosts(Ctx(user=user), 'mt-p', {})['results'][0]
+		self.assertEqual(host['heat'], 'smoke')
+		match = list_matches(Ctx(user=user), 'mt-p', {})['results'][0]
+		self.assertEqual((match['cve']['tier'], match['cve']['feed_tier'], match['cve']['validation_tier']), ('smoke', 'smoke', 'fire'))
+		CVEMatch.objects.filter(pk=m.pk).update(distro_status='vulnerable')  # the distribution's tracker lists the package: hard evidence
 		host = list_hosts(Ctx(user=user), 'mt-p', {})['results'][0]
 		self.assertEqual(host['heat'], 'fire')
 		self.assertEqual(host['heat_reasons'][0]['label'], 'CVE-2099-9')

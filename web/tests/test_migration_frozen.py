@@ -7,7 +7,8 @@ from django.apps import apps
 from django.test import TestCase
 
 MIGRATIONS = ('cveFeed.migrations.0041_bbot_info_to_labels', 'startScan.migrations.0011_shorten_bbot_names',
-              'startScan.migrations.0015_technology_version_category', 'targetApp.migrations.0003_remove_shared_provider_apexes')
+              'startScan.migrations.0015_technology_version_category', 'targetApp.migrations.0003_remove_shared_provider_apexes',
+              'agentapi.migrations.0008_clear_stale_status_note', 'agentapi.migrations.0009_agent_hold')
 LIVE_CODE = re.compile(r'^\s*(from|import)\s+(reNgine|cveFeed|agentapi|dashboard|scanEngine|tenancy|targetApp\.(?!migrations)|startScan\.(?!migrations))', re.M)
 
 

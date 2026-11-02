@@ -22,7 +22,7 @@ Use the slug `_all` to search every project you can see.
 
 ## The syntax
 
-- A **bare word** matches almost anything: host name, IP, technology, web server, port product, service, version, CPE, banner, page title, OS, finding name, and CVE id. `nginx`, `jenkins`, `CVE-2026-111497`.
+- A **bare word** matches almost anything: host name, the alias and note a person gave the host (or, for an address added as a target, the target), IP, technology, web server, port product, service, version, CPE, banner, page title, OS, finding name, and CVE id. `nginx`, `jenkins`, `CVE-2026-111497`.
 - A **filter** is `name:value` with no space around the colon.
 - A space means **AND**. Every term must match the host, but each term is tested on its own: `port:22 product:nginx` finds hosts with SSH open somewhere and nginx somewhere, not necessarily on the same port.
 - A leading `-` **excludes**: `-host:www`.
@@ -41,7 +41,9 @@ Use the slug `_all` to search every project you can see.
 | `banner:` | Service banners and NSE script output on an open port | `banner:"Anonymous FTP login allowed"` |
 | `os:` | Operating system guess | `os:windows` |
 | `ip:` | An address, a prefix, or a CIDR range | `ip:198.51.100.0/24` |
-| `host:` | Part of a host name | `host:staging` |
+| `host:` | Part of a host name or of its alias | `host:staging` |
+| `alias:` | The short display name given to a host (or, for an address added as a target, to the target) | `alias:printer` |
+| `note:` | The note written on a host (or its target) | `note:"rack 3"` |
 | `cve:` | Hosts matched by a CVE (a full id or a prefix) | `cve:CVE-2026-111497` |
 | `vuln:` | A finding by name, open or closed | `vuln:jenkins` |
 | `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
@@ -84,6 +86,14 @@ auth:open sensitive:credentials        hosts with an open route and a route that
 auth:open tech:jenkins                 Jenkins hosts that also have a route open to anyone
 tech:php -tech:nginx                   PHP hosts that are not behind nginx
 zombie:yes                             retired names that still answer, with the old name
+```
+
+**By the names you gave your hosts** (an alias and a note, set on the Targets and Hosts pages or over the API; see [Frontend](FRONTEND.md))
+
+```text
+printer                                a bare word also reads aliases and notes
+alias:printer                          hosts you named "printer"
+note:"rack 3" -alias:spare             hosts with that note, minus the spares
 ```
 
 **Scope it down**

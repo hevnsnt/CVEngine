@@ -8,7 +8,8 @@
 #   3. refuses to touch a checkout with uncommitted changes to tracked files (a modified or deleted .env does not
 #      count: it is backed up before the merge and put back after it, because .env used to be tracked and an
 #      update that untracks it would otherwise delete it);
-#   4. fast-forwards to exactly that commit, rebuilds and restarts app services while leaving db/Redis containers running;
+#   4. fast-forwards to exactly that commit, rebuilds and restarts app services while leaving the Redis container running (the db container is
+#      recreated only when its compose definition changed, e.g. max_connections);
 #   5. if it fails before the database is migrated (the build, or the migration itself), returns to the previous
 #      commit and restarts it. Once the migration has succeeded the previous code is never put back, because it would
 #      run on the new schema: the restart is retried and, if it still fails, the approval is kept so the next run
@@ -18,7 +19,7 @@
 #
 # The Compose layout is the one the running stack was started with, or CVENGINE_COMPOSE_FILES / CVENGINE_COMPOSE_ENV_FILE /
 # CVENGINE_COMPOSE_PROJECT (environment or .env, the settings scripts/update.sh reads); see resolve_layout below. Ordinary updates
-# deliberately keep db/Redis containers running. A PostgreSQL major-version migration requires a separate maintenance operation. An update
+# deliberately keep db/Redis containers running (db is recreated only when its compose definition changed). A PostgreSQL major-version migration requires a separate maintenance operation. An update
 # waits while recorded scans or targeted jobs are running, up to CVENGINE_UPDATE_DRAIN_SECONDS (environment or .env, default 300); past that it
 #    proceeds and interrupts them (cveFeed.reaper.expire_orphaned_running closes out what the restart leaves behind within one reaper tick).
 #    Operators should drain other worker work as well.
@@ -189,6 +190,10 @@ deploy_builtin() {
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" up -d --no-recreate db redis || return 1
+  # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
+  # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
+  "${compose[@]}" up -d --no-deps db || return 1
+  for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
