@@ -1936,6 +1936,73 @@ class HeatGateTests(Fixture, TestCase):
         self.assertEqual(OpenvasRun.objects.get().hosts, {'93.184.216.6': 'api.rt.test'})
 
 
+class KevHeatGateTests(Fixture, TestCase):
+    """The heat gate under the KEV heat policy (the default; HeatGateTests pins legacy): a host qualifies through a CVE on the KEV or with a
+    known exploit (rated by its validation heat, the heat once proven: OpenVAS is how it is proven), or an open finding of medium severity or
+    more that names no CVE; a CVE that is neither on the KEV nor exploited is ice, whatever its CVSS, and a host with only such CVEs (as matches
+    or as scanner findings) is not scanned. Fire before smoke, then the most reasons, then the longest waiting."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()
+        kev = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'kev'})
+        kev.start()
+        self.addCleanup(kev.stop)
+        self.link.hosts, self.link.forced_hosts = [], []
+        self.link.save()
+        self.kev = CVEEntry.objects.create(cve_id='CVE-2024-0001', title='Exploited', published_at=timezone.now(), cvss=6.5, kev=True)
+        self.exploit = CVEEntry.objects.create(cve_id='CVE-2024-0005', title='Exploit', published_at=timezone.now(), cvss=4.0, exploit_db=True)
+        self.critical = CVEEntry.objects.create(cve_id='CVE-2024-0002', title='Critical', published_at=timezone.now(), cvss=9.8, epss_reached=True)
+
+    def latest(self, host):
+        return Subdomain.objects.filter(name=host).order_by('-scan_history_id').first()
+
+    def heat(self, host, cve, **kw):
+        return CVEMatch.objects.update_or_create(cve_entry=cve, subdomain=self.latest(host), matched_product='x',
+                                                 defaults={'confidence': 0.9, 'matched_version': '1', **kw})[0]
+
+    def finding(self, host, severity, cves=(), source='nuclei-cve'):
+        from startScan.models import CveId
+        sub = self.latest(host)
+        v = Vulnerability.objects.create(name=f'finding {severity}', severity=severity, source=source, subdomain=sub,
+                                         target_domain=sub.target_domain, scan_history=sub.scan_history, open_status=True)
+        for cve in cves:
+            v.cve_ids.add(CveId.objects.create(name=cve))
+        return v
+
+    def batch(self):
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        return [h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)]
+
+    def test_a_critical_score_alone_does_not_qualify_a_host_and_a_kev_cve_does(self):
+        self.heat('www.rt.test', self.critical)
+        self.finding('db.rt.test', 4, ['CVE-2024-0002'])  # the same CVE confirmed by a template: still neither on the KEV nor exploited
+        self.assertEqual(self.batch(), [])
+        self.assertEqual({h: v[0] for h, v in ov.host_heat(self.project.id, ['www.rt.test', 'db.rt.test']).items()},
+                         {'www.rt.test': 'ice', 'db.rt.test': 'ice'})
+        match = self.heat('api.rt.test', self.kev)  # version not proven: smoke on the host, fire here (validation heat)
+        self.assertEqual(self.batch(), ['api.rt.test'])
+        match.remediation_status = 'fixed'
+        match.save()
+        self.assertEqual(self.batch(), [])  # cooled
+
+    def test_fire_before_smoke_then_the_most_reasons_then_the_longest_waiting(self):
+        from cveFeed import ledger
+        self.finding('www.rt.test', 2, source='bbot')  # a medium finding that names no CVE: smoke by its severity
+        self.heat('api.rt.test', self.exploit)
+        self.finding('db.rt.test', 2, source='bbot')
+        self.finding('db.rt.test', 2, source='wapiti')
+        ready, _v = ov.assess(self.project.id, ov.hot_names(self.project.id), resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in ready], ['api.rt.test', 'db.rt.test', 'www.rt.test'])
+        self.assertEqual(self.batch(), ['api.rt.test'])
+        ledger.record(ov.SERVICE, ['api.rt.test'], self.project.id)
+        self.assertEqual(self.batch(), ['db.rt.test'])
+
+    def test_a_hot_cve_finding_qualifies_its_host(self):
+        self.finding('www.rt.test', 3, ['CVE-2024-0001'], source='openvas')
+        self.assertEqual(self.batch(), ['www.rt.test'])
+
+
 class BudgetTests(Fixture, TestCase):
     """A task that runs out of its time budget keeps what it found."""
 

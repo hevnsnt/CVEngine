@@ -146,3 +146,56 @@ class FeedAnnouncementTests(TestCase):
 				mock.patch('cveFeed.tasks.auto_fire_new_cves.delay') as delay:
 			tasks.sync_cve_now_feed()
 		delay.assert_called_once_with([77])
+
+
+JENKINS = [{'product': 'jenkins', 'ranges': [{'introduced': '1.0', 'fixed': '2.442'}]}]
+
+
+class KevFeedAnnouncementTests(FeedAnnouncementTests):
+	"""The same announcement plumbing under the KEV heat policy (the default): the host's evidence is a banner nmap probed from a vendor-built
+	service (Jenkins), which proves the version there, so a KEV CVE in its range is fire and paged; the cap of the legacy policy is not read."""
+
+	def setUp(self):
+		super().setUp()
+		kev = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'kev', 'CVENGINE_VERSION_ONLY_MAX_HEAT': ''})
+		kev.start()
+		self.addCleanup(kev.stop)
+		Port.objects.update(product='Jenkins', version='2.440', extra={'method': 'probed'})
+
+	def cve(self, affected=NGINX, cve_id='CVE-2099-60'):
+		affected = {id(NGINX): JENKINS, id(NO_RANGE): [{'product': 'jenkins'}]}.get(id(affected), affected)
+		return super().cve(affected, cve_id)
+
+	def test_with_the_default_cap_a_banner_version_alone_is_not_paged(self):
+		# under the KEV rule: a version nmap guessed from the port table is not proven, so the KEV match is smoke and not paged
+		Port.objects.update(extra={'method': 'table'})
+		cve = self.cve()
+		auto_fire_new_cves([cve.pk])
+		match = CVEMatch.objects.get()
+		self.assertEqual((match.version_in_range, match.template_result, match.source), (True, '', 'port'))
+		self.assertEqual(self.slack(), [])
+		CVEMatch.objects.update(template_result='vulnerable')  # a template test confirmed it: now it is fire, and pageable
+		self.assertTrue(notify.fire_matches(timezone.now() - timedelta(minutes=5)))
+		self.assertIn('1 new fire-tier CVE match on 1 host', self.slack()[0])
+
+	def test_a_match_the_ai_calls_a_false_positive_stays_open_but_is_not_announced(self):
+		# Under the KEV rule the AI's call does not hold back a match whose version is proven: nmap read it from the vendor's own banner, so a
+		# KEV CVE in range is fire (an AI verdict is no evidence either way); it is still tested, and announced once.
+		AIProviderSettings.objects.create(auto_fire=True, enabled=True)
+		cve = self.cve()
+		provider = mock.Mock(model='m')
+		provider.name = 'test'
+		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "banner says patched"}'
+		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
+				mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
+			out = auto_fire_new_cves([cve.pk])
+		self.assertEqual(out, {'fired': 1})
+		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'uncertain')
+		self.assertEqual(len(self.slack()), 1)
+
+	def test_a_cve_that_is_neither_on_the_kev_nor_exploited_is_never_announced(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-64', kev=False, exploit_db=False, cvss=10.0, epss_reached=True,
+									  published_at=timezone.now(), affected=JENKINS)
+		auto_fire_new_cves([cve.pk])
+		self.assertEqual(CVEMatch.objects.get().cve_entry_id, cve.pk)  # found and kept: ice, not paged
+		self.assertEqual(self.slack(), [])
