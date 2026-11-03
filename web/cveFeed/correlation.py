@@ -925,7 +925,12 @@ def _library_standing(match):
     from cveFeed.models import Triage
     if match_policy.has_standing(match):
         return True
-    return Triage.objects.filter(match_id=match.pk).filter(Q(validation_status='hit') | Q(classification='confirmed')).exists()
+    from cveFeed.triage import library_body_proven
+    # a confirmation the rules gave because the page's own file stated the version (triage.library_rule) rests on the very reading a newer
+    # one may contradict: it is no standing against the page's word, only a validation hit is
+    confirmed = Q(classification='confirmed') if not library_body_proven(
+        match.source, match.evidence, match.version_in_range, match.distro_status) else Q(pk__in=[])
+    return Triage.objects.filter(match_id=match.pk).filter(Q(validation_status='hit') | confirmed).exists()
 
 
 def _recently_reopened(match, now=None, days=LIBRARY_DAMPING_DAYS):
@@ -1360,7 +1365,7 @@ def _vouched_on_another_row(subdomain, name, version):
     tokens = {re.sub(r'[^a-z0-9]', '', key), re.sub(r'[^a-z0-9]', '', js_libraries.LIBRARIES[key][0].lower())}
     for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id, source='tech',
                                           matched_version=version).exclude(subdomain_id=subdomain.pk)
-                  .only('id', 'source', 'matched_product', 'evidence', 'ai_verdict', 'remediation_status', 'assignee_id', 'template_result',
+                  .only('id', 'source', 'matched_product', 'evidence', 'version_in_range', 'ai_verdict', 'remediation_status', 'assignee_id', 'template_result',
                         'distro_status')):
         if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens and _library_standing(match):
             return True

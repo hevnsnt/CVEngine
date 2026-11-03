@@ -120,10 +120,81 @@ def ceiling(kind, facts):
     """``(level, text)``: the highest classification the evidence supports, or ``('', '')`` when it sets none. The mirror of the floor:
     a CVE match that stands on a version string alone (``match_policy.version_only``) is needs_validation at most, whatever the model
     says. Enforced here, in code, because a prompt is a request and a model's stated certainty is not calibrated (it is overconfident
-    on exactly this kind of claim); the evidence class decides, as OpenVEX does with ``under_investigation`` until there is more."""
+    on exactly this kind of claim); the evidence class decides, as OpenVEX does with ``under_investigation`` until there is more.
+
+    It still applies to a JavaScript library version read from the served file's own body (``library_body_proven``): what it gives is the
+    classification everything else reads (the legacy verdict, heat, paging, standing, score). ``library_rule`` then sets the row's own
+    classification on top of it, in ``_apply``, and nothing else."""
     if kind == 'cve_match' and facts.get('version_only'):
         return 'needs_validation', 'the only evidence is a version string inside the affected range'
     return '', ''
+
+
+def library_body_proven(source, evidence, version_in_range, distro_status=''):
+    """Whether a CVE match's version was read by cvENGINE from the JavaScript library's own served file, for the copy the page runs, and is
+    inside the affected range. The predicate is the library clause of ``match_policy.version_read_from_component``, the one the heat policy
+    and ``match_policy.version_proven`` read (evidence ``source`` tech, ``version_source`` body, ``copy_state`` effective, a numeric
+    ``version_confidence`` of at least ``PROVEN_LIBRARY_CONFIDENCE`` and no ``copies_unresolved``), reached only for a technology match (never
+    its version-template or service-banner clauses), plus ``version_in_range`` True. A version another tool read (Wappalyzer, httpx, the
+    technology scan, nmap), a file name or ``?ver=`` hint, a shadowed, fallback or unresolved copy is never it, and neither is evidence with
+    no absolute http(s) ``script_url`` (``library_body_proven_q`` is the database form)."""
+    return (source == 'tech' and version_in_range is True and isinstance(evidence, dict) and evidence.get('source') == 'tech'
+            and isinstance(evidence.get('script_url'), str) and bool(_HTTP_URL.match(evidence['script_url']))
+            and match_policy.version_read_from_component(evidence, distro_status or ''))
+
+
+_HTTP_URL = re.compile(r'^https?://[^\s/?#]+')
+
+
+def library_body_proven_q(prefix=''):
+    """The database form of ``library_body_proven`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
+    from django.db.models import Q
+    p = prefix
+    return (Q(**{p + 'source': 'tech', p + 'version_in_range': True, p + 'evidence__script_url__regex': _HTTP_URL.pattern})
+            & match_policy.library_read_q(p) & ~Q(**{p + 'distro_status': 'patched'}))
+
+
+def range_text(rng):
+    """An affected range in words: "1.0.3 to before 3.5.0", "before 3.5.0", "up to 2.4.1"."""
+    rng = rng if isinstance(rng, dict) else {}
+    low = str(rng.get('introduced') or '').strip()
+    low = '' if low in ('0', '*') else low
+    fixed = str(rng.get('fixed') or rng.get('less_than') or '').strip()
+    last = str(rng.get('last_affected') or rng.get('lastAffected') or '').strip()
+    high = f'before {fixed}' if fixed else f'up to {last}' if last else ''
+    if low and high:
+        return f'{low} to {high}'
+    return high or (f'from {low} on' if low else '')
+
+
+def library_rule(kind, facts):
+    """``(level, reason)`` the rules give a CVE match whose library version the served file proves (``facts['library_proof']``, set by
+    ``describe_cve_match`` from ``library_body_proven``), or ``('', '')``: confirmed, with a reason built from the row's own evidence alone,
+    never the model's words. Applied per row in ``_apply`` and nowhere else: the stored answer, shared by signature, keeps the classification
+    the model and the ceiling gave, and that classification is what the legacy verdict (and so heat, paging, standing and score) is made
+    from."""
+    proof = facts.get('library_proof') if kind == 'cve_match' else None
+    if not proof:
+        return '', ''
+    product, version = proof.get('product') or 'The library', proof.get('version') or ''
+    where = proof.get('script_url') or ''
+    stated = (f"the file's own banner states v{version}" if proof.get('how') == 'banner'
+              else f"the library's own code in the file names version {version}")
+    span = range_text(proof.get('range'))
+    reason = (f'{product} {version} is served at {where or "a script the page loads"} ({stated}), and it is the copy the page runs; '
+              f'{version} is inside the affected range{" " + span if span else ""}. Whether the site\'s own code uses the affected '
+              'functionality in an exploitable way is not visible to a scan.')
+    return 'confirmed', reason[:700]
+
+
+def library_proof_of(m, evidence, distro_status=''):
+    """``facts['library_proof']`` of a CVE match: what ``library_rule`` words its reason from, or None when the served file does not prove its
+    version (``library_body_proven``)."""
+    if not library_body_proven(getattr(m, 'source', ''), evidence, m.version_in_range, distro_status):
+        return None
+    confidence = evidence.get('version_confidence')
+    return {'product': m.matched_product or '', 'version': m.matched_version or '', 'script_url': str(evidence.get('script_url') or '')[:500],
+            'how': 'banner' if confidence >= 0.9 else 'signature', 'range': evidence.get('range') or {}}
 
 
 def apply_rules(kind, facts, parsed):
@@ -154,9 +225,10 @@ def apply_rules(kind, facts, parsed):
     if facts.get('version_unknown') and rank(floor) <= rank('needs_validation') and final != 'needs_validation':
         # nothing to test the version against: only a person, or a published range, moves it (the model cannot raise it either)
         prefix, final = f'AI said {said.replace("_", " ")} but the advisory gives no affected version range; kept as needs validation: ', 'needs_validation'
+    text = prefix + reason
     adjust = 0 if invalid else parsed['severity_adjust']
     return {
-        'classification': final, 'reason': (prefix + reason)[:700], 'overridden': (not invalid) and final != said,
+        'classification': final, 'reason': text[:700], 'overridden': (not invalid) and final != said,
         'model_classification': '' if invalid else said, 'model_reason': '' if invalid else reason,
         'impact': '' if invalid else parsed['impact'], 'severity_adjust': adjust,
         'severity_reason': '' if invalid else parsed['severity_reason'],
@@ -312,6 +384,9 @@ def describe_cve_match(m):
     facts['version_unknown'] = match_policy.is_version_unknown(evidence, m.version_in_range, facts['template_result'], facts['distro_status'])
     facts['version_only'] = match_policy.version_only(getattr(m, 'source', ''), evidence, m.version_in_range, facts['template_result'],
                                                       facts['distro_status'])
+    proof = library_proof_of(m, evidence, facts['distro_status'])
+    if proof:
+        facts['library_proof'] = proof
     payload = {
         'product': _s(m.matched_product, 120, names), 'version': _s(m.matched_version, 120, names),
         'version_in_range': m.version_in_range, 'source': _s(m.source, 20),
@@ -1213,7 +1288,7 @@ def _apply(verdict, group):
     group = current
     matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])
                      .select_related('triage')}
-    held_ids = set()
+    held_ids, legacy = set(), {}
     for row, d in group:
         # the model's words only where the answer was reached: another project's finding gets the classification, never the text
         classification, reason = verdict.classification, verdict.reason if same_project(verdict, row) else SHARED_REASON
@@ -1243,6 +1318,11 @@ def _apply(verdict, group):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.REASON_VERSION_UNKNOWN
+        legacy[row.pk] = classification  # what the legacy verdict is made from: never the library rule's confirmation below
+        rule, rule_text = library_rule(d['kind'], d['facts'])
+        if rule and not held and row.validation_status != 'hit' and classification not in CLOSING:
+            # the served library file proves the version: the rules' classification and reason, with this row's own script URL
+            classification, reason = rule, rule_text
         target = (None if held else verdict.pk, 'pending' if held else 'triaged', classification, reason,
                   hard_evidence(d['kind'], d['facts'])[1])
         if (row.verdict_id, row.status, row.classification, row.reason, row.hard_evidence) == target:
@@ -1258,25 +1338,25 @@ def _apply(verdict, group):
         return []
     by_class = {}
     for row, _ in matches:
-        by_class.setdefault((row.classification, row.reason, row.pk in held_ids), []).append(row.match_id)
-    for (classification, reason, held), ids in by_class.items():
+        by_class.setdefault((row.classification, row.reason, row.pk in held_ids, verdict_for(legacy[row.pk])), []).append(row.match_id)
+    for (classification, reason, held, legacy_verdict), ids in by_class.items():
         if held:  # waiting for its own answer: a match the stored answer had closed reopens, any other keeps its legacy verdict (never lowered)
             CVEMatch.objects.filter(pk__in=ids, ai_verdict='not_affected').update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000],
                                                                                  ai_model='', updated_at=now)
             continue
-        CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000], ai_model=verdict.model,
-                                                   updated_at=now)
+        CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=legacy_verdict, ai_reason=reason[:2000], ai_model=verdict.model, updated_at=now)
     # kept for correlation: a new host with the same evidence starts out judged. Taken from a row the answer was applied to as it stands (not
     # held, no validation hit of its own), never a closing answer (the table has no tenant, so it would close another organization's new
     # match; save_matches does not seed one either, and the same host's own is carried by its twin), and never the model's words: the row
     # holds a fixed sentence, since a seeded match may be another organization's (task 256)
     shared = next((row for row, _ in matches if row.pk not in held_ids and row.validation_status != 'hit'), None)
     m = matches_by_id.get(shared.match_id) if shared is not None else None
-    if m and verdict_for(shared.classification) not in ('not_affected', ''):
+    shared_verdict = verdict_for(legacy[shared.pk]) if shared is not None else ''
+    if m and shared_verdict not in ('not_affected', ''):
         MatchVerdict.objects.update_or_create(
             cve_entry_id=m.cve_entry_id, matched_product=m.matched_product, matched_version=m.matched_version,
             version_in_range=m.version_in_range, source=m.source,
-            defaults={'ai_verdict': verdict_for(shared.classification), 'ai_reason': SHARED_REASON, 'ai_model': verdict.model})
+            defaults={'ai_verdict': shared_verdict, 'ai_reason': SHARED_REASON, 'ai_model': verdict.model})
     return [row.match_id for row, _ in matches]
 
 
@@ -1308,7 +1388,7 @@ def recap_version_only():
     """Bring the answers stored before the ceiling in line with it (no model call): a triaged CVE match that stands on a version string
     alone (inside the range, or on a branch no advisory lists) and was classed likely or confirmed becomes needs_validation, with its
     legacy verdict. A validation hit, a template hit, a distribution listing, a host report and a
-    runZero report are all left as they are. Idempotent. Returns how many rows changed. (The shared MatchVerdict is not touched: it has
+    runZero report are all left as they are, and so is a match whose library version the served file proves (``library_rule``). Idempotent. Returns how many rows changed. (The shared MatchVerdict is not touched: it has
     no evidence class, so it may be the answer a host with a template hit or a distribution listing earned; ``correlation._seedable``
     keeps it from seeding a version-only match as affected.)"""
     from django.db.models import Q
@@ -1320,7 +1400,9 @@ def recap_version_only():
             .exclude(validation_status='hit').exclude(match__template_result='vulnerable').exclude(match__distro_status='vulnerable')
             .exclude(match__source='host').exclude(match_policy.evidence_flag_q('host_reported', 'match__'))
             .exclude(match_policy.evidence_flag_q('runzero', 'match__')))  # the key is removed when runZero stops reporting it
-    ids = list(rows.values_list('pk', flat=True))
+    ids = [pk for pk, source, evidence, in_range, distro in rows.values_list(
+        'pk', 'match__source', 'match__evidence', 'match__version_in_range', 'match__distro_status')
+        if not library_body_proven(source, evidence, in_range, distro)]
     changed = 0
     now = timezone.now()
     for start in range(0, len(ids), CHUNK):
@@ -1332,6 +1414,53 @@ def recap_version_only():
                                                         ai_reason=(f'{text.capitalize()}; kept as {limit.replace("_", " ")}. ' + reason)[:2000])
         changed += len(batch)
     return changed
+
+
+SETTLE_BATCH = 200  # Triage rows looked at per batch of ``settle_library_proven``
+
+
+def settle_library_proven(after=0, batch=SETTLE_BATCH):
+    """One batch of bringing the CVE matches judged before ``library_rule`` in line with it, with no model call and no network: the Triage
+    rows after ``after`` (pk order) of open matches of the current inventory whose library version the served file proves
+    (``library_body_proven_q``, checked again in Python). A triaged row gets the rules' classification and reason (and its match the reason),
+    unless a validation hit confirmed it, it is held for its own answer or its answer closes it; every row gets the body read recorded as a
+    step (``validation.library_step``). A closed match (fixed, an accepted risk, a false positive, or one ruled out) is never touched. The
+    legacy verdict is not written (it stays what the answer and the ceiling gave), nor the validation status or time, so heat, paging,
+    standing, score and the validation schedule do not move and no host is rescored. A row whose evidence moved since it was judged is put
+    right by the next ``track``. A row already in line is not written (idempotent). Three queries a batch and two bulk writes.
+    Returns ``(rows changed, last pk looked at, done)``; the caller (``tasks.settle_library_proven_task``) keeps the cursor."""
+    from cveFeed import validation
+    from cveFeed.closure import CLOSED
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import CVEMatch, Triage
+    rows = list(Triage.objects.filter(kind='cve_match', pk__gt=after).filter(library_body_proven_q('match__'))
+                .exclude(match__remediation_status__in=CLOSED).exclude(match__ai_verdict='not_affected')
+                .filter(latest_scan_q('match__subdomain__')).select_related('match__subdomain__target_domain').order_by('pk')[:batch])
+    if not rows:
+        return 0, after, True
+    readings = validation.library_readings([row.match for row in rows])
+    triage_rows, match_rows, now = [], [], timezone.now()
+    for row in rows:
+        m = row.match
+        proof = library_proof_of(m, m.evidence, m.distro_status)
+        if not proof:
+            continue
+        _rule, text = library_rule('cve_match', {'library_proof': proof})
+        changed = False
+        if (row.status == 'triaged' and row.verdict_id and row.validation_status != 'hit' and row.classification not in CLOSING
+                and (row.classification, row.reason) != ('confirmed', text)):
+            row.classification, row.reason = 'confirmed', text
+            m.ai_reason, m.updated_at = text[:2000], now
+            match_rows.append(m)
+            changed = True
+        if validation.put_library_step(row, validation.library_step(m, readings.get(m.pk))):
+            changed = True
+        if changed:
+            row.updated_at = now
+            triage_rows.append(row)
+    Triage.objects.bulk_update(triage_rows, ['classification', 'reason', 'validation_steps', 'updated_at'], batch_size=CHUNK)
+    CVEMatch.objects.bulk_update(match_rows, ['ai_reason', 'updated_at'], batch_size=CHUNK)
+    return len(triage_rows), rows[-1].pk, len(rows) < batch
 
 
 def _mark(group, status, diagnostic=None):

@@ -5,7 +5,8 @@ from cveFeed import detection_author
 
 class Command(BaseCommand):
     help = ('Write the shared detection record of every CVE that has none (rules author), refresh changed ones, and, with --ai, '
-            'spend the AI budget on the hottest. The periodic task does the same in small batches; this is for a first full backfill.')
+            'spend the AI budget on the hottest. Rules records written under an older schema are regenerated (AI-written and person-written '
+            'records never are). The periodic task does the same in small batches; this is for a first full backfill.')
 
     def add_arguments(self, parser):
         parser.add_argument('--batch', type=int, default=5000, help='records per round (default 5000)')
@@ -21,8 +22,10 @@ class Command(BaseCommand):
             if not written:
                 break
         refreshed = detection_author.refresh_rules(batch=options['batch'])
+        regenerated = detection_author.regenerate_rules_records(seconds=3600)  # rules records of an older schema; ai and manual never
         libraries = detection_author.refresh_client_library_records(seconds=3600)
-        self.stdout.write(f'{total} detection record(s) written, {refreshed} refreshed, {libraries} client-library record(s) corrected')
+        self.stdout.write(f'{total} detection record(s) written, {refreshed} refreshed, {regenerated} rules record(s) regenerated, '
+                          f'{libraries} client-library record(s) corrected')
         if options['ai']:
             from reNgine.ai_settings import get_configured_provider
             provider = get_configured_provider()

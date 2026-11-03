@@ -3055,7 +3055,14 @@ def _detection(c):
     row = getattr(c, 'detection', None) if c.pk else None
     if row is None:
         return None
-    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': row.strategy or None,
+    strategy = row.strategy or None
+    if strategy:
+        # re-validated and re-rendered on read: the commands and the profile are always the current renderer's (an older record's dpkg
+        # check of an npm packaging, or an nmap step for a JavaScript file, is never shown), whoever wrote the record
+        from cveFeed import detection
+        clean, _ = detection.validate_strategy(strategy)
+        strategy = detection.finalize(clean, c.cvss_vector) if clean else strategy
+    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': strategy,
             'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
 
 
@@ -3791,6 +3798,11 @@ def _classification_of(obj):
     return t.classification if t else ''
 
 
+def _library_read_step(steps):
+    from cveFeed.validation import library_read_step
+    return library_read_step(steps)
+
+
 def _triage_brief(t):
     """What a list card needs to show the classification and validation badges without a second request."""
     from cveFeed import triage as triage_lib
@@ -3801,6 +3813,8 @@ def _triage_brief(t):
     validation_status = ('observed' if t.validation_status == 'clean' and t.validation_steps and
                          all(step.get('result') in ('observed', 'reaffirmed') for step in t.validation_steps)
                          else t.validation_status)
+    if validation_status in ('none', 'no_check') and _library_read_step(t.validation_steps):
+        validation_status = 'observed'  # shown as a check that ran: cvENGINE read the library's served file (validation.library_step)
     return {'classification': t.classification, 'status': t.status, 'validation_status': validation_status,
             'overridden': bool(v and (v.overridden or t.classification != v.classification)),
             'severity_adjust': triage_lib.shown_severity_adjust(v, t),
@@ -3840,7 +3854,7 @@ def _kv(label, value):
 def _how_found_match(m):
     from cveFeed.distro import label_for
     ev = m.evidence or {}
-    steps = []
+    steps, excerpts = [], {}
     found = ' '.join(x for x in (m.matched_product, m.matched_version or '(no version)') if x)
     if m.source == 'host':
         steps.append(_kv('Observed', f'{found}, reported by the host itself' + (f' ({ev["component"]})' if ev.get('component') and ev['component'] != m.matched_product else '')))
@@ -3854,6 +3868,21 @@ def _how_found_match(m):
         steps.append(_kv('Found by', 'nmap service detection of an open port'
                          + (f', method {ev["method"]}' + (' (guessed from the port number, not probed)' if ev['method'] == 'table' else '')
                             if ev.get('method') else '')))
+    elif ev.get('version_source') == 'body' and isinstance(ev.get('script_url'), str) and ev['script_url']:
+        # cvENGINE read the library's served file itself (cveFeed.js_libraries): where the version came from, which page loads it, and when
+        from cveFeed import validation
+        reading = validation.library_reading(m)
+        confidence = ev.get('version_confidence')
+        number = isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+        how = reading.get('how') or ('banner' if number and confidence >= 0.9 else 'signature')
+        state = ev.get('copy_state') if isinstance(ev.get('copy_state'), str) else ''
+        steps.append(_kv('Observed', f'{found}, read from the file\'s own {"banner" if how == "banner" else "code"} at {ev["script_url"]}'))
+        steps.append(_kv('Loaded by', (reading.get('page_url') or 'the host\'s front page')
+                         + {'effective': ' (the copy the page runs)', 'shadowed': ' (a later copy replaces it)',
+                            'fallback': ' (a fallback, loaded only when another script fails)',
+                            'unresolved': ' (the page does not show which copy runs)'}.get(state, '')))
+        steps.append(_kv('Found by', 'library body read' + (f', {_iso(reading["read_at"])}' if reading.get('read_at') else '')))
+        excerpts['script_url'] = _cap_text(ev['script_url'])
     else:
         steps.append(_kv('Observed', f'{found} (technology fingerprint of the web server)'))
         steps.append(_kv('Found by', 'technology detection'))
@@ -3872,7 +3901,7 @@ def _how_found_match(m):
                          + (f', tested {_iso(m.template_tested_at)}' if m.template_tested_at else '')))
     else:
         steps.append(_kv('Template check', 'not tested'))
-    return {'steps': steps, 'excerpts': {}}
+    return {'steps': steps, 'excerpts': excerpts}
 
 
 def _how_found_vulnerability(v):
@@ -4003,10 +4032,23 @@ def finding_detail(ctx, slug, kind, finding_id):
         'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
+        'confirm': _confirm_guide(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},
     }
+
+
+def _confirm_guide(m):
+    """How to confirm this one match by hand (cveFeed.confirm_guide): where to look, what to look for, the read-only steps with the match's
+    real host, port and URL, how to read the answer and how to fix it. None when it cannot be built; it never fails the detail."""
+    from cveFeed import confirm_guide
+    try:
+        return confirm_guide.match_guide(m)
+    except Exception:  # noqa: BLE001 - the guide is help on top of the evidence; a gap in it must not cost the finding its page
+        import logging
+        logging.getLogger(__name__).warning('could not build the confirm guide of match %s', m.pk, exc_info=True)
+        return None
 
 
 MAX_COMMENT_LENGTH = 4000

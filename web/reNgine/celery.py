@@ -83,6 +83,21 @@ def recap_version_only_answers(*args, **kwargs):
 
 
 @worker_ready.connect()
+def settle_library_proven_answers(*args, **kwargs):
+    """Queue, once per install, the step that gives the CVE matches judged before the library rule the rules' classification and records
+    their body read (cveFeed.tasks.settle_library_proven_task: a task of its own, in batches, one worker at a time, resumable). Nothing is
+    queued once it has finished. Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed.models import BackgroundCursor
+        from cveFeed.tasks import SETTLE_DONE_LANE, settle_library_proven_task
+        if not BackgroundCursor.objects.filter(lane=SETTLE_DONE_LANE).exists():
+            settle_library_proven_task.apply_async(countdown=30)
+    except Exception:  # noqa: BLE001 - the database or the broker may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not queue the library rule settle step')
+
+
+@worker_ready.connect()
 def rescore_for_heat_cap(*args, **kwargs):
     """Host scores are stored: when the heat rule changed (the heat policy, CVENGINE_HEAT_POLICY or the Heat policy card, and under legacy
     CVENGINE_VERSION_ONLY_MAX_HEAT; the upgrade that introduced the policy too), one full rescore is queued so a score never counts a match

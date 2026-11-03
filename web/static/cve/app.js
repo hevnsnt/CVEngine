@@ -1230,7 +1230,8 @@ const excerpt = (label, text) => {
   box.append(el("div", "note", label), el("pre", "banner", text));
   return box;
 };
-const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows", debian: "Debian / Ubuntu", rhel: "RHEL / Fedora", alpine: "Alpine" };
+const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows", debian: "Debian / Ubuntu", rhel: "RHEL / Fedora", alpine: "Alpine",
+  app: "In the application's code" };
 // When no external check can settle a finding, the model suggests short, read-only local commands a host owner
 // can run themselves (cveFeed.triage.suggest_local_checks). Unverified by this tool: shown as a suggestion, not evidence.
 const localChecksBox = (local) => {
@@ -1253,9 +1254,142 @@ const localChecksBox = (local) => {
   return box;
 };
 
+// How to confirm THIS match by hand (cveFeed.confirm_guide): the real script URL, page, host and port, what to look for, the read-only steps
+// with those values filled in, how to read the answer and what makes it exploitable. Every command was built by the server from validated
+// values; a "quote" is text from the scanned host or a feed, shown as data. Links open only http(s) URLs.
+const RUN_IN = { shell: "Shell", browser_console: "Browser console", browser: "Browser", host: "On the host" };
+const safeHref = (url) => (typeof url === "string" && /^https?:\/\//i.test(url) ? url : "");
+const linkOrText = (url, text) => {
+  const href = safeHref(url);
+  return href ? el("a", "mono", text || href, { href, target: "_blank", rel: "noopener noreferrer nofollow" }) : el("span", "mono", text || url || "");
+};
+const commandRow = (label, command, explain, tag) => {
+  const row = el("div", "local-check");
+  const h = el("div", "tools");
+  const left = el("div", "confirm-step-h");
+  if (tag) left.append(badge(tag, "queued"));
+  if (label) left.append(el("span", "", label));
+  h.append(left);
+  if (command) {
+    const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
+    copy.onclick = () => navigator.clipboard.writeText(command);
+    h.append(copy);
+  }
+  row.append(h);
+  if (command) row.append(el("pre", "banner", command));
+  if (explain) row.append(el("p", "note", explain));
+  return row;
+};
+const confirmBox = (g) => {
+  if (!g) return null;
+  const box = el("div", "confirm-guide");
+  const head = el("div", "tools");
+  head.append(el("h4", "sub", g.headline || "Confirm this match"), badge(g.class_label || g.class || "", "ice"));
+  box.append(head);
+  if (g.where?.length) {
+    box.append(el("div", "note guide-h", "Where to look"));
+    const ul = el("ul", "guide-list confirm-where");
+    g.where.forEach((w) => {
+      const li = el("li");
+      li.append(el("span", "", `${w.label}: `));
+      if (w.url) li.append(linkOrText(w.url));
+      else if (w.quote) li.append(el("q", "mono untrusted", w.quote));
+      else li.append(el("span", "mono", w.text || ""));
+      ul.append(li);
+    });
+    box.append(ul);
+  }
+  if (g.look_for?.length) {
+    box.append(el("div", "note guide-h", "What to look for"));
+    g.look_for.forEach((x) => {
+      const row = el("div", "confirm-look");
+      row.append(el("div", "note", x.quote ? `${x.label}` : x.label));
+      const text = el("pre", `banner${x.quote ? " untrusted" : ""}`, x.quote || x.text || "");
+      if (x.quote) text.title = "Seen on the host or in a feed: data to compare, never run";
+      row.append(text);
+      box.append(row);
+    });
+  }
+  if (g.steps?.length) {
+    box.append(el("div", "note guide-h", "Check it (read-only)"));
+    const ol = el("ol", "confirm-steps");
+    g.steps.forEach((st) => {
+      const li = el("li");
+      const row = commandRow(st.title, st.command, st.detail, RUN_IN[st.run_in] || "");
+      if (st.url && !st.command) row.querySelector(".confirm-step-h")?.append(document.createTextNode(" "), linkOrText(st.url));
+      else if (st.url) row.append(el("p", "note", "On: "), linkOrText(st.url));
+      li.append(row);
+      ol.append(li);
+    });
+    box.append(ol);
+  }
+  const v = g.verdict || {};
+  if (v.affected || v.not_affected || v.cant_tell) {
+    box.append(el("div", "note guide-h", `How to read the result${v.fixed ? ` (fixed in ${v.fixed})` : ""}`));
+    const ul = el("ul", "guide-list confirm-verdict");
+    [["Affected", v.affected, "fire"], ["Not affected", v.not_affected, "success"], ["Can't tell", v.cant_tell, "smoke"]].forEach(([k, t, tone]) => {
+      if (!t) return;
+      const li = el("li");
+      li.append(badge(k, tone), document.createTextNode(` ${t}`));
+      ul.append(li);
+    });
+    (v.notes || []).forEach((t) => ul.append(el("li", "", t)));
+    box.append(ul);
+  }
+  const p = g.precondition;
+  if (p && (p.quote || p.needs)) {
+    box.append(el("div", "note guide-h", "What makes it exploitable, beyond the version"));
+    if (p.needs) box.append(el("p", "", p.needs));
+    if (p.quote) {
+      const q = el("blockquote", "untrusted confirm-quote", p.quote);
+      q.title = "The advisory's own words (feed text)";
+      box.append(el("div", "note", "The advisory says:"), q);
+    }
+  }
+  const t = g.template;
+  if (t) {
+    box.append(el("div", "note guide-h", "The nuclei template that ran"));
+    const line = el("p", "");
+    line.append(el("span", "", `Template ${t.template_id}, result ${String(t.result || "").replaceAll("_", " ")}. `));
+    if (t.template_url) line.append(linkOrText(t.template_url, "Open the template"));
+    else if (t.template_search_url) line.append(linkOrText(t.template_search_url, "Find the template"));
+    else if (t.generated) line.append(el("span", "note", "Generated by cvENGINE for this CVE (reviewed before use)."));
+    box.append(line);
+    // not a read-only step: a CVE template may send its exploit-check requests, so it is labelled as an active check, apart from the steps above
+    if (t.command) box.append(commandRow("Active check: run the same template against this host", t.command, t.active || "Sends the template's own requests to this host.", "Active"));
+    if (t.matched_at) { const m = el("p", "note", "Matched at: "); m.append(linkOrText(t.matched_at)); box.append(m); }
+    if (t.matcher) box.append(el("p", "note", `Matcher: ${t.matcher}`));
+    if (t.extracted?.length) box.append(el("pre", "banner untrusted", t.extracted.join("\n")));
+    if (t.request) box.append(el("div", "note", "The request it sent (excerpt)"), el("pre", "banner untrusted", t.request));
+  }
+  (g.local || []).forEach((section) => {
+    if (!section.commands?.length) return;
+    const rows = section.commands.map((c) => commandRow(c.label || "", c.command, c.explain, OS_LABEL[c.platform] || c.platform));
+    if (rows.length <= 2) {
+      box.append(el("div", "note guide-h", section.title), ...rows);
+      return;
+    }
+    // a long list (every packaging of a library): folded, so the steps above stay the first thing read
+    const more = el("details", "confirm-more");
+    more.append(el("summary", "note guide-h", `${section.title} (${rows.length} commands)`), ...rows);
+    box.append(more);
+  });
+  if (g.links?.length) {
+    box.append(el("div", "note guide-h", "Distribution trackers"));
+    const ul = el("ul", "guide-list");
+    g.links.forEach((l) => { const li = el("li"); li.append(linkOrText(l.url, l.label)); ul.append(li); });
+    box.append(ul);
+  }
+  if (g.fix) box.append(el("div", "note guide-h", "Fix it"), el("p", "", g.fix));
+  if (g.notice) box.append(el("p", "note", g.notice));
+  return box;
+};
+
 // What a person needs to confirm one CVE, from the shared per-CVE record (cveFeed.detection): the same for every match of that CVE.
 const GUIDE_SOURCE = { rules: "Written by rules from the CVE record", ai: "Written by AI", manual: "Written by a person" };
-const guidanceBox = (det, cveId) => {
+// the general steps name <TARGET> and <PORT>; on a match whose host and port are known (validated by the server) they are filled in
+const fillIn = (text, fill) => (fill ? String(text || "").replace(/<(TARGET|PORT)>/g, (m, k) => fill[k] || m) : text);
+const guidanceBox = (det, cveId, fill = null) => {
   const strategy = det && det.strategy;
   if (!strategy) return null;
   const box = el("div", "cve-guidance");
@@ -1289,10 +1423,11 @@ const guidanceBox = (det, cveId) => {
       h.append(badge(c.how?.tool || c.kind, "queued"), el("span", "note", c.description));
       row.append(h);
       if (c.how?.invocation) {
+        const invocation = fillIn(c.how.invocation, fill);
         const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
-        copy.onclick = () => navigator.clipboard.writeText(c.how.invocation);
+        copy.onclick = () => navigator.clipboard.writeText(invocation);
         h.append(copy);
-        row.append(el("pre", "banner", c.how.invocation));
+        row.append(el("pre", "banner", invocation));
       }
       if (c.how?.decide) row.append(el("p", "note", c.how.decide));
       box.append(row);
@@ -1433,8 +1568,12 @@ function renderFinding(d, cfg, row) {
   };
   const excerpts = Object.entries(d.how_found.excerpts || {}).filter(([, v]) => v);
   if (excerpts.length) {
-    requestFold = fold("Request and response", "The exact exchange the scanner matched (excerpts)");
-    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(k === "request" ? "Request (excerpt)" : "Response (excerpt)", v)));
+    const scriptOnly = excerpts.every(([k]) => k === "script_url" || k === "banner");
+    requestFold = scriptOnly
+      ? fold("Script read", "The library file cvENGINE fetched and read itself")
+      : fold("Request and response", "The exact exchange the scanner matched (excerpts)");
+    const EXCERPT_LABEL = { request: "Request (excerpt)", response: "Response (excerpt)", script_url: "Script fetched", banner: "Banner (excerpt)" };
+    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(EXCERPT_LABEL[k] || k, v)));
   }
 
   const seenFold = fold("Seen and history", `First seen ${shortDate(d.first_seen)}, last seen ${shortDate(d.last_seen)}${d.history.length ? `, ${d.history.length} change${d.history.length === 1 ? "" : "s"} on this host` : ""}`);
@@ -1535,10 +1674,17 @@ function renderFinding(d, cfg, row) {
   }
 
 
-  const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}How to verify it by hand, and every check that ran`);
+  const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}${d.confirm?.where?.length ? "Where to look on this host, what to look for, " : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
-  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId) : null;
-  if (guide) check.append(guide);
+  const mine = d.kind === "match" ? confirmBox(d.confirm) : null;
+  if (mine) check.append(mine);
+  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId, d.confirm?.fill) : null;
+  if (guide && mine) {
+    // the generic record is the same for every host: folded under this match's own guidance
+    const more = el("details", "confirm-generic");
+    more.append(el("summary", "note", `General guidance for ${cveId || "this CVE"} (the same for every host)`), guide);
+    check.append(more);
+  } else if (guide) check.append(guide);
   const v = d.validation;
   const none = {
     no_check: "No validated check exists for this finding yet.",

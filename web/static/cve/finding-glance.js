@@ -150,7 +150,9 @@ function confidenceCard(d, row) {
       ),
     );
   const live = d.validation || {};
-  const [liveTone, liveText] = {
+  // cvENGINE's own read of a library's served file (validation.record_library_read): a completed check, not metadata
+  const bodyRead = (live.steps || []).some((s) => s.kind === "library_read" && s.result === "reaffirmed");
+  const [liveTone, liveText] = bodyRead ? ["for", "the served file states an affected version"] : {
     hit: ["for", "reproduced by a check"],
     clean: ["against", "a check did not reproduce it"],
     observed: ["unk", "only metadata was observed"],
@@ -209,9 +211,11 @@ function aiCard(d, aiBadge, note) {
       el(
         "p",
         "gl-rule",
-        why
-          ? `The rules kept it open because ${why}.`
-          : "The rules decide whether a finding can be cleared.",
+        d.ai.classification === "confirmed" && d.ai.reason
+          ? `The rules confirmed it: ${d.ai.reason}`
+          : why
+            ? `The rules kept it open because ${why}.`
+            : "The rules decide whether a finding can be cleared.",
       ),
     );
   }

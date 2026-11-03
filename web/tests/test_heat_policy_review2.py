@@ -86,7 +86,8 @@ class PerRuleAnnouncementTests(Switching):
 		with mock.patch.dict(os.environ, LEGACY):
 			notify.baseline_heat_policy()  # legacy in force
 		cve = self.entry('CVE-2099-7004', [], kev=True, cvss=5.0)
-		banner = {'source': 'tech', 'version_source': 'body', 'version_confidence': 0.9, 'copy_state': 'effective'}
+		banner = {'source': 'tech', 'version_source': 'body', 'version_confidence': 0.9, 'copy_state': 'effective', 'script_url': 'https://x/jquery.js',
+				  'copies': [{'url': 'https://x/jquery.js', 'source': 'body', 'state': 'effective'}]}
 		m = self.match_for(cve, version='1', in_range=True, evidence=banner, ai_verdict='uncertain')
 		old(m.pk)
 		notify.baseline_heat_policy()  # to the KEV rule: the library's own file proves it, fire there: marked for kev
