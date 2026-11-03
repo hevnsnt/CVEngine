@@ -1,8 +1,10 @@
 """Validating a CVE match on a client-side JavaScript library (jQuery, CVE-2020-11023): the validation reads the pages' scripts again
 (the html-libraries read of every web base), never runs nmap or a HEAD for it, records the fresh version evidence, reaffirms an affected
 version without calling it a hit, and closes only what is truly false: a host every root of which permanently redirects elsewhere, or one
-whose running copy was read in full and is fixed with every copy of the library read. A library a page no longer shows, a temporary redirect,
-a cut-short or unread copy, a run-time loader, a held-back host and a failed read all leave the match as it was."""
+whose running copy is fixed where the match's own file, every script that could hold the library and every file it was seen in were read
+whole in this read and searched end to end. A library a page no longer shows (its script gone, moved into a bundle, loaded by a loader), a
+temporary redirect, a cut-short or unread file, a spent budget, a run-time loader, a held-back host and a failed read all leave the match as
+it was."""
 import os
 import re
 import unittest
@@ -93,9 +95,21 @@ def record(*copies, unresolved=False):
 					   **({'unresolved_reason': 'a copy is loaded with async'} if unresolved else {})}}
 
 
-def read_page(records=None, base='https://www.v.test', **kw):
+NOTHING = {'versions': [], 'unplaceable': [], 'blocks': [], 'blocks_more': False, 'loaders': [], 'overflow': False}
+
+
+def whole(*versions, key='jquery', **kw):
+	"""A script fetched in the read and searched whole (``probes._scanned``) that states ``versions`` of ``key``."""
+	return {'status': 200, 'whole': True, 'truncated': False, **NOTHING, 'versions': [[key, v, 'banner'] for v in versions], **kw}
+
+
+def read_page(records=None, base='https://www.v.test', entries=None, **kw):
+	"""A page read in a script read: its scripts are the copies' files (same-host when on the base), unless ``entries`` says otherwise."""
+	if entries is None:
+		entries = [{'url': c['url'], 'kind': 'same-host' if c['url'].startswith(base) else 'cdn', 'library': key, 'fallback': False}
+				   for key, r in (records or {}).items() for c in r['copies'] if c.get('url')]
 	return {'base': base, 'outcome': 'read', 'status': 200, 'records': records or {}, 'skipped': [], 'scripts': 3, 'read_whole': 3, 'lazy': [],
-			'inline': [], 'capped': False, 'inline_unread': 0, **kw}
+			'inline': [], 'capped': False, 'inline_unread': 0, 'entries': entries, 'page_scan': dict(NOTHING), 'page_truncated': False, **kw}
 
 
 class LibraryOutcomeTests(unittest.TestCase):
@@ -104,6 +118,10 @@ class LibraryOutcomeTests(unittest.TestCase):
 			  'matched_version': '1.12.4', 'script_url': JQ}
 
 	def outcome(self, *pages, params=None, **reading):
+		"""``library_outcome`` of ``pages``; unless ``scanned`` is given, every copy a page's file states was fetched and is whole."""
+		if 'scanned' not in reading:
+			reading['scanned'] = {c['url']: whole(c['version']) for p in pages for r in (p.get('records') or {}).values() for c in r['copies']
+								  if c.get('source') == 'body' and not c.get('truncated')}
 		return validation.library_outcome({**self.PARAMS, **(params or {})}, {'pages': list(pages), 'roots': [], **reading})
 
 	def test_what_closes(self):
@@ -114,9 +132,10 @@ class LibraryOutcomeTests(unittest.TestCase):
 		fixed = self.outcome(read_page(record(copy('3.6.0'))))
 		self.assertEqual(fixed['status'], 'version_changed')
 		self.assertTrue(fixed['close_reason'].startswith(correlation.SCRIPT_READ))
-		# unrelated scripts the six-script budget left unread never stand in the way of a fixed copy that runs
-		budget = self.outcome(read_page(record(copy('3.6.0')), skipped=[('https://www.v.test/theme/a.js', 'page host limit')] * 30))
-		self.assertEqual(budget['status'], 'version_changed')
+		# scripts no rule could hold the library in (a third-party widget the vetter never reads) do not stand in the way
+		widget = self.outcome(read_page(record(copy('3.6.0')), entries=[
+			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]))
+		self.assertEqual(widget['status'], 'version_changed')
 		# a version another tool named closes on the running copy read in full too (a technology scan's "jQuery 1.0.4" from a theme's ?ver=)
 		other = self.outcome(read_page(record(copy('3.7.1'))), params={'version_source': 'other', 'script_url': ''})
 		self.assertEqual(other['status'], 'version_changed')
@@ -124,9 +143,6 @@ class LibraryOutcomeTests(unittest.TestCase):
 		alias = self.outcome(permanent, {**permanent, 'base': 'http://www.v.test', 'status': 308})
 		self.assertEqual(alias['status'], 'version_changed')
 		self.assertIn('redirect alias', alias['close_reason'])
-		self.assertEqual(self.outcome(read_page({}), script={'status': 404, 'found': [], 'truncated': False})['status'], 'version_changed')
-		gone_fixed = self.outcome(read_page({}), script={'status': 200, 'found': [['jquery', '3.6.0', 'banner']], 'truncated': False})
-		self.assertEqual(gone_fixed['status'], 'version_changed')
 
 	def test_anything_that_leaves_doubt_is_observed_and_never_closes(self):
 		permanent = {'base': 'https://www.v.test', 'outcome': 'redirect', 'status': 301, 'location': 'https://www.other.test/'}
@@ -150,14 +166,35 @@ class LibraryOutcomeTests(unittest.TestCase):
 			'another web base runs an affected copy': self.outcome(read_page(record(copy('3.6.0'))), read_page(
 				record(copy('1.12.4', url='https://www.v.test:8443/jquery.js')), base='https://www.v.test:8443')),
 			'a run-time loader of the library': self.outcome(read_page(record(copy('3.6.0')), lazy=['jquery'])),
-			'the match\'s script cut short': self.outcome(read_page({}), script={'status': 200, 'found': [['jquery', '3.6.0', 'banner']],
-																				   'truncated': True}),
+			'the match\'s script gone (404) and no page shows the library': self.outcome(read_page({}), scanned={JQ: {'status': 404, 'whole': False}}),
+			'the match\'s script now fixed but no page loads it': self.outcome(read_page({}), extra={JQ: whole('3.6.0')}),
+			'the budget left a same-host script unread': self.outcome(read_page(record(copy('3.6.0')), entries=[
+				{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://www.v.test/theme/a.js', 'kind': 'same-host', 'library': ''}],
+				skipped=[('https://www.v.test/theme/a.js', 'page host limit')])),
+			'the match\'s own file not read (budget)': self.outcome(read_page(record(copy('3.7.1', url='https://www.v.test/js/jquery-3.7.1.min.js'))),
+																  params={'script_url': 'https://www.v.test/assets/vendor.js'}),
+			'the match\'s own file answered 503': self.outcome(read_page(record(copy('3.7.1', url='https://www.v.test/js/jquery-3.7.1.min.js'))),
+															 params={'script_url': 'https://www.v.test/assets/vendor.js'},
+															 scanned={'https://www.v.test/js/jquery-3.7.1.min.js': whole('3.7.1'),
+																	  'https://www.v.test/assets/vendor.js': {'status': 503, 'whole': False}}),
+			'a file previously seen holding it not read': self.outcome(read_page(record(copy('3.6.0'))),
+																	   params={'seen_urls': ['https://www.v.test/old/jquery.js']}),
+			'the running file holds a second, older copy': self.outcome(read_page(record(copy('3.7.1'))), scanned={JQ: whole('3.7.1', '1.12.4')}),
+			'the running file holds two fixed copies': self.outcome(read_page(record(copy('3.7.1'))), scanned={JQ: whole('3.7.1', '3.6.0')}),
+			'an older copy deep in another same-host bundle': self.outcome(read_page(record(copy('3.6.0')), entries=[
+				{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://www.v.test/app.js', 'kind': 'same-host', 'library': ''}]),
+				scanned={JQ: whole('3.6.0'), 'https://www.v.test/app.js': whole('1.12.4')}),
+			'jQuery code whose version cannot be told': self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', unplaceable=['jquery'])}),
+			'a licence block naming the library': self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', blocks=['/*! jquery custom build'])}),
+			'a loader inside a read script': self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', loaders=['requirejs'])}),
+			'a loader on the page': self.outcome(read_page(record(copy('3.6.0')), page_scan={**NOTHING, 'loaders': ['createElement(script)']})),
+			'the page cut at the read limit': self.outcome(read_page(record(copy('3.6.0')), page_truncated=True)),
+			'inline code no rule reads': self.outcome(read_page(record(copy('3.6.0')), inline_unread=1)),
+			'a read that does not list the page\'s scripts': self.outcome(read_page(record(copy('3.6.0')), entries=None) | {'entries': None}),
 			'error page': self.outcome({'base': 'https://www.v.test', 'outcome': 'error_page', 'status': 403}),
 			'a page the parse could not see whole': self.outcome(read_page(record(copy('3.6.0')), capped=True)),
 			'an inline copy in range': self.outcome(read_page(record(copy('3.6.0')), inline=[['jquery', '1.12.4']])),
 			'only an inline fixed copy': self.outcome(read_page({}, inline=[['jquery', '3.6.0']])),
-			'the 404 exception on a page not read whole': self.outcome(read_page({}, read_whole=1), script={'status': 404, 'found': [],
-																										   'truncated': False}),
 		}
 		for name, result in cases.items():
 			self.assertNotIn('close_reason', result, name)
@@ -166,8 +203,28 @@ class LibraryOutcomeTests(unittest.TestCase):
 		self.assertIn('not every web base', cases['another web base not read']['summary'])
 		self.assertIn('was not read', cases['another copy of the library unread']['summary'])
 		self.assertIn('cut at 300 KB', cases['the running copy was cut short']['summary'])
+		self.assertIn('not read whole', cases['the match\'s own file not read (budget)']['summary'])
+		self.assertIn('1.12.4 inside the affected range', cases['the running file holds a second, older copy']['summary'])
+		self.assertIn('more than one jQuery version', cases['the running file holds two fixed copies']['summary'])
+		self.assertIn('1.12.4 inside the affected range', cases['an older copy deep in another same-host bundle']['summary'])
+		self.assertIn('run time', cases['a loader inside a read script']['summary'])
 		self.assertEqual(self.outcome({'base': 'https://www.v.test', 'outcome': 'challenged', 'challenge': 'Cloudflare'})['status'], 'blocked')
 		self.assertEqual(self.outcome({'base': 'https://www.v.test', 'outcome': 'error_page', 'status': 503})['status'], 'failed')
+
+
+	def test_a_licence_block_is_ruled_out_only_for_a_library_whose_own_code_names_its_version(self):
+		# jQuery's code states its version wherever it is, so another library's licence block (Sizzle) cannot hide a copy of it
+		sizzle = self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', blocks=['/*! Sizzle CSS Selector Engine v2.3.6'])})
+		self.assertEqual(sizzle['status'], 'version_changed')
+		# a library with no such code: any licence block no rule names may be its copy under another banner
+		boot = 'https://www.v.test/js/bootstrap.min.js'
+		pages = read_page({'bootstrap': {**record(copy('4.6.0', url=boot))['jquery'], 'product': 'Bootstrap'}})
+		params = {'library': 'bootstrap', 'product': 'Bootstrap', 'ranges': [[{'introduced': '4.0.0', 'fixed': '4.3.1'}]], 'script_url': boot}
+		clean = self.outcome(pages, params=params, scanned={boot: whole('4.6.0', key='bootstrap')})
+		self.assertEqual(clean['status'], 'version_changed')
+		other = self.outcome(pages, params=params, scanned={boot: whole('4.6.0', key='bootstrap', blocks=['/*! popper v1 (c) someone'])})
+		self.assertEqual(other['status'], 'observed')
+		self.assertIn('licence block', other['summary'])
 
 
 class Base(TestCase):
@@ -267,15 +324,25 @@ class LibraryValidationTests(Base):
 		from cveFeed.models import ProbeObservation
 		self.assertFalse(ProbeObservation.objects.exists())  # nothing stored that would move the host's other matches' signatures
 
-	def test_a_fixed_version_read_in_full_closes_even_when_the_budget_left_unrelated_scripts_unread(self):
+	def test_a_fixed_version_closes_when_every_script_of_the_page_was_read_whole(self):
+		m = self.match()
+		theme = [f'/theme/js/vendor-{i}.js' for i in range(3)]
+		site = Site({PAGE: page('/js/jquery.min.js', *theme), JQ: {'status': 200, 'body': script('3.6.0')},
+					 **{f'https://www.v.test{t}': {'status': 200, 'body': 'var a=1;'} for t in theme}})
+		row, _stats, _calls = self.validate(site)
+		self.assertEqual(self.step(row)['library']['version'], '3.6.0')
+		self.assert_closed(m, row, 'at or above the fixed release')
+
+	def test_a_spent_budget_never_closes_even_on_a_fixed_running_copy(self):
 		m = self.match()
 		theme = [f'/theme/js/vendor-{i}.js' for i in range(12)]
 		site = Site({PAGE: page('/js/jquery.min.js', *theme), JQ: {'status': 200, 'body': script('3.6.0')},
 					 **{f'https://www.v.test{t}': {'status': 200, 'body': 'var a=1;'} for t in theme}})
 		row, _stats, _calls = self.validate(site)
-		self.assertTrue(self.step(row)['library']['not_read'])  # the six-script budget was spent
-		self.assertEqual(self.step(row)['library']['version'], '3.6.0')
-		self.assert_closed(m, row, 'at or above the fixed release')
+		self.assertTrue(self.step(row)['library']['not_read'])  # the six-script budget was spent: an unread script may hold an older copy
+		self.assertEqual(self.step(row)['result'], 'observed')
+		self.assertIn('page host limit', self.step(row)['summary'])
+		self.assert_open(m)
 
 	def test_a_running_copy_cut_short_does_not_close(self):
 		m = self.match()
@@ -307,20 +374,22 @@ class LibraryValidationTests(Base):
 		self.assertIn('next scan', self.step(row)['summary'])
 		self.assert_open(m)
 
-	def test_the_matched_script_gone_closes_only_through_its_own_404(self):
+	def test_the_matched_script_gone_never_closes(self):
+		# an absence is the next scan's to decide (its ordinary stale closure): the library may have moved into a bundle or a loader
 		m = self.match()
 		site = Site({PAGE: page('/js/app.js'), 'https://www.v.test/js/app.js': {'status': 200, 'body': 'var x=1;'}})
 		row, _stats, _calls = self.validate(site)
-		self.assertIn(JQ, site.calls)  # the match's own script was asked for again: 404
-		self.assert_closed(m, row, 'answers 404')
+		self.assertEqual(self.step(row)['result'], 'observed')
+		self.assertIn('next scan', self.step(row)['summary'])
+		self.assert_open(m)
 
-	def test_a_cut_short_script_stops_the_404_exception(self):
+	def test_a_cut_short_script_leaves_the_match_as_it_is(self):
 		m = self.match()
 		from cveFeed import js_libraries
 		site = Site({PAGE: page('/js/app.bundle.js'), 'https://www.v.test/js/app.bundle.js': {'status': 200, 'body': '/* app */',
 																							  'bytes': js_libraries.MAX_SCRIPT_BYTES}})
 		row, _stats, _calls = self.validate(site)
-		self.assertNotIn(JQ, site.calls)  # a bundle read only in part may hold the library: the match's own script is not even asked for
+		self.assertNotIn(JQ, site.calls)  # no page shows the library: nothing can close, so the match's own script is not even asked for
 		self.assertEqual(self.step(row)['result'], 'observed')
 		self.assert_open(m)
 
@@ -486,12 +555,35 @@ class HotLaneTests(Base):
 		self.assertEqual(job.status, 'completed')
 		m.refresh_from_db()
 		self.assertTrue(m.ai_reason.startswith(correlation.SCRIPT_READ))
-		# Validate now on the closed match says why it was closed, not that the product is another one
+		# Validate now on the closed match reads the page again instead of returning the old closure
 		again = OnDemandValidation.objects.create(match=m, project=self.project, evidence_signature='y', priority=3, source='manual')
-		result, ran = self.run_job(again, jquery_site('3.6.0'))
-		self.assertEqual(ran, [])
-		self.assertIn('re-read the page\'s scripts', result['check_notes'][0])
-		self.assertNotIn('not the software', result['check_notes'][0])
+		site = jquery_site('3.6.0')
+		result, ran = self.run_job(again, site)
+		self.assertEqual(ran, ['script_read'])
+		self.assertIn(JQ, site.calls)
+		self.assertIn('A fresh read of the page\'s scripts closed this match.', result['check_notes'])
+		self.assertFalse(any('not the software' in note for note in result['check_notes']))
+
+	def test_a_closed_match_whose_page_runs_an_affected_copy_again_is_reopened(self):
+		m = self.match()
+		self.run_job(self.job(m), jquery_site('3.6.0'))
+		m.refresh_from_db()
+		self.assertTrue(validation.closed_by_script_read(m))
+		again = OnDemandValidation.objects.create(match=m, project=self.project, evidence_signature='y', priority=3, source='manual')
+		result, ran = self.run_job(again, jquery_site('1.12.4'))
+		self.assertEqual(ran, ['script_read'])
+		m.refresh_from_db()
+		self.assertFalse(validation.closed_by_script_read(m))
+		self.assertNotEqual(m.ai_verdict, 'not_affected')
+		self.assertEqual(m.confidence, 0.9)  # the fresh read's confidence: the file's own banner
+		row = Triage.objects.get(match=m)
+		self.assertNotEqual(row.classification, 'not_applicable')
+		self.assertEqual(self.step(row)['result'], 'reaffirmed')
+		self.assertNotEqual(result.get('assessment_status'), 'closed_not_applicable')
+		# the next triage does not close it again
+		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=None)
+		m.refresh_from_db()
+		self.assertNotEqual(m.ai_verdict, 'not_affected')
 
 	def test_an_unconfirmed_bug_bounty_project_gets_no_automatic_script_read(self):
 		m = self.match()
@@ -542,9 +634,10 @@ class AcmeSites(Site):
 
 
 class EstateOracleTests(Base):
-	"""The review's ground truth on a live estate (names replaced): the five redirect aliases close, acme.test's 3.2.1, 1.0.4 and 3.4.1
-	jQuery matches (a technology scan's readings of ``?ver=`` strings) close on the running jQuery 3.7.1 read in full, and info.acme.test
-	stays at 1.11.2, re-affirmed."""
+	"""The review's ground truth on a live estate (names replaced): the five redirect aliases close; acme.test's 3.2.1, 1.0.4 and 3.4.1
+	jQuery matches (a technology scan's readings of ``?ver=`` strings) stay open although the running jQuery 3.7.1 was read in full, because
+	its thirty theme and plugin scripts are more than the six-script budget reads (any of them may hold an older copy) and the page loads
+	Google Tag Manager at run time; and info.acme.test stays at 1.11.2, re-affirmed."""
 
 	def test_estate(self):
 		domain = Domain.objects.create(name='acme.test', project=self.project, insert_date=timezone.now())
@@ -566,7 +659,7 @@ class EstateOracleTests(Base):
 			row = Triage.objects.get(match=m)
 			got[(m.subdomain.name, m.matched_version)] = (self.step(row)['result'], m.ai_verdict or '')
 		want = {(f'{a}.acme.test', '3.2.1'): ('version_changed', 'not_affected') for a in AcmeSites.ALIASES}
-		want.update({('acme.test', v): ('version_changed', 'not_affected') for v in ('3.2.1', '1.0.4', '3.4.1')})
+		want.update({('acme.test', v): ('observed', '') for v in ('3.2.1', '1.0.4', '3.4.1')})
 		want[('info.acme.test', '1.11.2')] = ('reaffirmed', '')
 		self.assertEqual(got, want)
 		self.assertEqual(site.calls.count('https://acme.test/'), 1)  # three matches, one read

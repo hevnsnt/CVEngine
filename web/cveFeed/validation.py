@@ -17,11 +17,13 @@ check exist.
 * ``script_read``: for a match on a client-side JavaScript library (``cveFeed.detection.client_libraries``), the html-libraries read of every
   web base's front page again (``probes.read_host_libraries``: the pages, then their scripts through ``js_libraries``' vetter and budgets),
   which states the version from the file itself and which copy runs. nmap and a HEAD cannot see a library inside a page, so for such a
-  match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page). Only
-  what is truly false closes the match, through the guarded closure (``correlation.close_invalid_correlation``, this host only), never one
-  a person worked: every root permanently redirecting to another host, or the running copy on every base read in full and fixed with every
-  copy of the library read (``library_outcome``). A library the page no longer shows is left to the next scan. A host the server may not
-  read (internal, passive, manual only, a one-host target, the bug bounty gate, script reading off) is left as it is, and says why.
+  match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page), and
+  reopens a match an earlier script read closed. Only what is truly false closes the match, through the guarded closure
+  (``correlation.close_invalid_correlation``, this host only), never one a person worked: every root permanently redirecting to another
+  host, or a fixed running copy where the match's own file and every script that could hold the library were read whole in this read and
+  searched end to end (``library_outcome``). An absence (the library or its script gone from the page) is left to the next scan. A host the
+  server may not read (internal, passive, manual only, a one-host target, the bug bounty gate, script reading off) is left as it is, and
+  says why.
 
 Everything is read-only; every host goes through the scannable-host filter and must belong to the finding's project; work is
 dispatched per project; each check waits its turn for memory (heavy_job), is kept off the ledger while fresh (CVENGINE_TTL_VALIDATE),
@@ -348,7 +350,7 @@ def _script_read_check(subject, signature):
                   domain_id=subject.get('domain_id'), host=subject.get('host'), library=subject['library'], product=product,
                   ranges=subject.get('library_ranges') or [], matched_version=subject.get('matched_version') or '',
                   version_source=subject.get('version_source') or '', script_url=subject.get('script_url') or '',
-                  unattended=subject.get('unattended', True))
+                  seen_urls=subject.get('seen_urls') or [], unattended=subject.get('unattended', True))
 
 
 def _http_check(url, signature):
@@ -376,10 +378,11 @@ def _probe_plan(finding, evidence):
     return probes.plan_for_host(sub, [lead] + probes.leads_for(sub), edge_fronted=edge)
 
 
-def subject_for(row, finding):
-    """The plain dict ``plan_checks`` reads, from a Triage row and its finding: host, CVE id, source, address and port, URL."""
+def subject_for(row, finding, unattended=True):
+    """The plain dict ``plan_checks`` reads, from a Triage row and its finding: host, CVE id, source, address and port, URL. ``unattended`` is
+    False for a person's own request (Validate now): the bug bounty gate then holds the run to the program's scope only."""
     from cveFeed import route_auth
-    subject = {'kind': row.kind, 'host': row.host}
+    subject = {'kind': row.kind, 'host': row.host, 'unattended': bool(unattended)}
     if row.kind == 'cve_match':
         ev = finding.evidence or {}
         subject.update(cve_id=finding.cve_entry.cve_id, source=finding.source, ip=ev.get('ip'), port=ev.get('port'),
@@ -401,9 +404,13 @@ def subject_for(row, finding):
         library = library_of(finding)
         if library:
             from cveFeed import detection
+            # every file the host was seen to load the library from (the match's own script and the copies its evidence names): a fixed
+            # version closes the match only when each of them is read again, whole
+            seen = [str(c.get('url'))[:500] for c in (ev.get('copies') or []) if isinstance(c, dict) and c.get('url')]
             subject.update(library=library, library_product=detection._libraries()[library][0],
-                           library_ranges=detection.client_libraries(finding.cve_entry.affected)[library][:10],
+                           library_ranges=detection.cve_libraries(finding.cve_entry)[library][:10],
                            version_source=str(ev.get('version_source') or ''), script_url=str(ev.get('script_url') or '')[:500],
+                           seen_urls=list(dict.fromkeys(u for u in [str(ev.get('script_url') or '')[:500], *seen] if u.startswith('http')))[:8],
                            bases=route_auth.web_bases(finding.subdomain) if finding.subdomain is not None else [])
         elif finding.subdomain is not None and not subject['local_component_only']:
             subject['probe_plan'] = _probe_plan(finding, ev)
@@ -422,7 +429,7 @@ def library_of(match):
     if getattr(match, 'source', '') != 'tech':
         return ''
     key = detection.library_key(match.matched_product)
-    return key if key and key in detection.client_libraries(match.cve_entry.affected) else ''
+    return key if key and key in detection.cve_libraries(match.cve_entry) else ''
 
 
 # ----------------------------------------------------------------------------- the runners (injectable)
@@ -570,40 +577,66 @@ def _current_roots(project_id, host):
 def run_script_read(check, get=None):
     """Read every web base's front page and the scripts it loads again (``probes.read_host_libraries``), past the script cache, and say what
     that means for the match (``library_outcome``). Nothing is fetched for a host ``script_read_held_back`` refuses. One read of a host is
-    reused by every library match of it for READ_REUSE_SECONDS, so a host with several jQuery CVEs is read once. ``get`` replaces the network
-    (tests)."""
+    reused by every library match of it for READ_REUSE_SECONDS, so a host with several jQuery CVEs is read once; a person's own request
+    (``unattended`` False: Validate now) always reads again. A file the host was seen to load the library from (``seen_urls``: the match's
+    own script, the copies its evidence names) that the pages did not load is fetched too, within what is left of the same script budget,
+    so a fixed version can be weighed against it. ``get`` replaces the network (tests)."""
     from django.core.cache import cache
     from cveFeed import probes
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     params = check['params']
+    unattended = params.get('unattended', True)
     sub = (Subdomain.objects.filter(target_domain__project_id=params['project_id'], name=params['host']).filter(latest_scan_q())
            .prefetch_related('technologies').select_related('target_domain').order_by('-id').first())
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
-    held = script_read_held_back(params['project_id'], sub, unattended=params.get('unattended', True))
+    held = script_read_held_back(params['project_id'], sub, unattended=unattended)
     if held:
         return {'status': 'blocked', 'summary': f'not read: {held}', 'library': {'held_back': held}}
     bases = params.get('bases') or [params['base']]
     key = _reading_key(params['project_id'], sub.name.lower(), bases)
-    try:
-        reading = cache.get(key)
-    except Exception:  # noqa: BLE001 - no cache: read again
-        reading = None
+    reading = None
+    if unattended:
+        try:
+            reading = cache.get(key)
+        except Exception:  # noqa: BLE001 - no cache: read again
+            reading = None
     reused = reading is not None
     if not reused:
-        reading = probes.read_host_libraries(params['project_id'], sub, bases, get=get)
+        reading = probes.read_host_libraries(params['project_id'], sub, bases, get=get, unattended=unattended)
+    reading = {**reading, 'extra': dict(reading.get('extra') or {})}
+    fetched = _fetch_seen(params, reading, sub, get)
+    if not reused or fetched:
         try:
             cache.set(key, reading, READ_REUSE_SECONDS)
         except Exception:  # noqa: BLE001
             pass
     reading = {**reading, 'roots': _current_roots(params['project_id'], sub.name.lower()), 'reused': reused}
-    if _wants_script_refetch(params, reading):
-        try:
-            reading['script'] = probes.refetch_script(params['project_id'], sub, params['script_url'], get=get)
-        except (OSError, ValueError):
-            reading['script'] = None
     return library_outcome(params, reading)
+
+
+def _fetch_seen(params, reading, sub, get=None):
+    """Fetch, within the read's remaining script budget, each file the host was seen to load the library from (``seen_urls``) that the
+    pages' read did not fetch, when a page still shows the library (otherwise nothing can close and nothing is asked). Each lands in
+    ``reading['extra']``; one the budget does not cover is recorded as not read. Returns how many were fetched."""
+    from cveFeed import probes
+    scanned = reading.get('scanned') or {}
+    wanted = [u for u in params.get('seen_urls') or [] if u not in scanned and u not in reading['extra']]
+    if not wanted or not _library_records(reading, params['library']):
+        return 0
+    page = next((p.get('final_url') or p.get('base') for p in reading.get('pages') or [] if p.get('outcome') == 'read'), None)
+    from cveFeed.js_libraries import MAX_SCRIPTS_PER_HOST
+    fetched = 0
+    for url in wanted[:MAX_SCRIPTS_PER_HOST]:
+        if reading.get('budget_left', 0) <= 0:
+            reading['extra'][url] = {'status': 0, 'whole': False, 'error': 'page host limit'}
+            continue
+        reading['budget_left'] = reading.get('budget_left', 0) - 1
+        reading['extra'][url] = probes.refetch_script(params['project_id'], sub, url, get=get, page_url=page,
+                                                      unattended=params.get('unattended', True))
+        fetched += 1
+    return fetched
 
 
 def _in_ranges(version, entries):
@@ -622,21 +655,6 @@ def _library_records(reading, key):
     """``[(page, record)]``: the record of library ``key`` on every page that was read."""
     return [(page, (page.get('records') or {}).get(key)) for page in reading.get('pages') or []
             if page.get('outcome') == 'read' and (page.get('records') or {}).get(key)]
-
-
-def _wants_script_refetch(params, reading):
-    """Whether the one exception to "a library the page no longer shows is left to the next scan" applies: the match was made on a script's
-    own file (``version_source`` body, with its URL), every web base was read, every script of every page was read whole (none cut short,
-    no script the parse could not see, no inline code no rule reads), the pages load scripts, and none of them shows the library any more."""
-    pages = reading.get('pages') or []
-    # as for every absence (cveFeed.js_libraries.complete_page): only a page known whole can show a library is not on it
-    return bool(params.get('script_url') and params.get('version_source') == 'body' and pages
-                and all(p.get('outcome') == 'read' for p in pages) and any(p.get('scripts') for p in pages)
-                and all(p.get('read_whole', 0) >= p.get('scripts', 0) for p in pages)
-                and not any(p.get('capped') or p.get('inline_unread') or p.get('truncated') for p in pages)
-                and not any(key == params['library'] for p in pages for key, _v in p.get('inline') or [])
-                and not any(c.get('truncated') for p in pages for r in (p.get('records') or {}).values() for c in r.get('copies') or [])
-                and not _library_records(reading, params['library']))
 
 
 def _library_evidence(reading, records):
@@ -678,19 +696,53 @@ def _alias_of(params, reading):
     return redirect_alias_of(roots, host, [p.get('base') for p in pages if p.get('base')] or None)
 
 
+def _scan_of(reading, url):
+    """What a whole read of ``url`` found in this script read (``probes._scanned``), or None when it was not fetched."""
+    return (reading.get('scanned') or {}).get(url) or (reading.get('extra') or {}).get(url)
+
+
+def _whole_versions(scan, key):
+    return list(dict.fromkeys(v for k, v, *_how in (scan or {}).get('versions') or [] if k == key))
+
+
+def _file_doubt(scan, key, product, where):
+    """Why one file searched whole leaves the library in doubt, or '': more than one version of it in the one file, its code with a version
+    that cannot be told, more matches than are kept, or a licence block no rule names that may be its copy (``js_libraries.rules_out``)."""
+    from cveFeed.js_libraries import rules_out
+    versions = _whole_versions(scan, key)
+    if len(versions) > 1:
+        return f'{where} holds more than one {product} version ({", ".join(versions[:4])})'
+    if key in (scan.get('unplaceable') or []):
+        return f'{where} carries {product} code whose version cannot be told'
+    if scan.get('overflow'):
+        return f'{where} has more library banners or licence blocks than the read keeps'
+    blocks = [b for b in scan.get('blocks') or [] if not rules_out(key, b)]
+    if scan.get('blocks_more'):
+        blocks = blocks or ['more licence blocks than the read keeps']
+    if blocks:
+        return f'{where} has a licence block no rule names, which may be a {product} copy ("{(blocks or ["..."])[0][:80]}")'
+    if scan.get('loaders'):
+        return f'{where} loads scripts at run time ({", ".join(scan["loaders"][:3])}), which the read does not see'
+    return ''
+
+
 def library_outcome(params, reading):
-    """The step result of a script read for a match on ``params['library']`` (pure). Only what is truly false is closed:
+    """The step result of a script read for a match on ``params['library']`` (pure). Only what is truly false is closed, and an absence never
+    is (a page that no longer shows a library, the match's own script gone: the next scan's ordinary stale closure decides that):
 
     - ``reaffirmed``: the copy that runs on a page states, in its own file, a version inside the range (never a hit: the version is on the page,
       the page is not shown to be exploitable);
-    - closed (``version_changed`` with a ``close_reason``): every current root of the host answers 301 or 308 to another host (an alias); or
-      on every web base the copy that runs was read in full and states a fixed version, every copy of the library was read and none is
-      inside or unknown to the range, and no page adds the library at run time; or the match's own script, re-fetched, answers 404 or now
-      states a fixed version (``_wants_script_refetch``);
-    - ``observed`` otherwise: a library the pages no longer show (a maintenance or an "access denied" page shows none; the next scan retires
-      it), a temporary redirect, an older copy that is shadowed, an unread or cut-short copy, a page that loads scripts at run time, an
-      error page;
-    - ``blocked``: every base was refused or challenged; ``failed``: no base answered, or a server error."""
+    - closed (``version_changed`` with a ``close_reason``) in two cases only. (1) A redirect alias: every current root of the host answers 301
+      or 308 to another host. (2) A fixed version, when every one of these holds: every web base was read; the match's own file (a match made
+      from a file's body) was fetched in this read, read whole, and now states one version, outside the range; every script of every page
+      that could hold the library (same-host and same-site scripts, every copy named after it, every file the host was seen to load it from)
+      was fetched in this read and read whole, within the budget; each of those files and each page, searched from end to end
+      (``js_libraries.whole_body``), states at most one version of the library, no code of it with an unknown version, and no licence
+      block that may be a copy; no page and no file loads scripts at run time; and the copy that runs states a fixed version, with no copy
+      inside the range or unplaceable;
+    - ``observed`` otherwise: the library gone or moved, a temporary redirect, an older copy that is shadowed, an unread or cut-short file, a
+      spent budget, a run-time loader, an error page;
+    - ``blocked``: every base was refused or challenged; ``failed``: no base answered, a port this server held, or a server error."""
     from cveFeed.correlation import SCRIPT_READ
     from cveFeed.js_libraries import MAX_SCRIPT_BYTES
     key, product, entries = params['library'], params['product'], params.get('ranges') or []
@@ -735,21 +787,14 @@ def library_outcome(params, reading):
     # a copy pasted into the page itself (an inline script that states the library, cveFeed.js_libraries.PageScripts.inline) is on the page too
     inline = [(page, {'url': f"{page.get('base')}/ (inline)", 'version': version, 'source': 'body', 'state': 'inline'})
               for page in read for lib, version in page.get('inline') or [] if lib == key]
-    if not records and not inline:
-        script = reading.get('script') if _wants_script_refetch(params, reading) else None
-        if script and script.get('status') in (404, 410):
-            return result('version_changed', f"the script the match was made on ({params['script_url']}) is gone ({script['status']}) and no page "
-                                             f'shows {product} any more',
-                          f"The script the match was made on ({params['script_url']}) now answers {script['status']}, and a fresh read of every "
-                          f'web base and the scripts they load finds no {product}.')
-        if script and not script.get('truncated'):
-            versions = [v for k, v, _how in script.get('found') or [] if k == key]
-            if versions and all(_in_ranges(v, entries) is False for v in versions):
-                return result('version_changed', f"the script the match was made on now states {product} {versions[0]}, outside the affected range",
-                              f"The script the match was made on ({params['script_url']}) now states {product} {versions[0]}, at or above the fixed "
-                              'release, and no page shows an older copy.')
-        return result('observed', f'no page read now shows {product}; a page that no longer shows a library (a maintenance or an access-denied '
-                                  'page shows none) does not close the match: the next scan retires it if it is really gone')
+    # every version of the library any file or page states anywhere in it, searched end to end (a second copy deep in a bundle)
+    deep = [(url, v) for url, scan in {**(reading.get('scanned') or {}), **(reading.get('extra') or {})}.items()
+            if (scan or {}).get('whole') for v in _whole_versions(scan, key)]
+    deep += [(f"{page.get('base')}/", v) for page in read for v in _whole_versions(page.get('page_scan'), key)]
+    if not records and not inline and not deep:
+        return result('observed', f'no page read now shows {product}; a library a page no longer shows (a maintenance or an access-denied page '
+                                  'shows none, a bundle or a loader may hold it) does not close the match: the next scan retires it if it is '
+                                  'really gone')
     copies = [(page, c) for page, record in records for c in record.get('copies') or [] if isinstance(c, dict)]
     copies += inline
     for page, record in records:
@@ -763,10 +808,18 @@ def library_outcome(params, reading):
         states = ', '.join(dict.fromkeys(c.get('state') or 'unresolved' for c in inside))
         return result('observed', f'{product} {inside[0].get("version")} inside the affected range is still on the page, as a {states} copy; '
                                   'whether it runs needs a person to look')
+    deep_inside = [(url, v) for url, v in deep if _in_ranges(v, entries) is True]
+    if deep_inside:
+        return result('observed', f'{product} {deep_inside[0][1]} inside the affected range is still in {deep_inside[0][0]} (found by searching '
+                                  'the whole file); whether it runs needs a person to look')
     blockers = []
     capped = [p['base'] for p in read if p.get('capped')]
     if capped:
         blockers.append('the page has more scripts than the read can see, so another copy may be among them')
+    if any(p.get('page_truncated') for p in read):
+        blockers.append('a front page was cut at the read limit, so a script further in was not seen')
+    if any(p.get('inline_unread') for p in read):
+        blockers.append('the page has inline code no rule reads, which may be a copy')
     unread = [c for _p, c in copies if c.get('source') != 'body']
     if unread:
         blockers.append(f"the file of a {product} copy ({unread[0].get('url')}) was not read ({unread[0].get('not_read') or 'not read'})")
@@ -775,27 +828,78 @@ def library_outcome(params, reading):
                                                                              if r.get('unresolved_reason')), 'copies unresolved') + ')')
     effective = [next((c for c in r.get('copies') or [] if c.get('state') == 'effective'), None) for _p, r in records]
     if not records:
-        blockers.append(f'only a copy pasted into the page states {product}, and no script file of it was read')
+        blockers.append(f'no script file the page loads is {product}: only a copy found inside a page or a bundle states it')
     if any(c is None for c in effective) and not blockers:
         blockers.append(f'no copy of {product} is the one that runs on every page')
     if any(c and c.get('truncated') for c in effective):
         blockers.append(f'the file of the copy that runs was cut at {MAX_SCRIPT_BYTES // 1024} KB, so a second copy further in was not seen')
-    if any(_in_ranges(c.get('version'), entries) is None for _p, c in copies if c.get('source') == 'body'):
-        blockers.append('a version the file states cannot be placed against the affected range')
+    if any(_in_ranges(c.get('version'), entries) is None for _p, c in copies if c.get('source') == 'body') or \
+            any(_in_ranges(v, entries) is None for _u, v in deep):
+        blockers.append('a version a file states cannot be placed against the affected range')
     if not every_base:
         blockers.append('not every web base of the host was read (' + ', '.join(f"{p['base']}: {p.get('outcome')}" for p in pages
                                                                                    if p.get('outcome') != 'read') + ')')
     lazy = [p['base'] for p in read if key in (p.get('lazy') or [])]
     if lazy:
         blockers.append(f'the page adds {product} at run time (a loader or inline code), which the read does not see')
+    blockers += _whole_read_blockers(params, reading, read, key, product, entries)
     versions = ', '.join(dict.fromkeys(c.get('version') for c in effective if c))
     if blockers:
-        return result('observed', f'the copy that runs states {product} {versions or "no version"}, but ' + '; '.join(blockers))
+        return result('observed', f'the copy that runs states {product} {versions or "no version"}, but ' + '; '.join(dict.fromkeys(blockers))[:400])
     where = f" (read from the file {effective[0].get('url')})" if effective and effective[0] and effective[0].get('url') else ''
     return result('version_changed', f'the page now loads {product} {versions}{where}, outside the affected range',
-                  f"A fresh read of every web base shows the copy of {product} that runs is {versions}{where}, read in full and at or above the "
-                  f"fixed release, and every copy on the page was read: the version the match was made on ({params.get('matched_version') or 'unknown'}) "
+                  f"A fresh read of every web base shows the copy of {product} that runs is {versions}{where}, at or above the fixed release; "
+                  'every script on the page that could hold it, and every file it was seen in, was read whole and searched end to end, and none '
+                  f"holds another copy or loads one at run time: the version the match was made on ({params.get('matched_version') or 'unknown'}) "
                   'is not what the page runs.')
+
+
+def _whole_read_blockers(params, reading, read, key, product, entries):
+    """Why the fresh read is not whole enough to close on a fixed version (``library_outcome`` case 2): the match's own file, every script that
+    could hold the library and every file it was seen in, each fetched in this read, read whole and free of doubt (``_file_doubt``), every
+    page's own text free of doubt, and no run-time loader anywhere."""
+    out = []
+    own = params.get('script_url') or ''
+    if own and params.get('version_source') == 'body':
+        scan = _scan_of(reading, own)
+        if not scan or not scan.get('whole'):
+            out.append(f"the file the match was made on ({own}) was not read whole in this read ({(scan or {}).get('error') or 'not fetched'})")
+        else:
+            versions = _whole_versions(scan, key)
+            if not versions:
+                out.append(f'the file the match was made on ({own}) no longer states {product}: that is an absence, which the next scan decides')
+            elif any(_in_ranges(v, entries) is not False for v in versions):
+                out.append(f'the file the match was made on ({own}) still states {product} {versions[0]}, not outside the affected range')
+    wanted = []
+    for page in read:
+        listed = page.get('entries')
+        if listed is None:
+            out.append(f"the read of {page.get('base')} does not list its scripts")
+            continue
+        wanted += [e['url'] for e in listed if e.get('url') and (e.get('kind') in ('same-host', 'same-site') or e.get('library') == key)]
+    wanted += [u for u in params.get('seen_urls') or [] if u]
+    for url in dict.fromkeys(wanted):
+        scan = _scan_of(reading, url)
+        if not scan or not scan.get('whole'):
+            why = (scan or {}).get('error') or next((w for p in read for u, w in p.get('skipped') or [] if u == url), 'not fetched')
+            out.append(f'a script that could hold {product} ({url}) was not read whole ({why})')
+            break
+    for url in dict.fromkeys(wanted):
+        scan = _scan_of(reading, url)
+        if scan and scan.get('whole'):
+            doubt = _file_doubt(scan, key, product, url)
+            if doubt:
+                out.append(doubt)
+                break
+    for page in read:
+        scan = page.get('page_scan')
+        if scan is None:
+            out.append(f"the page {page.get('base')}/ was not searched whole")
+            continue
+        doubt = _file_doubt(scan, key, product, f"the page {page.get('base')}/")
+        if doubt:
+            out.append(doubt)
+    return out
 
 
 RUNNERS = {'nuclei_template': run_nuclei_template, 'nmap_sv': run_nmap_sv, 'http_head': run_http_head, 'db_probe': run_db_probe,
@@ -892,6 +996,8 @@ def apply_validation(row, check, result, now=None, save=True):
             result = {**result, 'status': 'observed', 'summary': f"{result.get('summary')}; not closed: {refusal}"}
             close_reason = ''
     status = result['status']
+    if check['kind'] == 'script_read' and status == 'reaffirmed' and save and row.match_id:
+        _reopen_on_script_read(row, result, now)  # an earlier script read closed it; this one reads an affected copy that runs: open again
     hit_before = row.validation_status == 'hit'
     step = {'kind': check['kind'], 'label': check['label'], 'display': check['display'], 'target': check['target'],
             'ran_at': now.isoformat(), 'result': status, 'summary': _trim(result.get('summary'), 300),
@@ -980,6 +1086,27 @@ def _close_on_script_read(row, reason):
     closed = correlation.close_invalid_correlation(match, reason[:2000], host_only=True)
     row.refresh_from_db()  # the closure wrote the row's classification: a later check of this run must not save the old one over it
     return closed
+
+
+def _reopen_on_script_read(row, result, now):
+    """Reopen the row's match when an earlier script read closed it (``closed_by_script_read``) and this read finds the copy that runs inside
+    the affected range: the closure no longer holds. The match takes the fresh read's confidence, its verdict and the row's classification
+    are cleared, so triage judges it again; the next scan's correlation recomputes the rest. Returns whether it reopened."""
+    from cveFeed import activity, scoring
+    from cveFeed.models import CVEMatch
+    match = CVEMatch.objects.filter(pk=row.match_id).select_related('cve_entry').first()
+    if match is None or not closed_by_script_read(match):
+        return False
+    library = result.get('library') or {}
+    confidence = float(library.get('version_confidence') or 0.0)
+    CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='', ai_reason='', ai_model='', confidence=confidence, updated_at=now)
+    match.ai_verdict, match.ai_reason, match.ai_model, match.confidence = '', '', '', confidence
+    row.verdict, row.status, row.classification, row.reason = None, 'pending', '', ''
+    activity.log('confirm', f'{match.cve_entry.cve_id}: reopened for this asset (a fresh script read finds {library.get("version") or "an affected"} '
+                 'version that runs, inside the affected range)', project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
+                 finding_id=row.pk, decision='reopened')
+    scoring.rescore_for_matches([match])
+    return True
 
 
 def closed_by_script_read(match):
@@ -1148,10 +1275,12 @@ def _adopt(row, check):
     return False
 
 
-def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_for=None, selected_kinds=None):
+def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_for=None, selected_kinds=None, unattended=True):
     """Plan and run the checks for ``triage_ids`` (rows of ``project_id`` only: a row of another project is never touched), within the
     per-run, per-project and per-day caps and the ledger TTL, honouring the stop flag of ``scan_id``. Returns the counts. Never raises
-    for one check's trouble: a failure is recorded on its row and retried later.
+    for one check's trouble: a failure is recorded on its row and retried later. ``unattended`` is False only for a person's own request
+    (Validate now): it reaches every check's subject, so the bug bounty gate holds an automatic run to the project's confirmation and a
+    person's own one to the program's scope only.
 
     ``runners`` replaces the default check runners (tests); ``template_for(cve_id)`` replaces ``resolve_template``."""
     from cveFeed import ledger, notify
@@ -1185,7 +1314,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             finding = findings[0]
             if triage.effective_signature(triage.describe(finding), row.review_nonce) != row.signature:
                 continue  # the evidence moved since: triage resets the row and validation follows the new signature
-            subject = subject_for(row, finding)
+            subject = subject_for(row, finding, unattended=unattended)
             if row.host and row.host.strip().lower().rstrip('.') in narrowed:  # held only under a target that is now exactly one host (=example.com)
                 row.validation_status, row.validation_steps = 'skipped_blocked', [{
                     'kind': 'scope', 'label': 'scope check', 'display': '', 'target': row.host, 'ran_at': now.isoformat(),

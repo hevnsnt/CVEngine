@@ -97,17 +97,56 @@ def _bundles(name, keys):
     return bool(name) and any(name in BUNDLED_BY.get(key, ()) for key in keys)
 
 
-def client_libraries(affected):
+# Libraries whose name an advisory also gives to server-side code (``react``: React Server Components, react-server-dom-*, react-dom/server,
+# Next.js; ``vue``: vue-server-renderer). Such an advisory is about code that runs on the server, which no script a page loads shows, so it is
+# never taken for the browser library. Decided on the package names the advisory lists and its words, conservatively: a sign of either
+# keeps the CVE's ordinary record.
+SERVER_SIDE = {
+    'react': (re.compile(r'^(?:react-server(?:-dom-[a-z0-9-]+)?|react-dom/server|next|nextjs|next\.js|@next/[a-z0-9-]+|react-router|@remix-run/[a-z0-9-]+'
+                         r'|@vercel/[a-z0-9-]+|waku|@parcel/rsc)$'),
+              re.compile(r'server[ -]?components?|server[ -]?functions?|server[ -]?actions?|react-server|\bRSC\b|server[ -]side render|\bSSR\b|'
+                         r'renderTo(?:String|PipeableStream|ReadableStream|StaticMarkup)|react-dom/server|next\.js|\bnextjs\b|flight protocol|'
+                         r'node\.js', re.IGNORECASE)),
+    'vue': (re.compile(r'^(?:vue-server-renderer|@vue/server-renderer|nuxt|@nuxt/[a-z0-9-]+|vue-template-compiler|@vue/compiler-sfc)$'),
+            re.compile(r'server[ -]?render|server[ -]side|\bSSR\b|nuxt|node\.js', re.IGNORECASE)),
+}
+
+
+def _server_side(key, affected, text=''):
+    """Whether an advisory naming library ``key`` (SERVER_SIDE) is about its server-side code: one of its entries is a server package, or its
+    words say so. A library with no such twin is never server-side."""
+    rules = SERVER_SIDE.get(key)
+    if not rules:
+        return False
+    packages, words = rules
+    for item in affected or []:
+        if not isinstance(item, dict):
+            continue
+        for field in ('product', 'package'):
+            name = str(item.get(field) or '').strip().lower()
+            if name and packages.match(name.split(':')[-1]):
+                return True
+    return bool(words.search(text or ''))
+
+
+def client_libraries(affected, text=None):
     """``{library key: [ranges of each entry naming it]}`` for the entries of a CVE's ``affected`` list that name a client-side library
     cvENGINE reads from script files (``library_key``), in the order the advisory names them. Each value is a list of the entries' range
-    lists, as the feed gives them."""
+    lists, as the feed gives them. A library whose advisory is about its server-side code (``_server_side``: a server package among the
+    entries, or, with ``text``, the advisory's own words) is left out: that CVE keeps its ordinary checks."""
     from cveFeed.correlation import clean_affected
     out = {}
     for item in clean_affected(affected):
         key = next((k for k in (library_key(item.get(f)) for f in ('product', 'package') if isinstance(item.get(f), str)) if k), '')
         if key:
             out.setdefault(key, []).append(item.get('ranges') or [])
-    return out
+    return {key: ranges for key, ranges in out.items() if not _server_side(key, affected, text or '')}
+
+
+def cve_libraries(cve):
+    """``client_libraries`` for a CVE record, read with its title and description: the one every caller with a CVEEntry uses."""
+    text = ' '.join(str(getattr(cve, field, '') or '') for field in ('title', 'original_description', 'summary'))
+    return client_libraries(getattr(cve, 'affected', None) or [], text)
 
 
 def _nse_allowlist():
@@ -386,7 +425,7 @@ def rules_strategy(cve, template_ids=()):
     banner check, and host checks only for the system-wide packages that ship it (SYSTEM_PACKAGES); an entry that is a package bundling the
     library (``jquery-rails``) gets no check of its own: the copy it puts on a page is the one the script read finds."""
     from cveFeed.correlation import clean_affected, prepared_ranges
-    libraries = client_libraries(cve.affected)
+    libraries = cve_libraries(cve)
     remote, local = [], []
     if libraries:
         remote, local = _library_checks(libraries)
@@ -679,8 +718,13 @@ def validation_profile(strategy, cvss_vector=''):
 
 def is_script_read(check):
     """Whether a remote check is a client-side library version read from a page's script files: a ``script_version`` check, or a
-    ``version_banner`` (an older or model-written record) whose product is a library cvENGINE reads that way. nmap cannot read either."""
-    return check['kind'] == 'script_version' or (check['kind'] == 'version_banner' and bool(library_key(check['params'].get('product'))))
+    ``version_banner`` (an older or model-written record) whose product is a library cvENGINE reads that way. nmap cannot read either. A
+    banner check of a library whose name is also server-side code (SERVER_SIDE: React, Vue) is not reinterpreted: without the advisory it
+    cannot be told which one it is, so it stays as it was written."""
+    if check['kind'] == 'script_version':
+        return True
+    key = library_key(check['params'].get('product')) if check['kind'] == 'version_banner' else ''
+    return bool(key) and key not in SERVER_SIDE
 
 
 def _script_product(check):

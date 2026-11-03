@@ -549,7 +549,8 @@ class AgentApiTests(TestCase):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
 		plans = [({'check_kinds': ['http_head'], 'generate_template': False, 'reason': 'Identify the frontend first.', 'source': 'ai'}, None),
 			({'check_kinds': ['nmap_sv'], 'generate_template': False, 'reason': 'Inspect the observed service.', 'source': 'ai'}, None)]
-		def run_check(project_id, ids, selected_kinds):
+		def run_check(project_id, ids, selected_kinds, unattended=True):
+			self.assertFalse(unattended)  # a person's own Validate now: the bug bounty gate holds it to the program's scope only
 			if selected_kinds == {'http_head'}:
 				Triage.objects.filter(pk__in=ids).update(validation_status='observed', validation_steps=[
 					{'kind': 'http_head', 'result': 'observed', 'summary': 'HEAD answered 200, Server: nginx/1.18.0'}])

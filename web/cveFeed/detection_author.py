@@ -141,8 +141,8 @@ def refresh_client_library_records(batch=LIBRARY_BATCH, seconds=60):
 def _refresh_library_record(row):
     """Bring one record of a client-library CVE to the current rules; 1 when it changed, 0 when it already had them or is not one."""
     cve = row.cve_entry
-    if not detection.client_libraries(cve.affected):
-        return 0
+    if not detection.cve_libraries(cve):
+        return 0  # not a client-side library CVE (a server-side React or Vue advisory among them): its record stays as it is
     fresh = _rules_for(cve)
     if not fresh:
         return 0

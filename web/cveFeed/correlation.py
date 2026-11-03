@@ -886,7 +886,7 @@ def signature_of(obj):
 # the stored reasons of a deterministic closure (this module, cveFeed.locality, cveFeed.match_policy): a verdict that starts with one
 # was reached on the evidence alone, so it is reusable and a person's or the AI's later answer does not replace it
 DIFFERENT_PRODUCT = 'Closed automatically: different product'
-# a validation's fresh read of the page's scripts (cveFeed.validation.library_outcome): the library is fixed, gone, or the host is an alias
+# a validation's fresh read of the page's scripts (cveFeed.validation.library_outcome): the library is fixed, or the host is an alias
 SCRIPT_READ = 'Closed automatically: fresh script read'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
