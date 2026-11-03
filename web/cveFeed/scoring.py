@@ -362,7 +362,7 @@ def rescore_subdomain_ids(subdomain_ids):
 def evidence_arrived(match_ids, confirmed=()):
     """Hard evidence (``match_policy.has_hard_evidence``) just reached these CVE matches without a template hit: the host's inventory report
     (``inventory_match``), runZero (``runzero_sync``), or a validation hit recorded, adopted from a sibling row or carried to a rescan's match
-    (``validation``, ``triage``). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
+    (``validation``, ``triage``); or a version-class template hit proved their version (``templategen.record_outcomes``, KEV rule). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
     hosts and make every snapshot re-read (``bump_stats_revision``). ``confirmed`` are the matches among them that were version-only just
     before the write (the caller checked, before it wrote): those that are fire now are paged once (``notify.fire_confirmed``). A hit adopted
     from a sibling or carried to a rescan pages nothing: the finding and its hit were announced already. Never raises."""
