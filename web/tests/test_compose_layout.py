@@ -2,7 +2,6 @@
 runs with, never with docker-compose.yml alone (an overlay that frees a published port, memory limits, a separate env file)."""
 import os
 import shutil
-import stat
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +26,8 @@ exit 0
 
 @unittest.skipUnless((ROOT / 'scripts' / 'compose-layout.sh').is_file() and shutil.which('bash'), 'needs the repository scripts directory')
 class ComposeLayoutTests(unittest.TestCase):
+    WORK = 'work'
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
@@ -34,9 +35,9 @@ class ComposeLayoutTests(unittest.TestCase):
         self.stub.mkdir()
         (self.stub / 'docker').write_text(DOCKER)
         (self.stub / 'docker').chmod(0o755)
-        self.work = self.tmp / 'work'
+        self.work = self.tmp / self.WORK
         (self.work / 'scripts').mkdir(parents=True)
-        for name in ('compose-layout.sh', 'enable-redis-auth.sh', 'rotate-field-key.sh'):
+        for name in ('compose-layout.sh', 'enable-redis-auth.sh', 'rotate-field-key.sh', 'openvas-user.sh'):
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
             (self.work / 'scripts' / name).chmod(0o755)
         (self.work / 'docker-compose.yml').write_text('services: {}\n')
@@ -99,3 +100,16 @@ class ComposeLayoutTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, name)
             self.assertIn('CVENGINE_COMPOSE_FILES', result.stderr)
         self.assertEqual(self.recreates(), [])
+
+
+class ComposeLayoutWithSpacesTests(ComposeLayoutTests):
+    """The same, for an installation whose path holds spaces (issue #394: a project under "/Volumes/<two words>" was cut at the first space,
+    and every script that recreates or execs a service refused to run)."""
+    WORK = 'My Disk/cv engine'
+
+    def test_make_openvas_user_runs_from_a_path_with_spaces(self):
+        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.vps.yml\n')
+        result = self.run_script('openvas-user.sh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('not a Compose file', result.stderr)
+        self.assertIn('docker compose -f docker-compose.yml -f docker-compose.vps.yml exec -T celery python3 manage.py openvas_bootstrap', self.calls())
