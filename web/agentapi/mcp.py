@@ -298,7 +298,7 @@ TOOLS = [
      _schema({'project': SLUG, 'match_id': {'type': 'integer'}, 'request_id': {'type': 'integer'}},
              ['project', 'match_id', 'request_id']),
      lambda c, a: svc.validation_request(c, a.get('project'), int(a['match_id']), int(a['request_id'])), False),
-    ('get_finding', 'One finding in full (kind: match, vulnerability, route or hygiene): why it matters, how it was found, first and last seen with the host history, the AI classification (and the model original when rules overrode it), the fix, and every validation check that ran with its exact command and result.', _schema(
+    ('get_finding', 'One finding in full (kind: match, vulnerability, route or hygiene): why it matters, how it was found, first and last seen with the host history, the AI classification (and the model original when rules overrode it), the fix, every validation check that ran with its exact command and result, and for a match "confirm": how to check it by hand on this host (the script URL, page, host and port, what to look for, read-only steps with those values filled in, how to read the result, what makes it exploitable, the fix).', _schema(
         {'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'route', 'hygiene']}, 'id': {'type': 'integer'}},
         ['project', 'kind', 'id']),
      lambda c, a: svc.finding_detail(c, a.get('project'), a['kind'], int(a['id'])), False),
