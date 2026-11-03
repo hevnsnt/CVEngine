@@ -3055,7 +3055,14 @@ def _detection(c):
     row = getattr(c, 'detection', None) if c.pk else None
     if row is None:
         return None
-    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': row.strategy or None,
+    strategy = row.strategy or None
+    if strategy:
+        # re-validated and re-rendered on read: the commands and the profile are always the current renderer's (an older record's dpkg
+        # check of an npm packaging, or an nmap step for a JavaScript file, is never shown), whoever wrote the record
+        from cveFeed import detection
+        clean, _ = detection.validate_strategy(strategy)
+        strategy = detection.finalize(clean, c.cvss_vector) if clean else strategy
+    return {'source': row.source, 'schema_version': row.schema_version, 'strategy': strategy,
             'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
 
 
@@ -4003,10 +4010,23 @@ def finding_detail(ctx, slug, kind, finding_id):
         'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
+        'confirm': _confirm_guide(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},
     }
+
+
+def _confirm_guide(m):
+    """How to confirm this one match by hand (cveFeed.confirm_guide): where to look, what to look for, the read-only steps with the match's
+    real host, port and URL, how to read the answer and how to fix it. None when it cannot be built; it never fails the detail."""
+    from cveFeed import confirm_guide
+    try:
+        return confirm_guide.match_guide(m)
+    except Exception:  # noqa: BLE001 - the guide is help on top of the evidence; a gap in it must not cost the finding its page
+        import logging
+        logging.getLogger(__name__).warning('could not build the confirm guide of match %s', m.pk, exc_info=True)
+        return None
 
 
 MAX_COMMENT_LENGTH = 4000
