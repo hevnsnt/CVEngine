@@ -1066,14 +1066,19 @@ FALLBACK_NOTES = {'document.write': 'a fallback the page loads only when an earl
                   'nomodule': 'a nomodule script: only browsers without module support run it',
                   'type': 'a script whose type a loader or consent manager switches before it runs'}
 UNREAD_NOTE = ('read from the script\'s {where}; its file was not read ({why}), so the file has not confirmed it')
+STATES_NOTE = ('the script named {named} states {name} {said} in its own file; the version the browser scan reported may not be the one the '
+               'page runs, and a page can load another copy at run time that no static read sees')
+CONTRADICTS_NOTE = ('the page\'s own scripts state {name} {said}; the {version} the technology scan reported may not be the one the page '
+                    'runs, and a page can load another copy at run time that no static read sees')
 SILENT_NOTE = ('read from the script\'s {where}; its file was read but states no version the read recognises (a build without its banner), '
                'which proves nothing either way')
 UNRECOGNISED_NOTE = ('the page\'s files state {said}, but {name}\'s code is not recognised wherever it appears (a copy without its banner, '
                      'in a bundle or inline, looks like any other code), so the page cannot rule this version out')
 # the libraries whose own code names their version, so the whole-body search (``whole_body``) finds every copy of them, banner or not, in
-# any file or inline script, and code of them whose version cannot be told is flagged (``unplaceable``): only for these may the page's files
-# close a technology scan's version (the named and the contradicted-by-file closures). Any other library (Moment.js, Vue, DataTables,
-# Bootstrap 5 builds without banners) may sit unrecognised in a bundle or inline, so its versions stay candidates
+# any file or inline script, and code of them whose version cannot be told is flagged (``unplaceable``): only for these does the match's
+# note say the page's files state another version (``STATES_NOTE``, ``CONTRADICTS_NOTE``). Nothing closes on it: file evidence informs and
+# caps, and only a redirect alias closes. Any other library (Moment.js, Vue, DataTables, Bootstrap 5 builds without banners) may sit
+# unrecognised in a bundle or inline, and its note says so
 CLOSABLE = ('jquery', 'jquery-ui', 'jquery-migrate')
 NAMED_NOTE = ('read from the script\'s {where}; its file states {said}, but not every script of the page was read whole, so another copy may '
               'carry this version')
@@ -1085,17 +1090,21 @@ LIBRARY_CLOSED = 'Closed automatically: this JavaScript library version is not o
 
 
 def closed_reason(reason):
-    """The stored reason of a library match closed because the host's own page contradicts it (``HostLibraries.judge`` skipped it: the
-    host only redirects, or the page's files state another version; reasons stored by an earlier build may also name an absence or a
-    cache-buster).
-    Correlation reopens such a match as soon as the host matches it again."""
+    """The stored reason of a library match closed because the host only redirects to another host of its project (``HostLibraries.judge``
+    skipped it: the only library closure this build makes). Reasons an earlier build stored may name the page's files, an absence or a
+    cache-buster (``FILE_KINDS``): those are reopened once (``reopen_file_closures``). Correlation reopens such a match as soon as the host
+    matches it again."""
     return f'{LIBRARY_CLOSED}: {str(reason)[:400]}.'
 
 
+# the closures earlier builds made on the page's files, an absence or a cache-buster: none is made any more, and each is reopened once
+FILE_KINDS = ('named_by_script', 'contradicted_by_file', 'file_states_nothing', 'no_such_script', 'cache_buster')
+
+
 def closure_kind(reason):
-    """The kind of a stored library closure reason (``closed_reason``), for counts: redirect_alias, named_by_script (a library script's own
-    ``?ver=`` or file name its file contradicts), contradicted_by_file, and the kinds earlier builds stored (cache_buster, no_such_script,
-    file_states_nothing), or '' for any other reason."""
+    """The kind of a stored library closure reason (``closed_reason``), for counts: redirect_alias (the only kind this build makes), and the
+    kinds earlier builds stored (``FILE_KINDS``: named_by_script, a library script's own ``?ver=`` or file name its file contradicted;
+    contradicted_by_file; file_states_nothing; no_such_script; cache_buster), or '' for any other reason."""
     text = str(reason or '')
     if not text.startswith(LIBRARY_CLOSED):
         return ''
@@ -1250,16 +1259,16 @@ class HostLibraries:
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
-        most its confidence may be (None: no cap). Skipped: every library version of a host whose front page only redirects to another host
-        (``alias_of``: the scripts are that host's, whichever tool saw them after following the redirect), a version a script's query
-        string or name carried where that script's own file was read and states another version or none, on a page known whole (the
-        same page conditions as ``_contradicts``: every script of every web port read whole, nothing loaded at run time, no inline code
-        unread, not cut), and a version every copy of the library on the whole page, read to its end, contradicts (``_contradicts``). Nothing is ever skipped for an absence (no script of the
-        library on the page) or a theme's ``?ver=``: a script not read may hold it under any name. A copy a later one replaces and a
-        fallback stay candidates at SHADOWED_CAP, and a query or name version of a script that was never read (reading off, a budget, a
-        refused or failing host) at the file-name confidence: nothing is dropped that a file has not contradicted. A version no file on the
-        page stated (another tool's: httpx/Wappalyzer, the nuclei technology pass, bbot) is kept at the file-name confidence too: only a
-        file's own banner or code earns more. None of this is hard evidence (``match_policy.has_hard_evidence``): every library match made
+        most its confidence may be (None: no cap). Skipped: only every library version of a host whose front page only redirects (301, 308)
+        to another host of the same project (``alias_of``: the scripts are that host's, whichever tool saw them after following the
+        redirect). The page's own files never skip a version: static reading cannot prove a page loads nothing else at run time (a
+        ``document.write``, an appended script tag, a fetch and eval), so where a file states another version (a script's ``?ver=`` or name
+        its file contradicts, or every copy of the library on a page read whole, ``_contradicts``) the version stays a candidate at the
+        file-name confidence with a note saying what the file states (``STATES_NOTE``, ``CONTRADICTS_NOTE``). Nothing is ever skipped for an
+        absence or a theme's ``?ver=`` either. A copy a later one replaces and a fallback stay candidates at SHADOWED_CAP, and a query or
+        name version of a script that was never read at the file-name confidence. A version no file on the page stated (another tool's:
+        httpx/Wappalyzer, the nuclei technology pass, bbot) is kept at the file-name confidence too: only a file's own banner or code earns
+        more. None of this is hard evidence (``match_policy.has_hard_evidence``): every library match made
         here is version-only."""
         key = PRODUCTS.get((product or '').strip().lower())
         if not key or not version:
@@ -1329,22 +1338,22 @@ class HostLibraries:
         # (a minified build without its banner, Moment.js's for one, is the named version all the same)
         read_named = [c for c in named if c.get('source') == 'body' and c.get('version') and c.get('version') != version]
         closable = key in CLOSABLE
+        # what used to close the match (1.3.3 before its final review) now only informs it: static reading cannot prove a page loads nothing
+        # else at run time (a document.write, an append of a script tag, a fetch and eval), so the page's files never close a technology
+        # scan's version. The match stays a candidate at the file-name confidence, with what the file states (only a redirect alias closes)
+        stated_note = ''
         if read_named and closable and self.page_read and key not in self.inline:
-            # the string a script's query or name carries, where the file itself was read and states another version, on a page known whole
-            # (every script of every web port read whole, nothing loaded at run time, no inline code unread, not cut), for a library whose
-            # code is recognised wherever it is: no other copy of the page can carry the version the name gives
-            return True, {'reason': f'the page\'s own scripts say {name} {read_named[-1]["version"]}; the {version} came from a script\'s name '
-                                    f'or query string'}, None
-        if stated and closable and self.explains(key, version) and self._contradicts(key, record, copies):
-            # the page itself explains the version (a script URL or another library on it carries it), and every script of it, read whole,
-            # states another version of the library
-            return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
+            stated_note = STATES_NOTE.format(named=version, name=name, said=read_named[-1]['version'])
+        elif stated and closable and self.explains(key, version) and self._contradicts(key, record, copies):
+            stated_note = CONTRADICTS_NOTE.format(name=name, said=said, version=version)
         unrecognised = (UNRECOGNISED_NOTE.format(name=name, said=f'{name} {said}' if said else 'no version')
                         if not closable and (read_named or stated) else '')
         if named:  # the script was never read, or the page is not known whole: its query or name string is kept at the file-name confidence
             copy = named[0]
             where = 'query string' if copy.get('query_version') == version else 'file name'
-            if unrecognised:
+            if stated_note:
+                note = stated_note
+            elif unrecognised:
                 note = unrecognised
             elif copy in read_named:
                 note = NAMED_NOTE.format(where=where, said=f'{name} {copy["version"]}')
@@ -1356,7 +1365,8 @@ class HostLibraries:
                            'version_confidence': CONFIDENCE['filename'], 'version_note': note}, CONFIDENCE['filename']
         # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
         # says, and trusted no further than a file name
-        return False, {'copies': summary, **_other(), **({'version_note': unrecognised} if unrecognised else {})}, CONFIDENCE['filename']
+        note = stated_note or unrecognised
+        return False, {'copies': summary, **_other(), **({'version_note': note} if note else {})}, CONFIDENCE['filename']
 
     def _judge_legacy(self, key, version):
         """A version stored before records existed, from a script's name or its query string (one cannot be told from the other any more):

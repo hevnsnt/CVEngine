@@ -164,7 +164,7 @@ class VouchedAcrossRescansTests(ReviewScenarioBase):
         match = self.correlate(sub)[(name, 'CVE-2020-11023', '1.12.4')]
         if vouch:
             vouch(match)
-        self.read_root(name, 200, CONTRA)  # the page's own jQuery file says 3.7.1
+        self.redirect_away(name)  # the host now only redirects to another host of the project: the one closure the page makes
         self.correlate(sub)
         site = site or self.site
         scan = ScanHistory.objects.create(domain=site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='y')

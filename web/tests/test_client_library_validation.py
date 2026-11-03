@@ -49,6 +49,14 @@ def page(*sources, status=200, extra=''):
 	return {'status': status, 'body': ''.join(f'<script src="{s}"></script>' for s in sources) + extra}
 
 
+STAYS_OPEN = 'stays open'  # a fixed version the page's files state informs the match, never closes it (only a redirect alias closes)
+
+
+def alias_site():
+	"""The front page only redirects (301) to www.other.test, which the test makes one of the project's hosts: the one closure a read makes."""
+	return Site({PAGE: {'status': 301, 'location': 'https://www.other.test/', 'body': ''}})
+
+
 def jquery_site(version='1.12.4', **more):
 	return Site({PAGE: page('/js/jquery.min.js'), JQ: {'status': 200, 'body': script(version)}, **more})
 
@@ -131,8 +139,9 @@ class LibraryOutcomeTests(unittest.TestCase):
 		self.assertNotIn('close_reason', reaffirmed)
 		self.assertEqual((reaffirmed['library']['version'], reaffirmed['library']['version_source']), ('1.12.4', 'body'))
 		fixed = self.outcome(read_page(record(copy('3.6.0'))))
-		self.assertEqual(fixed['status'], 'version_changed')
-		self.assertTrue(fixed['close_reason'].startswith(correlation.SCRIPT_READ))
+		self.assertEqual(fixed['status'], 'observed')  # every script read whole, a fixed version: informs, never closes
+		self.assertNotIn('close_reason', fixed)
+		self.assertIn(STAYS_OPEN, fixed['summary'])
 		# every script with a source on the page must be read whole: a third-party widget the vetter never reads may bundle an old copy
 		widget = self.outcome(read_page(record(copy('3.6.0')), entries=[
 			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]))
@@ -141,7 +150,8 @@ class LibraryOutcomeTests(unittest.TestCase):
 		read = self.outcome(read_page(record(copy('3.6.0')), entries=[
 			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]),
 			scanned={JQ: whole('3.6.0'), 'https://widget.example/w.js': whole()})
-		self.assertEqual(read['status'], 'version_changed')
+		self.assertEqual(read['status'], 'observed')
+		self.assertIn(STAYS_OPEN, read['summary'])
 		# a version another tool named (bbot or httpx on another route, an iframe, a widget the read never fetches) never closes on what the
 		# front page's readable scripts show: only a match made from a file's body, that file re-read whole, closes on a fixed version
 		for params in ({'version_source': 'other', 'script_url': ''}, {'version_source': 'filename'}, {'version_source': 'body', 'script_url': ''}):
@@ -254,13 +264,13 @@ class LibraryOutcomeTests(unittest.TestCase):
 	def test_a_licence_block_is_ruled_out_only_for_a_library_whose_own_code_names_its_version(self):
 		# jQuery's code states its version wherever it is, so another library's licence block (Sizzle) cannot hide a copy of it
 		sizzle = self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', blocks=['/*! Sizzle CSS Selector Engine v2.3.6'])})
-		self.assertEqual(sizzle['status'], 'version_changed')
+		self.assertIn(STAYS_OPEN, sizzle['summary'])  # no doubt left (it would have closed before 1.3.3's final review)
 		# a library with no such code: any licence block no rule names may be its copy under another banner
 		boot = 'https://www.v.test/js/bootstrap.min.js'
 		pages = read_page({'bootstrap': {**record(copy('4.6.0', url=boot))['jquery'], 'product': 'Bootstrap'}})
 		params = {'library': 'bootstrap', 'product': 'Bootstrap', 'ranges': [[{'introduced': '4.0.0', 'fixed': '4.3.1'}]], 'script_url': boot}
 		clean = self.outcome(pages, params=params, scanned={boot: whole('4.6.0', key='bootstrap')})
-		self.assertEqual(clean['status'], 'version_changed')
+		self.assertIn(STAYS_OPEN, clean['summary'])
 		other = self.outcome(pages, params=params, scanned={boot: whole('4.6.0', key='bootstrap', blocks=['/*! popper v1 (c) someone'])})
 		self.assertEqual(other['status'], 'observed')
 		self.assertIn('licence block', other['summary'])
@@ -363,14 +373,17 @@ class LibraryValidationTests(Base):
 		from cveFeed.models import ProbeObservation
 		self.assertFalse(ProbeObservation.objects.exists())  # nothing stored that would move the host's other matches' signatures
 
-	def test_a_fixed_version_closes_when_every_script_of_the_page_was_read_whole(self):
+	def test_a_fixed_version_never_closes_even_when_every_script_of_the_page_was_read_whole(self):
 		m = self.match()
 		theme = [f'/theme/js/vendor-{i}.js' for i in range(3)]
 		site = Site({PAGE: page('/js/jquery.min.js', *theme), JQ: {'status': 200, 'body': script('3.6.0')},
 					 **{f'https://www.v.test{t}': {'status': 200, 'body': 'var a=1;'} for t in theme}})
 		row, _stats, _calls = self.validate(site)
 		self.assertEqual(self.step(row)['library']['version'], '3.6.0')
-		self.assert_closed(m, row, 'at or above the fixed release')
+		# a page can still load another copy at run time that no static read sees: the fixed version informs, the match stays open
+		self.assertEqual(self.step(row)['result'], 'observed')
+		self.assertIn(STAYS_OPEN, self.step(row)['summary'])
+		self.assert_open(m)
 
 	def test_a_spent_budget_never_closes_even_on_a_fixed_running_copy(self):
 		m = self.match()
@@ -471,7 +484,8 @@ class LibraryValidationTests(Base):
 
 	def test_a_match_a_person_worked_is_never_closed(self):
 		m = self.match(remediation_status='in_progress')
-		row, _stats, _calls = self.validate(jquery_site('3.6.0'))
+		self.sub('www.other.test')  # the alias target is one of the project's own hosts
+		row, _stats, _calls = self.validate(alias_site())
 		step = self.step(row)
 		self.assertEqual(step['result'], 'observed')
 		self.assertIn('not closed: a person worked this match', step['summary'])
@@ -487,7 +501,8 @@ class LibraryValidationTests(Base):
 		check = validation._script_read_check({**validation.subject_for(row, triage.load_findings([row])[0]), 'project_id': self.project.id},
 											  row.signature)
 		self.assertNotEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'not_affected')  # still open before the read
-		result = validation.run_script_read(check, get=jquery_site('3.6.0'))
+		self.sub('www.other.test')  # the alias target is one of the project's own hosts
+		result = validation.run_script_read(check, get=alias_site())
 		self.assertEqual(result['status'], 'version_changed')
 		verdicts = set(MatchVerdict.objects.values_list('pk', 'ai_verdict', 'ai_reason'))
 		validation.apply_validation(row, check, result)
@@ -594,8 +609,9 @@ class HotLaneTests(Base):
 
 	def test_the_hot_lane_request_runs_the_script_read_and_ends_on_the_closure(self):
 		m = self.match()
+		self.sub('www.other.test')  # the alias target is one of the project's own hosts: the one closure a read makes
 		job = self.job(m)
-		result, ran = self.run_job(job, jquery_site('3.6.0'))
+		result, ran = self.run_job(job, alias_site())
 		self.assertEqual(ran, ['script_read'])
 		self.assertEqual((result['assessment_status'], result['ai_state']), ('closed_not_applicable', 'not_needed'))
 		job.refresh_from_db()
@@ -604,16 +620,17 @@ class HotLaneTests(Base):
 		self.assertTrue(m.ai_reason.startswith(correlation.SCRIPT_READ))
 		# Validate now on the closed match reads the page again instead of returning the old closure
 		again = OnDemandValidation.objects.create(match=m, project=self.project, evidence_signature='y', priority=3, source='manual')
-		site = jquery_site('3.6.0')
+		site = alias_site()
 		result, ran = self.run_job(again, site)
 		self.assertEqual(ran, ['script_read'])
-		self.assertIn(JQ, site.calls)
+		self.assertIn(PAGE, site.calls)
 		self.assertIn('A fresh read of the page\'s scripts closed this match.', result['check_notes'])
 		self.assertFalse(any('not the software' in note for note in result['check_notes']))
 
 	def test_a_closed_match_whose_page_runs_an_affected_copy_again_is_reopened(self):
 		m = self.match()
-		self.run_job(self.job(m), jquery_site('3.6.0'))
+		self.sub('www.other.test')
+		self.run_job(self.job(m), alias_site())  # closed: the host only redirected to another host of the project
 		m.refresh_from_db()
 		self.assertTrue(validation.closed_by_script_read(m))
 		again = OnDemandValidation.objects.create(match=m, project=self.project, evidence_signature='y', priority=3, source='manual')

@@ -193,9 +193,13 @@ class EveryScriptOfThePageTests(ReviewScenarioBase):
         sub = self.host(host, ['jQuery:1.12.4'])
         self.correlate(sub)
         self.read_root(host, 200, page + EXPLAINS, scripts=scripts)
-        return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')].ai_verdict == 'not_affected'
+        m = self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
+        # file evidence never closes (only a redirect alias does): whether the page's files, read whole, contradict the version shows in
+        # the match's note, the match stays a candidate at the file-name confidence either way
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        return (m.evidence.get('version_note') or '').startswith(("the page's own scripts state", 'the script named'))
 
-    def test_the_page_read_whole_still_closes(self):
+    def test_the_page_read_whole_still_contradicts_it_in_the_note(self):
         self.assertTrue(self._closed('w0.x.test', '<script src="/js/jquery.min.js"></script>'))
 
     def test_a_third_party_script_never_read(self):
@@ -236,10 +240,13 @@ class ContradictsRuleTests(SimpleTestCase):
     COPY = {'url': 'https://h.test/js/jquery.min.js', 'version': '3.7.1', 'source': 'body', 'whole': True, 'state': 'effective'}
 
     def judge(self, record, page_read=True):
-        # the page explains 1.12.4 (a script URL carries it): only the copies decide here
-        return js_libraries.HostLibraries({'jquery': record}, page_read=page_read, page_versions={'1.12.4'}).judge('jQuery', '1.12.4')[0]
+        # the page explains 1.12.4 (a script URL carries it): only the copies decide here. Nothing closes on file evidence: whether the copies
+        # contradict the version shows in the note
+        skip, evidence, cap = js_libraries.HostLibraries({'jquery': record}, page_read=page_read, page_versions={'1.12.4'}).judge('jQuery', '1.12.4')
+        self.assertEqual((skip, cap), (False, js_libraries.CONFIDENCE['filename']))
+        return (evidence.get('version_note') or '').startswith("the page's own scripts state")
 
-    def test_the_whole_page_with_one_effective_copy_closes(self):
+    def test_the_whole_page_with_one_effective_copy_contradicts_it(self):
         self.assertTrue(self.judge({'version': '3.7.1', 'version_source': 'body', 'copies': [dict(self.COPY)]}))
 
     def test_unresolved_copies_contradict_nothing(self):
@@ -403,19 +410,21 @@ class ExplainedByThePageTests(ReviewScenarioBase):
 
     def test_a_query_string_version_explains_it(self):
         m = self._verdict('ex1.x.test', '<script src="/js/jquery.min.js"></script><script src="/site.js?ver=1.12.4"></script>')
-        self.assertEqual(m.ai_verdict, 'not_affected')
-        self.assertIn("the page's own scripts say jQuery 3.7.1", m.ai_reason)
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))  # informs and caps, never closes
+        self.assertTrue(m.evidence['version_note'].startswith("the page's own scripts state jQuery 3.7.1"))
 
     def test_a_file_name_version_explains_it(self):
         m = self._verdict('ex2.x.test', '<script src="/js/jquery.min.js"></script><script src="/js/site-1.12.4.js"></script>',
                           scripts={'https://ex2.x.test/js/site-1.12.4.js': 'var s=1;'})
-        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))  # informs and caps, never closes
+        self.assertTrue(m.evidence['version_note'].startswith("the page's own scripts state jQuery 3.7.1"))
 
     def test_another_librarys_version_on_the_page_explains_it(self):
         migrate = '/*! jQuery Migrate v3.4.1 | (c) OpenJS Foundation and other contributors */\nvar m=1;'
         m = self._verdict('ex3.x.test', '<script src="/js/jquery.min.js"></script><script src="/js/migrate.js"></script>', version='3.4.1',
                           scripts={'https://ex3.x.test/js/migrate.js': migrate})
-        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))  # informs and caps, never closes
+        self.assertTrue(m.evidence['version_note'].startswith("the page's own scripts state jQuery 3.7.1"))
 
     def test_the_rule(self):
         libraries = js_libraries.HostLibraries({'jquery-migrate': {'copies': [{'version': '3.4.1', 'source': 'body'}]}},
@@ -540,10 +549,10 @@ class NamedClosureNeedsTheWholePageTests(ReviewScenarioBase):
         self.read_root(host, 200, self.PAGE + extra, scripts=scripts)
         return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
 
-    def test_the_whole_page_closes(self):
+    def test_the_whole_page_states_it_in_the_note(self):
         m = self._match('nm0.x.test', '<script src="/site.js"></script>')
-        self.assertEqual(m.ai_verdict, 'not_affected')
-        self.assertIn("the 1.12.4 came from a script's name or query string", m.ai_reason)
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))  # informs and caps, never closes
+        self.assertEqual(m.evidence['version_note'], js_libraries.STATES_NOTE.format(named='1.12.4', name='jQuery', said='3.7.1'))
 
     def test_one_unread_script_keeps_it_open(self):
         for host, extra, scripts in (('nm1.x.test', '<script src="/js/missing.js"></script>', None),  # not served
@@ -632,21 +641,21 @@ class OnlyRecognisedLibrariesCloseTests(ReviewScenarioBase):
                                {f'https://{host}/js/moment.js': MOMENT_2294})
         self.assertNotEqual(m.ai_verdict, 'not_affected')
 
-    def test_jquery_still_closes_on_a_whole_page_both_ways(self):
+    def test_jquery_on_a_whole_page_is_noted_both_ways_never_closed(self):
         # named: the library's own script names 1.12.4, its file says 3.7.1
         sub = self.host('ok1.x.test', ['jQuery:1.12.4'])
         self.correlate(sub)
         self.read_root('ok1.x.test', 200, '<script src="/js/jquery.min.js?ver=1.12.4"></script>')
         m = self.correlate(sub)[('ok1.x.test', 'CVE-2020-11023', '1.12.4')]
-        self.assertEqual(m.ai_verdict, 'not_affected')
-        self.assertEqual(js_libraries.closure_kind(m.ai_reason), 'named_by_script')
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertTrue(m.evidence['version_note'].startswith('the script named 1.12.4 states jQuery 3.7.1'))
         # contradicted by file: another script of the page carries 1.12.4
         sub = self.host('ok2.x.test', ['jQuery:1.12.4'])
         self.correlate(sub)
         self.read_root('ok2.x.test', 200, '<script src="/js/jquery.min.js"></script><script src="/site.js?ver=1.12.4"></script>')
         m = self.correlate(sub)[('ok2.x.test', 'CVE-2020-11023', '1.12.4')]
-        self.assertEqual(m.ai_verdict, 'not_affected')
-        self.assertEqual(js_libraries.closure_kind(m.ai_reason), 'contradicted_by_file')
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertTrue(m.evidence['version_note'].startswith("the page's own scripts state jQuery 3.7.1"))
 
     def test_an_inline_jquery_code_whose_version_cannot_be_told_is_unread(self):
         page = '<script>x.fn=x.prototype={jquery:v,constructor:x};</script>'
@@ -674,4 +683,72 @@ class OnlyRecognisedLibrariesCloseTests(ReviewScenarioBase):
         jq = js_libraries.HostLibraries({'jquery': {'version': '3.7.1', 'version_source': 'body', 'copies': [{**copy, 'version': '3.7.1',
                                                                                                              'query_version': '1.12.4'}]}},
                                         page_read=True, page_versions={'1.12.4'})
-        self.assertTrue(jq.judge('jQuery', '1.12.4')[0])
+        skip, evidence, _cap = jq.judge('jQuery', '1.12.4')
+        self.assertFalse(skip)  # nor does jQuery: its note says what the file states
+        self.assertTrue(evidence['version_note'].startswith('the script named 1.12.4 states jQuery 3.7.1'))
+
+
+NAMED_PAGE = '<script src="/js/jquery.min.js?ver=1.12.4"></script>'  # the file says 3.7.1 (read_root serves it); its ?ver= says 1.12.4
+
+
+class FileEvidenceNeverClosesTests(ReviewScenarioBase):
+    """Round four of the loader gap (coordinator decision): static reading cannot prove a page loads nothing else at run time, so the page's
+    files never close a technology scan's version; only a redirect alias does. Each loader the read did not know, in a file or inline, and
+    each jQuery build the whole-body search takes for another library, keeps the genuine 1.12.4 open as a capped candidate."""
+
+    def _open(self, host, page, scripts=None):
+        sub = self.host(host, ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root(host, 200, page, scripts=scripts)
+        m = self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']), host)
+        return m
+
+    def _legacy(self, host, code):
+        return self._open(host, NAMED_PAGE + '<script src="/js/legacy.js"></script>', {f'https://{host}/js/legacy.js': code})
+
+    def test_l1_document_write_without_a_js_extension(self):
+        self._legacy('l1.x.test', 'document.write(\'<script src="/bundles/legacy?v=Xy12"><\\/script>\');')
+
+    def test_l2_jquery_append_of_a_script_tag(self):
+        self._legacy('l2.x.test', "$(function(){$('head').append('<script src=\"/bundles/legacy?v=Xy12\"></scr'+'ipt>')});")
+
+    def test_l3_fetch_and_eval(self):
+        self._legacy('l3.x.test', "fetch('/bundles/legacy?v=1').then(function(r){return r.text()}).then(function(t){(0,eval)(t)});")
+
+    def test_l4_ajax_with_datatype_script(self):
+        self._legacy('l4.x.test', "$.ajax({url:'/bundles/legacy?v=1',dataType:'script',cache:true});")
+
+    def test_l5_an_uppercase_script_element(self):
+        self._legacy('l5.x.test', "var s=document.createElement('SCRIPT');s.src='/bundles/legacy?v=1';document.head.appendChild(s);")
+
+    def test_l6_create_element_ns(self):
+        self._legacy('l6.x.test', "var s=document.createElementNS('http://www.w3.org/1999/xhtml','script');s.src='/bundles/legacy?v=1';"
+                                  "document.head.appendChild(s);")
+
+    def test_l7_a_contextual_fragment(self):
+        self._legacy('l7.x.test', "document.head.appendChild(document.createRange().createContextualFragment('<script src=\"/bundles/legacy?v=1\">"
+                                  "</scr'+'ipt>'));")
+
+    def test_i2_an_inline_append(self):
+        self._open('i2.x.test', NAMED_PAGE + "<script>$('head').append('<script src=\"/bundles/legacy?v=1\"></scr'+'ipt>');</script>")
+
+    def test_i3_an_inline_fetch_and_eval(self):
+        self._open('i3.x.test', NAMED_PAGE + "<script>fetch('/bundles/legacy?v=1').then(r=>r.text()).then(t=>(0,eval)(t));</script>")
+
+    def test_g3b_a_prototype_whose_jquery_key_is_far_away(self):
+        code = ('!function(w){var v="1.12.4",q=function(s,c){return new q.fn.init(s,c)};q.fn=q.prototype={init:function(s,c){'
+                + 'if(!s)return this;' * 400 + 'return this},jquery:v,constructor:q,length:0};w.jQuery=w.$=q}(window);')
+        self._open('g3b.x.test', NAMED_PAGE + '<script src="/js/app.js"></script>', {'https://g3b.x.test/js/app.js': code})
+
+    def test_g3c_a_prototype_assigned_separately(self):
+        code = ('!function(w){var v="1.12.4",q=function(s,c){return new q.fn.init(s,c)};q.prototype={jquery:v,constructor:q,length:0};'
+                'q.fn=q.prototype;w.jQuery=q}(window);')
+        self._open('g3c.x.test', NAMED_PAGE + '<script src="/js/app.js"></script>', {'https://g3c.x.test/js/app.js': code})
+
+    def test_only_a_redirect_alias_closes(self):
+        sub = self.host('al2.x.test', ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.redirect_away('al2.x.test')
+        m = self.correlate(sub)[('al2.x.test', 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual((m.ai_verdict, js_libraries.closure_kind(m.ai_reason)), ('not_affected', 'redirect_alias'))

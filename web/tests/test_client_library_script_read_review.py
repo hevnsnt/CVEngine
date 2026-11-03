@@ -14,7 +14,7 @@ from django.utils import timezone
 from cveFeed import detection, detection_author, js_libraries, local_egress, probes, triage, validation
 from cveFeed.models import CVEDetection, CVEEntry, CVEMatch, ServiceRun, Triage
 from targetApp.models import Domain
-from tests.test_client_library_validation import JQ, PAGE, Base, HotLaneTests, Site, jquery_site, page, script
+from tests.test_client_library_validation import JQ, PAGE, STAYS_OPEN, Base, HotLaneTests, Site, alias_site, jquery_site, page, script
 
 VENDOR = 'https://www.v.test/assets/vendor.js'
 FILLER = '/* app code */\n' + ('var a' + 'x' * 60 + '=1;\n') * 2200  # ~140 KB of ordinary code, under MAX_SCRIPT_BYTES
@@ -92,11 +92,11 @@ class AbsenceAndWholeFileTests(Base):
 		row, _s, _c = self.validate(site)
 		self.assertIn(old, site.calls)  # not on the page any more, so fetched on its own, within the budget
 		self.assertIn('1.12.4 inside the affected range', self.assert_kept(m, row)['summary'])
-		# once that file is fixed (or gone and replaced by the fixed copy, with the old one answering a fixed version), it closes
+		# once that file is fixed too, the read has no doubt left, and still the match stays open: a fixed version never closes
 		cache_clear()
 		Triage.objects.all().delete()
 		row, _s, _c = self.validate(jquery_site('3.6.0', **{old: {'status': 200, 'body': script('3.6.0')}}))
-		self.assert_closed(m, row, 'at or above the fixed release')
+		self.assertIn(STAYS_OPEN, self.assert_kept(m, row)['summary'])
 
 
 JQ371 = 'https://www.v.test/js/jquery-3.7.1.min.js'
@@ -178,10 +178,10 @@ class ModuleAndOtherSourceTests(Base):
 				row, _s, _c = self.validate(site)
 				self.kept(m, row)
 
-	def test_N6_a_body_match_whose_own_file_is_fixed_still_closes(self):
+	def test_N6_a_body_match_whose_own_file_is_fixed_stays_open(self):
 		m = self.match('1.12.4')
 		row, _s, _c = self.validate(jquery_site('3.6.0'))
-		self.assert_closed(m, row, 'at or above the fixed release')
+		self.assertIn(STAYS_OPEN, self.kept(m, row)['summary'])  # informs, never closes: a page can load another copy at run time
 
 	def test_N7_an_unread_third_party_bundle_that_may_run_an_old_copy_keeps_a_body_match(self):
 		# the match's own file now states 3.7.1; a widget loaded after it (a third-party host the vetter never reads) may bundle 1.12.4
@@ -235,7 +235,8 @@ class ModuleAndOtherSourceTests(Base):
 
 	def test_a_later_read_finding_an_affected_copy_deep_in_a_file_reopens_a_closed_match(self):
 		m = self.match('1.12.4')
-		self.validate(jquery_site('3.6.0'))
+		self.sub('www.other.test')
+		self.validate(alias_site())  # closed: the host only redirected to another host of the project
 		m.refresh_from_db()
 		self.assertTrue(validation.closed_by_script_read(m))
 		cache_clear()
@@ -252,7 +253,8 @@ class ModuleAndOtherSourceTests(Base):
 	def test_a_later_read_finding_an_affected_copy_anywhere_reopens_a_closed_match(self):
 		# F3: closed on a fixed read; the next read finds 1.12.4 again, only as a shadowed copy (observed, not reaffirmed): it reopens
 		m = self.match('1.12.4')
-		row, _s, _c = self.validate(jquery_site('3.6.0'))
+		self.sub('www.other.test')
+		row, _s, _c = self.validate(alias_site())  # closed: the host only redirected to another host of the project
 		m.refresh_from_db()
 		self.assertTrue(validation.closed_by_script_read(m))
 		cache_clear()
@@ -278,7 +280,7 @@ class ModuleAndOtherSourceTests(Base):
 		result = validation.run_script_read(RedirectScopeTests.check_for(self, m), get=get)
 		self.assertIn(JQ, site.calls)
 		self.assertEqual(sent, [None, None])  # the page and the script, neither with If-None-Match: a 304 leaves nothing to search
-		self.assertEqual(result['status'], 'version_changed')
+		self.assertIn(STAYS_OPEN, result['summary'])  # read whole, no doubt left (a fixed version informs, never closes)
 
 
 def cache_clear():
@@ -382,7 +384,7 @@ class RedirectScopeTests(Base):
 					   JQ: {'status': 301, 'location': moved, 'body': ''}, moved: {'status': 200, 'body': script('3.6.0')}})
 		result = self.read(net, self.check_for(m))
 		self.assertIn(moved, net.calls)
-		self.assertEqual(result['status'], 'version_changed')
+		self.assertIn(STAYS_OPEN, result['summary'])  # the moved file was read whole (a fixed version informs, never closes)
 
 	def test_a_script_on_a_held_port_is_held_not_unreachable(self):
 		reader = js_libraries.Reader(1, fresh=True)

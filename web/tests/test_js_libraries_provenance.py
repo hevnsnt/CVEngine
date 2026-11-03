@@ -111,11 +111,12 @@ class AnotherToolsVersionTests(Hosts):
         self.assertEqual([c['version'] for c in records['jquery']['copies']], ['3.7.1'])  # the plugin is not a copy of jQuery
         self.root('www.rt.test', evidence=self.page_evidence())
         found = self.matches('www.rt.test', 'jQuery:3.7.1', 'jQuery:1.0.4', 'jQuery:3.2.1', 'nginx:1.24.0', 'WordPress:7.1.4')
-        self.assertNotIn(('jquery', '1.0.4'), found)
-        self.assertNotIn(('jquery', '3.2.1'), found)
-        skip, evidence, _cap = js_libraries.HostLibraries.for_subdomain(self.sub('www.rt.test')).judge('jQuery', '1.0.4')
-        self.assertTrue(skip)
-        self.assertEqual(evidence['reason'], "the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a technology scan")
+        # the page's files inform and cap, never close: both stay candidates at the file-name confidence, the note says what the file states
+        for version in ('1.0.4', '3.2.1'):
+            self.assertEqual(found[('jquery', version)]['confidence'], js_libraries.CONFIDENCE['filename'])
+        skip, evidence, cap = js_libraries.HostLibraries.for_subdomain(self.sub('www.rt.test')).judge('jQuery', '1.0.4')
+        self.assertEqual((skip, cap), (False, js_libraries.CONFIDENCE['filename']))
+        self.assertEqual(evidence['version_note'], js_libraries.CONTRADICTS_NOTE.format(name='jQuery', said='3.7.1', version='1.0.4'))
         # server-side products on the same host are not touched
         self.assertEqual(found[('nginx', '1.24.0')]['confidence'], 0.95)
         # the live plugin file keeps its fancyBox licence block, which no rule names: a script carrying more than was recognised may hold
@@ -346,13 +347,13 @@ class StoredMatchClosureTests(Hosts):
         correlation.correlate_subdomain(Subdomain.objects.prefetch_related('technologies').get(pk=self.sub_row.pk), index, {self.entry.id: self.entry})
         return CVEMatch.objects.get(subdomain=self.sub_row, cve_entry=self.entry)
 
-    def test_the_next_correlation_closes_a_technology_scan_match_the_page_contradicts(self):
+    def test_the_next_correlation_keeps_a_technology_scan_match_the_page_contradicts_open_and_capped(self):
         before = self.correlate()
         self.assertEqual((before.ai_verdict, before.confidence), ('', js_libraries.CONFIDENCE['filename']))  # page never read: capped
         self.wordpress_root()
-        after = self.correlate()
-        self.assertEqual(after.ai_verdict, 'not_affected')
-        self.assertEqual(after.ai_reason, js_libraries.closed_reason("the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a technology scan"))
+        after = self.correlate()  # the page's files inform and cap, never close (a page can load another copy at run time)
+        self.assertEqual((after.ai_verdict, after.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertEqual(after.evidence['version_note'], js_libraries.CONTRADICTS_NOTE.format(name='jQuery', said='3.7.1', version='1.0.4'))
 
     def stored(self, **fields):
         from cveFeed.models import CVEMatch
@@ -360,16 +361,62 @@ class StoredMatchClosureTests(Hosts):
                                        version_in_range=True, confidence=0.95, scan_history=self.scan_obj,
                                        evidence={'source': 'tech', 'source_id': self.tech.id, 'raw_version': '1.0.4'}, **fields)
 
-    def test_the_periodic_reconcile_sweep_closes_a_stored_match_without_a_rescan(self):
-        from cveFeed.models import CVEMatch, Triage
-        from cveFeed.tasks import reconcile_invalid_correlations
+    def test_the_periodic_reconcile_sweep_closes_nothing_on_the_pages_files(self):
+        from cveFeed.models import CVEMatch
+        from cveFeed.tasks import reconcile_invalid_correlations, reconcile_library_provenance
         match = self.stored()  # as 1.3.2 left it: technology source, confidence 0.95
         self.wordpress_root()
         reconcile_invalid_correlations(limit=100)
-        match = CVEMatch.objects.get(pk=match.pk)
-        self.assertEqual(match.ai_verdict, 'not_affected')
-        self.assertIn("the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a technology scan", match.ai_reason)
-        self.assertEqual(Triage.objects.get(match=match).classification, 'not_applicable')
+        self.assertEqual(reconcile_library_provenance()['closed'], 0)
+        self.assertEqual(CVEMatch.objects.get(pk=match.pk).ai_verdict, '')
+
+    def test_a_match_an_earlier_build_closed_on_the_pages_files_is_reopened_once_and_nothing_pages(self):
+        from unittest import mock
+
+        from cveFeed import library_reopen
+        from cveFeed.models import BackgroundCursor, CVEMatch, Triage
+        from cveFeed.correlation import close_invalid_correlation
+        self.wordpress_root()
+        reasons = {"the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a technology scan": 'contradicted_by_file',
+                   "the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a script's name or query string": 'named_by_script',
+                   "the jQuery script's own file does not state 1.0.4": 'file_states_nothing', 'the front page loads no jQuery': 'no_such_script',
+                   "the 1.0.4 is a theme's cache-buster": 'cache_buster', 'the host only redirects to rt.test; the jQuery seen there is that host\'s':
+                   'redirect_alias'}
+        rows = {}
+        for text, kind in reasons.items():
+            CVEMatch.objects.filter(subdomain=self.sub_row).delete()
+            match = self.stored()
+            self.assertTrue(close_invalid_correlation(match, js_libraries.closed_reason(text)))  # what an earlier build did
+            self.assertEqual(js_libraries.closure_kind(CVEMatch.objects.get(pk=match.pk).ai_reason), kind)
+            rows[kind] = CVEMatch.objects.get(pk=match.pk)
+            CVEMatch.objects.filter(pk=match.pk).update(subdomain=Subdomain.objects.create(
+                name=f'{kind}.rt.test', target_domain=self.domain, scan_history=self.scan_obj))  # each on a host of its own
+        worked = rows['contradicted_by_file']
+        person = CVEMatch.objects.create(cve_entry=self.entry, subdomain=Subdomain.objects.create(name='p.rt.test', target_domain=self.domain,
+                                                                                                 scan_history=self.scan_obj),
+                                         source='tech', matched_product='jquery', matched_version='1.0.4', version_in_range=True, confidence=0.4,
+                                         ai_verdict='not_affected', ai_reason=js_libraries.closed_reason('the front page loads no jQuery'),
+                                         ai_model='analyst')  # a person's (or the AI's) closure with the same words: never reopened
+        with mock.patch('cveFeed.notify._send', return_value=True) as send:
+            counts = library_reopen.reopen_once()
+            self.assertIsNone(library_reopen.reopen_once())  # once: the marker makes every later call a single read
+        self.assertEqual(send.call_count, 0)  # reopening never pages
+        self.assertEqual(counts['reopened'], 5)
+        self.assertEqual(counts['by_kind'], {k: 1 for k in js_libraries.FILE_KINDS})
+        self.assertEqual(counts['projects'], {self.project.id: 5})
+        self.assertTrue(BackgroundCursor.objects.filter(lane=library_reopen.ONCE_LANE, last_pk=library_reopen.DONE).exists())
+        for kind, match in rows.items():
+            match.refresh_from_db()
+            if kind == 'redirect_alias':
+                self.assertEqual(match.ai_verdict, 'not_affected')  # the one closure that stays
+                continue
+            self.assertEqual((match.ai_verdict, match.ai_reason, match.confidence), ('', '', js_libraries.CONFIDENCE['filename']), kind)
+            self.assertEqual(match.evidence['reopened_from'], kind)
+            self.assertEqual((Triage.objects.get(match=match).classification, Triage.objects.get(match=match).status), ('', 'pending'))
+        self.assertEqual(CVEMatch.objects.get(pk=person.pk).ai_verdict, 'not_affected')
+        self.assertEqual(worked.pk, rows['contradicted_by_file'].pk)
+        # a second, explicit run finds nothing left (idempotent)
+        self.assertEqual(library_reopen.reopen_file_closures()['reopened'], 0)
 
     def test_the_sweep_never_closes_a_match_a_person_worked_or_one_the_page_does_not_contradict(self):
         from cveFeed.models import CVEMatch
@@ -564,6 +611,26 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
         self.correlate()
         self.assert_oracle({'redirect_alias': 15})
 
+    def test_the_closures_an_earlier_build_made_on_the_page_reopen_once_and_the_aliases_stay(self):
+        """The oracle as the build before the final review left it: 17 closed (15 redirect aliases, 2 jQuery matches on acme.test closed as
+        contradicted by the page's file). The one-off step reopens the 2, keeps the 15, and pages nothing."""
+        from cveFeed import library_reopen
+        from cveFeed.correlation import close_invalid_correlation
+        from cveFeed.models import CVEMatch
+        self.correlate()
+        self.read_front_pages()
+        self.correlate()
+        for m in CVEMatch.objects.filter(subdomain__name='acme.test', matched_product='jquery').select_related('cve_entry', 'subdomain'):
+            self.assertTrue(close_invalid_correlation(m, js_libraries.closed_reason(
+                f"the page's own scripts say jQuery 3.7.1; the {m.matched_version} came from a technology scan")))
+        _rows, _open, closed = self.open_and_closed()
+        self.assertEqual(len(closed), 17)
+        with mock.patch('cveFeed.notify._send', return_value=True) as send:
+            counts = library_reopen.reopen_once()
+        self.assertEqual(send.call_count, 0)
+        self.assertEqual((counts['reopened'], counts['by_kind']), (2, {'contradicted_by_file': 2}))
+        self.assert_oracle({'redirect_alias': 15}, proven=False)
+
     def test_the_reconcile_sweep_closes_the_same_aliases_without_a_rescan(self):
         from cveFeed.tasks import reconcile_invalid_correlations
         self.correlate()
@@ -674,6 +741,12 @@ class ReviewScenarioBase(RouteFixture, TestCase):
         sub.ip_addresses.add(ip)
         sub.technologies.add(*[Technology.objects.get_or_create(name=t)[0] for t in techs])
         return sub
+
+    def redirect_away(self, host, target='target.x.test'):
+        """The host's front page now only redirects (301) to another host of the project: the one closure the page can make."""
+        if not Subdomain.objects.filter(name=target, target_domain=self.site).exists():
+            self.host(target, [])
+        return self.read_root(host, 301, '', location=f'https://{target}/')
 
     def read_root(self, host, status, body='', scheme='https', location='', scripts=None, **extra):
         from cveFeed import route_auth
@@ -786,7 +859,7 @@ class ReviewScenarioTests(ReviewScenarioBase):
         self.entries = [kev]
         a = self.host('a.x.test', ['jQuery:1.12.4'])
         self.correlate(a)
-        self.read_root('a.x.test', 200, CONTRA)
+        self.redirect_away('a.x.test')
         self.assertEqual(reconcile_library_provenance()['closed'], 1)
         closed = CVEMatch.objects.get(subdomain=a)
         self.assertTrue(closed.ai_reason.startswith(js_libraries.LIBRARY_CLOSED))
@@ -833,8 +906,8 @@ class ReviewScenarioTests(ReviewScenarioBase):
         from cveFeed.tasks import reconcile_library_provenance
         sub = self.host('flap.x.test', ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root('flap.x.test', 200, CONTRA)  # variant A: the page's one jQuery file says 3.7.1
-        self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+        self.read_root('flap.x.test', 200, CONTRA)  # variant A: the page's one jQuery file says 3.7.1: informs, never closes
+        self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
         self.read_root('flap.x.test', 200, '<script src="/js/jquery-1.12.4.min.js"></script>')  # variant B of the page loads 1.12.4
         self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
         self.read_root('flap.x.test', 200, CONTRA)  # variant A again, reopened lately: held, the page alternates
@@ -853,9 +926,9 @@ class ReviewScenarioTests(ReviewScenarioBase):
         subs = [self.host(f'h{i}.x.test', ['jQuery:1.12.4']) for i in range(4)]
         self.correlate(*subs)
         for sub in subs:
-            self.read_root(sub.name, 200, CONTRA)
+            self.redirect_away(sub.name)
         first = reconcile_library_provenance(limit=2)
-        self.assertEqual((first['reviewed'], first['closed'], first['closed_by_reason']), (2, 2, {'contradicted_by_file': 2}))
+        self.assertEqual((first['reviewed'], first['closed'], first['closed_by_reason']), (2, 2, {'redirect_alias': 2}))
         second = reconcile_library_provenance(limit=2)
         self.assertEqual(second['closed'], 2)
         self.assertEqual(CVEMatch.objects.filter(subdomain__in=subs, ai_verdict='not_affected').count(), 4)
@@ -864,7 +937,7 @@ class ReviewScenarioTests(ReviewScenarioBase):
         more = [self.host(f'k{i}.x.test', ['jQuery:1.12.4']) for i in range(3)]
         self.correlate(*more)
         for sub in more:
-            self.read_root(sub.name, 200, CONTRA)
+            self.redirect_away(sub.name)
         BackgroundCursor.objects.filter(lane='library_provenance').update(last_pk=0)
         ticks = iter([0, 0, 0, 1000, 1000, 1000, 1000])
         stopped = reconcile_library_provenance(limit=10, seconds=10, clock=lambda: next(ticks))
@@ -918,14 +991,14 @@ class RereviewScenarioTests(ReviewScenarioBase):
         from cveFeed.tasks import reconcile_library_provenance
         sub = self.host('st.x.test', ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root('st.x.test', 200, CONTRA)
+        self.redirect_away('st.x.test')
         closed = self.correlate(sub)[('st.x.test', 'CVE-2020-11023', '1.12.4')]
         self.assertEqual(closed.ai_verdict, 'not_affected')
         RouteAuth.objects.filter(host='st.x.test').update(checked_at=timezone.now() - timedelta(days=js_libraries.FRESH_DAYS + 1))
         stale = self.correlate(sub)[('st.x.test', 'CVE-2020-11023', '1.12.4')]  # the periodic correlation, no scan for 9 days
         self.assertEqual(stale.ai_verdict, 'not_affected')
         self.assertNotIn('library_reopened_at', stale.evidence)
-        self.read_root('st.x.test', 200, CONTRA)  # the next scan reads the same page
+        self.redirect_away('st.x.test')  # the next scan reads the same page
         self.correlate(sub)
         reconcile_library_provenance()
         self.assertEqual(CVEMatch.objects.get(pk=closed.pk).ai_verdict, 'not_affected')
@@ -980,7 +1053,7 @@ class RereviewScenarioTests(ReviewScenarioBase):
         subs = [self.host(f'r{i}.x.test', ['jQuery:1.12.4']) for i in range(3)]
         found = self.correlate(*subs)
         for sub in subs:
-            self.read_root(sub.name, 200, CONTRA)
+            self.redirect_away(sub.name)
         ids = sorted(m.pk for m in found.values())
         BackgroundCursor.objects.update_or_create(lane='library_provenance', defaults={'last_pk': ids[0] - 1})
         ticks = iter([0, 0, 1000, 1000, 1000])

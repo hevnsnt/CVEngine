@@ -9,7 +9,7 @@ import os
 from cveFeed import correlation, js_libraries
 from cveFeed.models import CVEMatch, RouteAuth
 from startScan.models import Technology
-from tests.test_js_libraries_provenance import CONTRA, ReviewScenarioBase
+from tests.test_js_libraries_provenance import ReviewScenarioBase
 from tests.test_js_library_versions import JQ_371_MIN
 
 JQ_1124 = '/*! jQuery v1.12.4 | (c) jQuery Foundation | jquery.org/license */\n!function(a,b){}'
@@ -17,12 +17,13 @@ JQ_UI_1121 = '/*! jQuery UI - v1.12.1 - 2016-09-14\n* http://jqueryui.com\n* Inc
 
 
 class ReopenOnAFreshReadingTests(ReviewScenarioBase):
-    """A match the page closed reopens on any fresh reading that no longer supports the closure, even a partial one."""
+    """A match the page closed (a redirect alias, the one closure it makes) reopens on any fresh reading that no longer supports the closure,
+    even a partial one."""
 
     def closed_by_the_page(self, name):
         sub = self.host(name, ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root(name, 200, CONTRA)
+        self.redirect_away(name)  # the one closure the page makes: the host only redirects to another host of the project
         match = self.correlate(sub)[(name, 'CVE-2020-11023', '1.12.4')]
         self.assertEqual(match.ai_verdict, 'not_affected')
         return sub
@@ -136,13 +137,13 @@ class VouchedForTests(ReviewScenarioBase):
         sub = self.host('v6.x.test', ['jQuery:1.12.4'])
         match = self.correlate(sub)[('v6.x.test', 'CVE-2020-11023', '1.12.4')]
         CVEMatch.objects.filter(pk=match.pk).update(assignee=user)
-        self.read_root('v6.x.test', 200, CONTRA)
+        self.redirect_away('v6.x.test')
         self.correlate(sub)
         reconcile_library_provenance()
         self.assertEqual(CVEMatch.objects.get(pk=match.pk).ai_verdict, '')
         sibling = self.host('v7.x.test', ['jQuery:1.12.4'])  # the same page, nobody vouches: it closes
         self.correlate(sibling)
-        self.read_root('v7.x.test', 200, CONTRA)
+        self.redirect_away('v7.x.test')
         self.assertEqual(self.correlate(sibling)[('v7.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
     def test_a_vouched_for_version_that_left_the_host_closes_even_where_the_page_contradicts_it(self):
@@ -167,7 +168,7 @@ class VouchedForTests(ReviewScenarioBase):
         sub = self.host('ns.x.test', ['jQuery:1.12.4'])
         match = self.correlate(sub)[('ns.x.test', 'CVE-2020-11023', '1.12.4')]
         CVEMatch.objects.filter(pk=match.pk).update(assignee=user, remediation_status='in_progress')
-        self.read_root('ns.x.test', 200, CONTRA)
+        self.redirect_away('ns.x.test')
         self.assertEqual(self.correlate(sub)[('ns.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')  # held on its own row
         scan2 = ScanHistory.objects.create(domain=self.site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[],
                                            results_dir='y')
@@ -177,7 +178,7 @@ class VouchedForTests(ReviewScenarioBase):
         carried = self.correlate(sub2)[('ns.x.test', 'CVE-2020-11023', '1.12.4')]
         self.assertEqual((carried.ai_verdict, carried.remediation_status, carried.assignee_id), ('', 'in_progress', user.pk))
         unvouched = self.host('nu.x.test', ['jQuery:1.12.4'])  # nobody vouched: the next row has no match
-        self.read_root('nu.x.test', 200, CONTRA)
+        self.redirect_away('nu.x.test')
         self.assertEqual(self.correlate(unvouched), {})
 
 
