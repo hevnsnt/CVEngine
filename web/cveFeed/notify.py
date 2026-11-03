@@ -197,13 +197,14 @@ def cves_turned_hot(cve_ids):
     KEV heat policy only: a match whose version is proven is fire now and is paged once (claimed like every page); one we only infer is smoke
     and is not paged (it is validated first, in the fire lane, and paged when proof turns it fire). A template hit on such a CVE is paged here
     too: ``template_hits`` left it out while the CVE was ice. Only the current inventory's rows are counted and named; a match the AI ruled out,
-    fixed, accepted as a risk or patched by the distribution is left out. Every such match is claimed, ``MAX_MARK`` at a time, up to
-    ``MAX_TURNED_HOT_ROUNDS`` claims; the CVEs of a call that could not finish are kept (cache) and carried by the next call, so none is lost.
+    closed (fixed, an accepted risk or a false positive: ``counts.CLOSED``) or patched by the distribution is left out. Every such match is
+    claimed, ``MAX_MARK`` at a time, up to ``MAX_TURNED_HOT_ROUNDS`` claims; the CVEs of a call that could not finish are kept (cache) and carried by the next call, so none is lost.
     Under ``legacy`` nothing is sent from here (the legacy behaviour is unchanged). Never raises."""
     try:
         from django.core.cache import cache
 
         from cveFeed.correlation import latest_scan_q
+        from cveFeed.counts import CLOSED
         from cveFeed.models import CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, heat_policy, match_heat_rank_expr
         if heat_policy() == LEGACY_POLICY:
@@ -216,7 +217,7 @@ def cves_turned_hot(cve_ids):
         if not ids:
             return False
         rows = (CVEMatch.objects.filter(unannounced_q(), cve_entry_id__in=ids).filter(latest_scan_q('subdomain__'))
-                .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
+                .exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).exclude(distro_status='patched')
                 .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]))
         claimed_ids, left = [], False
         for _round in range(MAX_TURNED_HOT_ROUNDS):
@@ -385,17 +386,32 @@ def _version_only_pairs(hits):
     return version - hard
 
 
+def _closed_pairs(hits):
+    """The (CVE id, host) pairs of ``hits`` whose stored matches are all closed (``counts.CLOSED``: fixed, an accepted risk or a false
+    positive): a person decided about the finding, so a template hit on it is not paged again. A pair with no stored match, or with one
+    open match, is not one of them."""
+    from cveFeed.counts import CLOSED
+    from cveFeed.models import CVEMatch
+    rows = (CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+            .values_list('cve_entry__cve_id', 'subdomain__name', 'remediation_status'))
+    closed, open_ = set(), set()
+    for cve, host, status in rows:
+        (closed if status in CLOSED else open_).add((cve, host))
+    return closed - open_
+
+
 def template_hits(hits, scan=None):
     """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
     version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): it read a version, it did not
-    confirm the flaw (the callers already leave those hits out; this is the last check before a page). Under the KEV heat policy only a CVE on
+    confirm the flaw (the callers already leave those hits out; this is the last check before a page). So is a pair whose matches are all
+    closed (``_closed_pairs``: fixed, an accepted risk or a false positive never pages). Under the KEV heat policy only a CVE on
     the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit is recorded and shown all
     the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
     (``templategen.record_outcomes``)."""
     hits = list(dict.fromkeys(hits))
     if hits:
         try:
-            capped = _version_only_pairs(hits)
+            capped = _version_only_pairs(hits) | _closed_pairs(hits)
         except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
             logger.warning('template hit heat check failed (%s)', type(exc).__name__)
             capped = set()
