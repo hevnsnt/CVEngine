@@ -974,6 +974,8 @@ def validate_match_on_demand(request_id):
                         f'Validation request #{job.pk}: AI review {ai_state} for {cve_id}', ai_status=row.status)
         check_state = ('no_check' if no_check else 'not_run' if no_execution else
                        'observed' if row.validation_status == 'observed' else 'checked')
+        if check_state in ('no_check', 'observed') and validation.library_read_step(row.validation_steps):
+            check_state = 'checked'  # cvENGINE read the library's served file itself: shown as a completed check (validation.library_step)
         if check_state == 'observed':
             plan_notes.append('The external checks observed service metadata only. They cannot identify software behind a frontend '
                               'or verify the affected product without specific evidence.')
@@ -1082,6 +1084,47 @@ def reconcile_invalid_correlations(limit=50):
                     ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
     library = reconcile_library_provenance()
     return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk, 'library': library}
+
+
+SETTLE_LANE = 'library_body_settle'           # BackgroundCursor: where settle_library_proven_task resumes
+SETTLE_DONE_LANE = 'library_body_settle_done'  # BackgroundCursor: present once every row has been looked at
+SETTLE_SECONDS = 60  # one run of settle_library_proven_task works this long, then queues the next run to resume from the cursor
+
+
+@app.task(name='settle_library_proven', bind=False, queue='cve_feed_queue')
+def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
+    """Bring the CVE matches judged before the library rule in line with it (``triage.settle_library_proven``), once per install, off the
+    worker's start: queued by ``reNgine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
+    UPDATE SKIP LOCKED``: another run that finds it held returns at once), works batches in pk order for ``seconds``, saves the cursor after
+    each batch and queues the next run to resume from it; the last batch records the done lane, and any later run returns at once.
+    Idempotent: a batch that is run twice writes nothing the second time. Returns the counts."""
+    import time as _time
+
+    from django.db import transaction
+
+    from cveFeed import triage
+    from cveFeed.models import BackgroundCursor
+    clock = clock or _time.monotonic
+    if BackgroundCursor.objects.filter(lane=SETTLE_DONE_LANE).exists():
+        return {'state': 'done'}
+    started, changed, batches, done = clock(), 0, 0, False
+    BackgroundCursor.objects.get_or_create(lane=SETTLE_LANE)
+    with transaction.atomic():
+        cursor = BackgroundCursor.objects.select_for_update(skip_locked=True).filter(lane=SETTLE_LANE).first()
+        if cursor is None:
+            return {'state': 'held'}  # another worker runs it
+        while not done and clock() - started < seconds:
+            count, last, done = triage.settle_library_proven(after=cursor.last_pk)
+            changed, batches = changed + count, batches + 1
+            cursor.last_pk = last
+            cursor.save(update_fields=['last_pk', 'updated_at'])
+        if done:
+            BackgroundCursor.objects.get_or_create(lane=SETTLE_DONE_LANE)
+    if not done:
+        transaction.on_commit(lambda: settle_library_proven_task.apply_async(countdown=5))
+    if changed:
+        logger.info('settle_library_proven: %d CVE matches proven by the served library file brought in line (%d batches)', changed, batches)
+    return {'state': 'done' if done else 'resumed', 'changed': changed, 'batches': batches}
 
 
 LIBRARY_SWEEP_BATCH = 500   # open technology-scan matches looked at per run of the reconcile sweep (every five minutes)
