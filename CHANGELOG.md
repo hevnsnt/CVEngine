@@ -2,7 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.3.4 (2026-11-03)
+
+### Upgrade notes
+
+- **No migration and no manual step.** The host watcher, which cron starts every minute, runs the new `scripts/update-watch.sh` within a minute of the update, and from then on carries out cvENGINE's gvmd restart requests (see Fixed). Sentinels get their half (hevnsnt/cvENGINE-sentinel#32) by their own self-update; a Sentinel that has not updated yet still reports a stale-cache run as before, and this server then reads it as before.
 
 ### Fixed
 
