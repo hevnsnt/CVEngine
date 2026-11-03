@@ -191,6 +191,22 @@ class BodyProvenTests(Base):
 		self.assertEqual(triage.recap_version_only(), 0)
 		self.assertEqual(Triage.objects.get(pk=row.pk).classification, 'confirmed')
 
+	def test_a_second_validation_keeps_the_read_and_ends_queued_requests(self):
+		self.reading()
+		m = self.match()
+		row = self.triage_all('likely')[m.pk]
+		self.validate([row])
+		row.refresh_from_db()
+		steps = row.validation_steps
+		Triage.objects.filter(pk=row.pk).update(validation_status='pending', validated_at=timezone.now() - datetime.timedelta(days=3))
+		row.refresh_from_db()
+		stats = self.validate([row])
+		row.refresh_from_db()
+		self.assertEqual(row.validation_steps, steps)
+		self.assertNotIn(row.validation_status, ('pending', 'no_check'))
+		self.assertGreater(row.validated_at, timezone.now() - datetime.timedelta(minutes=5))  # not due again at every sweep
+		self.assertEqual(stats['no_check'], 0)
+
 	def test_the_same_version_from_a_tech_fingerprint_stays_needs_validation(self):
 		m = self.match(evidence=fingerprint_evidence())
 		row = self.triage_all('likely')[m.pk]

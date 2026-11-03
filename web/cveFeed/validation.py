@@ -1489,8 +1489,9 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             if row.kind == 'cve_match':
                 # the read of a library's served file that proved its version is cvENGINE's own check: recorded, never run again here
                 if not record_library_read(row, finding, now) and not checks and library_read_step(row.validation_steps):
-                    row.validated_at = now  # the same read stands: not due again until the TTL has passed
-                    row.save(update_fields=['validated_at', 'updated_at'])
+                    # the same read stands: not due again until the TTL has passed, and a request that queued the row sees it done
+                    row.validated_at, row.validation_status = now, rollup(row.validation_steps)
+                    row.save(update_fields=['validated_at', 'validation_status', 'updated_at'])
                 if not checks and library_read_step(row.validation_steps):
                     stats['reused'] += 1
                     continue
