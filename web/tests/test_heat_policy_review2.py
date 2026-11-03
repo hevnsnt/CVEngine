@@ -346,6 +346,103 @@ class ClosedNeverPagesTests(Base):
 		self.assertEqual(len(self.sends), 1)
 
 
+class ClosedPairsScopeTests(Base):
+	"""Review of 2806c7e: whether a template hit is on a closed finding is read from the current inventory's copy (closing updates only that
+	row) and, when the caller knows it, the project that ran the test (the same host name in another project is another finding)."""
+
+	def test_a_hit_on_a_finding_closed_on_the_current_scan_is_not_paged(self):
+		cve = self.entry('CVE-2099-8101', [], kev=True, cvss=9.8)
+		self.match_for(cve, version='1', in_range=True, template_result='vulnerable')  # the previous scan's copy: closing never touches it
+		scan2, sub2 = self.rescan()
+		CVEMatch.objects.create(cve_entry=cve, subdomain=sub2, scan_history=scan2, source='tech', matched_product='nginx', matched_version='1',
+								version_in_range=True, evidence={'source': 'tech'}, confidence=0.5, template_result='vulnerable',
+								remediation_status='false_positive')
+		self.assertFalse(notify.template_hits([(cve.cve_id, self.sub.name)]))
+		self.assertEqual(self.sends, [])
+
+	def other_project_scan(self):
+		from dashboard.models import Project
+		from targetApp.models import Domain
+		other = Project.objects.create(name='Q', slug='other-q', insert_date=timezone.now(), org=self.project.org)
+		dom = Domain.objects.create(name='other.test', project=other, insert_date=timezone.now())
+		scan = ScanHistory.objects.create(domain=dom, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+		Subdomain.objects.create(name=self.sub.name, target_domain=dom, scan_history=scan)
+		return other, scan
+
+	def test_a_closed_match_in_another_project_does_not_hold_back_a_hit(self):
+		cve = self.entry('CVE-2099-8301', [], kev=True, cvss=9.8)
+		self.match_for(cve, version='1', in_range=True, template_result='vulnerable', remediation_status='false_positive')
+		other, scan = self.other_project_scan()
+		self.assertTrue(notify.template_hits([(cve.cve_id, self.sub.name)], scan))
+		self.assertEqual(len(self.sends), 1)
+		self.assertTrue(notify.template_hits([(cve.cve_id, self.sub.name)], project=other.pk))
+		self.assertFalse(notify.template_hits([(cve.cve_id, self.sub.name)], project=self.project.pk))  # its own project: closed
+		self.assertEqual(len(self.sends), 2)
+
+	def test_the_cve_test_task_names_its_project(self):
+		from cveFeed import tasks
+		cve = self.entry('CVE-2099-8302', [], kev=True, cvss=9.8)
+		results = {'source': 'existing', 'results': [{'host': self.sub.name, 'vulnerable': True}]}
+		with mock.patch('cveFeed.templategen.run_cve_tests', return_value=results), \
+				mock.patch('cveFeed.templategen.is_confirmed', return_value=True), \
+				mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
+				mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value=set()), \
+				mock.patch.object(notify, 'template_hits') as hits:
+			tasks.template_test_for_cve(cve.pk, [self.sub.name], project_id=self.project.pk)
+		hits.assert_called_once_with([(cve.cve_id, self.sub.name)], project=self.project.pk)
+
+
+class MigrationRuleTests(Base):
+	"""Review of 2806c7e: each clause of migration 0139's frozen KEV rule and of its grace is pinned (they had no test of their own)."""
+
+	def run_migration(self):
+		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
+		importlib.import_module('cveFeed.migrations.0139_heat_policy_baseline').baseline(apps, None)
+
+	def marked(self, m):
+		return CVEMatch.objects.get(pk=m.pk).fire_notified_rule == 'kev'
+
+	def test_a_probed_banner_is_proof_only_when_correlation_recorded_it_as_vendor_built(self):
+		vendor = self.match_for(self.entry('CVE-2099-8401', []), source='port', product='Jenkins', version='2.440', in_range=True,
+								ai_verdict='uncertain', evidence={'source': 'port', 'method': 'probed', 'vendor_banner': True})
+		packaged = self.match_for(self.entry('CVE-2099-8402', []), source='port', product='OpenSSH', version='7.4', in_range=True,
+								  ai_verdict='uncertain', evidence={'source': 'port', 'method': 'probed'})
+		for m in (vendor, packaged):
+			old(m.pk)
+		self.run_migration()
+		self.assertEqual((self.marked(vendor), self.marked(packaged)), (True, False))
+
+	def test_a_version_class_template_hit_is_proof(self):
+		m = self.match_for(self.entry('CVE-2099-8403', []), version='3.4.1', in_range=True, ai_verdict='uncertain', template_result='version_only')
+		old(m.pk)
+		self.run_migration()
+		self.assertTrue(self.marked(m))
+
+	def test_a_match_made_in_the_last_six_hours_is_left_to_its_page(self):
+		recent = self.match_for(self.entry('CVE-2099-8404', []), version='1', in_range=True, ai_verdict='uncertain', template_result='vulnerable')
+		earlier = self.match_for(self.entry('CVE-2099-8405', []), version='1', in_range=True, ai_verdict='uncertain', template_result='vulnerable')
+		old(recent.pk, minutes=5 * 60)
+		old(earlier.pk, minutes=7 * 60)
+		self.run_migration()
+		self.assertEqual((self.marked(recent), self.marked(earlier)), (False, True))
+
+
+class CarryPerRuleTests(Base):
+	"""Review of 2806c7e: a rescan's copy carries the page of an earlier copy only when it was made under the rule in force."""
+
+	def test_a_page_under_another_rule_is_not_carried_and_the_rescan_pages(self):
+		self.entry('CVE-2099-8501', JENKINS)
+		self.probed('Jenkins', '2.440')
+		self.correlate()
+		CVEMatch.objects.update(fire_notified_at=timezone.now(), fire_notified_rule='legacy:smoke')  # paged under legacy, never under kev
+		scan2, sub2 = self.rescan()
+		self.correlate()
+		fresh = CVEMatch.objects.get(subdomain=sub2)
+		self.assertIsNone(fresh.fire_notified_at)
+		self.assertTrue(notify.fire_matches(scan2.start_scan_date, scan2))
+		self.assertEqual(len(self.sends), 1)
+
+
 class NucleiCveTests(Base):
 	"""Item 4: nuclei writes ``classification.cve-id``; a finding of a real nuclei line carries its CVE ids and follows the CVE rule."""
 
