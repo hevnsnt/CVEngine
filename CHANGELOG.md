@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **OpenVAS: results whose CVEs gvmd left out no longer close earlier findings** (reported by camstork, #394). gvmd 26.35 and later reload the NVT cache their GMP answers are built from only in their periodic-jobs process (greenbone/gvmd#3220), so after the first feed load, and for NVTs a later feed sync adds, every result came without its CVE references. cvENGINE read that as "no CVE", counted the host as scanned clean and closed what earlier OpenVAS scans had found on it. A result with CERT-Bund or DFN-CERT references (which gvmd links to an NVT through its CVEs) and no CVE reference now marks the run as read from a stale cache: it is imported as partial (nothing earlier is resolved), the GVM task and report are kept, the hosts are asked again in three days, and the run says to restart gvmd. With the host's watcher installed, cvENGINE asks it to restart `openvas-gvmd` (at most once in six hours; `scripts/openvas-sync.sh restart-gvmd`, answered in `web/.openvas-restarted`). A Sentinel reports the same count (`nvt_cache_stale`), and its run is treated the same way.
+
 ## v1.3.3 (2026-11-03)
 
 ### Thanks

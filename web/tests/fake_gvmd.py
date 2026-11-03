@@ -135,8 +135,9 @@ class FakeGvmd:
         self.tasks[task_id]['status'], self.tasks[task_id]['progress'] = status, progress
 
     def add_result(self, task_id, host, port, oid, name, severity, qod, cves=(), description='Detection result.', hostname='', threat=None,
-                   qod_type='remote_banner', tags=None, urls=()):
+                   qod_type='remote_banner', tags=None, urls=(), certs=()):
         refs = ''.join(f'<ref type="cve" id="{c}"/>' for c in cves) + ''.join(f'<ref type="url" id="{escape(u)}"/>' for u in urls)
+        refs += ''.join(f'<ref type="cert-bund" id="{c}"/>' for c in certs)  # gvmd reads these from its database, the others from its NVT cache
         tags = tags if tags is not None else (f'cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=The product {name} is affected.|'
                                               'insight=A flaw in request handling.|affected=Versions before 2.4.51|solution_type=VendorFix')
         threat = threat or ('Critical' if severity >= 9 else 'High' if severity >= 7 else 'Medium' if severity >= 4 else 'Low' if severity > 0 else 'Log')
