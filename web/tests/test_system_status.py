@@ -70,6 +70,10 @@ class SystemStatusTests(TestCase):
 		_, cls.t_root = create_token(cls.root, 'root')
 
 	def setUp(self):
+		# the egress ledger lives in Redis, which a test database does not roll back: Sentinel tasks that fell back to local execution in
+		# earlier tests of this run must not make this instance look unhealthy (tests.test_local_egress covers that problem line)
+		from tests.test_local_egress import _clear
+		_clear()
 		# the per-project cache is exercised by CountsCacheTests; here every call counts afresh
 		patch = mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})
 		patch.start()

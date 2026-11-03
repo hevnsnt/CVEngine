@@ -752,7 +752,8 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             provider = None
         outcome = run_cve_tests(cve, hosts, provider=provider, project=project_id)
         logger.info("template test %s: %s on %d hosts", cve.cve_id, outcome["source"], len(hosts))
-        vulnerable = [r["host"] for r in outcome["results"] if r["vulnerable"]]
+        from cveFeed.templategen import is_confirmed
+        vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
         pairs = [(cve.cve_id, host) for host in vulnerable]
         if batch:
             hit_batch.record(batch, pairs)
@@ -1023,9 +1024,12 @@ def validate_match_on_demand(request_id):
 
 @app.task(name='reconcile_invalid_correlations', bind=False, queue='cve_feed_queue')
 def reconcile_invalid_correlations(limit=50):
-    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls."""
+    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls: every project's current matches,
+    ``limit`` (at most 100) a run in id order from a stored cursor, so the whole table is walked in turn with no long lock. It closes a
+    wrong product link (``correlation.invalid_identity_reason``) and a JavaScript library match the host's own page contradicts
+    (``correlation.library_provenance_reason``), and logs how many it closed for each reason."""
     from django.db import transaction
-    from cveFeed import correlation
+    from cveFeed import correlation, js_libraries
     from cveFeed.models import BackgroundCursor, CVEMatch
 
     batch_size = max(1, min(int(limit), 100))
@@ -1037,14 +1041,83 @@ def reconcile_invalid_correlations(limit=50):
         if not batch:
             cursor.last_pk = 0
             batch = list(base[:batch_size])
-        closed = 0
+        closed, by_reason = 0, {}
         for match in batch:
-            if correlation.invalid_identity_reason(match):
-                closed += int(correlation.close_invalid_correlation(match))
+            reason = correlation.invalid_identity_reason(match)
+            if reason and correlation.close_invalid_correlation(match, reason):
+                closed += 1
+                kind = js_libraries.closure_kind(reason) or 'identity'
+                by_reason[kind] = by_reason.get(kind, 0) + 1
         if batch:
             cursor.last_pk = batch[-1].pk
         cursor.save(update_fields=['last_pk', 'updated_at'])
-    return {'reviewed': len(batch), 'closed': closed, 'last_match_id': cursor.last_pk}
+    if closed:
+        logger.info('reconcile_invalid_correlations closed %d of %d matches: %s', closed, len(batch),
+                    ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    library = reconcile_library_provenance()
+    return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk, 'library': library}
+
+
+LIBRARY_SWEEP_BATCH = 500   # open technology-scan matches looked at per run of the reconcile sweep (every five minutes)
+LIBRARY_SWEEP_SECONDS = 120  # and at most this long
+
+
+def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEEP_SECONDS, clock=None):
+    """Re-check stored JavaScript library matches against their host's own page (``correlation.library_closure``) without a rescan, in
+    every project: the OPEN technology-scan matches of the current inventory, ``limit`` a run in id order from a cursor of their own
+    (claimed, then worked outside the lock), at most ``seconds`` long. One query loads the batch, one the sightings' names, and each host's
+    page is read once (``HostLibraries.for_subdomain``) for all its matches. Closes with the stored reason (never shared, never one a person
+    or a check vouches for) and logs how many it closed for each reason. Returns the counts."""
+    import time as _time
+
+    from django.db import transaction
+    from cveFeed import correlation, js_libraries
+    from cveFeed.models import BackgroundCursor, CVEMatch
+    from startScan.models import Subdomain, Technology
+    clock = clock or _time.monotonic
+    started = clock()
+    size = max(1, min(int(limit), 2000))
+    base = (CVEMatch.objects.filter(correlation.latest_scan_q('subdomain__'), source='tech').exclude(ai_verdict='not_affected')
+            .order_by('pk'))
+    with transaction.atomic():
+        cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane='library_provenance')
+        batch = list(base.filter(pk__gt=cursor.last_pk).select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if not batch:
+            cursor.last_pk = 0
+            batch = list(base.select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if batch:
+            cursor.last_pk = batch[-1].pk
+        cursor.save(update_fields=['last_pk', 'updated_at'])
+    names = dict(Technology.objects.filter(pk__in={(m.evidence or {}).get('source_id') for m in batch if isinstance(m.evidence, dict)}
+                                                   - {None}).values_list('pk', 'name'))
+    candidates = []
+    for m in batch:
+        source_id = (m.evidence or {}).get('source_id') if isinstance(m.evidence, dict) else None
+        name = correlation.split_name_version(names[source_id])[0] if source_id in names else m.matched_product
+        if js_libraries.is_library(name) or js_libraries.is_library(m.matched_product):
+            candidates.append((m, name if js_libraries.is_library(name) else m.matched_product))
+    hosts = {sub.pk: sub for sub in Subdomain.objects.filter(pk__in={m.subdomain_id for m, _ in candidates})
+             .select_related('target_domain').prefetch_related('ip_addresses__ports', 'technologies')}
+    pages, closed, by_reason, looked = {}, 0, {}, 0
+    for m, name in candidates:
+        if clock() - started > seconds:  # out of time: the next run starts at the first match this one did not look at
+            BackgroundCursor.objects.filter(lane='library_provenance').update(last_pk=m.pk - 1)
+            break
+        looked += 1
+        sub = hosts.get(m.subdomain_id)
+        if sub is None:
+            continue
+        if sub.pk not in pages:
+            pages[sub.pk] = (js_libraries.HostLibraries.for_subdomain(sub), correlation.host_library_versions(sub))
+        reason, _hold = correlation.library_closure(m, pages[sub.pk][0], name=name, present=pages[sub.pk][1])
+        if reason and correlation.close_invalid_correlation(m, reason):
+            closed += 1
+            kind = js_libraries.closure_kind(reason)
+            by_reason[kind] = by_reason.get(kind, 0) + 1
+    if closed:
+        logger.info('reconcile_library_provenance closed %d of %d library matches (%d open tech matches looked at): %s', closed, looked,
+                    len(batch), ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    return {'reviewed': len(batch), 'libraries': looked, 'closed': closed, 'closed_by_reason': by_reason}
 
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')
@@ -1647,10 +1720,19 @@ def weekly_deep_nuclei():
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan, udp_scan
+    from cveFeed import fullscan, local_egress, udp_scan
     result = fullscan.run()
     udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
+    local_egress.kick_catch_up()  # and so does the paced pass over ports the egress governor held back (only when one is owed)
     return result
+
+
+@app.task(name='egress_catch_up', bind=False, queue='cve_feed_queue')
+def egress_catch_up():
+    """Queued by the background full scan's firing when a port is owed: probe the ports the egress governor held back (port 25 over its
+    hourly budget, by default), paced by the same budget (see ``cveFeed.local_egress``)."""
+    from cveFeed import local_egress
+    return local_egress.catch_up()
 
 
 @app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')

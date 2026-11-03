@@ -478,6 +478,15 @@ def _sentinels(problems):
                               'at': _iso(r['finished_at'])} for r in recent_errors]}
 
 
+def _egress(problems):
+    """Outbound connections from this server's own scanners (``cveFeed.local_egress``): the last hour, 24 hours and seven days per watched
+    port (25, 465, 587, 23, 3389 by default) and for all ports, the budget of each paced port and its use this hour, ports owed to the paced
+    pass, the top sources (scan kind and project), and how many Sentinel tasks fell back to local execution in the last hour (a problem while it
+    stays high). nmap, naabu, testssl.sh and nuclei are counted from their probe plan, an estimate."""
+    from cveFeed import local_egress
+    return local_egress.status(problems)
+
+
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -544,6 +553,7 @@ def _system(user, problems, notes):
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
     out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
     out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
+    out['egress'] = _probe(problems, 'egress', lambda: _egress(problems))
     out['live_cache'] = _probe(problems, 'live_cache', lambda: _live_cache(notes))
     out['tools'] = _probe(problems, 'tools', _tools)
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})

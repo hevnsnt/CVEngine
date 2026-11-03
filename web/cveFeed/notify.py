@@ -360,11 +360,44 @@ def _hot_only(hits):
         return hits
 
 
+def _version_only_pairs(hits):
+    """The (CVE id, host) pairs of ``hits`` that a version-class template matched: a stored match of the pair was recorded as
+    ``templategen.VERSION_ONLY_RESULT`` and none of its matches has hard evidence (``match_policy.hard_evidence_q``). Such a match is
+    version-only (it read a version, not the flaw), so the "hit" is not announced as a confirmed vulnerability. A pair
+    with no stored match, or whose match simply has no result recorded yet, is not one of them: a genuine hit is never held back."""
+    from django.db.models import BooleanField, Case, Value, When
+
+    from cveFeed.match_policy import hard_evidence_q
+    from cveFeed.models import CVEMatch
+    from cveFeed.templategen import VERSION_ONLY_RESULT
+    rows = (CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+            .annotate(hard=Case(When(hard_evidence_q(), then=Value(True)), default=Value(False), output_field=BooleanField()))
+            .values_list('cve_entry__cve_id', 'subdomain__name', 'template_result', 'hard'))
+    version, hard = set(), set()
+    for cve, host, result, is_hard in rows:
+        if result == VERSION_ONLY_RESULT:
+            version.add((cve, host))
+        if is_hard:
+            hard.add((cve, host))
+    return version - hard
+
+
 def template_hits(hits, scan=None):
-    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). Under the KEV heat
-    policy only a CVE on the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit
-    is recorded and shown all the same)."""
-    hits = _hot_only(list(dict.fromkeys(hits)))
+    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
+    version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): it read a version, it did not
+    confirm the flaw (the callers already leave those hits out; this is the last check before a page). Under the KEV heat policy only a CVE on
+    the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit is recorded and shown all
+    the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
+    (``templategen.record_outcomes``)."""
+    hits = list(dict.fromkeys(hits))
+    if hits:
+        try:
+            capped = _version_only_pairs(hits)
+        except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
+            logger.warning('template hit heat check failed (%s)', type(exc).__name__)
+            capped = set()
+        hits = [pair for pair in hits if pair not in capped]
+    hits = _hot_only(hits)
     if not hits:
         return False
     cves = len({cve for cve, _ in hits})

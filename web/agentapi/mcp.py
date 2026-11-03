@@ -21,6 +21,7 @@ from reNgine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import egress
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
@@ -81,7 +82,7 @@ SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'ty
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
     ('list_projects', 'Projects you can access, with your role in each.', _schema(), lambda c, a: svc.list_projects(c), False),
-    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness, today's AI validation budget, and auto-tuning (mode, last run, its last decisions and why each setting was not raised). Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
+    ('get_system_status', "Instance status in one call: overall ok/degraded with problems and notes, whether scanning is paused, the update phase, and for your projects the targets, hosts, exposed hosts, scans running/queued/stalled and open findings. An App Admin also gets the database and broker, queue depths, workers and what they consume, schedules past due, memory per container, disk, CVE feed freshness, today's AI validation budget, auto-tuning (mode, last run, its last decisions and why each setting was not raised), and outbound connections from this server (egress: per watched port such as 25 for the last hour, 24 hours and 7 days, budgets, ports paced for later, top sources, and local fallbacks of Sentinel work). Read-only; may take up to ten seconds while workers answer.", _schema(), lambda c, a: system_status.system_status(c), False),
     ('list_engines', 'Legacy: scan engines are only labels, every scan runs the same fixed pipeline.', _schema(), lambda c, a: svc.list_engines(c), False),
     ('list_targets', 'Targets (domains, IPs) in a project.', _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_targets(c, a.get('project'), a), False),
@@ -434,6 +435,11 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
+    ('list_egress_connections', 'App Admin only. The log of this server\'s own outbound connections to the logged ports (25, 465 and 587 by default; CVENGINE_EGRESS_LOG_PORTS), newest first, kept 14 days and at most 200,000 records: at, address, port, outcome (sent, paced: held back by the hourly budget and probed later, skipped: on the opt-in skip list), mode (exact: this server opened or refused that very connection; estimated: an external tool such as nmap or naabu had it in its probe plan), kind (the tool), project and scan_id. Page with cursor (the next value of the previous page). For a CSV download use GET /api/v1/egress/connections?format=csv.',
+     _schema({'port': {'type': 'integer'}, 'project': {'type': 'string', 'description': 'project slug'},
+              'since': {'type': 'string', 'description': 'ISO 8601 time or epoch seconds'}, 'until': {'type': 'string', 'description': 'ISO 8601 time or epoch seconds'},
+              'limit': {'type': 'integer', 'description': 'up to 1000, default 100'}, 'cursor': {'type': 'string'}}),
+     lambda c, a: egress.list_connections(c, a), False),
     ('get_tuning_status', 'App Admin only. Auto-tuning of the instance throughput settings (Settings, configMaxxing): mode (off, suggest or auto; auto by default) and effective_mode (off when the CVENGINE_AUTOTUNE=0 kill switch is set), the AI advisor and its daily budget, the numbers it chose, the settings a person pinned by saving a value (with who), the settings it manages with range and step, its last run with why each setting was not raised, and the last ten decisions.',
      _schema(), lambda c, a: tuning.get_status(c), False),
     ('list_tuning_decisions', 'App Admin only. Auto-tuning decisions, newest first: each change or recommendation with old and new value, source (controller, ai or person), reason, whether it was applied, and can_apply / can_revert.',

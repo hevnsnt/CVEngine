@@ -148,6 +148,10 @@ def candidates(limit=MAX_TARGETS, days=14):
         network = '.'.join(str(ip).split('.')[:2])
         if network in seen or not is_scannable_ip(ip):
             continue
+        from cveFeed import local_egress
+        if local_egress.admit_one(port, 'path-probe', ip):  # the opt-in skip list or the egress governor holds this port: another address is asked instead
+            continue
+        local_egress.record_one(port, 'path-probe', address=ip)
         seen.add(network)
         out.append((ip, port))
         if len(out) >= limit:
