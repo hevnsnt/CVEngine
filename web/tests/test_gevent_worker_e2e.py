@@ -4,7 +4,9 @@ bounds how many run at once, so these go through it rather than stubbing the con
 
 * the worker runs as many as its ceiling, never more;
 * a ceiling raised live while the worker is idle (configMaxxing's resize) is honoured: celery's own path returned early with no task running;
-* after a broker reconnect the worker comes back to its ceiling: celery's prefetch restore read the greenlets running, so it stayed at one.
+* after a broker reconnect the worker comes back to its ceiling: celery's prefetch restore read the greenlets running, so it stayed at one;
+* an ack lost to a dropped broker connection does not cost a slot: kombu kept counting that delivery against the prefetch, so the worker ran
+  one task fewer at once until a restart (``reNgine/broker_acks.py``). The reconnect test hit it when its cut landed on an ack.
 
 Needs the Redis of ``CELERY_BROKER`` (CI has it); skipped without it. Each test uses its own queue and keys and cuts only its own worker's
 connections."""
@@ -52,7 +54,8 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
             self.worker.kill()
             self.worker.wait(10)
             self.worker.stdout.close()
-        self.r.delete(self.queue, f'{self.name}:running', f'{self.name}:max', f'{self.name}:done')
+        self.r.delete(self.queue, f'{self.name}:running', f'{self.name}:max', f'{self.name}:done', f'{self.name}:dropped_ack',
+                      f'{self.name}:drop_armed')
         self.client.close()
 
     def start(self, ceiling):
@@ -115,3 +118,14 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
         after = self.watch(25)
         # the tasks running at the cut finish within 5 s; from then on the worker must be back at its ceiling, not at one
         self.assertGreaterEqual(max(after[int(7 / 0.25):]), 4, after)
+
+    def test_an_ack_lost_to_a_dropped_broker_connection_does_not_cost_a_slot(self):
+        # The reconnect above fails only when the cut lands on an ack (about one run in thirty); this drops the first ack every time. kombu
+        # then never freed the delivery, so the prefetch counted it for good and the worker ran 3 at a time from then on (reNgine/broker_acks.py).
+        self.env['E2E_DROP_ONE_ACK'] = '1'
+        self.start(4)
+        self.send(24, 5)
+        seen = self.watch(26)
+        self.assertTrue(self.r.get(f'{self.name}:dropped_ack'), 'the first ack was dropped')
+        # the first ack is about 5 s in; from 12 s on the worker must be running 4 at once again
+        self.assertEqual(max(seen[int(12 / 0.25):]), 4, seen)

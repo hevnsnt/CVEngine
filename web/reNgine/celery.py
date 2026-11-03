@@ -19,6 +19,11 @@ app.conf.worker_autoscaler = 'reNgine.gevent_autoscale:GeventAutoscaler'
 # After a broker reconnect celery lowers the prefetch and restores it toward pool.num_processes, which on gevent is the greenlets running, not the
 # ceiling: acks_late tasks then ran one at a time until a restart. The prefetch stays at the ceiling (set at start and by the autoscaler).
 app.conf.worker_enable_prefetch_count_reduction = False
+# An ack that hits a dropped broker connection still frees its delivery: otherwise it holds one prefetch slot, so one task slot of acks_late
+# work, until the worker restarts (reNgine/broker_acks.py)
+from reNgine import broker_acks
+
+broker_acks.install()
 app.autodiscover_tasks()
 
 
