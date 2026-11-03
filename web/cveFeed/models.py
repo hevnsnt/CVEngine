@@ -1003,14 +1003,15 @@ class TriageVerdict(models.Model):
 
     ``signature`` is the sha1 of the evidence the answer depends on (see cveFeed.triage.signature_for), never a hostname: fifty hosts
     with the same evidence are one question. ``model_classification`` / ``model_reason`` are what the model said; ``classification`` /
-    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). Holds only text
-    derived from cleaned fingerprints and feed data, so it is not tenant data.
+    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). The model's words may
+    quote what the host it was asked about showed (a page title, a certificate, a banner, a path).
 
     ``project`` and ``host`` record where the answer was reached (the finding the model was asked about). An answer that raises attention or
-    leaves the finding for validation is reused by every host with the same signature. A closing one (likely_false_positive, not_applicable)
-    is reused only within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE
-    match) only on that host: a crafted page, banner or response on one tenant's host must not close another's finding (``triage._apply``,
-    task 256). An answer whose origin could not be proven (stored before it was recorded: migration 0139) has none and closes no other finding."""
+    leaves the finding for validation is reused by every host with the same signature, but only its classification and severity step up:
+    its words are shown only in that project (``triage.verdict_text``). A closing one (likely_false_positive, not_applicable) is reused only
+    within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE match) only on
+    that host; elsewhere the finding asks its own question, stored under ``triage.own_signature`` (task 256). An answer whose origin could not
+    be proven (stored before it was recorded: migration 0140) has none: it closes no other finding and its words are shown nowhere."""
 
     CLASSIFICATIONS = ("confirmed", "likely", "needs_validation", "likely_false_positive", "not_applicable")
     kind = models.CharField(max_length=16)
@@ -1069,7 +1070,9 @@ class TriageCall(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx")]
+        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx"),
+                   # who asked for a signature: the origin of a stored answer (migration 0140, cveFeed.verdict_tenancy)
+                   models.Index(fields=["signature", "status"], name="triagecall_signature_idx")]
         constraints = [models.UniqueConstraint(fields=["kind", "signature"],
                                                condition=models.Q(status="running"), name="one_running_triage_signature")]
 

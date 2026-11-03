@@ -1083,7 +1083,36 @@ def _store_verdict(kind, signature, outcome, model, origin=None):
 CLOSING = ('likely_false_positive', 'not_applicable')
 HELD_REASON = ('A stored answer for the same evidence would close this finding, but it was reached on another host or tenant: an answer '
                'about what one host showed is never reused to close another organization\'s or another host\'s finding, so this one is kept '
-               'for validation.')
+               'for validation until its own review answers.')
+# What a finding shows in place of the model's words when its answer was reached in another project: the classification and the severity
+# step are shared, the text never is (the prompt showed that host's own text: a page title, a banner, a certificate, a path; task 256).
+SHARED_REASON = 'Assessed from a matching finding elsewhere (the same evidence on another host); no host-specific notes.'
+NO_TEXT = {'reason': '', 'model_reason': '', 'impact': '', 'remediation': '', 'validation_notes': [], 'severity_reason': ''}
+
+
+def own_signature(kind, signature, row):
+    """The key of ``row``'s own answer for ``signature``: asked when the stored answer for the shared signature would close the row but
+    was reached elsewhere (``closure_reusable``). Salted with the project and host, so the provider is asked about this row and the answer
+    is stored with this origin: a hold is only a wait for that answer, never permanent (task 256)."""
+    blob = json.dumps(['own-v1', kind, signature, row.project_id, (row.host or '')[:500]], separators=(',', ':'))
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
+def same_project(verdict, row):
+    """Whether the stored answer ``verdict`` was reached in ``row``'s project (a Triage row): only then is its free text shown on it."""
+    return verdict is not None and row is not None and verdict.project_id is not None and verdict.project_id == row.project_id
+
+
+def verdict_text(verdict, row):
+    """The model's free text of ``verdict`` (reason, model_reason, impact, remediation, validation_notes, severity_reason) as ``row`` may
+    show it: all of it when the answer was reached in the row's project, none otherwise. The prompt showed text of the host it was asked
+    about that the signature does not carry (a page title, a certificate, a banner, a path, another port's title), so another
+    organization's finding shows only the shared classification (task 256). Every reader of these fields goes through here."""
+    if verdict is None or not same_project(verdict, row):
+        return dict(NO_TEXT)
+    return {'reason': verdict.reason or '', 'model_reason': verdict.model_reason or '', 'impact': verdict.impact or '',
+            'remediation': verdict.remediation or '', 'validation_notes': list(verdict.validation_notes or []),
+            'severity_reason': verdict.severity_reason or ''}
 
 
 def closure_reusable(verdict, row, kind, match=None):
@@ -1118,10 +1147,12 @@ def shown_severity_adjust(verdict, row):
 
 
 def _apply(verdict, group):
-    """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A closing verdict
-    reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached from the
-    verdict. The legacy ``ai_verdict`` of a CVE match follows, and a verdict that does not close is stored (MatchVerdict) for later
-    correlations to reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
+    """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A row of another project
+    than the one the answer was reached in gets its classification with ``SHARED_REASON``, never the model's words. A closing verdict
+    reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached and pending,
+    and run_triage asks its own answer (``own_signature``). A row whose state does not change is not written. The legacy ``ai_verdict`` of
+    a CVE match follows, and a verdict that does not close is stored (MatchVerdict, with ``SHARED_REASON``) for later correlations to
+    reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
@@ -1136,13 +1167,17 @@ def _apply(verdict, group):
         row.validation_status, row.reason = latest.validation_status, latest.reason
         current.append((row, d))
     group = current
-    matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])}
+    matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])
+                     .select_related('triage')}
+    held_ids = set()
     for row, d in group:
-        classification, reason = verdict.classification, verdict.reason
+        # the model's words only where the answer was reached: another project's finding gets the classification, never the text
+        classification, reason = verdict.classification, verdict.reason if same_project(verdict, row) else SHARED_REASON
         match = matches_by_id.get(row.match_id) if row.match_id else None
         held = classification in CLOSING and not closure_reusable(verdict, row, d['kind'], match)
-        if held:
+        if held:  # run_triage asks this row's own answer (own_signature); pending, so the sweep picks it up if it is not asked now
             classification, reason = 'needs_validation', HELD_REASON
+            held_ids.add(row.pk)
         if row.validation_status == 'hit' and rank(classification) < rank('confirmed'):
             classification, reason = 'confirmed', row.reason or reason
         limit, limit_text = ceiling(d['kind'], d['facts'])
@@ -1164,30 +1199,58 @@ def _apply(verdict, group):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.REASON_VERSION_UNKNOWN
-        row.verdict, row.status, row.classification, row.reason = None if held else verdict, 'triaged', classification, reason
-        row.hard_evidence = hard_evidence(d['kind'], d['facts'])[1]
+        target = (None if held else verdict.pk, 'pending' if held else 'triaged', classification, reason,
+                  hard_evidence(d['kind'], d['facts'])[1])
+        if (row.verdict_id, row.status, row.classification, row.reason, row.hard_evidence) == target:
+            continue  # nothing changes (a held row seen again): not rewritten
+        row.verdict = None if held else verdict
+        row.status, row.classification, row.reason, row.hard_evidence = target[1:]
         row.updated_at = now
         rows.append(row)
     Triage.objects.bulk_update(rows, ['verdict', 'status', 'classification', 'reason', 'hard_evidence', 'updated_at'], batch_size=CHUNK)
-    matches = [(row, d) for row, d in group if row.match_id]
+    written = {row.pk for row in rows}
+    matches = [(row, d) for row, d in group if row.match_id and row.pk in written]
     if not matches:
         return []
     by_class = {}
     for row, _ in matches:
-        by_class.setdefault((row.classification, row.reason), []).append(row.match_id)
-    for (classification, reason), ids in by_class.items():
-        CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000], ai_model=verdict.model,
-                                                   updated_at=now)
-    m = CVEMatch.objects.filter(pk=matches[0][0].match_id).first()
-    if m and verdict_for(matches[0][0].classification) != 'not_affected':
-        # kept for correlation: a new host with the same evidence starts out judged. Never a closing answer: the table has no tenant, so it
-        # would close another organization's new match (save_matches does not seed one either; the same host's is carried by its twin)
+        by_class.setdefault((row.classification, row.reason, row.pk in held_ids), []).append(row.match_id)
+    for (classification, reason, held), ids in by_class.items():
+        CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000],
+                                                   ai_model='' if held else verdict.model, updated_at=now)
+    # kept for correlation: a new host with the same evidence starts out judged. Taken from a row the answer was applied to as it stands (not
+    # held, no validation hit of its own), never a closing answer (the table has no tenant, so it would close another organization's new
+    # match; save_matches does not seed one either, and the same host's own is carried by its twin), and never the model's words: the row
+    # holds a fixed sentence, since a seeded match may be another organization's (task 256)
+    shared = next((row for row, _ in matches if row.pk not in held_ids and row.validation_status != 'hit'), None)
+    m = matches_by_id.get(shared.match_id) if shared is not None else None
+    if m and verdict_for(shared.classification) not in ('not_affected', ''):
         MatchVerdict.objects.update_or_create(
             cve_entry_id=m.cve_entry_id, matched_product=m.matched_product, matched_version=m.matched_version,
             version_in_range=m.version_in_range, source=m.source,
-            defaults={'ai_verdict': verdict_for(matches[0][0].classification),
-                      'ai_reason': matches[0][0].reason, 'ai_model': verdict.model})
+            defaults={'ai_verdict': verdict_for(shared.classification), 'ai_reason': SHARED_REASON, 'ai_model': verdict.model})
     return [row.match_id for row, _ in matches]
+
+
+def _hold(group):
+    """Hold the rows of ``group`` while their own answer is asked for (``own_signature``): needs validation with ``HELD_REASON``, pending (so
+    the sweep asks again when it is not asked now), detached from any stored answer. A row a validation hit confirmed stays confirmed, and a
+    row already held is not rewritten. Returns the ids of the CVE matches whose legacy verdict changed."""
+    from cveFeed.models import CVEMatch, Triage
+    now = timezone.now()
+    rows = []
+    for row, _ in group:
+        if row.validation_status == 'hit' or (row.verdict_id is None and row.classification == 'needs_validation' and row.reason == HELD_REASON
+                                               and row.status != 'triaged'):
+            continue  # (still waiting: pending, or not_triaged / error as the last attempt left it, which the sweep picks up)
+        row.verdict, row.status, row.classification, row.reason, row.updated_at = None, 'pending', 'needs_validation', HELD_REASON, now
+        rows.append(row)
+    if not rows:
+        return []
+    Triage.objects.bulk_update(rows, ['verdict', 'status', 'classification', 'reason', 'updated_at'], batch_size=CHUNK)
+    ids = [row.match_id for row in rows if row.match_id]
+    CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict_for('needs_validation'), ai_reason=HELD_REASON, ai_model='', updated_at=now)
+    return ids
 
 
 def recap_version_only():
@@ -1266,7 +1329,7 @@ def run_triage(pairs, provider=False, scan_id=None):
     # question worth charging the AI provider for. Retain a deterministic, auditable closure.
     from cveFeed import correlation
     matches = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in pairs if row.match_id])
-               .select_related('cve_entry', 'subdomain__target_domain')}
+               .select_related('cve_entry', 'subdomain__target_domain', 'triage')}
     eligible = []
     for row, described in pairs:
         match = matches.get(row.match_id) if row.match_id else None
@@ -1296,8 +1359,34 @@ def run_triage(pairs, provider=False, scan_id=None):
         return stats
     known = {(v.kind, v.signature): v for v in TriageVerdict.objects.filter(signature__in=[sig for _, sig in groups],
                                                                           invalid_output=False)}
-    state = {'provider': False, 'run': 0}
+    # A stored closing answer reached elsewhere (another project, another host: closure_reusable) does not close a row, and the row is not
+    # left waiting on it: it gets its own question, keyed by its project and host (own_signature), asked and budgeted like any other, and
+    # held at needs validation only until that answer is there (task 256).
     applied = []
+    own = {}
+    for key in list(groups):
+        verdict = known.get(key)
+        if verdict is None or verdict.classification not in CLOSING:
+            continue
+        keep = []
+        for row, d in groups[key]:
+            match = matches.get(row.match_id) if row.match_id else None
+            if closure_reusable(verdict, row, d['kind'], match):
+                keep.append((row, d))
+            else:
+                own.setdefault((key[0], own_signature(key[0], key[1], row)), []).append((row, d))
+        if keep:
+            groups[key] = keep
+        else:
+            del groups[key]
+    if own:
+        known.update({(v.kind, v.signature): v for v in TriageVerdict.objects.filter(
+            signature__in=[sig for _, sig in own], invalid_output=False)})
+        for key, group in own.items():
+            if key not in known:
+                applied += _hold(group)
+        groups.update(own)
+    state = {'provider': False, 'run': 0}
     for key in sorted(groups, key=lambda k: (groups[k][0][1]['priority'], k[1])):
         group = groups[key]
         verdict = known.get(key)

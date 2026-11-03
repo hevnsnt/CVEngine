@@ -141,7 +141,8 @@ class ReportBase(TestCase):
                                                  remediation_updated_at=NOW, remediation_by=cls.worker, assignee=cls.assignee)
         cls.verdict = TriageVerdict.objects.create(kind='cve_match', signature='s' * 40, classification='confirmed', reason='reproduced',
                                                    impact='An attacker can smuggle requests past the front proxy.',
-                                                   remediation='Upgrade nginx to 1.20.0 or later and reload the service.')
+                                                   remediation='Upgrade nginx to 1.20.0 or later and reload the service.',
+                                                   project=cls.pa, host=cls.www.name)  # reached here: its words are shown in this project
         cls.proof_cmd = 'nuclei -u https://www.acme.test -t nginx-smuggle.yaml -jsonl'
         Triage.objects.create(project=cls.pa, domain=cls.da, host=cls.www.name, kind='cve_match', match=cls.fire_match, verdict=cls.verdict,
                               status='triaged', classification='confirmed', validation_status='hit',

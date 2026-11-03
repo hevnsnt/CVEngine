@@ -11,6 +11,7 @@ finding there; an answer that closes is reused only for the tenant (and, where t
 it was reached on; and even then it never closes a finding a person or hard evidence stands behind.
 """
 import json
+import re
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -338,14 +339,17 @@ class AiAnswerTests(TenancyFixture):
 		reported = self.cve_match(self.a, sub=self.a.host('three.attacker.test'))
 		CVEMatch.objects.filter(pk=runzero.pk).update(evidence={'source': 'port', 'service_extra': 'Widget', 'runzero': {'id': 'r1'}})
 		CVEMatch.objects.filter(pk=reported.pk).update(evidence={'source': 'port', 'service_extra': 'Widget', 'host_reported': True})
+		runzero.refresh_from_db()
+		reported.refresh_from_db()
 		pairs = triage.track(triage.with_cves([mine, runzero, reported]))
 		self.assertEqual(len({d['signature'] for _, d in pairs}), 1)
 		self.triage(triage.with_cves([mine]), provider=self.provider(answer('not_applicable')))
 		provider = self.provider(answer('likely'))
 		self.triage(triage.with_cves([runzero, reported]), provider=provider)
+		self.assertEqual(provider.complete.call_count, 2)  # each gets its own answer (its host's own question), not a permanent hold
 		for match in (runzero, reported):
 			self.assertOpen(match)
-			self.assertEqual(Triage.objects.get(match=match).classification, 'needs_validation')
+			self.assertEqual(Triage.objects.get(match=match).classification, 'likely')
 
 	def test_a_downgraded_severity_from_another_tenant_is_not_shown(self, _log):
 		from agentapi import services
@@ -389,7 +393,7 @@ class SameHostReuseTests(TenancyFixture):
 
 @mock.patch('cveFeed.activity.log', return_value=None)
 class CleanupTests(TenancyFixture):
-	"""What an earlier version already stored: the origin migration 0139 can prove, and the findings ``release_shared_closures`` reopens."""
+	"""What an earlier version already stored: the origin migration 0140 can prove, and the findings ``release_shared_closures`` reopens."""
 
 	def closed_pair(self, origin=None, model='a-model', fresh=False, signature=None):
 		"""The state before the fix: one stored closing answer held by a finding of each tenant, both matches closed by it."""
@@ -428,11 +432,11 @@ class CleanupTests(TenancyFixture):
 		TriageCall.objects.create(kind='cve_match', signature='f' * 40, project=self.a.project, status='succeeded', expires_at=timezone.now())
 		raised = TriageVerdict.objects.create(kind='cve_match', signature='c' * 40, classification='likely', model='a-model')
 		TriageCall.objects.create(kind='cve_match', signature='c' * 40, project=self.a.project, status='succeeded', expires_at=timezone.now())
-		migration = importlib.import_module('cveFeed.migrations.0139_triageverdict_origin')
-		migration.neutralise_shared_closures(apps, None)
+		migration = importlib.import_module('cveFeed.migrations.0140_triageverdict_origin')
+		migration.record_origins(apps, None)
 		lowered.refresh_from_db()
 		raised.refresh_from_db()
-		self.assertEqual((lowered.project_id, raised.project_id), (self.a.project.pk, None))  # a raising answer needs no origin
+		self.assertEqual((lowered.project_id, raised.project_id), (self.a.project.pk, self.a.project.pk))  # its words are shown only there
 		verdict.refresh_from_db()
 		self.assertEqual((verdict.project_id, verdict.host), (self.a.project.pk, self.a.sub.name))
 		for unproven in (twice, deterministic):
@@ -489,3 +493,261 @@ class CleanupTests(TenancyFixture):
 			self.assertIsNone(verdict_tenancy.release_once())
 			self.correlate()  # correlation calls it too: a no-op from now on
 		again.assert_not_called()
+
+
+SECRET_TITLE = 'Acme Payroll Portal'
+
+
+def echoing_provider(classification):
+	"""A model that quotes what it was shown (a page title) in its reason, impact, remediation and advice, as real models do."""
+	calls = []
+
+	def complete(system, prompt):
+		calls.append(prompt)
+		found = re.search(r'Acme[A-Za-z ]*', prompt)
+		quoted = found.group(0).strip() if found else 'nothing'
+		return json.dumps({'classification': classification, 'reason': f'The host serves "{quoted}".',
+						   'impact': f'Exposure of the {quoted} for this asset.', 'severity_adjust': 0, 'severity_reason': '',
+						   'remediation': f'Restrict access to the {quoted}.', 'validation_steps': [{'kind': 'manual', 'note': f'open {quoted}'}]})
+	p = mock.Mock(model='m')
+	p.name = 'anthropic'
+	p.complete.side_effect = complete
+	p.calls = calls
+	return p
+
+
+class Rv392Fixture(TenancyFixture):
+	def detail(self, tenant, kind, pk):
+		from agentapi.services import Ctx, finding_detail
+		user = User.objects.filter(username='root-rv').first() or User.objects.create_superuser('root-rv', 'r@example.test', 'x')
+		return finding_detail(Ctx(user), tenant.project.slug, kind, pk)
+
+	def widget_cve(self):
+		return CVEEntry.objects.get_or_create(cve_id='CVE-2099-901', defaults=dict(
+			kev=True, cvss=9.8, published_at=timezone.now(), title='flaw',
+			affected=[{'product': 'Widget Server', 'ranges': [{'introduced': '5.0', 'fixed': '5.9'}]}]))[0]
+
+	def widget_match(self, tenant, sub=None, evidence=None, **fields):
+		fields.setdefault('version_in_range', True)
+		fields.setdefault('distro_status', 'no_data')
+		return CVEMatch.objects.create(cve_entry=self.widget_cve(), subdomain=sub or tenant.sub, source='port', matched_product='Widget Server',
+									   matched_version='5.2', confidence=0.5, evidence=evidence or {'source': 'port'}, **fields)
+
+	def route(self, tenant, title, path='/backup/', sub=None):
+		host = (sub or tenant.sub).name
+		return RouteAuth.objects.create(project=tenant.project, domain=tenant.domain, host=host, url=f'https://{host}{path}', path=path,
+										auth_state='open', http_status=200, title=title, sensitive_score=10)
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class SharedTextTests(Rv392Fixture):
+	"""An answer shared with another project carries its classification, never the model's words: the prompt showed the host's own text
+	(a page title, a certificate, a banner, a path) that the signature does not carry (review of PR 392, B1)."""
+
+	def test_a_cve_match_answer_shares_its_class_never_its_words(self, _log):
+		from startScan.models import Subdomain
+		Subdomain.objects.filter(pk=self.a.sub.pk).update(page_title=SECRET_TITLE)
+		Subdomain.objects.filter(pk=self.b.sub.pk).update(page_title='Victim intranet')
+		mine, theirs = self.widget_match(self.a), self.widget_match(self.b)
+		mine, theirs = (CVEMatch.objects.select_related('subdomain__target_domain').get(pk=m.pk) for m in (mine, theirs))
+		pairs = triage.track(triage.with_cves([mine, theirs]))
+		self.assertEqual(pairs[0][1]['signature'], pairs[1][1]['signature'])  # a floor: no host text in the key, but the prompt shows it
+		p = echoing_provider('needs_validation')
+		self.triage(triage.with_cves([mine]), provider=p)
+		self.assertIn(SECRET_TITLE, p.calls[0])
+		self.assertIn(SECRET_TITLE, json.dumps(self.detail(self.a, 'match', mine.pk)))  # the project it was reached in keeps the words
+		p2 = echoing_provider('needs_validation')
+		self.triage(triage.with_cves([theirs]), provider=p2)
+		self.assertEqual(len(p2.calls), 0)  # the classification is still shared: one question
+		self.assertEqual(Triage.objects.get(match=theirs).classification, 'needs_validation')
+		shown = self.detail(self.b, 'match', theirs.pk)
+		self.assertNotIn(SECRET_TITLE, json.dumps(shown))
+		self.assertEqual(shown['ai']['reason'], triage.SHARED_REASON)
+		theirs.refresh_from_db()
+		self.assertNotIn(SECRET_TITLE, theirs.ai_reason)
+		# ... nor on into the shared correlation table and a third host's new match
+		self.assertEqual(MatchVerdict.objects.get(cve_entry=self.widget_cve()).ai_reason, triage.SHARED_REASON)
+		third = Tenant('third', self.a.scan.scan_type)
+		correlation.save_matches([{'cve_entry_id': self.widget_cve().pk, 'subdomain_id': third.sub.pk, 'source': 'port',
+								   'matched_product': 'Widget Server', 'matched_version': '5.2', 'version_in_range': True, 'confidence': 0.5,
+								   'scan_history_id': third.scan.pk, 'distro_status': 'no_data', 'distro_fixed_version': '', 'evidence': {'source': 'port'}}])
+		self.assertNotIn(SECRET_TITLE, self.match_of(third).ai_reason)
+
+	def test_a_route_answer_shares_its_class_never_its_words(self, _log):
+		a = self.route(self.a, SECRET_TITLE, '/admin/')
+		b = self.route(self.b, 'Victim admin', '/admin/')
+		self.triage([a], provider=echoing_provider('likely'))
+		p2 = echoing_provider('likely')
+		self.triage([b], provider=p2)
+		self.assertEqual(len(p2.calls), 0)
+		shown = self.detail(self.b, 'route', b.pk)
+		self.assertEqual(shown['ai']['classification'], 'likely')
+		self.assertNotIn(SECRET_TITLE, json.dumps(shown))
+		self.assertEqual((shown['why_it_matters'], shown['remediation']['text'], shown['ai']['advice'], shown['ai']['model_reason']), ('', '', [], ''))
+
+	def test_a_report_shows_no_other_projects_words(self, _log):
+		from cveFeed import report_data
+		from startScan.models import Subdomain
+		Subdomain.objects.filter(pk=self.a.sub.pk).update(page_title=SECRET_TITLE)
+		mine, theirs = self.widget_match(self.a), self.widget_match(self.b)
+		self.triage(triage.with_cves([CVEMatch.objects.select_related('subdomain__target_domain').get(pk=mine.pk)]),
+					provider=echoing_provider('needs_validation'))
+		self.triage(triage.with_cves([theirs]), provider=echoing_provider('needs_validation'))
+		for match, leaks in ((mine, True), (theirs, False)):
+			m = CVEMatch.objects.select_related('cve_entry', 'subdomain', 'triage__verdict').get(pk=match.pk)
+			m.sev = 3
+			entry = report_data._match_entry(m, 'fire')
+			self.assertEqual(SECRET_TITLE in json.dumps(entry, default=str), leaks)
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class HeldRowTests(Rv392Fixture):
+	"""A finding a stored closing answer from elsewhere may not close gets its own answer: the hold is a wait, never a state it keeps
+	(review of PR 392, B2)."""
+
+	def test_a_held_row_gets_its_own_answer(self, _log):
+		crafted = self.route(self.a, 'Decoy')
+		real = self.route(self.b, 'Index of /backup')
+		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
+		calls = []
+		for _ in range(3):  # three sweeps
+			p = self.provider(answer('confirmed'))
+			self.triage([real], provider=p)
+			calls.append(p.complete.call_count)
+		self.assertEqual(calls, [1, 0, 0])  # asked once, then answered from its own stored answer
+		row = Triage.objects.get(route=real)
+		self.assertEqual((row.status, row.classification), ('triaged', 'likely'))  # confirmed without hard evidence is likely
+		self.assertEqual((row.verdict.project_id, row.verdict.host), (self.b.project.pk, self.b.sub.name))
+		self.assertEqual(Triage.objects.get(route=crafted).classification, 'likely_false_positive')  # the origin keeps its own
+
+	def test_the_sweep_asks_a_row_held_while_there_was_no_provider(self, _log):
+		crafted = self.route(self.a, 'Decoy')
+		real = self.route(self.b, 'Index of /backup')
+		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
+		self.triage([real], provider=None)
+		row = Triage.objects.get(route=real)
+		self.assertEqual((row.classification, row.reason, row.verdict_id), ('needs_validation', triage.HELD_REASON, None))
+		p = self.provider(answer('likely'))
+		triage.sweep(provider=p)
+		self.assertEqual(p.complete.call_count, 1)
+		self.assertEqual(Triage.objects.get(route=real).classification, 'likely')
+
+	def test_another_host_of_the_same_project_gets_its_own_answer(self, _log):
+		r1 = self.route(self.a, 'x')
+		r2 = self.route(self.a, 'y', sub=self.a.host('two.attacker.test'))
+		self.triage([r1], provider=self.provider(answer('likely_false_positive')))
+		p = self.provider(answer('likely'))
+		self.triage([r2], provider=p)
+		self.triage([r2], provider=p)
+		self.assertEqual(p.complete.call_count, 1)
+		self.assertEqual(Triage.objects.get(route=r2).classification, 'likely')
+
+	def test_a_held_cve_match_with_hard_evidence_gets_its_own_answer(self, _log):
+		mine = self.widget_match(self.a, distro_status='patched')
+		theirs = self.widget_match(self.b, distro_status='patched', evidence={'source': 'port', 'runzero': {'id': 'r'}})
+		self.triage(triage.with_cves([mine]), provider=self.provider(answer('not_applicable')))
+		p = self.provider(answer('likely'))
+		self.triage(triage.with_cves([theirs]), provider=p)
+		theirs.refresh_from_db()
+		self.assertEqual((p.complete.call_count, theirs.ai_verdict, Triage.objects.get(match=theirs).classification), (1, 'affected', 'likely'))
+
+	def test_a_held_row_does_not_overwrite_the_shared_verdict(self, _log):
+		cve = self.widget_cve()
+		MatchVerdict.objects.create(cve_entry=cve, matched_product='Widget Server', matched_version='5.2', version_in_range=True, source='port',
+									ai_verdict='affected', ai_reason='a check confirmed it', ai_model='m')
+		mine = self.widget_match(self.a, distro_status='patched')
+		theirs = self.widget_match(self.b, distro_status='patched')
+		self.triage(triage.with_cves([mine]), provider=self.provider(answer('not_applicable')))
+		self.triage(triage.with_cves([theirs]))  # no provider: held while its own answer waits
+		self.assertEqual(Triage.objects.get(match=theirs).reason, triage.HELD_REASON)
+		self.assertEqual(list(MatchVerdict.objects.values_list('ai_verdict', 'ai_reason')), [('affected', 'a check confirmed it')])
+
+	def test_a_held_row_is_not_rewritten_on_every_run(self, _log):
+		crafted = self.route(self.a, 'Decoy')
+		real = self.route(self.b, 'Index of /backup')
+		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
+		with mock.patch.object(triage, 'cap', return_value=0):  # over the cap: queued
+			self.triage([real], provider=self.provider(answer('likely')))
+			first = Triage.objects.get(route=real)
+			self.assertEqual((first.status, first.classification), ('pending', 'needs_validation'))
+			with mock.patch('cveFeed.models.Triage.objects.bulk_update') as written:
+				self.triage([real], provider=self.provider(answer('likely')))
+		# what triage writes (not track's own bookkeeping of last_seen): nothing for a row already held
+		self.assertFalse(any(call.args[0] for call in written.call_args_list
+							 if call.args and 'classification' in call.args[1] and 'last_seen' not in call.args[1]))
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class ReleaseReviewTests(Rv392Fixture):
+	"""The one-time release reopens only what another organization's answer closed, never a host's own closure (review of PR 392, B3)."""
+
+	def legacy_identity_closure(self):
+		"""What develop's close_invalid_correlation wrote: the host's own Triage row pointing at a shared deterministic answer."""
+		from startScan.models import Port
+		cve = self.cve()
+		port = self.a.port('Jenkins', '2.426.2')
+		self.correlate()
+		mine = self.match_of(self.a)
+		Port.objects.filter(pk=port.pk).update(product='Acme portal')
+		reason = correlation.invalid_identity_reason(CVEMatch.objects.select_related('cve_entry', 'subdomain__target_domain').get(pk=mine.pk))
+		self.assertTrue(reason)
+		row = triage.track(triage.with_cves([mine]))[0][0]
+		verdict = TriageVerdict.objects.create(kind='cve_match', signature=row.signature, classification='not_applicable', reason=reason,
+											   model='deterministic-correlation')
+		Triage.objects.filter(pk=row.pk).update(verdict=verdict, status='triaged', classification='not_applicable', reason=reason)
+		CVEMatch.objects.filter(pk=mine.pk).update(ai_verdict='not_affected', ai_reason=reason, ai_model='deterministic-correlation')
+		return cve, mine, verdict, reason
+
+	def test_release_keeps_the_hosts_own_legacy_identity_closure(self, _log):
+		from cveFeed import verdict_tenancy
+		cve, mine, verdict, reason = self.legacy_identity_closure()
+		self.b.port('Jenkins', '2.426.2')  # the other organization's real match, closed by the same stored answer
+		self.correlate()
+		theirs = self.match_of(self.b, cve)
+		row = triage.track(triage.with_cves([theirs]))[0][0]
+		Triage.objects.filter(pk=row.pk).update(verdict=verdict, status='triaged', classification='not_applicable', reason=reason)
+		CVEMatch.objects.filter(pk=theirs.pk).update(ai_verdict='not_affected', ai_reason=reason, ai_model='deterministic-correlation')
+		counts = verdict_tenancy.release_shared_closures(apply=True)
+		self.assertEqual((counts['kept_own'], counts['triage_rows']), (1, 1))
+		mine.refresh_from_db()
+		own = Triage.objects.get(match=mine)
+		self.assertEqual((mine.ai_verdict, own.classification, own.reason, own.verdict_id), ('not_affected', 'not_applicable', reason, None))
+		self.assertOpen(theirs)
+		self.assertEqual(Triage.objects.get(match=theirs).status, 'pending')  # queued for its own review
+
+	def test_release_changes_nothing_on_a_single_organization_instance(self, _log):
+		from cveFeed import verdict_tenancy
+		Project.objects.filter(pk=self.b.project.pk).update(org=self.a.org)
+		verdict, (mine, theirs) = CleanupTests.closed_pair(self)
+		counts = verdict_tenancy.release_shared_closures(apply=True)
+		self.assertEqual({k: v for k, v in counts.items() if k != 'projects'}, dict.fromkeys(verdict_tenancy.COUNTS, 0))
+		for match in (mine, theirs):
+			match.refresh_from_db()
+			self.assertEqual(match.ai_verdict, 'not_affected')
+
+	def test_release_takes_another_organizations_words_off(self, _log):
+		from cveFeed import verdict_tenancy
+		words = f'The host serves "{SECRET_TITLE}".'
+		mine, theirs = self.widget_match(self.a), self.widget_match(self.b)
+		pairs = triage.track(triage.with_cves([mine, theirs]))
+		verdict = TriageVerdict.objects.create(kind='cve_match', signature=pairs[0][0].signature, classification='needs_validation', reason=words,
+											   model='a-model', project=self.a.project, host=self.a.sub.name)
+		for row, _ in pairs:
+			Triage.objects.filter(pk=row.pk).update(verdict=verdict, status='triaged', classification='needs_validation', reason=words)
+		CVEMatch.objects.filter(pk__in=[mine.pk, theirs.pk]).update(ai_verdict='uncertain', ai_reason=words, ai_model='a-model')
+		MatchVerdict.objects.create(cve_entry=self.widget_cve(), matched_product='Widget Server', matched_version='5.2', version_in_range=True,
+									source='port', ai_verdict='uncertain', ai_reason=words, ai_model='a-model')
+		counts = verdict_tenancy.release_shared_closures(apply=True)
+		self.assertEqual(counts['shared_text'], 1)
+		for match, expected in ((mine, words), (theirs, triage.SHARED_REASON)):
+			match.refresh_from_db()
+			self.assertEqual((match.ai_verdict, match.ai_reason, Triage.objects.get(match=match).reason), ('uncertain', expected, expected))
+		self.assertEqual(MatchVerdict.objects.get().ai_reason, triage.SHARED_REASON)
+
+	def test_the_background_release_writes_one_activity_line_per_project(self, log):
+		from cveFeed import verdict_tenancy
+		CleanupTests.closed_pair(self, origin={'project': self.a.project, 'host': self.a.sub.name})
+		verdict_tenancy.release_once()
+		lines = [c for c in log.call_args_list if c.kwargs.get('decision') == 'released_shared_verdicts']
+		self.assertEqual([c.kwargs['project'] for c in lines], [self.b.project.pk])
+		self.assertEqual(lines[0].kwargs['triage_rows'], 1)
