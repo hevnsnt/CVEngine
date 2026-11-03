@@ -79,7 +79,7 @@ EXCLUDED_FAMILIES = ('Denial of Service', 'Brute force attacks')
 DEFAULT_LOGIN = ('admin', 'admin')  # what Greenbone's community containers create; replaced by ``bootstrap``
 
 ACTIVE = ('New', 'Requested', 'Queued', 'Running', 'Processing', 'Stop Requested')
-CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,}$')
+CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$')  # bounded: CveId.name holds 100 characters
 CERT_REF_TYPES = ('cert-bund', 'dfn-cert')  # references gvmd reads from its database through the NVT's CVEs (``parse_result``)
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _TAILNET = [ipaddress.ip_network(n) for n in ('100.64.0.0/10', 'fd7a:115c:a1e0::/48')]

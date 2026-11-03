@@ -312,7 +312,7 @@ class PlanTests(unittest.TestCase):
 				for forbidden in (' -h ', '--header', ' -d ', '--data', ' -x ', 'payload', 'sh -c', '|bash', ' -b ', '--cookie'):
 					self.assertNotIn(forbidden, flat)
 				if check['kind'] == 'http_head':
-					self.assertEqual(check['argv'][:3], ['curl', '-I', '-k'])
+					self.assertEqual(check['argv'][:4], ['curl', '-g', '-I', '-k'])
 				if check['kind'] == 'nmap_sv':
 					self.assertEqual(check['argv'][0], 'nmap')
 					self.assertIn('-sV', check['argv'])

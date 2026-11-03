@@ -444,7 +444,9 @@ fi
 restore_branch() { if [ "$SWITCHED" = 1 ]; then git checkout -q -f "$BRANCH" >>"$LOG" 2>&1 || true; fi; }
 # The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
 # without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
-BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
+# (read through the state helper: ./web is writable by the web container, and a plain read would follow a link it planted there to a host
+# file and copy its first line into the log the app is shown)
+BUILT=$(python3 "$STATE_HELPER" built 2>/dev/null || true)
 # (HEAD contains the approved commit: it is $SHA itself, or a checkout with commits of its own that has merged it, and what is built is HEAD)
 if git merge-base --is-ancestor "$SHA" HEAD && [ "$BUILT" = "$PREV" ] && [ "$(deployed_commit)" = "$PREV" ] && schema_current; then
   log "already at $SHA"

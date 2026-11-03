@@ -14,8 +14,7 @@ SERVICES=(openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gv
 
 # This runs as root, and ./web is writable by the web container: everything read from or written to it goes through scripts/update-state.py, which
 # never follows a link planted there.
-want=$(python3 scripts/update-state.py openvas-wanted) || exit 0
-case $want in on | off) ;; *) exit 0 ;; esac
+want=$(python3 scripts/update-state.py openvas-wanted) || want=''
 
 STATE=$(python3 scripts/update-state.py directory) || exit 1
 exec 9>"$STATE/openvas.lock"
@@ -23,14 +22,17 @@ flock -n 9 || exit 0  # the previous request is still being carried out
 
 if [ "${1:-}" = restart-gvmd ]; then
   # gvmd 26.35 and later reload their NVT cache only in the periodic-jobs process, so the GMP answers miss the CVE references of NVTs loaded
-  # after gvmd started (greenbone/gvmd#3220) until gvmd restarts. Only while the add-on is meant to be on; the answer is written either way.
+  # after gvmd started (greenbone/gvmd#3220) until gvmd restarts. Only a gvmd that is running is restarted (an add-on started by hand with
+  # make openvas-up has no web/.openvas-wanted), never one switched off; the answer is written either way, so the request runs once.
   . scripts/compose-layout.sh
   result=failed
-  if [ "$want" = on ] && cvengine_compose_layout && "${COMPOSE[@]}" --profile openvas restart openvas-gvmd; then result=ok; fi
+  if [ "$want" != off ] && cvengine_compose_layout && [ -n "$("${COMPOSE[@]}" --profile openvas ps --status running -q openvas-gvmd 2>/dev/null)" ] \
+      && "${COMPOSE[@]}" --profile openvas restart openvas-gvmd; then result=ok; fi
   echo "$(date -u +%FT%TZ) restart of openvas-gvmd (NVT cache out of date): $result"
   python3 scripts/update-state.py openvas-restarted "$result" || true
   exit 0
 fi
+case $want in on | off) ;; *) exit 0 ;; esac
 
 # The watcher sends this script's output to $STATE/openvas.log (host-private); the end of it is published as web/.openvas-log.
 LOG=$STATE/openvas.log

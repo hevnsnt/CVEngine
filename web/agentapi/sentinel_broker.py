@@ -1204,7 +1204,7 @@ _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, '
 
 
 MAX_CVE_IDS = 20
-_CVE_ID = re.compile(r'CVE-\d{4}-\d+', re.IGNORECASE)
+_CVE_ID = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)  # bounded: a longer one would overflow CveId.name and fail the whole stage
 
 
 def _clean_findings(findings):

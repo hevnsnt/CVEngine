@@ -75,6 +75,21 @@ class OpenvasStateTests(unittest.TestCase):
         self.assertTrue(published.endswith(b'last line\n'))
         self.assertLessEqual(len(published), 65536)
 
+    def test_the_running_build_is_read_without_following_a_planted_link(self):
+        # security review 1.3.4 (sentinel-1): apply-update.sh read web/.commit with head, so a link to a host file put its first line into
+        # the update log the app is shown
+        sha = 'a' * 40
+        commit = self.tmp / 'web' / '.commit'
+        commit.write_text(sha.upper() + '\n')
+        self.assertEqual(self.state('built').stdout.strip(), sha)
+        commit.write_text('root:$6$secret:19000:0:99999:7:::\n')
+        self.assertEqual(self.state('built').stdout.strip(), '')
+        commit.unlink()
+        self.victim.write_text(sha + '\n')
+        commit.symlink_to(self.victim)
+        self.assertEqual(self.state('built').stdout.strip(), '')
+        self.assertNotIn('head -n1 web/.commit', (SCRIPTS / 'apply-update.sh').read_text())
+
     def test_the_request_is_read_without_following_links_and_only_on_or_off_count(self):
         wanted = self.tmp / 'web' / '.openvas-wanted'
         wanted.write_text('on\n')

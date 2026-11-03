@@ -1750,3 +1750,31 @@ class TestsslPriorityTests(Clean, TestCase):
             testssl_scan.sweep(fixture.project.id, runner=runner, resolve=lambda host, port, project: '203.0.113.5')
         wait.assert_called_once_with(25, local_egress.TESTSSL_CONNECTIONS)
         self.assertEqual(len(calls), 1)
+
+
+class PathProbeScopeTests(TestCase):
+    """Security review 1.3.4 (ssrf-1): the daily raw-packet path probe picks addresses from fingerprints of every organization; it must only
+    send to one some project may still have probed."""
+
+    def setUp(self):
+        self.org = Org.objects.create(name='P', slug='pp-org')
+        self.project = Project.objects.create(name='P', slug='pp-p', insert_date=timezone.now(), org=self.org)
+
+    def held(self, name, address, mode='standard'):
+        domain = Domain.objects.create(name=name, project=self.project, insert_date=timezone.now(), discovery_mode=mode)
+        sub = Subdomain.objects.create(target_domain=domain, name=f'www.{name}')
+        sub.ip_addresses.add(IpAddress.objects.create(address=address))
+        return sub
+
+    def test_only_an_address_a_project_may_still_probe(self):
+        from cveFeed import path_probe
+        from cveFeed.models import HostExclusion
+        self.held('ok.test', '198.51.100.20')
+        self.held('manual.test', '198.51.100.21', mode='manual')
+        self.held('passive.test', '198.51.100.22', mode='passive')
+        self.held('gone.test', '198.51.100.23')
+        HostExclusion.objects.create(org=self.org, host='198.51.100.23', created_at=timezone.now())
+        IpAddress.objects.create(address='198.51.100.24')  # fingerprinted once, now on no host of any project
+        self.assertTrue(path_probe.in_scope('198.51.100.20'))
+        for address in ('198.51.100.21', '198.51.100.22', '198.51.100.23', '198.51.100.24'):
+            self.assertFalse(path_probe.in_scope(address), address)

@@ -11,13 +11,16 @@
 # container reaches Redis and PostgreSQL on the host's loopback, where this file publishes them. The optional tailscale profile joins the
 # celery container's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead). If something
 # on the host already uses port 6379, set CVENGINE_REDIS_HOST_PORT in .env to another one.
+#
+# The published broker must have a password: on the host's loopback any local user or process could otherwise queue work the workers run
+# as root. Compose refuses this file while REDIS_PASSWORD is empty; an older install sets one with `make redis-auth` first.
 services:
   celery:
     network_mode: host
     networks: !reset []
     environment:
-      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
-      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:?the host network overlay publishes Redis on the host and needs a password, run make redis-auth first}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:?the host network overlay publishes Redis on the host and needs a password, run make redis-auth first}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
       - POSTGRES_HOST=127.0.0.1
   redis:
     ports:

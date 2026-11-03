@@ -241,7 +241,7 @@ class PlanTests(RouteFixture, TestCase):
 
     def test_the_display_command_is_something_a_person_can_repeat(self):
         text = probes.display_for('error-page', {'base': 'https://www.rt.test'})
-        self.assertIn("curl -sS -i --max-time 6 https://www.rt.test/.cvengine-probe/404", text)
+        self.assertIn("curl -gsS -i --max-time 6 https://www.rt.test/.cvengine-probe/404", text)
 
     def test_a_kernel_advisory_says_it_needs_the_inventory_reporter(self):
         cve = mock.Mock(title='Local kernel flaw', original_description='A local kernel driver issue.')

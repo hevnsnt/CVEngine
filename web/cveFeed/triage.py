@@ -1227,10 +1227,15 @@ def _unsigned_hard_evidence(match):
 
 def answer_reusable(verdict, row, d, match=None):
     """Whether the stored answer ``verdict`` may be applied to ``row`` (a Triage row; ``d`` its description, ``match`` its CVE match): an
-    answer may raise attention anywhere, never close or lower a finding of another tenant (task 256).
+    answer never closes or lowers a finding of another tenant (task 256), and raises one of another tenant only where the signature carries
+    what the model was shown.
 
     * A closing answer: ``closure_reusable``.
-    * An answer that raises attention (likely, confirmed), or one a deterministic rule gave (no host text): anywhere.
+    * One a deterministic rule gave (no host text): anywhere.
+    * An answer that raises attention (likely, confirmed): anywhere for a CVE match (the host text its prompt showed is in its signature,
+      ``bind_host_text``); for every other kind only in the project it was reached in, since that prompt showed host text the signature
+      does not carry (a bbot description, a nuclei path, a page title, a hygiene detail) and a host one organization controls must not
+      raise another organization's findings.
     * Needs validation from the model: where the row's own question could not do better either (its ceiling, or an advisory with no
       version range, holds it there); else only in the project it was reached in, and from another host there never on a CVE match with
       hard evidence the signature does not carry (``_unsigned_hard_evidence``: "uncertain" would keep it off the fire page).
@@ -1238,8 +1243,10 @@ def answer_reusable(verdict, row, d, match=None):
     Elsewhere the row asks its own question (``own_candidates``)."""
     if verdict.classification in CLOSING:
         return closure_reusable(verdict, row, d['kind'], match)
-    if verdict.classification in RAISING or (verdict.model or '').startswith('deterministic'):
+    if (verdict.model or '').startswith('deterministic'):
         return True
+    if verdict.classification in RAISING:
+        return d['kind'] == 'cve_match' or same_project(verdict, row)
     facts = d.get('facts') or {}
     if ceiling(d['kind'], facts)[0] == verdict.classification or facts.get('version_unknown'):
         return True
@@ -1260,9 +1267,12 @@ def reached_here(verdict, row, kind):
 
 def shown_severity_adjust(verdict, row):
     """The model's severity step ``verdict`` shows on ``row`` (a Triage row): a step down only where the answer was reached
-    (``reached_here``), since it may rest on what another tenant's host showed; a step up anywhere (task 256)."""
+    (``reached_here``), since it may rest on what another tenant's host showed; a step up on a CVE match anywhere, on every other kind only
+    in the project it was reached in (``answer_reusable``)."""
     adjust = (verdict.severity_adjust or 0) if verdict is not None else 0
-    return adjust if adjust >= 0 or reached_here(verdict, row, row.kind) else 0
+    if adjust < 0:
+        return adjust if reached_here(verdict, row, row.kind) else 0
+    return adjust if row.kind == 'cve_match' or same_project(verdict, row) else 0
 
 
 def _apply(verdict, group):

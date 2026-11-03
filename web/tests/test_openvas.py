@@ -69,6 +69,17 @@ class ParseTests(SimpleTestCase):
     def test_a_result_without_a_host_or_an_oid_is_unusable(self):
         self.assertIsNone(ov.parse_result(etree.fromstring('<result><nvt oid="1.2.3"/></result>')))
 
+    def test_an_overlong_cve_id_from_a_sentinel_is_dropped_not_stored(self):
+        # security review 1.3.4 (sentinel-2): CveId.name holds 100 characters; a longer id failed the save and with it the whole stage
+        from agentapi.sentinel_broker import _clean_findings, _clean_openvas_result
+        long_id = 'CVE-2024-' + '1' * 200
+        self.assertIsNone(ov.CVE_RE.match(long_id))
+        self.assertTrue(ov.CVE_RE.match('CVE-2024-1234567'))
+        found, _ = _clean_findings([{'template_id': 't', 'host': 'h', 'cve_ids': [long_id, 'CVE-2021-41773']}])
+        self.assertEqual(found[0]['cve_ids'], ['CVE-2021-41773'])
+        body = _clean_openvas_result({'results': [{'oid': '1.3.6.1.4.1.25623.1.0.1', 'address': '93.184.216.5', 'cves': [long_id]}]})
+        self.assertEqual(body['results'][0]['cves'], [])
+
     def test_cert_references_without_a_cve_reference_mean_gvmds_nvt_cache_is_stale(self):
         # camstork, #394: gvmd 26.43 sent only the CERT-Bund / DFN-CERT references (database) and none of the NVT cache's own cve / url ones
         stale = etree.fromstring(etree.tostring(result_xml(cves=())).replace(b'<refs/>', b'<refs><ref type="cert-bund" id="WID-SEC-2023-1801"/>'
@@ -1787,7 +1798,11 @@ class HostWatcherTests(SimpleTestCase):
         # a gvmd restart request (stale NVT cache) restarts openvas-gvmd only, while the add-on is on, and is answered so it runs once
         self.assertIn('scripts/openvas-sync.sh restart-gvmd', watch)
         self.assertIn('web/.openvas-restart -nt web/.openvas-restarted', watch)
-        self.assertIn('if [ "$want" = on ] && cvengine_compose_layout && "${COMPOSE[@]}" --profile openvas restart openvas-gvmd', script)
+        self.assertIn('--profile openvas restart openvas-gvmd', script)
+        self.assertIn('ps --status running -q openvas-gvmd', script)  # only a running gvmd, also one started by hand (no web/.openvas-wanted)
+        self.assertIn('[ "$want" != off ]', script)
+        # the restart is handled before the on/off gate, which exits without an answer when web/.openvas-wanted is missing (make openvas-up)
+        self.assertLess(script.index('restart-gvmd ]'), script.index('case $want in on | off) ;; *) exit 0 ;; esac'))
         self.assertIn('update-state.py openvas-restarted', script)
         self.assertIn('web/.openvas-restart', (ROOT / '.gitignore').read_text())
 
