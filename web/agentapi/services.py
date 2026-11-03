@@ -3793,6 +3793,7 @@ def _classification_of(obj):
 
 def _triage_brief(t):
     """What a list card needs to show the classification and validation badges without a second request."""
+    from cveFeed import triage as triage_lib
     if t is None:
         return {'classification': '', 'status': 'untracked', 'validation_status': 'none', 'overridden': False, 'severity_adjust': 0,
                 'first_seen': None, 'last_seen': None}
@@ -3802,7 +3803,7 @@ def _triage_brief(t):
                          else t.validation_status)
     return {'classification': t.classification, 'status': t.status, 'validation_status': validation_status,
             'overridden': bool(v and (v.overridden or t.classification != v.classification)),
-            'severity_adjust': v.severity_adjust if v else 0,
+            'severity_adjust': triage_lib.shown_severity_adjust(v, t),
             'first_seen': _iso(t.first_seen), 'last_seen': _iso(t.last_seen)}
 
 
@@ -3928,10 +3929,11 @@ def finding_detail(ctx, slug, kind, finding_id):
     title, host, target, base = _finding_summary(kind, obj)
     how = {'match': _how_found_match, 'vulnerability': _how_found_vulnerability, 'route': _how_found_route,
            'hygiene': _how_found_hygiene}[kind](obj)
-    adjust = v.severity_adjust if v else 0
+    adjust = triage_lib.shown_severity_adjust(v, t) if t else 0  # a step down only where the answer was reached (task 256)
+    text = triage_lib.verdict_text(v, t)  # the model's words only on a finding of the project the answer was reached in (task 256)
     severity_ai = (SEVERITY_NAMES.get(triage_lib.adjusted_severity(base, adjust, bool(t and t.hard_evidence)))
                    if base is not None and adjust else None)
-    remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
+    remediation = {'text': text['remediation'], 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
         remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), local_checks=(t.local_checks if t else None) or None)
     closed = _closure_fields(kind, obj) if kind in STATUS_KINDS else {}
@@ -3983,15 +3985,15 @@ def finding_detail(ctx, slug, kind, finding_id):
         'automatic_validation': automatic,
         'severity': SEVERITY_NAMES.get(base) if base is not None else None, 'severity_ai': severity_ai,
         'first_seen': _iso(first), 'last_seen': _iso(last), 'history': _history(project, host),
-        'why_it_matters': v.impact if v else '',
+        'why_it_matters': text['impact'],
         'ai': {'classification': t.classification if t else '', 'status': t.status if t else 'untracked',
                'reason': f'AI review failed ({diagnostic["category"]}); retry scheduled.' if diagnostic else t.reason if t else '',
                'diagnostic': diagnostic,
                'overridden': bool(v and (v.overridden or (t and t.classification != v.classification))),
                'model_classification': v.model_classification if v else '',
-               'model_reason': v.model_reason if v else '', 'model': v.model if v else '', 'invalid_output': bool(v and v.invalid_output),
-               'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': v.severity_reason if v else '',
-               'hard_evidence': (t.hard_evidence if t else []) or [], 'advice': (v.validation_notes if v else []) or []},
+               'model_reason': text['model_reason'], 'model': v.model if v else '', 'invalid_output': bool(v and v.invalid_output),
+               'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': text['severity_reason'] if adjust else '',
+               'hard_evidence': (t.hard_evidence if t else []) or [], 'advice': text['validation_notes']},
         'how_found': how, 'remediation': remediation,
         'status_changed_at': _iso(obj.remediation_updated_at) if kind in STATUS_KINDS else None,
         'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
