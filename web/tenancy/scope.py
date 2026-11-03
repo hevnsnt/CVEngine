@@ -89,6 +89,8 @@ UNSCOPED = {
     'cveFeed.HostExclusion': 'per organization',
     'cveFeed.OpenvasOrg': 'per organization',
     'cveFeed.ServiceRun': 'engine bookkeeping (nmap rows are global), never read for a user',
+    'cveFeed.TriageVerdict': 'one answer shared by every finding with the same evidence; project only records where it was reached, so '
+                             'triage reuses a closing answer and shows its words only there (task 256), never listed for a user',
     'agentapi.SentinelEnrollment': 'organization or instance wide as often as project wide, and redeemed with no user at all',
 }
 
