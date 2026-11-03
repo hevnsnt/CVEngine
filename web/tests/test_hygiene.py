@@ -246,6 +246,17 @@ class HygieneRunnerTests(TestCase):
 		self.assertEqual((row.status, row.remediation_status), ('open', 'open'))
 		self.assertIn('Reopened', row.remediation_note)
 
+	def test_a_false_positive_stays_closed_when_the_check_finds_it_again(self):
+		mail = lambda name: ([hy.Finding('dmarc_none', hy.MEDIUM, 'DMARC policy is p=none', host=name)], False)
+		none = lambda host, port: None
+		self.run_with(none, mail)
+		row = HygieneFinding.objects.get(domain=self.domain, check_name='dmarc_none')
+		HygieneFinding.objects.filter(pk=row.pk).update(remediation_status='false_positive', remediation_note='policy set on the parent')
+		self.run_with(none, lambda name: ([], False))  # gone: resolved
+		self.run_with(none, mail)  # found again: a false positive is not a regression, unlike fixed
+		row.refresh_from_db()
+		self.assertEqual((row.status, row.remediation_status, row.remediation_note), ('open', 'false_positive', 'policy set on the parent'))
+
 	def test_a_hostile_certificate_cannot_abort_the_domains_tls_review(self):
 		def hostile(host, port):
 			if host != 'www.example.test':

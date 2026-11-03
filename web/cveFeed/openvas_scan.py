@@ -518,7 +518,7 @@ def hot_names(project_id, limit=HOT_WINDOW):
     from cveFeed.threat import match_heat_rank_expr
     from startScan.models import Vulnerability
     from targetApp.models import in_target_scope_q
-    closed = ('fixed', 'accepted_risk')
+    from cveFeed.counts import CLOSED as closed  # fixed, accepted_risk, false_positive
     scope = in_target_scope_q('subdomain__')  # a name kept under a target that is now exactly one host is never OpenVAS's to scan through it
     # The current inventory only (not every scan's copy of a name), hottest first, so a large project's fire hosts fall inside the window.
     names = set(CVEMatch.objects.filter(latest_scan_q('subdomain__'), scope, subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')

@@ -89,7 +89,7 @@ def rescore_for_heat_cap(*args, **kwargs):
 def baseline_heat_pages(*args, **kwargs):
     """When the heat rule changed (the heat policy or, under legacy, the version-only cap), every CVE match that is fire under the new rule is
     marked as announced without a message, so the switch never pages the backlog (cveFeed.notify.baseline_heat_policy; the update itself is
-    baselined by migration 0137). Never stops the worker from starting."""
+    baselined by migration 0139). Never stops the worker from starting."""
     import logging
     try:
         from cveFeed import notify

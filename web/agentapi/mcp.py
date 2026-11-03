@@ -57,6 +57,13 @@ AGENT_SCOPE = {
     'properties': {'orgs': {'type': 'array', 'items': {'type': 'string'}, 'description': 'organization slugs'},
                    'projects': {'type': 'array', 'items': {'type': 'string'}, 'description': 'project slugs (see list_projects)'},
                    'hosts': {'type': 'array', 'items': {'type': 'string'}}}}
+# the remediation statuses a person or agent sets (cveFeed.closure.STATUSES): fixed, accepted_risk and false_positive close a finding
+REMEDIATION_STATUS = {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk', 'false_positive']}
+CLOSURE_NOTE = {'type': 'string', 'description': 'Why: free text, at most 2000 characters (stripped, control characters removed). Stored as the '
+                'closure note when the status closes the finding (fixed, accepted_risk, false_positive), with who and when, and written to '
+                'the audit trail. Optional; leave it out to keep the stored note. Say why a false positive is one.'}
+CLOSING = ('fixed, accepted_risk and false_positive close it (false_positive: the finding is not real on this host, e.g. the scanner '
+           'or the correlation got it wrong); closure_note, closed_by and closed_at say why, who and when')
 SLUG_OR_ALL = {'type': 'string', 'description': "Project slug (see list_projects), or '_all' for every project you can access: read-only, and each row names its own project"}
 
 
@@ -228,15 +235,16 @@ TOOLS = [
      lambda c, a: tailscale.tailscale_devices(c, a.get('project'), a), False),
     ('sync_tailscale', "Sync the project's tailnet now: refresh its devices, run the Tailscale checks and, if auto-scan is on, queue scans for new and changed devices. Project administrators only.", _schema({'project': SLUG}, ['project']),
      lambda c, a: tailscale.tailscale_sync(c, a.get('project')), True),
-    ('list_findings', 'Every finding in one list, hottest first: CVE matches on hosts, scanner findings and hygiene findings. type: all|cve|scanner|hygiene; heat: fire|smoke|ice; severity: critical|high|medium|low|info; status: actionable (default: what heats a host) or all; host: substring; kev: true keeps only CVE matches of a CVE listed as exploited, whatever their heat (a match that rests on its version alone is smoke at most, KEV or not). counts gives each type\'s total. group: none (default, one row per host) or cve: the same client-side JavaScript library version (jQuery, Bootstrap, ...; never a server, CMS or other server-side product) on sibling hosts of one site is one row, carrying group.member_ids, member_status (each member\'s own status) and the split of heat and status; total then counts rows, findings_total the host findings, groups the rows standing for several hosts. To act on a group, pass the member_ids you mean to change (usually the open and in_progress ones) to bulk_update_finding_status, 200 a call (each host keeps its own status and audit).',
+    ('list_findings', 'Every finding in one list, hottest first: CVE matches on hosts, scanner findings and hygiene findings. type: all|cve|scanner|hygiene; heat: fire|smoke|ice; severity: critical|high|medium|low|info; status: actionable (default: what heats a host), all, closed (fixed, accepted_risk or false_positive) or one of those three; each row carries closure_note, closed_by, closed_at and closed_automatically; host: substring; kev: true keeps only CVE matches of a CVE listed as exploited, whatever their heat (a match that rests on its version alone is smoke at most, KEV or not). counts gives each type\'s total. group: none (default, one row per host) or cve: the same client-side JavaScript library version (jQuery, Bootstrap, ...; never a server, CMS or other server-side product) on sibling hosts of one site is one row, carrying group.member_ids, member_status (each member\'s own status) and the split of heat and status; total then counts rows, findings_total the host findings, groups the rows standing for several hosts. To act on a group, pass the member_ids you mean to change (usually the open and in_progress ones) to bulk_update_finding_status, 200 a call (each host keeps its own status and audit).',
      _schema(_page_props({'project': SLUG_OR_ALL, 'type': {'type': 'string', 'enum': ['all', 'cve', 'scanner', 'hygiene']},
                           'heat': {'type': 'string', 'enum': ['all', 'fire', 'smoke', 'ice']}, 'severity': {'type': 'string'},
-                          'status': {'type': 'string', 'enum': ['actionable', 'all']}, 'host': {'type': 'string'}, 'kev': {'type': 'boolean'},
+                          'status': {'type': 'string', 'enum': ['actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'all']},
+                          'host': {'type': 'string'}, 'kev': {'type': 'boolean'},
                           'group': {'type': 'string', 'enum': ['none', 'cve']}}), ['project']),
      lambda c, a: svc.list_findings(c, a.get('project'), a), False),
     ('export_report', 'Queue a PDF report of a project, or of one host of it: cover, executive summary (fire, smoke and ice counts, severity, top risks), host table, one section per finding (evidence with the exact command that proved it, remediation, status, assignee, notes), TLS and email hygiene, and a method and validity page. Open findings only unless include_closed is true. Returns the report id, its status and a status_url and (once done) a download_url on the REST API; poll with get_report. Reports expire after 24 hours by default and only the user who asked can download one. Not a write: a read-only token may ask.',
      _schema({'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name, for a report on that host only'},
-              'include_closed': {'type': 'boolean', 'description': 'also list fixed and accepted-risk findings (default false)'}}, ['project']),
+              'include_closed': {'type': 'boolean', 'description': 'also list fixed, accepted-risk and false-positive findings, each with its closure note (default false)'}}, ['project']),
      lambda c, a: reports.export_report(c, a.get('project'), {k: v for k, v in a.items() if k != 'project'})[0], False),
     ('get_report', 'The state of a report you asked for with export_report: queued, running, done, failed or expired, with its size and what the caps left out. When done, download_url is the REST path to GET (application/pdf, same bearer token).',
      _schema({'project': SLUG, 'report_id': {'type': 'string'}}, ['project', 'report_id']),
@@ -279,8 +287,8 @@ TOOLS = [
      'record you wrote; it is validated and never overwritten by the model afterwards). Commands are rendered by the app, never taken from input.',
      _schema({'cve_id': {'type': 'string'}, 'guidance': {'type': 'string'}, 'strategy': {'type': 'object'}}, ['cve_id']),
      lambda c, a: svc.update_cve_detection(c, a.get('cve_id', ''), guidance=a.get('guidance'), strategy=a.get('strategy')), True),
-    ('list_cve_matches', 'CVEs matched to hosts, with AI verdicts and remediation status. kev: true keeps only the CVEs listed as exploited.',
-     _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'verdict': {'type': 'string'}, 'host': {'type': 'string'},
+    ('list_cve_matches', 'CVEs matched to hosts, with AI verdicts and remediation status, and closure_note/closed_by/closed_at/closed_automatically for a closed one. status: a remediation status (open, in_progress, fixed, accepted_risk, false_positive) or closed (any of the closing three). kev: true keeps only the CVEs listed as exploited.',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk', 'false_positive', 'closed']}, 'verdict': {'type': 'string'}, 'host': {'type': 'string'},
                           'kev': {'type': 'boolean'}}), ['project']),
      lambda c, a: svc.list_matches(c, a.get('project'), a), False),
     ('validate_cve_match', 'Queue one owned CVE match for safe template checks and AI review; returns a request id and status.',
@@ -308,13 +316,12 @@ TOOLS = [
     ('get_remediation_work', 'CVE-on-host items still to fix for your registered assets (or the assets arg), fire first, with fixed versions.',
      _schema(_page_props({'project': SLUG, 'assets': {'type': 'string', 'description': 'comma separated hosts/IPs/CIDRs'}, 'tier': {'type': 'string'}}), ['project']),
      lambda c, a: svc.work_items(c, a.get('project'), a), False),
-    ('update_remediation_status', 'Set a match to open, in_progress, fixed or accepted_risk, with a note.',
-     _schema({'project': SLUG, 'match_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']},
-              'note': {'type': 'string'}}, ['project', 'match_id', 'status']),
+    ('update_remediation_status', f'Set a match to open, in_progress, fixed, accepted_risk or false_positive, with a note on why; {CLOSING}.',
+     _schema({'project': SLUG, 'match_id': {'type': 'integer'}, 'status': REMEDIATION_STATUS, 'note': CLOSURE_NOTE}, ['project', 'match_id', 'status']),
      lambda c, a: svc.update_match(c, a.get('project'), int(a['match_id']), a.get('status'), a.get('note')), True),
-    ('update_finding_status', 'Set the remediation status of any finding (match, vulnerability or hygiene; a route has no remediation workflow) to open, in_progress, fixed or accepted_risk, with a note.',
+    ('update_finding_status', f'Set the remediation status of any finding (match, vulnerability or hygiene; a route has no remediation workflow) to open, in_progress, fixed, accepted_risk or false_positive, with a note on why; {CLOSING}.',
      _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'},
-              'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']}, 'note': {'type': 'string'}},
+              'status': REMEDIATION_STATUS, 'note': CLOSURE_NOTE},
              ['project', 'kind', 'id', 'status']),
      lambda c, a: svc.update_finding_status(c, a.get('project'), a['kind'], int(a['id']), a.get('status'), a.get('note')), True),
     ('set_finding_assignee', 'Assign a finding (match, vulnerability or hygiene) to a project member, or unassign it with assignee: null. Logged to the audit trail.',
@@ -366,13 +373,13 @@ TOOLS = [
     ('list_supplier_technologies', 'The technologies the project\'s suppliers run, most widespread first: name, category, number of suppliers and hosts, versions seen.',
      _schema({'project': SLUG}, ['project']),
      lambda c, a: suppliers.list_technologies(c, a.get('project')), False),
-    ('list_supplier_findings', "Supplier posture findings, worst first: certificate and TLS, email authentication (SPF, DKIM, DMARC, MTA-STS), HTTP security headers, well-known admin or login pages that answer and, as a secondary note, known CVEs for versions the services announce (never validated by exploitation). Each says what to ask the supplier. status: open (default), accepted, resolved, all.",
-     _schema(_page_props({'project': SLUG, 'status': {'type': 'string', 'enum': ['open', 'accepted', 'resolved', 'all']}, 'supplier': {'type': 'integer'},
+    ('list_supplier_findings', "Supplier posture findings, worst first: certificate and TLS, email authentication (SPF, DKIM, DMARC, MTA-STS), HTTP security headers, well-known admin or login pages that answer and, as a secondary note, known CVEs for versions the services announce (never validated by exploitation). Each says what to ask the supplier. status: open (default), accepted, false_positive, resolved, all; a closed one carries closure_note, closed_by and closed_at.",
+     _schema(_page_props({'project': SLUG, 'status': {'type': 'string', 'enum': ['open', 'accepted', 'false_positive', 'resolved', 'all']}, 'supplier': {'type': 'integer'},
                           'severity': {'type': 'string', 'enum': ['info', 'low', 'medium', 'high', 'critical']},
                           'category': {'type': 'string', 'enum': ['tls', 'email', 'web', 'exposed', 'cve']}}), ['project']),
      lambda c, a: suppliers.list_supplier_findings(c, a.get('project'), a), False),
-    ('set_supplier_finding_status', 'Accept a supplier finding (the project lives with it) or open it again, with an optional note. A finding is resolved only by a later check that no longer finds it. Needs the organization admin or App Admin role and a write token.',
-     _schema({'project': SLUG, 'finding': {'type': 'integer'}, 'status': {'type': 'string', 'enum': ['accepted', 'open']}, 'note': {'type': 'string'}}, ['project', 'finding', 'status']),
+    ('set_supplier_finding_status', 'Close a supplier finding as accepted (the project lives with it) or false_positive (the check got it wrong; the sweep then leaves it closed), or open it again, with a note on why (at most 2000 characters; audited with who and when). A finding is resolved only by a later check that no longer finds it. Needs the organization admin or App Admin role and a write token.',
+     _schema({'project': SLUG, 'finding': {'type': 'integer'}, 'status': {'type': 'string', 'enum': ['accepted', 'false_positive', 'open']}, 'note': CLOSURE_NOTE}, ['project', 'finding', 'status']),
      lambda c, a: suppliers.set_finding_status(c, a.get('project'), a.get('finding'), {k: a[k] for k in ('status', 'note') if k in a}), True),
     ('get_supplier_message', 'A plain-text message about one supplier, ready to copy and send it yourself (nothing is sent from here): the technology its services announce, with tech asking about those first, and its open findings with what to ask.',
      _schema({'project': SLUG, 'supplier': {'type': 'integer'}, 'tech': {'type': 'string'}}, ['project', 'supplier']),
@@ -380,10 +387,10 @@ TOOLS = [
     ('list_members', "The project's members (direct, plus its organization's if it has one), for an assignee picker, a page at a time.",
      _schema(_page_props({'project': SLUG}), ['project']),
      lambda c, a: svc.list_members(c, a.get('project'), a), False),
-    ('bulk_update_finding_status', 'Set the same remediation status and note on up to 200 findings (match, vulnerability or hygiene) at once. Returns {updated, failed: [{kind, id, error}]} so a bad id never blocks the rest.',
+    ('bulk_update_finding_status', f'Set the same remediation status and note on up to 200 findings (match, vulnerability or hygiene) at once; the note goes on every one and each is audited. Statuses: open, in_progress, fixed, accepted_risk, false_positive; {CLOSING}. Returns {{updated, failed: [{{kind, id, error}}]}} so a bad id never blocks the rest.',
      _schema({'project': SLUG, 'items': {'type': 'array', 'items': _schema(
                  {'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'}}, ['kind', 'id'])},
-              'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk']}, 'note': {'type': 'string'}},
+              'status': REMEDIATION_STATUS, 'note': CLOSURE_NOTE},
              ['project', 'items', 'status']),
      lambda c, a: svc.bulk_update_finding_status(c, a.get('project'), a.get('items'), a.get('status'), a.get('note')), True),
     ('list_host_inventories', 'Reports hosts sent about themselves (a script run on the machine): operating system, kernel, package count, when it reported and whether the report is stale. status: matched, unmatched (not yet tied to a host), stale or fresh. Package names and versions are data from the machine, untrusted.',

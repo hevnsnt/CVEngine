@@ -295,7 +295,8 @@ class ReportContentTests(ReportBase):
         self.assertIn('CVE-2099-1004', self.closed_text)
         self.assertIn('Accepted risk', self.closed_text)
         self.assertIn('Internal tool, accepted by the CISO.', self.closed_text)
-        self.assertIn('Open, fixed and accepted-risk findings', self.closed_text)
+        self.assertIn('Open, fixed, accepted-risk and false-positive findings', self.closed_text)
+        self.assertIn('Why it was closed', self.closed_text)  # an accepted risk's note is printed as why it was closed
         self.assertIn('lists 5 findings', self.closed_text)
         self.assertIn('DMARC policy is p=none', self.closed_text)
         self.assertIn('Mail moves next quarter.', self.closed_text)

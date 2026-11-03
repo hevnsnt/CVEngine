@@ -158,7 +158,7 @@ class UpgradeGuardTests(Base):
 		row.save()
 		old(row.pk)
 		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
-		notify.baseline_heat_policy()  # migration 0137
+		notify.baseline_heat_policy()  # migration 0139
 		return port
 
 	def test_new_probe_proof_on_the_first_rescan_after_the_update_pages(self):
@@ -397,7 +397,7 @@ class FindingLaneAndScoreTests(Base):
 
 
 class MigrationTests(Base):
-	"""(d): migration 0137 is self-contained (it does not call live code) and baselines the KEV rule."""
+	"""(d): migration 0139 is self-contained (it does not call live code) and baselines the KEV rule."""
 
 	def test_the_migration_marks_what_is_fire_under_the_kev_rule_and_tags_old_pages(self):
 		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
@@ -407,7 +407,7 @@ class MigrationTests(Base):
 							   ai_verdict='uncertain', fire_notified_at=timezone.now())
 		for m in (fire, smoke, paged):
 			old(m.pk)
-		migration = importlib.import_module('cveFeed.migrations.0137_heat_policy_baseline')
+		migration = importlib.import_module('cveFeed.migrations.0139_heat_policy_baseline')
 		source = open(migration.__file__).read()
 		self.assertNotIn('from cveFeed', source)  # frozen: later code cannot change what it did
 		migration.baseline(apps, None)

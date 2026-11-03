@@ -74,7 +74,7 @@ def baseline(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("cveFeed", "0136_cvematch_fire_notified"),
+        ("cveFeed", "0138_supplierfinding_false_positive"),
     ]
 
     operations = [

@@ -61,7 +61,7 @@
 | Host score | A 0 to 100 score per host, with reasons | Not stated | cvENGINE |
 | AI triage | Every finding is classified, with fixed rules so the model cannot dismiss hard evidence | Neo triages and validates | Even |
 | Validation | Read-only reproduction, with the exact command recorded | Findings replay against the live target and arrive with proof | Even |
-| Remediation | Statuses (open, in progress, fixed, accepted risk), notes, an assignee, comments, and an audit trail, set by people or agents | Triaging, Validated, Fixed, and Retesting states, an assignee, and a pull request with the fix and a regression test | ProjectDiscovery |
+| Remediation | Statuses (open, in progress, fixed, accepted risk, false positive), a closure note on why, an assignee, comments, and an audit trail, set by people or agents | Triaging, Validated, Fixed, and Retesting states, an assignee, and a pull request with the fix and a regression test | ProjectDiscovery |
 | Change tracking | A timeline of new hosts, ports, versions, technologies, certificates, and screenshots | Continuous monitoring. A change-diff feature is not described. | cvENGINE |
 
 ## Search, API, and teams

@@ -197,7 +197,7 @@ class RescanPagingTests(Base):
 		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
 		m = self.match_for(self.entry('CVE-2099-6306', []), version='1', in_range=True, template_result='vulnerable', ai_verdict='uncertain')
 		CVEMatch.objects.update(created_at=timezone.now() - timedelta(days=1))
-		migration = importlib.import_module('cveFeed.migrations.0137_heat_policy_baseline')
+		migration = importlib.import_module('cveFeed.migrations.0139_heat_policy_baseline')
 		migration.baseline(apps, None)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
 		from cveFeed import tasks
@@ -217,7 +217,7 @@ class RescanPagingTests(Base):
 		old.fire_notified_at = None
 		old.save()
 		BackgroundCursor.objects.filter(lane=notify.BASELINE_LANE).delete()
-		notify.baseline_heat_policy()  # the upgrade (migration 0137): the old row reads smoke, so it is not marked
+		notify.baseline_heat_policy()  # the upgrade (migration 0139): the old row reads smoke, so it is not marked
 		self.assertIsNone(CVEMatch.objects.get(pk=old.pk).fire_notified_at)
 		scan2, sub2 = self.rescan()
 		self.correlate()

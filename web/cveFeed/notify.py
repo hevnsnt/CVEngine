@@ -117,6 +117,7 @@ def fire_matches(since, scan=None, cve_ids=None):
         from django.db.models import Q
 
         from cveFeed import match_policy
+        from cveFeed.counts import CLOSED
         from cveFeed.models import CVEEntry, CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, fire_tier_q, heat_policy, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
@@ -126,7 +127,8 @@ def fire_matches(since, scan=None, cve_ids=None):
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
         if heat_policy() != LEGACY_POLICY:
             proven |= match_policy.version_read_from_component_q()  # the version is read from the component: fire on a KEV CVE
-        rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').filter(
+        rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').exclude(
+            remediation_status__in=CLOSED).filter(  # a closed decision carried onto the next scan's row is not news
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
         # and fire on the host: a match whose version is not proven shows smoke (and one that is not hot ice), so it is not paged as fire;
@@ -159,13 +161,14 @@ def fire_confirmed(match_ids):
     inventory's rows (``latest_scan_q``) are counted and named, and hosts are counted by name. Never raises."""
     try:
         from cveFeed.correlation import latest_scan_q
+        from cveFeed.counts import CLOSED
         from cveFeed.models import CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, match_heat_rank_expr
         ids = sorted({int(i) for i in match_ids if i})[:MAX_MARK]
         if not ids:
             return False
         fire = list(CVEMatch.objects.filter(unannounced_q(), pk__in=ids).exclude(template_result='vulnerable')
-                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
+                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).exclude(distro_status='patched')
                     .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True))
         claimed = _claim(fire)
         if claimed is None:
@@ -297,7 +300,7 @@ def baseline_heat_policy():
 
     Matches still waiting for their page are left to it: those of a scan that has not finished (``fire_matches`` pages them when it ends), and
     those made in the last ``BASELINE_GRACE_HOURS`` (a feed sync pages its new matches after the AI has judged them). The update itself is
-    baselined by migration 0137 (frozen rules of its own); this runs at worker start and on the 30 second tick. One cheap read when nothing
+    baselined by migration 0139 (frozen rules of its own); this runs at worker start and on the 30 second tick. One cheap read when nothing
     changed, and one locked row so two workers never both do it. Returns how many matches it marked."""
     from datetime import timedelta
 
