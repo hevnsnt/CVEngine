@@ -212,6 +212,27 @@ class ModuleAndOtherSourceTests(Base):
 		self.assertIn(old, site.calls)  # the match's own file, re-read: it still states 1.12.4
 		self.kept(m, row)
 
+	def test_A1_an_alias_never_closes_a_version_another_tool_saw_on_a_deeper_route(self):
+		# bbot or httpx saw jQuery 1.12.4 on /legacy/, which the host still serves; only its front page answers 301 to another host
+		m = self.match('1.12.4', version_source='other')
+		self.sub('www.other.test')
+		site = Site({PAGE: {'status': 301, 'location': 'https://www.other.test/', 'body': ''},
+					 'https://www.v.test/legacy/': {'status': 200, 'body': '<script src="/legacy/jquery-1.12.4.min.js"></script>'}})
+		row, _s, _c = self.validate(site)
+		self.assertIn('another tool', self.kept(m, row)['summary'])
+
+	def test_A2_an_svg_script_given_by_href_is_a_script_the_read_never_reads(self):
+		for attribute in ('href', 'xlink:href'):
+			with self.subTest(attribute):
+				cache_clear()
+				CVEMatch.objects.all().delete()
+				Triage.objects.all().delete()
+				m = self.match('1.12.4')
+				site = Site({PAGE: page('/js/jquery.min.js', extra=f'<svg><script {attribute}="/js/old-bundle.js"></script></svg>'),
+							 JQ: {'status': 200, 'body': script('3.7.1')}, 'https://www.v.test/js/old-bundle.js': {'status': 200, 'body': JQ_1124_BODY}})
+				row, _s, _c = self.validate(site)
+				self.assertIn('SVG', self.kept(m, row)['summary'])
+
 	def test_a_later_read_finding_an_affected_copy_deep_in_a_file_reopens_a_closed_match(self):
 		m = self.match('1.12.4')
 		self.validate(jquery_site('3.6.0'))
@@ -417,7 +438,8 @@ class WholeBodyTests(TestCase):
 	def test_a_hostile_file_costs_linear_time(self):
 		for hostile in (' ' * js_libraries.MAX_SCRIPT_BYTES, ('a' * 31 + '.fn = ') * 8000, '/*!' * 100000,
 						'\n * jQuery v' * 25000, 'createElement(x)' * 18000, 'x.fn=x.prototype={' * 16000, 'import ' * 45000,
-						'export {a,b} ' * 25000, 'import{' + 'a,' * 150000):
+						'export {a,b} ' * 25000, 'import{' + 'a,' * 150000,
+						'<script ' * 40000, '<script ' + 'a' * 300000):
 			started = time.monotonic()
 			js_libraries.whole_body(hostile[:js_libraries.MAX_SCRIPT_BYTES])
 			self.assertLess(time.monotonic() - started, 2.0, hostile[:20])

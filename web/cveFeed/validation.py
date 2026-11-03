@@ -613,7 +613,21 @@ def run_script_read(check, get=None):
         except Exception:  # noqa: BLE001
             pass
     reading = {**reading, 'roots': _current_roots(params['project_id'], sub.name.lower()), 'reused': reused}
+    reading['inventoried_hosts'] = _inventoried(params['project_id'], reading)
     return library_outcome(params, reading)
+
+
+def _inventoried(project_id, reading):
+    """The hosts the read's front pages redirect to that are hosts of this project's current inventory: only a redirect to one of them makes a
+    redirect alias (the project's own host, judged on its own; a redirect to anywhere else proves nothing about this host's scripts)."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    targets = {(urlparse(p.get('location') or '').hostname or '').lower().rstrip('.') for p in reading.get('pages') or []
+               if p.get('outcome') == 'redirect'} - {''}
+    if not targets:
+        return []
+    return sorted(set(Subdomain.objects.filter(target_domain__project_id=project_id, name__in=sorted(targets)).filter(latest_scan_q())
+                      .values_list('name', flat=True)))
 
 
 def _fetch_seen(params, reading, sub, get=None):
@@ -733,7 +747,9 @@ def library_outcome(params, reading):
     - ``reaffirmed``: the copy that runs on a page states, in its own file, a version inside the range (never a hit: the version is on the page,
       the page is not shown to be exploitable);
     - closed (``version_changed`` with a ``close_reason``) in two cases only. (1) A redirect alias: every current root of the host answers 301
-      or 308 to another host. (2) A fixed version, only for a match made from a file's body (``version_source`` body with its ``script_url``:
+      or 308 to another host that is one of the project's inventoried hosts (``reading['inventoried_hosts']``), for a match made from a
+      script of the front page (``version_source`` body or filename, with its ``script_url``); a version another tool named never closes
+      this way (it may be on a deeper route the host still serves). (2) A fixed version, only for a match made from a file's body (``version_source`` body with its ``script_url``:
       a version another tool, a file name or a ``?ver=`` string gave is never closed here, whatever the front page shows), when every one of
       these holds: every web base was read; that file was fetched in this read, read whole, and now states one version, outside the range; every script with a source
       on every page (same-host, same-site, CDN, third-party and analytics alike: a host the vetter never reads, such as a third-party widget,
@@ -758,6 +774,14 @@ def library_outcome(params, reading):
             out['close_reason'] = f'{SCRIPT_READ}. {close} This closes this match only; a later scan that finds the library again matches it again.'
         return out
     alias = _alias_of(params, reading)
+    if alias and not (params.get('version_source') in ('body', 'filename') and params.get('script_url')):
+        # a version another tool named may come from a deeper route the host still serves (only its front page redirects)
+        return result('observed', f'every front page of the host permanently redirects to {alias}, but the {params.get("matched_version") or "matched"} '
+                                  'version came from another tool, not from a script of the front page, and may be on a deeper route this host '
+                                  'still serves: a redirect alias closes only a match made from the front page\'s own script')
+    if alias and alias not in (reading.get('inventoried_hosts') or ()):
+        return result('observed', f'every front page of the host permanently redirects to {alias}, which is not one of this project\'s inventoried '
+                                  'hosts: a redirect alias closes a match only when its target is a host of the project, judged on its own')
     if alias:
         return result('version_changed', f'every front page of the host permanently redirects to {alias}: its scripts are that host\'s',
                       f'A fresh read shows every front page of this host answers a permanent redirect to {alias} (a redirect alias): it serves no '

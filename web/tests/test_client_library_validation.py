@@ -119,6 +119,7 @@ class LibraryOutcomeTests(unittest.TestCase):
 
 	def outcome(self, *pages, params=None, **reading):
 		"""``library_outcome`` of ``pages``; unless ``scanned`` is given, every copy a page's file states was fetched and is whole."""
+		reading.setdefault('inventoried_hosts', ['www.other.test'])  # the alias target is one of the project's own hosts
 		if 'scanned' not in reading:
 			reading['scanned'] = {c['url']: whole(c['version']) for p in pages for r in (p.get('records') or {}).values() for c in r['copies']
 								  if c.get('source') == 'body' and not c.get('truncated')}
@@ -151,6 +152,16 @@ class LibraryOutcomeTests(unittest.TestCase):
 		alias = self.outcome(permanent, {**permanent, 'base': 'http://www.v.test', 'status': 308})
 		self.assertEqual(alias['status'], 'version_changed')
 		self.assertIn('redirect alias', alias['close_reason'])
+		named = self.outcome(permanent, params={'version_source': 'filename'})  # a file name the front page's script carried
+		self.assertEqual(named['status'], 'version_changed')
+		# never for a version another tool named (it may have seen it on a deeper route the host still serves), nor for a match with no
+		# script of the front page behind it, nor when the target is not one of the project's own inventoried hosts
+		for params, reading in (({'version_source': 'other', 'script_url': ''}, {}), ({'version_source': 'other'}, {}),
+								({'version_source': 'body', 'script_url': ''}, {}), ({}, {'inventoried_hosts': []}),
+								({}, {'inventoried_hosts': ['www.v.test']})):
+			kept = self.outcome(permanent, params=params, **reading)
+			self.assertEqual(kept['status'], 'observed', (params, reading))
+			self.assertNotIn('close_reason', kept)
 
 	def test_anything_that_leaves_doubt_is_observed_and_never_closes(self):
 		permanent = {'base': 'https://www.v.test', 'outcome': 'redirect', 'status': 301, 'location': 'https://www.other.test/'}
@@ -432,9 +443,17 @@ class LibraryValidationTests(Base):
 
 	def test_a_permanent_redirect_on_every_root_closes_and_a_temporary_one_never_does(self):
 		m = self.match()
+		self.sub('www.other.test')  # the target is one of the project's own hosts
 		row, _stats, _calls = self.validate(Site({PAGE: {'status': 301, 'location': 'https://www.other.test/', 'body': ''}}))
 		self.assertEqual(self.step(row)['library']['pages'][0]['status'], 301)
 		self.assert_closed(m, row, 'redirect alias')
+
+	def test_a_permanent_redirect_to_a_host_outside_the_inventory_is_not_closed(self):
+		m = self.match()
+		row, _stats, _calls = self.validate(Site({PAGE: {'status': 301, 'location': 'https://www.other.test/', 'body': ''}}))
+		self.assertEqual(self.step(row)['result'], 'observed')
+		self.assertIn('not one of this project', self.step(row)['summary'])
+		self.assert_open(m)
 
 	def test_a_302_to_a_login_page_is_not_an_alias(self):
 		m = self.match()
@@ -636,6 +655,7 @@ class AcmeSites(Site):
 	30 theme and plugin scripts, a ``?ver=1.0.4`` theme and a ``?ver=3.2.1`` form plugin that a technology scan read as jQuery); and
 	info.acme.test (a hosted marketing site, jQuery 1.11.2)."""
 	ALIASES = ('www', 'blog', 'careers', 'learn', 'giving')
+	REDIRECTING = ALIASES + ('old',)
 
 	def __init__(self):
 		super().__init__()
@@ -646,7 +666,7 @@ class AcmeSites(Site):
 		self.calls.append(url)
 		host, path = re.match(r'https?://([^/]+)(.*)', url).groups()
 		answer = {'status': 200, 'body': '!function(){var x=1}();'}
-		if host.split('.')[0] in self.ALIASES and path in ('', '/'):
+		if host.split('.')[0] in self.REDIRECTING and path in ('', '/'):
 			answer = {'status': 301, 'location': 'https://acme.test/', 'body': MOVED}
 		elif host == 'acme.test' and path == '/':
 			answer = {'status': 200, 'body': self.main}
@@ -662,7 +682,9 @@ class AcmeSites(Site):
 
 
 class EstateOracleTests(Base):
-	"""The review's ground truth on a live estate (names replaced): the five redirect aliases close; acme.test's 3.2.1, 1.0.4 and 3.4.1
+	"""The review's ground truth on a live estate (names replaced): the five redirect aliases redirect to acme.test, one of the project's own
+	hosts, but their 3.2.1 is a technology scan's reading (another tool, which may have seen it on a deeper route), so they stay open; the
+	same alias with a version its front page's script carried closes; acme.test's 3.2.1, 1.0.4 and 3.4.1
 	jQuery matches (a technology scan's readings of ``?ver=`` strings) stay open although the running jQuery 3.7.1 was read in full, because
 	its thirty theme and plugin scripts are more than the six-script budget reads (any of them may hold an older copy) and the page loads
 	Google Tag Manager at run time; and info.acme.test stays at 1.11.2, re-affirmed."""
@@ -679,6 +701,10 @@ class EstateOracleTests(Base):
 			self.match(version, cve=cve, name='acme.test', version_source='other')
 		self.sub('info.acme.test', domain)
 		self.match('1.11.2', name='info.acme.test')
+		self.sub('old.acme.test', domain)
+		self.match('3.2.1', name='old.acme.test', version_source='filename')
+		CVEMatch.objects.filter(subdomain__name='old.acme.test').update(evidence={'source': 'tech', 'version_source': 'filename',
+			'script_url': 'https://old.acme.test/js/jquery-3.2.1.min.js', 'range': {'introduced': '1.0.3', 'fixed': '3.5.0'}})
 		site = AcmeSites()
 		with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
 			self.validate(site)
@@ -686,7 +712,8 @@ class EstateOracleTests(Base):
 		for m in CVEMatch.objects.select_related('subdomain'):
 			row = Triage.objects.get(match=m)
 			got[(m.subdomain.name, m.matched_version)] = (self.step(row)['result'], m.ai_verdict or '')
-		want = {(f'{a}.acme.test', '3.2.1'): ('version_changed', 'not_affected') for a in AcmeSites.ALIASES}
+		want = {(f'{a}.acme.test', '3.2.1'): ('observed', '') for a in AcmeSites.ALIASES}
+		want[('old.acme.test', '3.2.1')] = ('version_changed', 'not_affected')
 		want.update({('acme.test', v): ('observed', '') for v in ('3.2.1', '1.0.4', '3.4.1')})
 		want[('info.acme.test', '1.11.2')] = ('reaffirmed', '')
 		self.assertEqual(got, want)

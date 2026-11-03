@@ -1189,6 +1189,8 @@ _LOADERS = (
     ('static import', re.compile(r'''(?<![\w$."'`])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
     ('re-export', re.compile(r'''(?<![\w$."'`])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
     ('service worker', re.compile(r'serviceWorker\s{0,4}\.\s{0,4}register\s{0,4}\(')),
+    # an SVG script given by href or xlink:href: a browser loads it, the page parse (``src`` only) never reads it
+    ('SVG script href', re.compile(r'''<script\b[^<>]{0,2000}?\s(?:xlink:)?href\s{0,4}=''', re.IGNORECASE)),
 )
 
 
