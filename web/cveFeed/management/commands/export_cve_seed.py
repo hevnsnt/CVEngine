@@ -21,6 +21,7 @@ class Command(BaseCommand):
                 if not batch:
                     break
             detection_author.refresh_rules(batch=5000)
+            detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
             self.stdout.write(f'{written} detection record(s) written before the export')
         manifest = seed.export_seed(options['out'], progress=lambda n: self.stdout.write(f'  {n} CVEs...'))
         self.stdout.write(f"{options['out']}: {manifest['count']} CVEs (fire {manifest['tiers']['fire']}, smoke {manifest['tiers']['smoke']}, "

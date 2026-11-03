@@ -371,8 +371,8 @@ class HotValidationTests(TestCase):
             self.assertEqual(hot_validation.enqueue(row, 'smoke'), 'queued')
         job = AutomaticValidation.objects.get(triage=row)
         old_signature = row.signature
-        def checked(project_id, ids):
-            self.assertEqual((project_id, ids), (self.project.pk, [row.pk]))
+        def checked(project_id, ids, unattended=True):
+            self.assertEqual((project_id, ids, unattended), (self.project.pk, [row.pk], True))  # an automatic job is unattended
             Triage.objects.filter(pk=row.pk).update(validation_status='observed')
             return {'ran': 1, 'reused': 0, 'no_check': 0}
         with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \

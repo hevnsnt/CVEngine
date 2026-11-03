@@ -888,9 +888,11 @@ def signature_of(obj):
 # the stored reasons of a deterministic closure (this module, cveFeed.locality, cveFeed.match_policy): a verdict that starts with one
 # was reached on the evidence alone, so it is reusable and a person's or the AI's later answer does not replace it
 DIFFERENT_PRODUCT = 'Closed automatically: different product'
+# a validation's fresh read of the page's scripts (cveFeed.validation.library_outcome): the library is fixed, or the host is an alias
+SCRIPT_READ = 'Closed automatically: fresh script read'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
-               match_policy.NO_EVIDENCE)
+               match_policy.NO_EVIDENCE, SCRIPT_READ)
 
 
 def closure_summary(reason):
@@ -995,6 +997,8 @@ def invalid_identity_reason(match):
     """
     if match.template_result == 'vulnerable' or match.distro_status == 'vulnerable' or match_policy.has_standing(match):
         return ''  # a check found it, or a person or the host vouches for it: no name comparison closes that
+    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(SCRIPT_READ):
+        return match.ai_reason  # a validation read the page's scripts again and closed it: that stands until a person works it
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
@@ -1030,8 +1034,9 @@ def invalid_identity_reason(match):
             'it does not establish that the software is absent elsewhere on the host.')
 
 
-def close_invalid_correlation(match, reason=None):
-    """Persist a scoped, auditable closure and a reusable deterministic verdict for bad product links."""
+def close_invalid_correlation(match, reason=None, host_only=False):
+    """Persist a scoped, auditable closure for bad product links, on this row only. ``host_only`` (a closure reached from what this host
+    showed, a fresh script read) is kept for the callers; no closure is shared with another host since task 256."""
     from django.utils import timezone
     from cveFeed import activity, scoring, triage
     from cveFeed.models import CVEMatch
@@ -1045,9 +1050,10 @@ def close_invalid_correlation(match, reason=None):
     if not pairs:
         return False
     row, _ = pairs[0]
-    # Never shared (no MatchVerdict, no TriageVerdict): the reason is about this host's own sighting (the port's product, its CPE, a
-    # technology name) or its own page (cveFeed.js_libraries), which the host's owner controls, while the shared keys hold only the
-    # advisory's product and the version. Another host with the same key is judged on its own evidence by the same check, at no cost (task 256).
+    # Never shared (no MatchVerdict, no TriageVerdict), whether or not ``host_only`` says so: the reason is about this host's own sighting
+    # (the port's product, its CPE, a technology name) or its own page (cveFeed.js_libraries, or a validation's fresh script read), which the
+    # host's owner controls, while the shared keys hold only the advisory's product and the version. Another host with the same key is judged
+    # on its own evidence by the same check, at no cost (task 256).
     row.verdict, row.status, row.classification, row.reason = None, 'triaged', 'not_applicable', reason
     row.save(update_fields=['verdict', 'status', 'classification', 'reason', 'updated_at'])
     CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='not_affected', ai_reason=reason, ai_model='deterministic-correlation',

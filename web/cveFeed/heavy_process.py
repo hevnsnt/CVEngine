@@ -8,11 +8,14 @@ leader. It raises what the gate raises (``ScanAborted``, ``MemoryBusy``, ``Memor
 import subprocess
 
 
-def run(kind, argv, timeout, label='', env=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
+def run(kind, argv, timeout, label='', env=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, on_start=None):
     """``subprocess.CompletedProcess`` of ``argv`` (no stdin) run as the heavy job ``kind``. ``stdout`` and ``stderr`` are ``DEVNULL`` or
-    ``PIPE`` (the text then comes back on the result)."""
+    ``PIPE`` (the text then comes back on the result). ``on_start()`` is called once the job is let start (after its memory wait), right
+    before the process: the egress ledger counts a run there, so a run refused at the wait is not counted as sent."""
     from reNgine import resources
     with resources.heavy_job(kind, label=label) as job:
+        if on_start is not None:
+            on_start()
         proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, text=True, start_new_session=True)
         job.attach(proc)
         try:

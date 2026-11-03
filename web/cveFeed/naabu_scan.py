@@ -121,12 +121,13 @@ def run_naabu(ips, binary=None):
 def _run_naabu_once(ips, binary, exclude=()):
     from cveFeed import local_egress
     from reNgine import resources
-    local_egress.record_naabu(ips, exclude)
     timeout = min(RUN_TIMEOUT_MAX, RUN_TIMEOUT_BASE + RUN_TIMEOUT_PER_IP * len(ips))
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
         handle.write('\n'.join(ips) + '\n')
     try:
         with resources.heavy_job(SERVICE, label=f'{len(ips)} address(es)') as job:
+            exclude = local_egress.launch_naabu(ips, exclude)  # charged when it starts (after the memory wait); no room: that port is left out
+            local_egress.record_naabu(ips, exclude)
             proc = subprocess.Popen(build_command(binary, handle.name, rate(), exclude), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, start_new_session=True)
             job.attach(proc)

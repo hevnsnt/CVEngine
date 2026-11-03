@@ -90,6 +90,86 @@ def refresh_rules(batch=None):
     return done
 
 
+LIBRARY_LANE = 'client_library_records_v1'  # the BackgroundCursor of the one-time rewrite below; a later rules change of the same kind takes _v2
+LIBRARY_BATCH = 2000
+LIBRARY_NOTE = ('Rules revised in 1.3.3: the library version is read from the script files the page loads (html-libraries probe), '
+                'not from a service banner; host checks name only system-wide packages.')
+
+
+def _library_prefilter():
+    """A loose SQL pattern for an ``affected`` list that may name a client-side library (the first word of each library's name and its
+    key): only a prefilter, ``detection.client_libraries`` decides."""
+    import re
+    words = {re.split(r'[^a-z0-9]', n.lower())[0] for key, (product, _s, _d) in detection._libraries().items() for n in (key, product)}
+    return '(' + '|'.join(sorted(w for w in words if w)) + ')'
+
+
+def refresh_client_library_records(batch=LIBRARY_BATCH, seconds=60):
+    """Rewrite, once, the stored records of the CVEs in a client-side JavaScript library that an older rules author wrote with an nmap banner
+    check and host package checks named after every packaging (``jquery``, ``components/jquery``). A durable cursor walks the records in id
+    order, so every existing install (and a record imported later from an older seed, which gets a higher id) is corrected without a manual
+    step and nothing is read twice. The same merge as ``refresh_rules`` applies: the rules' checks are replaced, the checks and the words a
+    model wrote are kept, and a model-written record is queued for the model's own revision (within the daily budget) rather than rewritten
+    by the rules. A manual record is never touched. Returns how many records changed."""
+    import time
+    from django.db import transaction
+    from django.db.models import Max, TextField
+    from django.db.models.functions import Cast
+    from cveFeed.models import BackgroundCursor
+    deadline = time.monotonic() + seconds
+    pattern = _library_prefilter()
+    changed = 0
+    while time.monotonic() < deadline:
+        with transaction.atomic():
+            cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane=LIBRARY_LANE)
+            top = CVEDetection.objects.aggregate(top=Max('pk'))['top'] or 0
+            if cursor.last_pk >= top:
+                return changed
+            window = list(CVEDetection.objects.filter(pk__gt=cursor.last_pk, pk__lte=top).order_by('pk').values_list('pk', flat=True)[:batch])
+            if not window:
+                return changed
+            rows = (CVEDetection.objects.filter(pk__in=window).exclude(source='manual')
+                    .annotate(affected_text=Cast('cve_entry__affected', TextField())).filter(affected_text__iregex=pattern)
+                    .select_related('cve_entry').order_by('pk'))
+            for row in rows:
+                changed += _refresh_library_record(row)
+            cursor.last_pk = window[-1]
+            cursor.save(update_fields=['last_pk', 'updated_at'])
+    return changed
+
+
+def _refresh_library_record(row):
+    """Bring one record of a client-library CVE to the current rules; 1 when it changed, 0 when it already had them or is not one."""
+    cve = row.cve_entry
+    if not detection.cve_libraries(cve):
+        return 0  # not a client-side library CVE (a server-side React or Vue advisory among them): its record stays as it is
+    fresh = _rules_for(cve)
+    if not fresh:
+        return 0
+    old = row.strategy or {}
+
+    def rules_ids(strategy):
+        return [c['id'] for key in ('remote_checks', 'local_checks') for c in (strategy or {}).get(key, []) if not c['id'].startswith(AI_ID_PREFIX)]
+    kept = {**old, 'remote_checks': [c for c in old.get('remote_checks', []) if c['id'].startswith(AI_ID_PREFIX)],
+            'local_checks': [c for c in old.get('local_checks', []) if c['id'].startswith(AI_ID_PREFIX)]} if old else None
+    model_wrote = bool(kept) and (row.source == 'ai' or bool(kept['remote_checks'] or kept['local_checks']))
+    if model_wrote:
+        merged = detection.merge_strategies(fresh, kept)  # the model's words and checks stand; the rules' checks are the rules'
+    else:
+        merged = {**fresh, 'revision_note': LIBRARY_NOTE}
+    merged = detection.finalize(merged, cve.cvss_vector)
+    same_checks = rules_ids(old) == rules_ids(fresh) and [c.get('how') for c in old.get('remote_checks', [])] == \
+        [c.get('how') for c in merged.get('remote_checks', [])]
+    if same_checks and (model_wrote or old.get('confirm_steps') == merged.get('confirm_steps')):
+        return 0
+    now = timezone.now()
+    fields = {'strategy': merged, 'rules_at': now, 'updated_at': now, 'schema_version': detection.SCHEMA_VERSION}
+    if row.source == 'ai' and row.ai_model:
+        fields['ai_attempted_at'] = None  # the model's own revision pass (author_with_ai), within the daily budget
+    CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(**fields)
+    return 1
+
+
 # --- the AI author ---------------------------------------------------------------------------------------------------------
 
 INTAKE_POLICY = (
@@ -124,7 +204,10 @@ SYSTEM_PROMPT = (
     '{"id": "<lowercase slug>", "kind": <kind>, "description": "<at most 200 characters>", "params": {...}, "confidence": "high"|"medium"|"low"}. '
     'remote_checks kinds and params: version_banner {product, ranges: [{introduced?, fixed?, last_affected?}], source}; '
     'http_probe {method: GET|HEAD, path: "/...", expect_status: [200], expect_contains?: "<text>", expect_absent?: "<text>"} '
-    '(needs expect_contains or expect_absent; read-only requests only); nse_script {script: <one of: ' + ', '.join(detection._nse_allowlist()) +
+    '(needs expect_contains or expect_absent; read-only requests only); script_version {library: <one of: ' +
+    ', '.join(detection._libraries()) + '>, ranges: [...]} for a client-side JavaScript library a web page loads (the version is read from '
+    'the script file itself, never use version_banner or a package check of the library name for one; check only a system-wide package such '
+    'as Debian libjs-jquery); nse_script {script: <one of: ' + ', '.join(detection._nse_allowlist()) +
     '>, expect_contains?}; tls_check {property: protocol|cipher|cert_expiry|cert_key_bits, expect}; port_service {port, service?}. '
     'local_checks kinds and params: package_version {ecosystem: any|dpkg|rpm|apk|pip|npm|gem|maven|nuget|go, package, affected_below or '
     'fixed_version}; file_version {path, contains}; config_setting {path, key, match: present|absent|equals, value?}; '
@@ -341,7 +424,8 @@ def mark_changed_for_revision(limit=200):
 
 
 def author_pending(provider=None):
-    out = {'rules': author_rules(), 'refreshed': refresh_rules(), 'ai': 0, 'revisions_queued': 0}
+    out = {'rules': author_rules(), 'refreshed': refresh_rules(), 'libraries': refresh_client_library_records(), 'ai': 0,
+           'revisions_queued': 0}
     if provider is not None:
         out['revisions_queued'] = mark_changed_for_revision()
         out['ai'] = author_with_ai(provider, workers=4)
