@@ -3,7 +3,7 @@
 Before 1.3.3 a closing answer reached on one host (an automatic identity closure read from that host's sighting, or an AI answer to what
 that host showed) was stored in tables that have no tenant (``MatchVerdict``, ``TriageVerdict``) and handed to any other host, in any
 organization, whose finding had the same key: correlation seeded a new CVE match from it as not affected, and triage reused it instead of
-asking. The code no longer does either (``correlation._seedable``, ``triage.closure_reusable``), and migration 0138 records the origin of
+asking. The code no longer does either (``correlation._seedable``, ``triage.closure_reusable``), and migration 0139 records the origin of
 the closing answers it can prove. This module finds the findings that were already closed that way and puts them back where their own
 evidence leaves them, then deletes the shared not_affected rows nothing reads any more. It never touches a finding a validation hit
 confirmed, a remediation status, an assignee or a comment.

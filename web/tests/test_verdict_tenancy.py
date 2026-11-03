@@ -213,6 +213,17 @@ class StoredSeedTests(TenancyFixture):
 		correlation.save_matches([self.row(self.b, cve, in_range=True, distro='vulnerable')])
 		self.assertEqual(self.match_of(self.b).ai_verdict, 'affected')
 
+	def test_an_uncertain_verdict_is_not_seeded_onto_a_match_with_hard_evidence(self, _log):
+		# "uncertain" keeps a fire match with hard evidence other than a template hit or a tracker listing out of the fire page
+		# (notify.fire_matches): from another tenant's answer that is a downgrade, so the match's own triage decides
+		cve = self.cve()
+		self.stored(cve, verdict='uncertain', reason='the page says it is a test system', in_range=True, model='a-model')
+		correlation.save_matches([self.row(self.b, cve, in_range=True, runzero={'id': 'r1'})])
+		self.assertEqual(self.match_of(self.b).ai_verdict, '')
+		CVEMatch.objects.all().delete()
+		correlation.save_matches([self.row(self.b, cve, in_range=True)])  # version-only: uncertain is its ceiling anyway, still shared
+		self.assertEqual(self.match_of(self.b).ai_verdict, 'uncertain')
+
 	def test_another_products_verdict_for_the_same_version_string_is_never_used(self, _log):
 		cve = self.cve()
 		MatchVerdict.objects.create(cve_entry=cve, matched_product='Jenkins Lookalike', matched_version='2.426.2', version_in_range=True,
@@ -319,6 +330,37 @@ class AiAnswerTests(TenancyFixture):
 		self.assertEqual(Triage.objects.get(match=theirs).validation_status, 'none')
 
 
+	def test_a_reused_closure_never_closes_a_match_with_hard_evidence_on_another_host(self, _log):
+		# runZero's report and the host's own inventory are hard evidence (match_policy.has_hard_evidence) that set no floor and are not in the
+		# signature: the same project's answer for another host must not close them
+		mine = self.cve_match(self.a)
+		runzero = self.cve_match(self.a, sub=self.a.host('two.attacker.test'))
+		reported = self.cve_match(self.a, sub=self.a.host('three.attacker.test'))
+		CVEMatch.objects.filter(pk=runzero.pk).update(evidence={'source': 'port', 'service_extra': 'Widget', 'runzero': {'id': 'r1'}})
+		CVEMatch.objects.filter(pk=reported.pk).update(evidence={'source': 'port', 'service_extra': 'Widget', 'host_reported': True})
+		pairs = triage.track(triage.with_cves([mine, runzero, reported]))
+		self.assertEqual(len({d['signature'] for _, d in pairs}), 1)
+		self.triage(triage.with_cves([mine]), provider=self.provider(answer('not_applicable')))
+		provider = self.provider(answer('likely'))
+		self.triage(triage.with_cves([runzero, reported]), provider=provider)
+		for match in (runzero, reported):
+			self.assertOpen(match)
+			self.assertEqual(Triage.objects.get(match=match).classification, 'needs_validation')
+
+	def test_a_downgraded_severity_from_another_tenant_is_not_shown(self, _log):
+		from agentapi import services
+		crafted = self.route(self.a, 'Decoy')
+		real = self.route(self.b, 'Index of /backup')
+		again = RouteAuth.objects.create(project=self.a.project, domain=self.a.domain, host=self.a.sub.name, url=f'https://{self.a.sub.name}/backup/?x',
+										 path='/backup/', auth_state='open', http_status=200, title='Decoy', sensitive_score=10)
+		lowered = json.dumps({'classification': 'needs_validation', 'reason': 'r', 'impact': '', 'severity_adjust': -1,
+							  'severity_reason': 'the page says it is a test system', 'remediation': '', 'validation_steps': []})
+		self.triage([crafted], provider=self.provider(lowered))
+		self.triage([real, again], provider=self.provider(answer('likely')))
+		self.assertEqual(services._triage_brief(Triage.objects.get(route=crafted))['severity_adjust'], -1)  # where it was reached
+		self.assertEqual(services._triage_brief(Triage.objects.get(route=real))['severity_adjust'], 0)  # never on another tenant's finding
+		self.assertEqual(services._triage_brief(Triage.objects.get(route=again))['severity_adjust'], -1)  # the same host keeps it
+
 @mock.patch('cveFeed.activity.log', return_value=None)
 class SameHostReuseTests(TenancyFixture):
 	"""What the fix keeps: a rescan of the same host starts from what that host's own finding earned (issue 206)."""
@@ -347,7 +389,7 @@ class SameHostReuseTests(TenancyFixture):
 
 @mock.patch('cveFeed.activity.log', return_value=None)
 class CleanupTests(TenancyFixture):
-	"""What an earlier version already stored: the origin migration 0138 can prove, and the findings ``release_shared_closures`` reopens."""
+	"""What an earlier version already stored: the origin migration 0139 can prove, and the findings ``release_shared_closures`` reopens."""
 
 	def closed_pair(self, origin=None, model='a-model', fresh=False, signature=None):
 		"""The state before the fix: one stored closing answer held by a finding of each tenant, both matches closed by it."""
@@ -381,8 +423,16 @@ class CleanupTests(TenancyFixture):
 			TriageCall.objects.create(kind='cve_match', signature='e' * 40, project=tenant.project, status='succeeded', expires_at=timezone.now())
 		deterministic = TriageVerdict.objects.create(kind='cve_match', signature='d' * 40, classification='not_applicable',
 													 model='deterministic-correlation')
-		migration = importlib.import_module('cveFeed.migrations.0138_triageverdict_origin')
+		lowered = TriageVerdict.objects.create(kind='cve_match', signature='f' * 40, classification='needs_validation', severity_adjust=-1,
+											   model='a-model')  # a step down in severity is shown only where it was reached
+		TriageCall.objects.create(kind='cve_match', signature='f' * 40, project=self.a.project, status='succeeded', expires_at=timezone.now())
+		raised = TriageVerdict.objects.create(kind='cve_match', signature='c' * 40, classification='likely', model='a-model')
+		TriageCall.objects.create(kind='cve_match', signature='c' * 40, project=self.a.project, status='succeeded', expires_at=timezone.now())
+		migration = importlib.import_module('cveFeed.migrations.0139_triageverdict_origin')
 		migration.neutralise_shared_closures(apps, None)
+		lowered.refresh_from_db()
+		raised.refresh_from_db()
+		self.assertEqual((lowered.project_id, raised.project_id), (self.a.project.pk, None))  # a raising answer needs no origin
 		verdict.refresh_from_db()
 		self.assertEqual((verdict.project_id, verdict.host), (self.a.project.pk, self.a.sub.name))
 		for unproven in (twice, deterministic):

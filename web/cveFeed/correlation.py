@@ -1063,7 +1063,8 @@ def close_invalid_correlation(match, reason=None):
 
 def _seedable(verdict, row):
     """The stored verdict a new or moved match may start from: never a clearing one (not_affected), which may have been reached on another
-    tenant's host from what that host said, and never an "affected" one for a match that stands on its version string alone (``match_policy.version_only``): the verdict may
+    tenant's host from what that host said; never an "uncertain" one for a match with hard evidence, which it would keep off the fire page;
+    and never an "affected" one for a match that stands on its version string alone (``match_policy.version_only``): the verdict may
     have been earned on a host with a template hit or a distribution listing, which this match does not have, and the ceiling
     (``triage.ceiling``) holds such a match at needs_validation. It starts unjudged instead and is triaged under the ceiling."""
     if verdict and (verdict.ai_reason or '').startswith(js_libraries.LIBRARY_CLOSED):
@@ -1075,6 +1076,11 @@ def _seedable(verdict, row):
         # Never a closing one, whatever its reason (task 256): the stored row has no tenant and its key is only the CVE, product, version, range
         # result and source, so it may have been reached on another organization's host from what that host said (a banner, a CPE, a page, an
         # AI reading of them). A shared answer may raise attention, never close. The same host's own answer is carried by triage (its twin).
+        return None
+    if verdict and verdict.ai_verdict == "uncertain" and match_policy.has_hard_evidence(
+            row.get("source"), row.get("evidence"), row.get("template_result", ""), row.get("distro_status", "")):
+        # nor lower one: "uncertain" keeps a match with hard evidence out of the fire page (notify.fire_matches), and the stored answer may
+        # rest on what another tenant's host showed. Its own triage decides; a version-only match is held there anyway (triage.ceiling)
         return None
     return verdict
 

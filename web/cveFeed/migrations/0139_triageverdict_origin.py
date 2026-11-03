@@ -8,7 +8,8 @@ def neutralise_shared_closures(apps, schema_editor):
     """Give the closing answers already stored the origin they can be proven from, so only that tenant keeps reusing them (task 256).
 
     The origin of a model's answer is the project that reserved the provider call for its signature (TriageCall, kept for the daily caps):
-    a closing TriageVerdict (likely_false_positive, not_applicable) asked for by exactly one project gets that project, and the host when
+    a closing TriageVerdict (likely_false_positive, not_applicable), or one whose severity step is down (shown only where it was reached:
+    ``triage.shown_severity_adjust``), asked for by exactly one project gets that project, and the host when
     that project's findings holding it are all on one host. For the kinds whose prompt shows host text the signature does not carry (every
     kind but a CVE match), only a one-host answer gets an origin. Every other closing answer (asked by several projects, by none on record,
     or written by a deterministic closure) keeps none, so it closes nothing more. The findings that already hold one keep their
@@ -19,10 +20,10 @@ def neutralise_shared_closures(apps, schema_editor):
     TriageVerdict = apps.get_model('cveFeed', 'TriageVerdict')
     TriageCall = apps.get_model('cveFeed', 'TriageCall')
     Triage = apps.get_model('cveFeed', 'Triage')
-    from django.db.models import Max, Min
+    from django.db.models import Max, Min, Q
     last = 0
     while True:
-        chunk = list(TriageVerdict.objects.filter(classification__in=CLOSING, project__isnull=True, pk__gt=last)
+        chunk = list(TriageVerdict.objects.filter(Q(classification__in=CLOSING) | Q(severity_adjust__lt=0), project__isnull=True, pk__gt=last)
                      .order_by('pk').values_list('pk', 'kind', 'signature')[:1000])
         if not chunk:
             break
@@ -48,7 +49,10 @@ def neutralise_shared_closures(apps, schema_editor):
 
 class Migration(migrations.Migration):
     """Where a stored triage answer was reached (task 256): two nullable or defaulted columns, so adding them rewrites nothing; then the
-    closing answers already stored get the origin they can be told from (see ``neutralise_shared_closures``). Reversing drops the columns.""" 
+    closing answers already stored get the origin they can be told from (see ``neutralise_shared_closures``). Reversing drops the columns.
+
+    Numbered 0139 and placed after develop's 0136: open PRs add 0137 (#386, heat policy) and 0138 (#390, supplier false positive). Whichever of
+    these merges after another changes its dependency to the newest leaf (no merge migration is needed: the three touch different models)."""
 
     dependencies = [
         ("dashboard", "0031_ai_provider_request_settings"),

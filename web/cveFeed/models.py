@@ -1009,7 +1009,7 @@ class TriageVerdict(models.Model):
     leaves the finding for validation is reused by every host with the same signature. A closing one (likely_false_positive, not_applicable)
     is reused only within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE
     match) only on that host: a crafted page, banner or response on one tenant's host must not close another's finding (``triage._apply``,
-    task 256). An answer whose origin could not be proven (stored before it was recorded: migration 0138) has none and closes no other finding."""
+    task 256). An answer whose origin could not be proven (stored before it was recorded: migration 0139) has none and closes no other finding."""
 
     CLASSIFICATIONS = ("confirmed", "likely", "needs_validation", "likely_false_positive", "not_applicable")
     kind = models.CharField(max_length=16)

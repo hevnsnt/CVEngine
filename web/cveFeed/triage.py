@@ -1090,16 +1090,31 @@ def closure_reusable(verdict, row, kind, match=None):
     """Whether the stored closing answer ``verdict`` may close ``row`` (a Triage row): only in the project it was reached in, only on that
     host for the kinds whose prompt carries host text the signature does not (a page title, a path, a response: every kind but a CVE match,
     whose shown host text is in its signature, ``bind_host_text``), and never, from another host, a CVE match a person stands behind (assigned,
-    or a remediation status other than open). An answer with no recorded origin (stored before it was recorded) closes nothing more.
+    or a remediation status other than open) or one with hard evidence (``match_policy.has_hard_evidence``). An answer with no recorded origin (stored before it was recorded) closes nothing more.
     The signature has no tenant, so without this one organization's host could close another's finding by showing the same evidence with a
     crafted page or banner beside it (task 256)."""
-    if verdict.project_id is None or verdict.project_id != row.project_id:
+    if not reached_here(verdict, row, kind):
         return False
     if (verdict.host or '') == (row.host or ''):
         return True
-    if kind != 'cve_match':
+    # another host of the same project: never a match a person stands behind, nor one with hard evidence that sets no floor and is not in
+    # the signature (a runZero report, the host's own inventory, a validation hit: match_policy.has_hard_evidence)
+    return match is None or not (match.assignee_id or match.remediation_status != 'open' or not match_policy.is_version_only(match))
+
+
+def reached_here(verdict, row, kind):
+    """Whether the stored answer ``verdict`` was reached for ``row``'s own tenant: the same project, and the same host for the kinds whose
+    prompt shows host text the signature does not carry (every kind but a CVE match). An answer with no recorded origin never is."""
+    if verdict.project_id is None or verdict.project_id != row.project_id:
         return False
-    return match is None or not (match.assignee_id or match.remediation_status != 'open')
+    return kind == 'cve_match' or (verdict.host or '') == (row.host or '')
+
+
+def shown_severity_adjust(verdict, row):
+    """The model's severity step ``verdict`` shows on ``row`` (a Triage row): a step down only where the answer was reached
+    (``reached_here``), since it may rest on what another tenant's host showed; a step up anywhere (task 256)."""
+    adjust = (verdict.severity_adjust or 0) if verdict is not None else 0
+    return adjust if adjust >= 0 or reached_here(verdict, row, row.kind) else 0
 
 
 def _apply(verdict, group):
