@@ -553,6 +553,43 @@ class TemplateHitTests(Fixture):
             self.assertTrue(notify.template_hits(pair))  # nor is a genuine hit held back because its result is not recorded yet
         self.assertEqual(send.call_count, 3)
 
+    def test_template_hits_checks_each_hit_against_its_own_projects_matches(self):
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        from cveFeed import hit_batch
+        from dashboard.models import Org, Project
+        from startScan.models import ScanHistory, Subdomain
+        from targetApp.models import Domain
+        org = Org.objects.create(name='Other', slug='other-org')
+        other = Project.objects.create(name='O', slug='other-p', insert_date=timezone.now(), org=org)
+        domain = Domain.objects.create(name='example.test', project=other, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+        sub = Subdomain.objects.create(name=HOST, target_domain=domain, scan_history=scan)  # the same host name in another project
+        CVEMatch.objects.create(cve_entry=self.entry, subdomain=sub, source='tech', matched_product='jquery', matched_version='3.4.1',
+                                version_in_range=True, confidence=0.5, evidence={'source': 'tech'},
+                                template_result=templategen.VERSION_ONLY_RESULT)
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+        pair = [('CVE-2020-11023', HOST)]
+        with mock.patch('cveFeed.notify._send', return_value=True) as send:
+            self.assertTrue(notify.template_hits(pair, project=self.project.pk))  # its own project's match is a genuine hit
+            self.assertFalse(notify.template_hits(pair, project=other.pk))  # the other project's is version-only
+            self.assertTrue(notify.template_hits([('CVE-2020-11023', HOST, self.project.pk)]))
+            self.assertFalse(notify.template_hits([('CVE-2020-11023', HOST, other.pk)]))
+            # an auto-fire run's batch gathers several projects' tests: each hit is checked against its own project
+            for project, sent in ((self.project.pk, True), (other.pk, False)):
+                cache.clear()
+                batch = hit_batch.start()
+                hit_batch.record(batch, pair, project=project)
+                self.assertEqual(hit_batch.leave(batch), sent, project)
+            cache.clear()
+            batch = hit_batch.start()
+            hit_batch.record(batch, pair, project=self.project.pk)
+            hit_batch.record(batch, pair, project=other.pk)
+            self.assertTrue(hit_batch.leave(batch))
+        self.assertEqual(send.call_count, 4)
+        self.assertEqual(send.call_args_list[-1].args[0].count(HOST), 1)  # one host, named once
+
     def test_fire_confirmed_never_pages_a_version_class_hit(self):
         CVEMatch.objects.filter(pk=self.match.pk).update(template_result=templategen.VERSION_ONLY_RESULT)
         with mock.patch('cveFeed.notify._send', return_value=True) as send:

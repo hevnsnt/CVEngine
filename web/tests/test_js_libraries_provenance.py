@@ -61,7 +61,10 @@ class Hosts(RouteFixture, TestCase):
                 for r in correlation.collect_subdomain_matches(sub, self.index, {c.id: c for c in CVES})}
 
 
-WP_BODIES = {'/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN, '/wp-content/themes/acme/js/jquery.fancybox.js': FANCYBOX}
+# the plugin as it is served with its licence comment stripped (a minifier's default): nothing in it beyond what was recognised, so the
+# page is known whole. The live file keeps its fancyBox licence block, which no rule names: then the page contradicts nothing
+FANCYBOX_STRIPPED = '(function(r,G,f,v){})(window,document,jQuery);'
+WP_BODIES = {'/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN, '/wp-content/themes/acme/js/jquery.fancybox.js': FANCYBOX_STRIPPED}
 
 
 def front_page_evidence(page, bodies, serve_rest=True):
@@ -113,6 +116,14 @@ class AnotherToolsVersionTests(Hosts):
         self.assertEqual(evidence['reason'], "the page's own scripts say jQuery 3.7.1; the 1.0.4 came from a technology scan")
         # server-side products on the same host are not touched
         self.assertEqual(found[('nginx', '1.24.0')]['confidence'], 0.95)
+        # the live plugin file keeps its fancyBox licence block, which no rule names: a script carrying more than was recognised may hold
+        # any library, so the page contradicts nothing and the technology scan's versions stay capped candidates
+        RouteAuth.objects.all().delete()
+        self.root('www.rt.test', evidence=self.page_evidence(bodies={**WP_BODIES, '/wp-content/themes/acme/js/jquery.fancybox.js': FANCYBOX}))
+        self.assertEqual(RouteAuth.objects.get(host='www.rt.test').evidence['script_page']['unread'], 1)
+        for version in ('1.0.4', '3.2.1'):
+            match = self.matches('www.rt.test')[('jquery', version)]
+            self.assertEqual((match['confidence'], match['evidence']['version_source']), (js_libraries.CONFIDENCE['filename'], 'other'))
         self.assertNotIn('version_source', found[('nginx', '1.24.0')]['evidence'])
         self.assertEqual(found[('wordpress', '7.1.4')]['confidence'], 0.95)
 
@@ -208,9 +219,11 @@ class RedirectAliasCorrelationTests(Hosts):
         self.sub('blog.rt.test').ip_addresses.first().ports.add(Port.objects.create(number=8443, service_name='https', state='open'))
         self.root('blog.rt.test', 301, redirect_to='https://rt.test/')  # 443 redirects away, 8443 may serve an application of its own
         self.assertIn(('jquery', '3.2.1'), self.matches('blog.rt.test', 'jQuery:3.2.1'))
-        RouteAuth.objects.create(project=self.project, domain=self.domain, host='blog.rt.test', path='/', url='https://blog.rt.test:8443/',
-                                 auth_state='redirect', http_status=302, redirect_to='https://rt.test/', checked_at=timezone.now())
-        self.assertEqual(self.matches('blog.rt.test', 'jQuery:3.2.1'), {})  # every web port redirects away: an alias
+        row = RouteAuth.objects.create(project=self.project, domain=self.domain, host='blog.rt.test', path='/', url='https://blog.rt.test:8443/',
+                                       auth_state='redirect', http_status=302, redirect_to='https://rt.test/', checked_at=timezone.now())
+        self.assertIn(('jquery', '3.2.1'), self.matches('blog.rt.test', 'jQuery:3.2.1'))  # a temporary redirect: may serve its own page again
+        RouteAuth.objects.filter(pk=row.pk).update(http_status=308)
+        self.assertEqual(self.matches('blog.rt.test', 'jQuery:3.2.1'), {})  # every web port redirects away for good: an alias
 
     def test_a_match_closed_because_the_host_only_redirected_reopens_when_it_serves_its_own_page(self):
         from cveFeed.models import CVEEntry, CVEMatch
@@ -247,8 +260,13 @@ class RedirectAliasCorrelationTests(Hosts):
         away = [('https://a.test/', 301, 'https://b.test/')]
         self.assertEqual(alias(away, 'a.test', ['https://a.test']), 'b.test')
         self.assertEqual(alias(away, 'a.test', ['https://a.test', 'https://a.test:8443']), '')  # a web port with no root read
-        self.assertEqual(alias(away + [('https://a.test:8443/', 302, 'https://b.test/')], 'a.test', ['https://a.test', 'https://a.test:8443']),
+        self.assertEqual(alias(away + [('https://a.test:8443/', 308, 'https://b.test/')], 'a.test', ['https://a.test', 'https://a.test:8443']),
                          'b.test')
+        # only a permanent redirect (301, 308) makes an alias: a temporary one (a login hop, a geo or maintenance switch) does not
+        for status in (300, 302, 303, 304, 307):
+            self.assertEqual(alias([('https://a.test/', status, 'https://b.test/')], 'a.test'), '', status)
+            self.assertEqual(alias([('http://a.test/', 301, 'https://a.test/'), ('https://a.test/', status, 'https://b.test/')], 'a.test'), '')
+        self.assertEqual(alias([('https://a.test/', True, 'https://b.test/')], 'a.test'), '')
 
 
 class RedirectProbeTests(NoCache, SimpleTestCase):
@@ -417,8 +435,10 @@ def oracle(name):
 class LiveSiteOracleTests(RouteFixture, TestCase):
     """The live case (2026-11-02, names replaced), replayed through the route check's page read, correlation and closure: a WordPress site
     whose core jQuery file says 3.7.1, five names that only redirect to it, and a hosted landing site whose "/" answers 404 but loads a
-    real jQuery 1.11.2. Of the 19 stored matches, 17 close with a true reason; CVE-2020-11023 on the landing site stands, proven, and the
-    theme's Bootstrap "1.0.4" stays a capped candidate (not every script of the page was read)."""
+    real jQuery 1.11.2. Of the 19 stored matches, the 15 on the names that only redirect close with a true reason; CVE-2020-11023 on the
+    landing site stands, proven, and the WordPress site's own matches stay capped candidates: only 2 of the 36 scripts its page loads are
+    read whole (6 a host at most, third-party ones never), and a script not read may carry any library under any name, so the page's
+    jQuery file contradicts nothing."""
 
     HOSTS = {'acme.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
              'www.acme.test': ['Bootstrap:1.0.4', 'jQuery:1.0.4', 'jQuery:3.2.1', 'jQuery:3.4.1', 'jQuery:3.7.1'],
@@ -492,46 +512,50 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
         return rows, is_open, closed
 
     def assert_oracle(self, closed_kinds, proven=True):
-        """17 of the 19 close with a true reason (15 redirect aliases, 2 contradicted by the page's one jQuery file, read whole); two stay
-        open: the real jQuery 1.11.2 on the landing site, and the theme's Bootstrap "1.0.4", a capped candidate: a theme's ?ver= never closes
-        anything, and no Bootstrap file on the page was read (only 2 of its 36 scripts are: 6 a host, third-party ones never)."""
+        """15 of the 19 close with a true reason, all of them redirect aliases; four stay open: the real jQuery 1.11.2 on the landing site
+        (a KEV), and the WordPress site's jQuery and Bootstrap matches, capped candidates: its page loads 36 scripts and only 2 are read
+        whole (6 a host at most, third-party ones never), so its one jQuery file contradicts nothing, and a theme's ?ver= never closes
+        anything."""
         rows, is_open, closed = self.open_and_closed()
         self.assertEqual(len(rows), 19)
-        self.assertEqual(sorted((m.subdomain.name, m.cve_entry.cve_id, m.matched_version) for m in is_open),
-                         [('acme.test', 'CVE-2026-114538', '1.0.4'), ('info.acme.test', 'CVE-2020-11023', '1.11.2')])
+        # the jQuery version an open match on the WordPress site names (3.2.1 or 3.4.1, both in range) is whichever correlation chose
+        self.assertEqual(sorted((m.subdomain.name, m.cve_entry.cve_id) for m in is_open),
+                         [('acme.test', 'CVE-2020-11022'), ('acme.test', 'CVE-2020-11023'), ('acme.test', 'CVE-2026-114538'),
+                          ('info.acme.test', 'CVE-2020-11023')])
         survivor = next(m for m in is_open if m.subdomain.name == 'info.acme.test')
+        self.assertEqual(survivor.matched_version, '1.11.2')
         if proven:  # correlated again after the page read: proven by the file's banner
             self.assertEqual((survivor.evidence.get('version_source'), survivor.confidence), ('body', 0.95))
-        candidate = next(m for m in is_open if m.subdomain.name == 'acme.test')
         if proven:
-            self.assertLessEqual(candidate.confidence, js_libraries.CONFIDENCE['filename'])
-        self.assertEqual(len(closed), 17)
+            self.assertTrue(all(m.confidence <= js_libraries.CONFIDENCE['filename'] for m in is_open if m.subdomain.name == 'acme.test'))
+        script_page = RouteAuth.objects.get(host='acme.test').evidence['script_page']
+        self.assertEqual((script_page['scripts'], script_page['unread']), (36, 34))
+        self.assertEqual(len(closed), 15)
         kinds = {}
         for m in closed:
             self.assertTrue(m.ai_reason.startswith(js_libraries.LIBRARY_CLOSED), m.ai_reason)
             kinds[js_libraries.closure_kind(m.ai_reason)] = kinds.get(js_libraries.closure_kind(m.ai_reason), 0) + 1
         self.assertEqual(kinds, closed_kinds)
         by_host = {(m.subdomain.name, m.cve_entry.cve_id): m.ai_reason for m in closed}
-        self.assertIn("the page's own scripts say jQuery 3.7.1", by_host[('acme.test', 'CVE-2020-11023')])
         self.assertIn('only redirects to acme.test', by_host[('careers.acme.test', 'CVE-2020-11023')])
 
-    def test_the_next_correlation_closes_seventeen_and_keeps_the_real_one(self):
+    def test_the_next_correlation_closes_the_aliases_and_keeps_the_real_one(self):
         self.correlate()  # as stored before the fix: no front page read
         rows, is_open, _closed = self.open_and_closed()
         self.assertEqual((len(rows), len(is_open)), (19, 19))
         self.read_front_pages()
         self.correlate()
-        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2})
+        self.assert_oracle({'redirect_alias': 15})
 
-    def test_the_reconcile_sweep_closes_the_same_seventeen_without_a_rescan(self):
+    def test_the_reconcile_sweep_closes_the_same_aliases_without_a_rescan(self):
         from cveFeed.tasks import reconcile_invalid_correlations
         self.correlate()
         self.read_front_pages()
         with self.assertLogs('cveFeed.tasks', level='INFO') as logs:
             result = reconcile_invalid_correlations(limit=100)
-        self.assertEqual(result['closed_by_reason'], {'redirect_alias': 15, 'contradicted_by_file': 2})
-        self.assertIn('closed 17 of', '\n'.join(logs.output))
-        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2}, proven=False)
+        self.assertEqual(result['closed_by_reason'], {'redirect_alias': 15})
+        self.assertIn('closed 15 of', '\n'.join(logs.output))
+        self.assert_oracle({'redirect_alias': 15}, proven=False)
 
 
 def synthesized_page(key, cut):
@@ -550,8 +574,8 @@ def synthesized_page(key, cut):
 
 class RawLiveSiteOracleTests(LiveSiteOracleTests):
     """The same live case with the pages at their real length: the WordPress page is 248,915 bytes and its theme, plugin and Bootstrap
-    scripts sit 229 KB in. The route check reads a front page up to ROOT_READ_BYTES, so the whole page is known and every closure carries
-    a true reason; read at the old 64 KiB, the page is truncated and its files contradict nothing, so nothing on it closes."""
+    scripts sit 229 KB in. The route check reads a front page up to ROOT_READ_BYTES, so every script tag is seen and every closure carries
+    a true reason; read at the old 64 KiB, the page is truncated and its files contradict nothing, so nothing on it closes either way."""
 
     CUT = None
 
@@ -581,7 +605,7 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
         self.correlate()
         self.read_front_pages()
         self.correlate()
-        self.assert_oracle({'redirect_alias': 15, 'contradicted_by_file': 2})
+        self.assert_oracle({'redirect_alias': 15})
         _rows, _open, closed = self.open_and_closed()
         reasons = [m.ai_reason for m in closed if m.subdomain.name == 'acme.test']
         self.assertFalse([r for r in reasons if 'loads no' in r], reasons)  # the page loads Bootstrap: never "loads no Bootstrap script"
@@ -600,11 +624,11 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
                           ('info.acme.test', 'CVE-2020-11023')])
         self.assertTrue(all(m.confidence <= js_libraries.CONFIDENCE['filename'] for m in is_open if m.subdomain.name == 'acme.test'))
 
-    def test_the_reconcile_sweep_closes_the_same_seventeen_without_a_rescan(self):
-        super().test_the_reconcile_sweep_closes_the_same_seventeen_without_a_rescan()
+    def test_the_reconcile_sweep_closes_the_same_aliases_without_a_rescan(self):
+        super().test_the_reconcile_sweep_closes_the_same_aliases_without_a_rescan()
 
-    def test_the_next_correlation_closes_seventeen_and_keeps_the_real_one(self):
-        super().test_the_next_correlation_closes_seventeen_and_keeps_the_real_one()
+    def test_the_next_correlation_closes_the_aliases_and_keeps_the_real_one(self):
+        super().test_the_next_correlation_closes_the_aliases_and_keeps_the_real_one()
 
 
 class ReviewScenarioBase(RouteFixture, TestCase):

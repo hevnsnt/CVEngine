@@ -339,14 +339,21 @@ _CONSTRAINT = re.compile(r"""^\s*(?:'\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s
 _COMPARE = re.compile(r"compare_versions\(\s*([A-Za-z_]\w{0,40})\s*((?:,\s*(?:'[^'\n]{1,60}'|\"[^\"\n]{1,60}\")\s*){1,6})\)")
 _CONTAINS = re.compile(r"""^\s*(?:i?contains|contains_all|contains_any)\(\s*(?:body|header|all|response|content_type)\s*((?:,\s*(?:'[^'\n]{1,80}'|"[^"\n]{1,80}")\s*){1,8})\)\s*$""")
 _STATUS_DSL = re.compile(r"^\s*status_code\s*==\s*2\d\d\s*$")
-_STATUS_LINE = re.compile(r"(?i)HTTP\\?/")  # "HTTP/1.1 200": a status line, never a product's version
+# "HTTP/1.1 200", and its regex forms with or without the slash ("HTTP\/1\.1", "HTTP[/]1\.1", "^HTTP.1\.0 200", "HTTP/\d"): a status line,
+# never a product's version. "HTTP" then up to eight marks (a slash, a dot, a class bracket, an escape) and a protocol digit; a product
+# word after it ("Apache HTTP Server 2.4", "IBM_HTTP_Server/8.5", "HTTPd/2.4") is no status line
+_STATUS_LINE = re.compile(r"(?i)HTTP(?:[^A-Za-z0-9\\]|\\[^A-Za-z0-9]){0,8}(?:[0-3]|\\d|\[)")
 
 
-# a page whose answer is itself the exposure (status pages, configuration and backup files, the process table): a version read there is
-# read from a disclosure, so the hit is the disclosure's
+# a page whose answer is itself the exposure (status pages, configuration and backup files, the process table, a Java app's descriptors,
+# metrics, environment and diagnostic endpoints, password files): a version read there is read from a disclosure, so the hit is the
+# disclosure's
 _EXPOSURE_PATH = re.compile(r"(?i)server-(?:status|info)|application\.(?:properties|ya?ml)|(?:^|/)\.(?:env|git|svn|hg|ds_store)|actuator|phpinfo"
                             r"|info\.php|backup|\.(?:bak|old|orig|swp|sql|zip|tar|gz|tgz|7z|rar|ya?ml|ini|conf|config|log|properties|env)$"
-                            r"|web\.config|wp-config|(?:^|/)(?:config|configuration|debug|console|admin|proc|etc|sys|dev|boot|windows|winnt)(?:/|$)")
+                            r"|web\.config|wp-config|(?:^|/)(?:config|configuration|debug|console|admin|proc|etc|sys|dev|boot|windows|winnt)(?:/|$)"
+                            r"|(?:^|/)(?:config|settings|appsettings|credentials|secrets?)\.json|web-inf|meta-inf|jolokia|\.axd(?:/|$)"
+                            r"|(?:^|/)(?:env|metrics|prometheus|health|trace|dump|heapdump|threaddump|mappings|beans|configprops|loggers)(?:/|$|\.)"
+                            r"|(?:^|/)\.ht[a-z]{1,10}$")
 
 
 def _plain_path(value):
@@ -420,14 +427,20 @@ def _tokens(text):
     return {t for t in re.findall(r"[a-z0-9]+", str(text or "").lower()) if len(t) >= 2}
 
 
+_TITLE_DASH = re.compile(r"\s[-\u2013\u2014]\s")  # "Product 1.2 - Vulnerability title": the product is what comes before the first dash
+
+
 def _identity_tokens(doc):
-    """The words the template itself names its product with: info.name, metadata vendor and product, the classification's CPE."""
+    """The words the template itself names its product with: info.name's product part (what comes before the first `` - ``; the rest is the
+    vulnerability's title, "Email Address Disclosure", "Directory Listing", and a name with no dash names no product apart from its
+    title), metadata vendor and product, and the classification CPE's product."""
     info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
     metadata = info.get("metadata") if isinstance(info.get("metadata"), dict) else {}
     classification = info.get("classification") if isinstance(info.get("classification"), dict) else {}
     cpe = str(classification.get("cpe") or "").split(":")
-    return _tokens(" ".join([str(info.get("name") or ""), str(metadata.get("vendor") or ""), str(metadata.get("product") or ""),
-                             " ".join(cpe[3:5])]))
+    name = _TITLE_DASH.split(str(info.get("name") or ""), 1)
+    product = name[0] if len(name) > 1 else ""
+    return _tokens(" ".join([product, str(metadata.get("vendor") or ""), str(metadata.get("product") or ""), cpe[4] if len(cpe) > 4 else ""]))
 
 
 def _identity_word(word, identity):
@@ -501,9 +514,15 @@ def _decided_by_version(block, names, identity=frozenset()):
 _CAPTURE = re.compile(r"\((?!\?)([^()]{1,120})\)")
 
 
+# a capture group of digits and dots only: digit classes (``\d``, ``[0-9]``, ``[0-9.]``, ``[\d.]``), escaped dots and quantifiers. An
+# unescaped dot (any character), a letter or anything else is not a version: ``(.+\d.+)`` captures whatever the response held
+_VERSION_GROUP = re.compile(r"(?:\\d|\[(?:0-9|\\d|\\?\.|_|-){1,6}\]|\\\.|[+*?]|\{\d{1,3}(?:,\d{0,3})?\})+")
+
+
 def _version_shaped(pattern):
-    """Whether a regex extractor captures a version: a group of digits and dots (``([0-9.]+)``, ``(\\d+\\.\\d+)``)."""
-    return any(("\\d" in group or "0-9" in group) and "." in group for group in _CAPTURE.findall(str(pattern)))
+    """Whether a regex extractor captures a version: a group made of digits and dots only (``([0-9.]+)``, ``(\\d+\\.\\d+)``)."""
+    return any(_VERSION_GROUP.fullmatch(group) and ("\\d" in group or "0-9" in group) and "." in group
+               for group in _CAPTURE.findall(str(pattern)))
 
 
 def _extractor_names(doc):

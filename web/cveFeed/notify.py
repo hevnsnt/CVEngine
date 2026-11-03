@@ -216,17 +216,23 @@ def _version_only_pairs(hits, project=None):
 
 
 def template_hits(hits, scan=None, project=None):
-    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
-    version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): the version-only heat cap
-    holds for it here as everywhere else. The callers already leave those hits out; this is the last check before a page."""
-    hits = list(dict.fromkeys(hits))
-    if hits:
+    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A hit may also be
+    a (CVE id, host, project id) triple: an auto-fire run's batch (``hit_batch``) gathers the tests of several projects, each hit with the
+    project it was tested for; a pair is of ``project`` (or ``scan``'s). A pair a version-class template matched, whose matches in its own
+    project are still version-only, is left out (``_version_only_pairs``): the version-only heat cap holds for it here as everywhere else.
+    The callers already leave those hits out; this is the last check before a page."""
+    default = project if project is not None else (scan.domain.project_id if scan is not None else None)
+    keyed = list(dict.fromkeys((hit[0], hit[1], hit[2] if len(hit) > 2 and hit[2] is not None else default) for hit in hits))
+    if keyed:
         try:
-            capped = _version_only_pairs(hits, project if project is not None else (scan.domain.project_id if scan is not None else None))
+            capped = set()
+            for one in dict.fromkeys(owner for _c, _h, owner in keyed):  # each project's hits against that project's matches only
+                capped |= {(cve, host, one) for cve, host in _version_only_pairs([(c, h) for c, h, owner in keyed if owner == one], one)}
         except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
             logger.warning('template hit heat check failed (%s)', type(exc).__name__)
             capped = set()
-        hits = [pair for pair in hits if pair not in capped]
+        keyed = [hit for hit in keyed if hit not in capped]
+    hits = list(dict.fromkeys((cve, host) for cve, host, _owner in keyed))
     if not hits:
         return False
     cves = len({cve for cve, _ in hits})

@@ -718,7 +718,7 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
         vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
         pairs = [(cve.cve_id, host) for host in vulnerable]
         if batch:
-            hit_batch.record(batch, pairs)
+            hit_batch.record(batch, pairs, project=project_id)  # the run's one message checks each hit against its own project
         else:
             notify.template_hits(pairs, project=project_id)  # one message per CVE test, never per host
         return {"cve": cve.cve_id, "source": outcome["source"], "vulnerable": vulnerable}

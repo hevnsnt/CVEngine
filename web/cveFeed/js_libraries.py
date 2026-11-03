@@ -127,21 +127,48 @@ _SIGNATURES = (
 )
 
 
-def _jquery_signature(text):
-    """The version jQuery's own prototype names, or ''."""
-    for proto in itertools.islice(_JQ_PROTO.finditer(text), 5):  # the library has one; a page of look-alikes is not read on and on
+def _jquery_signatures(text, limit=5):
+    """The versions jQuery's own prototype names in ``text``, in order, from at most ``limit`` prototypes."""
+    out = []
+    for proto in itertools.islice(_JQ_PROTO.finditer(text), limit):  # the library has one; a page of look-alikes is not read on and on
         window = text[proto.end():proto.end() + 6000]
         key = _JQ_KEY.search(window)
         if not key:
             continue
         if key.group(1):
-            return key.group(1)
+            out.append(key.group(1))
+            continue
         name = re.escape(key.group(2))
         before = text[max(0, proto.start() - 4000):proto.start()]
         assigned = list(re.finditer(r'(?<![\w$.])' + name + r'\s{0,8}=\s{0,8}["\']' + _VERSION + r'["\']', before))
         if assigned:
-            return assigned[-1].group(1)
-    return ''
+            out.append(assigned[-1].group(1))
+    return out
+
+
+def _jquery_signature(text):
+    """The version jQuery's own prototype names, or ''."""
+    return next(iter(_jquery_signatures(text)), '')
+
+
+MAX_STATED = 20  # banners, or signatures, of one kind looked for anywhere in one file
+
+
+def _stated_anywhere(text, counts=None):
+    """``{(library key, version)}`` every banner and every code signature anywhere in ``text`` names, the whole text read (not only the
+    first bytes ``read_body`` looks in), at most MAX_STATED of each kind: a bundle's second library, or a second copy of one (with or
+    without its banner), shows here. ``counts`` (a dict, when given) receives how many banners were found (``banners``)."""
+    stated, banners = set(), 0
+    for key, pattern in _BANNERS:
+        for match in itertools.islice(pattern.finditer(text), MAX_STATED):
+            stated.add((key, match.group(1)))
+            banners += 1
+    stated |= {('jquery', version) for version in _jquery_signatures(text, MAX_STATED)}
+    for key, pattern in _SIGNATURES:
+        stated |= {(key, match.group(1)) for match in itertools.islice(pattern.finditer(text), MAX_STATED)}
+    if counts is not None:
+        counts['banners'] = banners
+    return stated
 
 
 def read_body(text):
@@ -625,16 +652,14 @@ _LICENSE_BLOCK = re.compile(r'/\*!|@license', re.IGNORECASE)
 
 def _states_all(text, found):
     """Whether what ``read_body`` found in a script (its first bytes' banner, its first 128 KB of code) is all the script says about
-    libraries: no library banner anywhere else in it, and no more licence blocks (``/*!``, ``@license``) than library banners. A bundle with a
-    second library (or a second copy of one) further in, or third-party code no rule names, is not known whole: its file contradicts
-    nothing."""
-    named = {(key, version) for key, version, _how in found}
-    banners = []
-    for key, pattern in _BANNERS:
-        banners += [(key, match.group(1)) for match in itertools.islice(pattern.finditer(text), 20)]
-    if set(banners) - named:
+    libraries: no library banner and no library code signature anywhere in the whole text names another library or another version
+    (``_stated_anywhere``: a second copy of a library, bannered or not, at any offset), and no more licence blocks (``/*!``, ``@license``)
+    than library banners. A bundle with a second library (or a second copy of one) further in, or third-party code no rule names, is not
+    known whole: its file contradicts nothing, and the page it is on contradicts nothing either (``HostLibraries``)."""
+    named, counts = {(key, version) for key, version, _how in found}, {}
+    if _stated_anywhere(text, counts) - named:
         return False
-    return len(_LICENSE_BLOCK.findall(text)) <= max(len(banners), len(named))
+    return len(_LICENSE_BLOCK.findall(text)) <= max(counts['banners'], len(named))
 
 
 def _order_to_read(entries, page_url):
@@ -709,10 +734,16 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             continue
         entry['read'] = read
         _remember(url, read, project)
-    if coverage is not None:
+    if coverage is not None:  # read whole: to its end (a sha256), and it states nothing beyond what was found (``_states_all``)
         sourced = [e for e in entries if e.get('url')]
-        coverage.update(scripts=len(sourced), read=sum(1 for e in sourced if isinstance(e.get('read'), dict) and e['read'].get('sha256')))
+        coverage.update(scripts=len(sourced), read=sum(1 for e in sourced if read_whole(e.get('read'))))
     return resolve(entries)
+
+
+def read_whole(read):
+    """Whether one script's reading (``_read_one``) covers the whole file and everything it says: not cut, and nothing in it beyond what was
+    found. A reading stored before ``whole`` was recorded is not."""
+    return isinstance(read, dict) and bool(read.get('sha256')) and read.get('whole') is True
 
 
 # ------------------------------------------------------------------ several copies: which one runs
@@ -846,7 +877,22 @@ def complete_page(row):
     Only such a page proves that a library is absent or that the library's files state another version."""
     script_page = (row.evidence or {}).get('script_page')
     return (page_status(row.http_status) and row.auth_state in ('open', 'not_found') and isinstance(script_page, dict)
-            and not script_page.get('truncated') and not script_page.get('capped') and not script_page.get('stub'))
+            and not script_page.get('truncated') and not script_page.get('capped') and not script_page.get('stub')
+            and every_script_read(script_page))
+
+
+def every_script_read(script_page):
+    """Whether every script of a parsed front page (``script_page``) was read whole: each script with a source (same-host, same-site,
+    third-party or CDN, a fallback) read to its end and stating nothing beyond what was found (``read_whole``), and every inline script's
+    text read. A script not read (not served, refused, failing, over the read budget, a third-party one never fetched), cut at the read
+    limit or carrying more than was recognised may hold any library under any name, so the page contradicts no version. A page stored
+    before the counts were recorded is not known whole, unless it loads no script with a source."""
+    unread, inline_unread = script_page.get('unread'), script_page.get('inline_unread')
+    if not isinstance(inline_unread, int) or isinstance(inline_unread, bool) or inline_unread != 0:
+        return False
+    if unread is None:
+        return script_page.get('scripts') == 0
+    return isinstance(unread, int) and not isinstance(unread, bool) and unread == 0
 
 
 def page_status(status):
@@ -924,11 +970,15 @@ def _origin(url):
     return parts.scheme.lower(), parts.port or (443 if parts.scheme.lower() == 'https' else 80)
 
 
+PERMANENT_REDIRECTS = (301, 308)  # the only answers that make a host an alias of another
+
+
 def redirect_alias_of(roots, host, bases=None):
     """The host a front page only redirects to, or '' when ``host`` serves a page of its own. ``roots`` are ``(url, status, location)`` of the
-    host's current root routes (http and https). A host is an alias only when every root answered a redirect and at least one of them leads
-    to another host: a redirect to itself (http to https, ``/`` to ``/en/``) is not one, and neither is a host whose root answered anything
-    else (a page, a 403, an error), whose own answer may carry scripts. ``bases`` (the host's web base URLs, every port) must each have a
+    host's current root routes (http and https). A host is an alias only when every root answered a permanent redirect (301 or 308: a 302,
+    303 or 307 is temporary, a login hop, a geo or maintenance switch, and the host may serve its own page again any time) and at least one
+    of them leads to another host: a redirect to itself (http to https, ``/`` to ``/en/``) is not one, and neither is a host whose root
+    answered anything else (a page, a 403, an error), whose own answer may carry scripts. ``bases`` (the host's web base URLs, every port) must each have a
     root among ``roots``: a web port the route check did not read (an app on 8443 beside a 443 that redirects away) may serve its own
     page, so such a host is not an alias. Pure."""
     try:
@@ -938,7 +988,7 @@ def redirect_alias_of(roots, host, bases=None):
         return ''
     target = ''
     for url, status, location in roots:
-        if not isinstance(status, int) or not 300 <= status < 400:
+        if not isinstance(status, int) or isinstance(status, bool) or status not in PERMANENT_REDIRECTS:
             return ''
         try:
             name = (urlsplit(urljoin(url or '', (location or '').strip())).hostname or '').lower().rstrip('.')
@@ -1046,10 +1096,13 @@ class HostLibraries:
 
     def _contradicts(self, key, record, copies):
         """Whether the page's own files contradict any other version of this library: the page is known whole on every web port
-        (``complete_page``) with no inline copy of the library, the copies resolve (the page shows which one runs), and EVERY copy of the
-        library the page references (same-host or third-party, shadowed, a fallback, one named only by its file name or ``?ver=``) was
-        read to its end and states its version and nothing beyond it (``_states_all``), the one that runs included. Any copy not read, not
-        served, refused, cut or ambiguous leaves the version a candidate."""
+        (``complete_page``: every script it loads, of any host and whether or not it is a copy of the library, read to its end with
+        nothing in it beyond what was recognised, and every inline script read; ``every_script_read``) with no inline copy of the
+        library, the copies resolve (the page shows which one runs), and EVERY copy of the library the page references (same-host or
+        third-party, shadowed, a fallback, one named only by its file name or ``?ver=``) was read to its end and states its version and
+        nothing beyond it (``_states_all``: no second version of any library, banner or code, anywhere in the file), the one that runs
+        included. Any script not read, not served, refused, over the budget, cut or carrying more than was recognised leaves the version
+        a candidate."""
         if not self.page_read or key in self.inline or record.get('copies_unresolved') or not copies:
             return False
         if not all(c.get('source') == 'body' and c.get('version') and c.get('whole') for c in copies):
