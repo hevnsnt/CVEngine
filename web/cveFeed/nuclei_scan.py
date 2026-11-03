@@ -311,40 +311,51 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
             listed = [ln.strip() for ln in f if ln.strip()]
     except OSError:
         listed = None
-    path, scratch, kept = targets_file, None, None
+    path, scratch, kept = targets_file, [], None
     if listed is not None:
         skip = local_egress.skipped_ports()
         kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
         if len(kept) != len(listed):
             local_egress.note_skipped('nuclei', skip, [_target_host(t) for t in listed if t not in kept])
+        if not kept:
+            return
+
+    def _write(targets):
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('\n'.join(targets) + '\n')
+        handle.close()
+        scratch.append(handle.name)
+        return handle.name
+
+    def started():
+        """Once nuclei is let start (after its memory wait): each host:25 target is charged now, whole; one with no room is left out of this
+        run (logged paced; it comes back with the host's next nuclei run). Then the run is counted and logged. Returns the targets file to
+        run, or None when nothing is left."""
+        if kept is None:
+            return path
+        run = kept
         rules = set(local_egress.budgets())
         if rules:
             explicit = lambda t: _target_ports(t) if _has_port(t) else []  # noqa: E731 - a bare host is a web target (80, 443)
-            kept = [t for t in kept if not any(local_egress.admit_one(p, 'nuclei', _target_host(t), weight=local_egress.NUCLEI_TARGET_CONNECTIONS)
-                                               for p in set(explicit(t)) & rules)]
-        if not kept:
-            return
-        if len(kept) != len(listed):
-            handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-            handle.write('\n'.join(kept) + '\n')
-            handle.close()
-            path = scratch = handle.name
-    def started(kept=kept):  # counted and logged once nuclei is let start (after its memory wait): a run refused there sent nothing
-        if kept is None:
-            return
+            run = [t for t in kept if not any(local_egress.admit_one(p, 'nuclei', _target_host(t), weight=local_egress.NUCLEI_TARGET_CONNECTIONS,
+                                                                     now=local_egress.launch_now())
+                                              for p in set(explicit(t)) & rules)]
+        if not run:
+            return None
         per_port = {}
-        for target in kept:
+        for target in run:
             for port in _target_ports(target):
                 per_port[port] = per_port.get(port, 0) + (local_egress.NUCLEI_TARGET_CONNECTIONS if _has_port(target) else 1)
         local_egress.record('nuclei', sum(per_port.values()), per_port)
         for port in local_egress.log_ports() & set(per_port):
-            local_egress.log_connections([_target_host(t) for t in kept if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
+            local_egress.log_connections([_target_host(t) for t in run if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
+        return path if len(run) == len(listed) else _write(run)
     try:
         yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file, on_start=started)
     finally:
-        if scratch:
+        for name in scratch:
             try:
-                os.remove(scratch)
+                os.remove(name)
             except OSError:
                 pass
 
@@ -365,7 +376,9 @@ def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', seve
     approved_dir, _, _ = approved_templates()
     with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
         if on_start is not None:
-            on_start()
+            targets_file = on_start()  # the egress governor's say at the start (cveFeed.local_egress): the targets to run, or None
+            if targets_file is None:
+                return
         proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)

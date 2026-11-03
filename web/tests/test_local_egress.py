@@ -23,6 +23,7 @@ NO_SKIP = {'CVENGINE_LOCAL_SKIP_PORTS': ''}
 
 
 def _clear():
+    getattr(local_egress, '_RESERVED', {}).clear()  # grants made when a pass was planned and not yet started (kept in this process)
     client = local_egress._client()
     if client is None:
         return
@@ -959,8 +960,9 @@ class NucleiGovernedTests(Clean, TestCase):
 
         def fake(path, *a, on_start=None, **k):
             if on_start:
-                on_start()  # the real one calls it once nuclei is let start (after the memory wait)
-            seen.extend(open(path).read().split())
+                path = on_start()  # the real one calls it once nuclei is let start (after the memory wait): the targets to run, or None
+            if path:
+                seen.extend(open(path).read().split())
             return iter(())
         with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake):
             list(nuclei_scan.stream_nuclei(handle.name))
@@ -1056,6 +1058,16 @@ class OwedListTests(Clean, _ScanFixture, TestCase):
         local_egress.owe(25, ['203.0.113.77'], org_id=self.project.org_id, project=self.project.id)  # on no host of the project
         local_egress.catch_up(runner=self.runner, now=T0)
         self.assertEqual(self.probed, [])
+        self.assertEqual(local_egress.owed(25), [])
+
+    def test_the_paced_pass_is_charged_once_when_its_nmap_starts(self):
+        local_egress.owe(25, ['198.51.100.7'], org_id=self.project.org_id, project=self.project.id)
+        with mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: _Job()), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            _Popen.calls = []
+            local_egress.catch_up()
+        self.assertEqual(len(_Popen.calls), 1)
+        self.assertEqual(sum(_window().values()), 1)  # its grant moved to the start, not counted twice
         self.assertEqual(local_egress.owed(25), [])
 
     def test_the_default_runner_checks_scope_before_launch_and_logs_nothing_sent_when_refused(self):
@@ -1203,14 +1215,14 @@ class FloodInvariantTests(Clean, _ScanFixture, TestCase):
                 answer[ip] = sorted({80, 443, self.rng.randint(1, 9000)} - {25})
         ServiceRun.objects.all().delete()
         charged = []
-        real_take = local_egress.take
+        real_take = local_egress._take
 
         def counting_take(port, want, *args, **kwargs):  # what the governor granted, independent of the clock hour the test runs across
             got = real_take(port, want, *args, **kwargs)
             if int(port) == 25:
-                charged.append(got)
+                charged.append(got[0])
             return got
-        patches = [mock.patch.object(local_egress, 'take', side_effect=counting_take)]
+        patches = [mock.patch.object(local_egress, '_take', side_effect=counting_take)]
         if flags_fallback:
             patches.append(mock.patch.object(nmap_scan, 'fast_flags', return_value=list(nmap_scan.FAST_FLAGS)))
         for p in patches:
@@ -1325,7 +1337,7 @@ class SentOnlyOnceStartedTests(Clean, TestCase):
                 list(nuclei_scan.stream_nuclei(handle.name))
         self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
         self.assertEqual((local_egress.snapshot() or {}).get('hour', {}).get('p25', 0), 0)
-        self.assertEqual(local_egress.used_this_hour(25), local_egress.NUCLEI_TARGET_CONNECTIONS)  # charged when granted
+        self.assertFalse(local_egress.used_this_hour(25))  # charged only when nuclei starts
 
     def test_nuclei_that_starts_logs_its_host_25_target_sent(self):
         import tempfile
@@ -1386,3 +1398,219 @@ class TestsslSentOnlyOnceStartedTests(Clean, TestCase):
         self.assertIn('memory', out.get('skipped', ''))
         self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
         self.assertEqual((local_egress.snapshot() or {}).get('hour', {}).get('p25', 0), 0)
+
+
+# --- charged when a process starts, after its memory wait (coordinator follow-up to #393) -------------------------------------------
+
+def _window(port=25):
+    return {int(k): int(v) for k, v in (local_egress._client().hgetall(f'{local_egress.PREFIX}:window:{port}') or {}).items()}
+
+
+@mock.patch.dict(os.environ, R2)
+class LaunchChargeTests(Clean, TestCase):
+    """The window counts what this server's processes START: a grant made when a pass was planned is moved to the minute its process
+    starts (after the memory wait), or, if the window has no room then, that process leaves port 25 out and owes it."""
+    TARGETS = [f'198.51.100.{i}' for i in range(1, 65)]
+    FLAGS = ['-sV', '-p', '25,80']
+
+    def launch_at(self, at):
+        return mock.patch.object(local_egress, 'launch_now', return_value=at)
+
+    def test_a_run_held_two_hours_in_the_memory_wait_is_charged_at_launch_against_that_window(self):
+        self.assertEqual(local_egress.plan(self.TARGETS, {25}, 'nmap', now=T0), {})  # granted when planned
+        self.assertEqual(local_egress.take(25, 100, now=T0 + 7200), 100)  # two hours later the window is full
+        with self.launch_at(T0 + 7260):
+            flags = local_egress.launch_nmap(self.FLAGS, self.TARGETS)
+        self.assertEqual(flags, ['-sV', '-p', '80', '--exclude-ports', '25'])  # no room at launch: port 25 is not sent
+        self.assertEqual(sorted(a for _o, a, _p in local_egress.owed(25)), sorted(self.TARGETS))
+        self.assertEqual({r['outcome'] for r in local_egress.connection_log(port=25, limit=1000)['records']}, {'paced'})
+
+    def test_a_launch_after_the_wait_is_charged_in_the_minute_it_starts(self):
+        local_egress.plan(self.TARGETS, {25}, 'nmap', now=T0)
+        with self.launch_at(T0 + 7200):
+            self.assertEqual(local_egress.launch_nmap(self.FLAGS, self.TARGETS), self.FLAGS)
+        self.assertEqual(_window(), {int((T0 + 7200) // 60): 64})  # the plan's grant moved, not counted twice
+        self.assertEqual(local_egress.take(25, 100, now=T0 + 7200), 36)
+
+    def test_two_chunks_of_one_pass_launched_20_minutes_apart_are_charged_separately(self):
+        addresses = [f'198.51.100.{i}' for i in range(1, 101)]
+        local_egress.plan(addresses, {25}, 'nmap', now=T0)  # 100: this 15 minutes' share
+        with self.launch_at(T0):
+            self.assertEqual(local_egress.launch_nmap(self.FLAGS, addresses[:64]), self.FLAGS)
+        with self.launch_at(T0 + 1200):
+            self.assertEqual(local_egress.launch_nmap(self.FLAGS, addresses[64:]), self.FLAGS)
+        m0 = int(T0 // 60)
+        self.assertEqual(_window(), {m0: 64, m0 + 20: 36})
+        self.assertEqual(local_egress.take(25, 100, now=T0 + 1200), 64)  # the 15 minutes before minute 20 hold the second chunk only
+
+    def test_a_chunk_without_port_25_in_its_plan_is_not_charged(self):
+        with self.launch_at(T0):
+            self.assertEqual(local_egress.launch_nmap(['-sV', '-p', '80,443'], self.TARGETS), ['-sV', '-p', '80,443'])
+        self.assertEqual(_window(), {})
+
+    def test_a_denied_launch_of_a_port_25_only_run_sends_nothing(self):
+        local_egress.take(25, 100, now=T0)
+        with self.launch_at(T0), self.assertRaises(local_egress.PortHeld):
+            local_egress.launch_nmap(['-sV', '-p', '25'], self.TARGETS[:2])
+
+    def test_run_nmap_xml_takes_the_tokens_after_its_memory_wait(self):
+        order = []
+
+        def heavy(kind, **kwargs):
+            order.append('wait')
+            return _Job()
+        with mock.patch('reNgine.resources.heavy_job', side_effect=heavy), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(local_egress, 'launch_nmap', side_effect=lambda f, t, *a, **k: order.append('launch') or f), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            _Popen.calls = []
+            nmap_scan.run_nmap_xml(['198.51.100.1'], self.FLAGS, '8m')
+        self.assertEqual(order, ['wait', 'launch'])
+        self.assertEqual(len(_Popen.calls), 1)
+
+    def test_run_nmap_xml_denied_at_launch_runs_without_25_and_logs_it_paced(self):
+        local_egress.take(25, 100)  # the window is full now
+        with mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: _Job()), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            _Popen.calls = []
+            nmap_scan.run_nmap_xml(['198.51.100.1'], self.FLAGS, '8m')
+        (cmd,) = _Popen.calls
+        self.assertIn('25', cmd[cmd.index('--exclude-ports') + 1].split(','))
+        self.assertEqual([r['outcome'] for r in local_egress.connection_log(port=25)['records']], ['paced'])
+        self.assertEqual([a for _o, a, _p in local_egress.owed(25)], ['198.51.100.1'])
+
+    def test_a_memory_kill_is_still_charged_at_its_launch(self):
+        from reNgine.resources import MemoryKill
+
+        class Killed(_Job):
+            def raise_if_killed(self):
+                raise MemoryKill('nmap', 'test')
+        with mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: Killed()), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            with self.assertRaises(MemoryKill):
+                nmap_scan.run_nmap_xml(['198.51.100.1'], self.FLAGS, '8m')
+        self.assertEqual(local_egress.used_this_hour(25), 1)
+
+    def test_naabu_is_charged_per_group_at_launch(self):
+        local_egress.plan(['198.51.100.1'], {25}, 'naabu', now=T0)
+        local_egress.take(25, 100)  # by launch time the window is full
+        with mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: _Job()), \
+                mock.patch.object(naabu_scan.subprocess, 'Popen', _Popen):
+            _Popen.calls = []
+            naabu_scan._run_naabu_once(['198.51.100.1'], '/bin/naabu')
+        (cmd,) = _Popen.calls
+        self.assertIn('25', cmd[cmd.index('-exclude-ports') + 1].split(','))
+        self.assertEqual([a for _o, a, _p in local_egress.owed(25)], ['198.51.100.1'])
+
+    def test_a_probe_is_charged_after_its_memory_wait_not_before(self):
+        from reNgine.resources import MemoryBusy
+        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')):
+            with self.assertRaises(MemoryBusy):
+                nmap_scan.run_nmap_args(['-sV', '-Pn', '-p', '25', '-oX', '-', '198.51.100.1'], '198.51.100.1:25', 10)
+        self.assertFalse(local_egress.used_this_hour(25))
+        local_egress.take(25, 100)
+        with mock.patch('reNgine.resources.heavy_job', side_effect=lambda *a, **k: _Job()), \
+                mock.patch.object(nmap_scan.subprocess, 'Popen', _Popen):
+            _Popen.calls = []
+            with self.assertRaises(local_egress.PortHeld):
+                nmap_scan.run_nmap_args(['-sV', '-Pn', '-p', '25', '-oX', '-', '198.51.100.1'], '198.51.100.1:25', 10)
+        self.assertEqual(_Popen.calls, [])
+
+    def test_a_testssl_run_refused_for_memory_is_not_charged(self):
+        from reNgine.resources import MemoryBusy
+        started = mock.Mock()
+        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')), mock.patch('targetApp.target_types.refuse_local'):
+            with self.assertRaises(MemoryBusy):
+                testssl_scan.run_testssl('mx.rt.test', '203.0.113.5', 25, 'smtp', on_start=started)
+        started.assert_not_called()
+
+
+@mock.patch.dict(os.environ, R2)
+class TestsslLaunchTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        from tests.test_route_auth import RouteFixture
+        fixture = RouteFixture()
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        self.project = fixture.project
+        fixture.scan(names=('mx.rt.test',), ports=((25, 'smtp'),))
+        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        self.calls = []
+
+    def runner(self, args, env, timeout):
+        self.calls.append(args)
+        from tests.test_testssl_scan import CLEAN
+        with open(args[args.index('--jsonfile') + 1], 'w') as out:
+            json.dump(CLEAN, out)
+
+    def test_no_room_at_launch_means_no_run_and_the_target_stays_due(self):
+        local_egress.take(25, 50)  # a testssl.sh run needs its 15 minutes to itself
+        out = testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out['failed'], 0)
+        self.assertFalse(ServiceRun.objects.filter(asset='mx.rt.test:25').exists())
+        self.assertEqual([r['outcome'] for r in local_egress.connection_log(port=25)['records']], ['paced'])
+        self.assertEqual(local_egress.used_this_hour(25), 50)
+
+    def test_a_run_with_room_is_charged_once_when_it_starts(self):
+        testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(local_egress.used_this_hour(25), local_egress.TESTSSL_CONNECTIONS)
+
+
+@mock.patch.dict(os.environ, R2)
+class StartedInvariantTests(Clean, TestCase):
+    """Randomised: passes planned at random times whose chunks start up to two hours later (the memory wait), beside single probes that
+    start at once. Counting only what STARTED, in the minute it started: any 61 minute buckets hold at most 400, any 16 at most 100."""
+
+    def test_what_started_never_exceeds_the_window(self):
+        import heapq
+        import random
+        rng = random.Random(25)
+        sent = {}  # minute -> port-25 attempts that started in it (what the test itself sent, not what the governor says it counted)
+        events = [(T0 + rng.uniform(0, 6 * 3600), i, 'plan' if rng.random() < 0.3 else 'probe', None) for i in range(400)]
+        heapq.heapify(events)
+        n, denied, launched = 0, 0, 0
+        while events:
+            at, _i, kind, chunk = heapq.heappop(events)
+            minute = int(at // 60)
+            if kind == 'probe':
+                sent[minute] = sent.get(minute, 0) + local_egress.take(25, 1, now=at)
+            elif kind == 'plan':
+                addresses = [f'10.{n // 250}.{n % 250}.{k}' for k in range(rng.randint(1, 120))]
+                n += 1
+                held = local_egress.plan(addresses, {25}, 'nmap', now=at, log=False)
+                granted = [a for a in addresses if a not in held]
+                for j in range(0, len(granted), 64):  # its chunks start now, half a minute later, or after up to two hours of memory wait
+                    heapq.heappush(events, (at + rng.choice([0, 30, rng.uniform(0, 7200)]), 10_000 + n * 100 + j, 'launch', granted[j:j + 64]))
+            else:
+                with mock.patch.object(local_egress, 'launch_now', return_value=at):
+                    try:
+                        flags = local_egress.launch_nmap(['-sV', '-p', '25,80'], chunk)
+                    except local_egress.PortHeld:
+                        flags = None
+                if flags == ['-sV', '-p', '25,80']:
+                    sent[minute] = sent.get(minute, 0) + len(chunk)
+                    launched += 1
+                else:
+                    denied += 1
+        self.assertTrue(denied and launched)  # both cases happened
+        for start in range(min(sent) - 60, max(sent) + 1):
+            self.assertLessEqual(sum(sent.get(m, 0) for m in range(start, start + 61)), 400, start)
+            self.assertLessEqual(sum(sent.get(m, 0) for m in range(start, start + 16)), 100, start)
+
+
+
+class ChunkHeldAtStartTests(SimpleTestCase):
+    def test_a_chunk_whose_only_port_had_no_room_is_skipped_and_the_rest_runs(self):
+        seen = []
+
+        def runner(targets, flags, host_timeout):
+            seen.append(list(targets))
+            if len(seen) == 1:
+                raise local_egress.PortHeld(25, 'paced')  # launch_nmap: no room for its only port (owed there)
+            return report(*[(t, [25]) for t in targets])
+        with mock.patch.object(nmap_scan, 'persist_inventory', return_value={'ports': 1, 'hosts_with_os': 0}):
+            out = nmap_scan.scan_in_chunks(runner, ['198.51.100.1', '198.51.100.2'], ['-sV', '-p', '25'], '8m', size=1)
+        self.assertEqual(seen, [['198.51.100.1'], ['198.51.100.2']])
+        self.assertEqual(out['ports'], 1)

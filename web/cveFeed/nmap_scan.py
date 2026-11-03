@@ -179,12 +179,14 @@ def run_nmap_xml(targets, flags, host_timeout, kind='nmap', wait_timeout=None, b
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
         f.write('\n'.join(targets) + '\n')
         path = f.name
-    cmd = [NMAP_BIN, *flags, '--host-timeout', host_timeout, '-oX', '-', '-iL', path]
     try:
         label = ', '.join(targets[:3]) if kind != 'nmap' else f'{len(targets)} host(s)'
         with resources.heavy_job(kind, label=label, wait_timeout=wait_timeout) as job:
             if before_launch is not None:
                 before_launch()
+            # the egress governor charges port 25 now, when the process starts (after the memory wait); no room leaves it out of this run
+            flags = local_egress.launch_nmap(flags, targets)
+            cmd = [NMAP_BIN, *flags, '--host-timeout', host_timeout, '-oX', '-', '-iL', path]
             local_egress.record_nmap(flags, targets)  # only once the run really starts: a run refused after its wait sent nothing
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             job.attach(proc)
@@ -230,19 +232,23 @@ def run_nmap_args(args, label, timeout):
     """Run nmap with exactly ``args`` (after the binary) and return its stdout, waiting its turn for memory like run_nmap_xml. Used by
     the validation check, which must be able to show the exact command it ran. Raises subprocess.TimeoutExpired, or
     reNgine.resources.MemoryKill if it had to be stopped to protect the container. Raises ``local_egress.PortHeld`` (an OSError) without
-    running anything when its port is on the opt-in skip list or over its hourly budget (the probes and validation checks run one port)."""
+    running anything when its port is on the opt-in skip list or, once it is let start (after its memory wait), over its budget (the probes
+    and validation checks run one port)."""
     from cveFeed import local_egress
     from reNgine import resources
     ports = _target_port(args)
     target = args[-1] if args and not str(args[-1]).startswith('-') else label
-    if 0 < len(ports) <= 16:
-        for port in ports:
-            reason = local_egress.admit_one(port, 'nmap', target)
-            if reason:
-                if reason == 'skipped':
-                    local_egress.note_skipped('nmap', {port})
-                raise local_egress.PortHeld(port, reason)
+    governed = ports if 0 < len(ports) <= 16 else []
+    for port in governed:
+        if port in local_egress.skipped_ports():
+            local_egress.admit_one(port, 'nmap', target)  # logs it skipped
+            local_egress.note_skipped('nmap', {port})
+            raise local_egress.PortHeld(port, local_egress.SKIPPED)
     with resources.heavy_job('nmap', label=label) as job:
+        for port in governed:  # charged when it starts, not before its memory wait
+            reason = local_egress.admit_one(port, 'nmap', target, now=local_egress.launch_now())
+            if reason:
+                raise local_egress.PortHeld(port, reason)
         local_egress.record_nmap(args, [target])
         proc = subprocess.Popen([NMAP_BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         job.attach(proc)
@@ -476,6 +482,7 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
     The run that was stopped may already have probed a budgeted port (25 by default, ``cveFeed.local_egress``) on its addresses, which the
     egress governor charged once: the retried halves leave every budgeted port out (``--exclude-ports``) and owe it to the paced catch-up
     pass, which asks the governor again, so a retry never probes port 25 uncharged."""
+    from cveFeed import local_egress
     from reNgine.resources import MemoryKill
     totals = {'ports': 0, 'hosts_with_os': 0}
     pending = [(targets[i:i + size], False) for i in range(0, len(targets), size)]
@@ -490,6 +497,8 @@ def scan_in_chunks(runner, targets, flags, host_timeout, size=NMAP_CHUNK, flags_
                 continue
         try:
             xml = runner(chunk, chunk_flags, host_timeout)
+        except local_egress.PortHeld:  # its only port had no room when it started: owed to the paced pass (local_egress.launch_nmap)
+            continue
         except MemoryKill:
             if len(chunk) <= 4:
                 raise

@@ -23,8 +23,9 @@ Five parts, all state in Redis (no table, no migration):
   never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
   which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
   after it). A nuclei ``host:25`` target is charged NUCLEI_TARGET_CONNECTIONS, an estimate. One window on the Redis server's clock, shared by
-  every worker. A local run asks it before it probes a budgeted port on a set of addresses (before the run queues for memory: the limits are
-  on grants, and a run that waits sends later). Addresses it grants are scanned as before.
+  every worker. A local pass asks it when it is planned (``plan``), and every process of the pass asks again when it starts, after its memory
+  wait (``launch``: the planned grant is given back and the tokens taken in the minute the process starts; no room, and that process runs
+  without the port, which is owed): the window counts what STARTED. Addresses it grants are scanned as before.
   Addresses over the budget are scanned now WITHOUT that port, and the port is owed: the catch-up pass (``catch_up``, queued every ten minutes
   by the background sweep's firing, one pass at a time) probes owed ports, paced by the same window, until every one is done. Nothing in
   scope is dropped (an owed entry leaves, with a log line, only when it is out of scope or 30 days old); port 25 is still scanned for every
@@ -540,6 +541,19 @@ local cap_burst = tonumber(ARGV[4])
 local whole = tonumber(ARGV[5])
 local use_burst = tonumber(ARGV[7])
 local m = math.floor(now / 60)
+-- refunds (ARGV[9] pairs of minute, count from ARGV[10]): grants made when a pass was planned, moved now to the minute its process starts
+local nref = tonumber(ARGV[9] or '0')
+for j = 0, nref - 1 do
+  local rm = ARGV[10 + 2 * j]
+  local cur = tonumber(redis.call('HGET', KEYS[1], rm) or '0')
+  local back = math.min(cur, tonumber(ARGV[11 + 2 * j]))
+  if back > 0 then
+    if back == cur then redis.call('HDEL', KEYS[1], rm) else redis.call('HINCRBY', KEYS[1], rm, -back) end
+    local uk = ARGV[8] .. tostring(math.floor(tonumber(rm) / 60))
+    local u = tonumber(redis.call('GET', uk) or '0')
+    if u > 0 then redis.call('DECRBY', uk, math.min(u, back)) end
+  end
+end
 local rows = redis.call('HGETALL', KEYS[1])
 local hour, burst = 0, 0
 for i = 1, #rows, 2 do
@@ -567,7 +581,7 @@ if grant > 0 then
   redis.call('EXPIRE', used_key, tonumber(ARGV[6]))
 end
 redis.call('EXPIRE', KEYS[1], 7300)
-return {grant, tonumber(redis.call('GET', used_key) or '0')}
+return {grant, tonumber(redis.call('GET', used_key) or '0'), m}
 """
 
 
@@ -577,26 +591,35 @@ def bucket_size(per_hour):
 
 
 def take(port, want, now=None, whole=False, burst=True):
+    return _take(port, want, now=now, whole=whole, burst=burst)[0]
+
+
+def _take(port, want, now=None, whole=False, burst=True, refund=None):
     """Up to ``want`` new connections to ``port`` (all or none with ``whole``): never more than the port's hourly budget in any 60 minutes, and
     never more than a quarter of it in any 15. ``burst=False`` (one testssl.sh run, with ``whole``) lets a run larger than the quarter go, but
     only alone: when nothing was granted in its 15 minutes, and nothing else is then granted in the 15 after it. The window runs on the Redis
     server's clock (``now`` replaces it in tests), so workers whose clocks differ share one window. Returns how many were granted: ``want``
-    for a port with no budget, and when Redis cannot be read (fail open)."""
+    for a port with no budget, and when Redis cannot be read (fail open).
+
+    ``_take`` returns ``(granted, minute)``, the minute (on the window's clock) the grant was counted in, or None when nothing was counted.
+    ``refund`` (``{minute: n}``) first takes back grants made earlier that were never used, in the same atomic step (see ``launch``)."""
     want = int(want)
     per_hour = budgets().get(int(port))
     if not per_hour or want <= 0:
-        return max(0, want)
+        return max(0, want), None
     client = _client()
     if client is None:
-        return want
+        return want, None
+    pairs = [x for minute, n in sorted((refund or {}).items()) if n > 0 for x in (int(minute), int(n))]
     try:
-        grant, used = client.eval(_TAKE, 1, f'{PREFIX}:window:{int(port)}', -1 if now is None else now, want, per_hour, bucket_size(per_hour),
-                                  1 if whole else 0, BUCKET_TTL, 1 if burst else 0, f'{PREFIX}:used:{int(port)}:')
+        grant, used, minute = client.eval(_TAKE, 1, f'{PREFIX}:window:{int(port)}', -1 if now is None else now, want, per_hour,
+                                          bucket_size(per_hour), 1 if whole else 0, BUCKET_TTL, 1 if burst else 0,
+                                          f'{PREFIX}:used:{int(port)}:', len(pairs) // 2, *pairs)
     except Exception:  # noqa: BLE001 - a governor that cannot be read must not stop a scan: the run goes ahead as before
         logger.warning('egress governor: Redis could not be read; port %s is not paced for this run', port)
-        return want
+        return want, None
     _alert(int(port), int(used), per_hour, int(grant), time.time() if now is None else now)
-    return int(grant)
+    return int(grant), int(minute)
 
 
 def used_this_hour(port, now=None):
@@ -643,7 +666,8 @@ def plan(addresses, touches, kind, now=None, log=True):
         wanting = [a for a in addresses if port in set(plan_of(a) or ())]
         if not wanting:
             continue
-        granted = take(port, len(wanting), now=now)
+        granted, minute = _take(port, len(wanting), now=now)
+        _reserve(port, wanting[:granted], minute)
         paced = wanting[granted:]
         for address in paced:
             held.setdefault(address, set()).add(port)
@@ -657,6 +681,91 @@ def plan(addresses, touches, kind, now=None, log=True):
                              f'{len(paced)} are scanned now without port {port}, which is probed later from this server',
                              project=ctx.get('project'), scan_id=ctx.get('scan_id'))
     return {a: frozenset(p) for a, p in held.items()}
+
+
+# --- charged when the process starts ---------------------------------------------------------------------------------------
+# A pass is planned (``plan``: which addresses get port 25 now, which are owed) before its processes queue for memory, and a pass of many
+# chunks starts them one after another. The window must count what is STARTED, so every process start asks again: ``launch`` takes back
+# (refunds) the grant its addresses got when the pass was planned and takes the tokens again in the minute the process starts, in one
+# atomic step. With room, the process runs as planned, counted where it starts. Without, it leaves the port out (nmap ``--exclude-ports``,
+# naabu ``-exclude-ports``; a run of that port alone is not started) and the port is owed and logged ``paced``, like any over-budget address.
+# The planned grants live in this process (``_RESERVED``): planning and starting happen in the same task.
+
+_RESERVED = {}  # (port, address) -> [minute of each grant made for it when planned and not yet started]
+_RESERVED_LOCK = __import__('threading').Lock()
+
+
+def _reserve(port, addresses, minute):
+    if minute is None or not addresses:
+        return
+    with _RESERVED_LOCK:
+        for key in [k for k, minutes in _RESERVED.items() if minutes[-1] < minute - 61]:  # out of every window: nothing left to take back
+            del _RESERVED[key]
+        for address in addresses:
+            _RESERVED.setdefault((int(port), address), []).append(int(minute))
+
+
+def _unreserve(port, addresses):
+    refund = {}
+    with _RESERVED_LOCK:
+        for address in addresses:
+            minutes = _RESERVED.get((int(port), address))
+            if minutes:
+                minute = minutes.pop(0)
+                refund[minute] = refund.get(minute, 0) + 1
+                if not minutes:
+                    del _RESERVED[(int(port), address)]
+    return refund
+
+
+def launch_now():
+    """The window's clock at a process start: None, the Redis server's clock (tests replace it)."""
+    return None
+
+
+def launch(port, addresses, kind=None, weight=1, burst=True):
+    """At the start of a process that probes ``port`` on ``addresses`` (after its memory wait): take ``weight`` tokens per address, all or
+    nothing, in the minute it starts, giving back what they were granted when their pass was planned. False when the window has no room:
+    the caller leaves the port out of this process; the addresses are then owed (``owe``) and logged ``paced`` here."""
+    addresses = list(dict.fromkeys(addresses or ()))
+    if not addresses or int(port) not in budgets():
+        return True
+    granted, _minute = _take(port, len(addresses) * max(1, int(weight)), now=launch_now(), whole=True, burst=burst,
+                             refund=_unreserve(port, addresses))
+    if granted:
+        return True
+    owe(port, addresses)
+    log_connections(addresses, [port], kind, mode=EXACT, outcome=PACED)
+    from cveFeed import activity
+    ctx = current()
+    activity.log('run_check', f'port {port} paced at start: {len(addresses)} host(s) ({kind or ctx.get("kind") or "local"}) run now without '
+                 f'port {port}, which is probed later from this server', project=ctx.get('project'), scan_id=ctx.get('scan_id'))
+    return False
+
+
+def launch_nmap(flags, targets, kind='nmap'):
+    """An nmap command's ``flags`` at its start: every budgeted port its plan probes is charged for ``targets`` now (``launch``); a port with
+    no room is left out (``--exclude-ports``). Raises ``PortHeld`` when nothing else is left to run."""
+    rules = budgets()
+    if not rules or not targets or flags is None:
+        return flags
+    _count, planned = nmap_plan_ports(flags)
+    for port in sorted(set(rules) & set(planned)):
+        if not launch(port, targets, current().get('kind') or kind):
+            flags = nmap_exclude(flags, {port})
+            if flags is None:
+                raise PortHeld(port, PACED)
+    return flags
+
+
+def launch_naabu(addresses, excluded=()):
+    """naabu's ``-exclude-ports`` at its start: every budgeted port it would sweep is charged for ``addresses`` now; one with no room is
+    added to the exclusions."""
+    excluded = set(excluded or ())
+    for port in sorted(set(budgets()) - excluded):
+        if not launch(port, addresses, 'naabu'):
+            excluded.add(port)
+    return excluded
 
 
 def admit_one(port, kind=None, address=None, weight=1, now=None, burst=True):
@@ -843,8 +952,9 @@ def _catch_up(runner, now, batch):
             ready += [e for e in group if e[2] in allowed]  # the rest stay owed: not scannable right now
         ready.sort(key=lambda e: (e[0], e[2]))
         ready = ready[:batch]
-        granted = take(port, len(ready), now=now)
+        granted, minute = _take(port, len(ready), now=now)
         todo, done = ready[:granted], []
+        _reserve(port, [e[2] for e in todo], minute)  # each group is charged again when its nmap starts (launch_nmap)
         groups = {}
         for entry in todo:
             groups.setdefault((entry[1], entry[3]), []).append(entry)

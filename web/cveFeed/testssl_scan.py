@@ -123,7 +123,8 @@ def command(host, ip, port, starttls, out_path, proxy_args=()):
 def run_testssl(host, ip, port, starttls=None, runner=None, on_start=None):
     """Run testssl.sh against ``host:port`` at ``ip`` and return its findings, a flat list of ``{id, severity, finding, cve?}``.
     ``runner(args, env, timeout)`` replaces the subprocess in tests. ``on_start()`` is called once testssl.sh is let start (after the memory
-    wait), right before it runs. Raises ``TestsslError``."""
+    wait), right before it runs, and may raise ``local_egress.PortHeld`` to stop it there. Raises ``TestsslError``."""
+    from cveFeed import local_egress
     from targetApp.target_types import refuse_local
     refuse_local('testssl.sh')
     with tempfile.TemporaryDirectory(prefix='testssl-') as work:
@@ -143,6 +144,8 @@ def run_testssl(host, ip, port, starttls=None, runner=None, on_start=None):
                 runner(args, env, timeout_seconds())
         except subprocess.TimeoutExpired:
             raise TestsslError('testssl.sh did not finish in time') from None
+        except local_egress.PortHeld:
+            raise
         except OSError as exc:
             raise TestsslError(f'testssl.sh could not be started: {type(exc).__name__}') from None
         try:
@@ -443,22 +446,31 @@ def sweep(project_id, runner=None, resolve=None):
                 from agentapi import sentinel_dispatch
                 items = sentinel_dispatch.try_testssl(sub.target_domain.project, host, ip, port, starttls, scan=sub.scan_history)
                 if items is None:
-                    held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS, burst=False)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
-                    if held:
-                        if held == 'skipped':
-                            local_egress.note_skipped('testssl.sh', {port})  # the log record was written by admit_one
+                    if port in local_egress.skipped_ports():  # the opt-in skip list (cveFeed.local_egress)
+                        local_egress.admit_one(port, 'testssl', ip)  # logs it skipped
+                        local_egress.note_skipped('testssl.sh', {port})
                         activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
-                                        f'{local_egress.held_text(port, held)}; the target stays due')
+                                        f'{local_egress.held_text(port, local_egress.SKIPPED)}; the target stays due')
                         continue
+
                     def started(ip=ip, port=port, scan_id=sub.scan_history_id):
-                        # testssl.sh opens 159 to 231 sockets to this one host and port (measured): counted as TESTSSL_CONNECTIONS (240), and
-                        # only once it is let start (a run refused at its memory wait sent nothing; its grant stays spent, the safe side)
+                        # once testssl.sh is let start (after its memory wait): the egress governor charges the run, whole and alone, now; no
+                        # room raises PortHeld and nothing is sent. testssl.sh opens 159 to 231 sockets to this one host and port (measured):
+                        # counted as TESTSSL_CONNECTIONS (240)
+                        held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS, burst=False,
+                                                 now=local_egress.launch_now())
+                        if held:
+                            raise local_egress.PortHeld(port, held)
                         local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
                         local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=scan_id)
                     items = run_testssl(host, ip, port, starttls, runner=runner, on_start=started)
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TestsslError(_why(items))
+            except local_egress.PortHeld as held:  # no room in the port's window when it was let start: not run, the target stays due
+                activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
+                                f'{local_egress.held_text(held.port, held.reason)}; the target stays due')
+                continue
             except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped or short of memory: not the target's failure
                 activity.settle(running, 'done', message=f'TLS audit of {where} stopped before it finished ({type(exc).__name__}); the target stays due')
                 return {**summary, 'skipped': 'scanning was stopped or memory was short: the targets stay due'}
