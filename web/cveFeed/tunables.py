@@ -142,18 +142,18 @@ TUNABLES = [
             'and whenever the advisor is unavailable or over its daily budget, the deterministic controller tunes alone.',
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
     Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
-            'Charged connection attempts this server\'s own scanners may make to port 25: never more than this in any 60 minutes, nor a quarter of it in any 15 '
-            '(one testssl.sh run, charged 240 as measured, is held to the 60 minutes only), shared by every worker. '
+            'Charged connection attempts this server\'s own scanners may make to port 25: never more than this in any 60 minutes, and never more than a '
+            'quarter of it in any 15, or one testssl.sh run (charged 240, as measured) and nothing else; shared by every worker. '
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
     Tunable('fallback_nmap_per_hour', 'Local nmap fallback runs per hour',
-            'How many nmap stages may run on this server in an hour because no Sentinel took them in time. Over it, the addresses wait for the '
-            'next run instead. 0 is unlimited.',
+            'How many nmap stages may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the addresses '
+            'wait and run when their target is next scanned. 0 is unlimited.',
             'egress', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR', 30, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
     Tunable('fallback_naabu_per_hour', 'Local naabu fallback runs per hour',
-            'How many naabu port sweeps may run on this server in an hour because no Sentinel took them in time. Over it, the addresses wait for '
-            'the next run instead. 0 is unlimited.',
+            'How many naabu port sweeps may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the '
+            'addresses wait and run when their target is next scanned. 0 is unlimited.',
             'egress', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR', 10, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}

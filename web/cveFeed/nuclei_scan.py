@@ -311,7 +311,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
             listed = [ln.strip() for ln in f if ln.strip()]
     except OSError:
         listed = None
-    path, scratch = targets_file, None
+    path, scratch, kept = targets_file, None, None
     if listed is not None:
         skip = local_egress.skipped_ports()
         kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
@@ -329,6 +329,9 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
             handle.write('\n'.join(kept) + '\n')
             handle.close()
             path = scratch = handle.name
+    def started(kept=kept):  # counted and logged once nuclei is let start (after its memory wait): a run refused there sent nothing
+        if kept is None:
+            return
         per_port = {}
         for target in kept:
             for port in _target_ports(target):
@@ -337,7 +340,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         for port in local_egress.log_ports() & set(per_port):
             local_egress.log_connections([_target_host(t) for t in kept if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
     try:
-        yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file)
+        yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file, on_start=started)
     finally:
         if scratch:
             try:
@@ -346,7 +349,7 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
                 pass
 
 
-def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
+def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None, on_start=None):
     from targetApp.target_types import refuse_local
     refuse_local('nuclei')
     from reNgine import resources
@@ -361,6 +364,8 @@ def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', seve
     kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
     approved_dir, _, _ = approved_templates()
     with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
+        if on_start is not None:
+            on_start()
         proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)

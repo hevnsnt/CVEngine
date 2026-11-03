@@ -957,7 +957,9 @@ class NucleiGovernedTests(Clean, TestCase):
         self.addCleanup(os.unlink, handle.name)
         seen = []
 
-        def fake(path, *a, **k):
+        def fake(path, *a, on_start=None, **k):
+            if on_start:
+                on_start()  # the real one calls it once nuclei is let start (after the memory wait)
             seen.extend(open(path).read().split())
             return iter(())
         with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake):
@@ -1073,7 +1075,8 @@ class OwedListTests(Clean, _ScanFixture, TestCase):
 @mock.patch.dict(os.environ, R2)
 class WindowTests(Clean, TestCase):
     def test_61_minute_buckets_are_needed(self):
-        got = [(s, local_egress.take(25, 100, now=T0 + s, burst=False)) for s in (59, 960, 1860, 2760, 3600)]  # the hour alone
+        with mock.patch.object(local_egress, 'BURST_SHARE', 1):  # the hour alone: the 15-minute share set to the whole budget
+            got = [(s, local_egress.take(25, 100, now=T0 + s)) for s in (59, 960, 1860, 2760, 3600)]
         self.assertEqual([g for _s, g in got[:4]], [100] * 4)
         self.assertLessEqual(sum(g for s, g in got if 59 <= s < 59 + 3600), 400)
 
@@ -1100,12 +1103,16 @@ class TestsslWeightTests(Clean, TestCase):
     def test_a_testssl_run_counts_its_measured_connections_and_may_exceed_the_burst_alone(self):
         self.assertEqual(local_egress.TESTSSL_CONNECTIONS, 240)
         self.assertEqual(local_egress.take(25, 50, now=T0), 50)
-        self.assertIsNone(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=T0, burst=False))
+        # 240 is more than the 15-minute share (100): the run needs its 15 minutes to itself, so not beside the 50 just granted
+        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=T0, burst=False),
+                         'paced')
+        self.assertIsNone(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=T0 + 16 * 60,
+                                                 burst=False))
         self.assertEqual(local_egress.used_this_hour(25, now=T0), 290)
-        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.2', weight=local_egress.TESTSSL_CONNECTIONS, now=T0 + 1800,
-                                                 burst=False), 'paced')  # 530 would break the hour
-        self.assertEqual(local_egress.take(25, 1, now=T0 + 60), 0)  # the run filled this 15 minutes: no nmap probe on 25 beside it
-        self.assertEqual(local_egress.take(25, 200, now=T0 + 1800), 100)  # later: the burst limit again, inside what is left of the hour
+        self.assertEqual(local_egress.take(25, 1, now=T0 + 17 * 60), 0)  # the run fills its 15 minutes: no nmap probe on 25 beside it
+        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.2', weight=local_egress.TESTSSL_CONNECTIONS, now=T0 + 40 * 60,
+                                                 burst=False), 'paced')  # 530 would break the 60 minutes
+        self.assertEqual(local_egress.take(25, 200, now=T0 + 40 * 60), 100)  # later: the 15-minute share again, inside what is left of the hour
 
 
 @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:4/hour'})
@@ -1223,3 +1230,159 @@ class FloodInvariantTests(Clean, _ScanFixture, TestCase):
                 for i in range(4):
                     probed, charged, calls = self.one_pass(flags_fallback=bool(i % 2))
                     self.assertLessEqual(probed, charged, (budget, i))
+
+
+# --- round 2 of the #389 review, completed: the stated limits, exactly ------------------------------------------------------------
+
+def _grant_log(port=25):
+    """``[(minute, granted, alone)]`` of every grant the governor made through ``take`` while the patch is active."""
+    out = []
+    real = local_egress.take
+
+    def counting(p, want, now=None, whole=False, burst=True):
+        got = real(p, want, now=now, whole=whole, burst=burst)
+        if int(p) == port and got:
+            out.append((int(now // 60), got, not burst and want > local_egress.bucket_size(local_egress.budgets()[port])))
+        return got
+    return out, mock.patch.object(local_egress, 'take', side_effect=counting)
+
+
+@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:800/hour'})
+class StatedLimitsInvariantTests(Clean, TestCase):
+    """Randomised over eight hours of asks from many callers (nmap chunks, single probes, nuclei targets, testssl.sh runs) at random times:
+    every 61 consecutive minute buckets (any 60 minutes) hold at most the hourly budget, and every 16 (any 15 minutes) hold at most a quarter
+    of it, or one testssl.sh run and nothing else."""
+
+    def test_any_60_minutes_and_any_15_minutes(self):
+        import random
+        rng = random.Random(3893)
+        grants, patcher = _grant_log()
+        with patcher:
+            dense = [T0 + rng.uniform(0, 2 * 3600) for _ in range(900)]  # a busy stretch, then a quiet one with gaps a testssl.sh run fits in
+            quiet = [T0 + 2 * 3600 + rng.uniform(0, 6 * 3600) for _ in range(60)]
+            for at in sorted(dense + quiet):  # the Redis clock only moves forward
+                r = rng.random()
+                if r < (0.05 if at < T0 + 2 * 3600 else 0.4):
+                    local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=at, burst=False)
+                elif r < 0.25:
+                    local_egress.admit_one(25, 'nuclei', '198.51.100.2', weight=local_egress.NUCLEI_TARGET_CONNECTIONS, now=at)
+                elif r < 0.6:
+                    local_egress.take(25, rng.randint(1, 64), now=at)
+                else:
+                    local_egress.admit_one(25, 'nmap', '198.51.100.3', now=at)
+        by_minute = {}
+        for minute, got, alone in grants:
+            by_minute.setdefault(minute, []).append((got, alone))
+        self.assertTrue(any(alone for _m, _g, alone in grants))  # the case under test happened
+        first, last = min(by_minute), max(by_minute)
+        for start in range(first - 60, last + 1):
+            hour = [g for m in range(start, start + 61) for g in by_minute.get(m, ())]
+            self.assertLessEqual(sum(got for got, _a in hour), 800, start)
+            quarter = [g for m in range(start, start + 16) for g in by_minute.get(m, ())]
+            if any(alone for _g, alone in quarter):
+                self.assertEqual(len(quarter), 1, (start, quarter))  # one testssl.sh run, alone in its 15 minutes
+                self.assertEqual(quarter[0][0], local_egress.TESTSSL_CONNECTIONS)
+            else:
+                self.assertLessEqual(sum(got for got, _a in quarter), 200, start)
+
+    def test_a_burst_spaced_841_seconds_is_still_one_15_minutes(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:400/hour'}):
+            self.assertEqual(local_egress.take(25, 100, now=T0 + 59), 100)
+            self.assertEqual(local_egress.take(25, 100, now=T0 + 900), 0)  # 841 s later: inside the same 15 minutes
+            self.assertEqual(local_egress.take(25, 100, now=T0 + 960), 100)  # 901 s later: a new 15 minutes
+
+    def test_a_partial_grant_is_never_made_for_a_whole_run(self):
+        self.assertEqual(local_egress.take(25, 150, now=T0), 150)
+        self.assertEqual(local_egress.take(25, 60, now=T0, whole=True), 0)  # 50 left of the share: a whole ask of 60 gets nothing
+        self.assertEqual(local_egress.take(25, 60, now=T0), 50)  # a divisible ask takes what is left
+        self.assertEqual(local_egress.used_this_hour(25, now=T0), 200)
+
+    def test_a_large_budget_holds_testssl_to_the_ordinary_share(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:2000/hour'}):  # share 500: 240 fits in it, no run alone
+            self.assertEqual(local_egress.take(25, 200, now=T0), 200)
+            self.assertIsNone(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=240, now=T0, burst=False))  # beside it: 440
+            self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.2', weight=240, now=T0, burst=False), 'paced')  # 680 > 500
+
+
+@mock.patch.dict(os.environ, R2)
+class SentOnlyOnceStartedTests(Clean, TestCase):
+    """A run refused at its memory wait sent nothing: no 'sent' record and no ledger count (its grant stays spent: over-charging is the
+    safe side of the cap)."""
+
+    def test_nuclei_refused_for_memory_logs_nothing_sent(self):
+        import tempfile
+
+        from cveFeed import nuclei_scan
+        from reNgine.resources import MemoryBusy
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('198.51.100.1:25\nwww.example.test\n')
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
+                mock.patch.object(nuclei_scan, 'build_flags', return_value=[]):
+            with self.assertRaises(MemoryBusy):
+                list(nuclei_scan.stream_nuclei(handle.name))
+        self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
+        self.assertEqual((local_egress.snapshot() or {}).get('hour', {}).get('p25', 0), 0)
+        self.assertEqual(local_egress.used_this_hour(25), local_egress.NUCLEI_TARGET_CONNECTIONS)  # charged when granted
+
+    def test_nuclei_that_starts_logs_its_host_25_target_sent(self):
+        import tempfile
+
+        from cveFeed import nuclei_scan
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('198.51.100.1:25\n')
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        popen = mock.Mock()
+        popen.return_value.stdout = iter(())
+        popen.return_value.wait.return_value = 0
+        popen.return_value.poll.return_value = 0
+        popen.return_value.returncode = 0
+        with mock.patch('reNgine.resources.heavy_job', return_value=_Job()), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
+                mock.patch.object(nuclei_scan, 'build_flags', return_value=[]), mock.patch.object(nuclei_scan.subprocess, 'Popen', popen):
+            try:
+                list(nuclei_scan.stream_nuclei(handle.name))
+            except Exception:  # noqa: BLE001 - the fake process is not a real nuclei; only the order matters here
+                pass
+        popen.assert_called_once()
+        self.assertEqual([r['outcome'] for r in local_egress.connection_log(port=25)['records']], ['sent'])
+
+    def test_heavy_process_calls_on_start_only_once_admitted(self):
+        from cveFeed import heavy_process
+        from reNgine.resources import MemoryBusy
+        started = mock.Mock()
+        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')):
+            with self.assertRaises(MemoryBusy):
+                heavy_process.run('testssl', ['/bin/true'], 5, on_start=started)
+        started.assert_not_called()
+        order = []
+        with mock.patch('reNgine.resources.heavy_job', return_value=_Job()), \
+                mock.patch.object(heavy_process.subprocess, 'Popen', side_effect=lambda *a, **k: order.append('popen') or mock.Mock(
+                    communicate=mock.Mock(return_value=('', '')), returncode=0)):
+            heavy_process.run('testssl', ['/bin/true'], 5, on_start=lambda: order.append('on_start'))
+        self.assertEqual(order, ['on_start', 'popen'])
+
+
+class TestsslSentOnlyOnceStartedTests(Clean, TestCase):
+    def setUp(self):
+        super().setUp()
+        from tests.test_route_auth import RouteFixture
+        fixture = RouteFixture()
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        self.project = fixture.project
+        fixture.scan(names=('mx.rt.test',), ports=((25, 'smtp'),))
+        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+
+    @mock.patch.dict(os.environ, R2)
+    def test_a_testssl_run_refused_for_memory_logs_nothing_sent(self):
+        from reNgine.resources import MemoryBusy
+        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')), mock.patch('targetApp.target_types.refuse_local'), \
+                mock.patch.object(testssl_scan, 'installed', return_value=True):
+            out = testssl_scan.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
+        self.assertIn('memory', out.get('skipped', ''))
+        self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
+        self.assertEqual((local_egress.snapshot() or {}).get('hour', {}).get('p25', 0), 0)

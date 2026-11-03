@@ -19,15 +19,19 @@ Five parts, all state in Redis (no table, no migration):
   external tool was handed that address and port). A Redis stream, kept 14 days and at most 200,000 records (``CVENGINE_EGRESS_LOG_DAYS``,
   ``CVENGINE_EGRESS_LOG_MAX``), the oldest dropped first; App Admins read it over REST and MCP (``agentapi.egress``) or as CSV.
 * **The governor** (``plan``, ``take``, ``owe``, ``catch_up``): a shared sliding window per budgeted port (``CVENGINE_LOCAL_PORT_BUDGETS``,
-  default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, nor a
-  quarter of it in any 15 (a testssl.sh run, charged TESTSSL_CONNECTIONS as measured, is held to the 60 minutes only; a nuclei ``host:25``
-  target is charged NUCLEI_TARGET_CONNECTIONS, an estimate), on the Redis server's clock. A local run asks it before it probes a budgeted port on a set of addresses. Addresses it grants are scanned as before.
+  default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, and
+  never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
+  which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
+  after it). A nuclei ``host:25`` target is charged NUCLEI_TARGET_CONNECTIONS, an estimate. One window on the Redis server's clock, shared by
+  every worker. A local run asks it before it probes a budgeted port on a set of addresses (before the run queues for memory: the limits are
+  on grants, and a run that waits sends later). Addresses it grants are scanned as before.
   Addresses over the budget are scanned now WITHOUT that port, and the port is owed: the catch-up pass (``catch_up``, queued every ten minutes
-  by the background sweep's firing, one pass at a time) probes owed ports, paced by the same window, until every one is done. Nothing is
-  dropped; port 25 is still scanned for every host from this server, spread over time. A fallback in the meaning of the cap below includes a
+  by the background sweep's firing, one pass at a time) probes owed ports, paced by the same window, until every one is done. Nothing in
+  scope is dropped (an owed entry leaves, with a log line, only when it is out of scope or 30 days old); port 25 is still scanned for every
+  host from this server, spread over time. A fallback in the meaning of the cap below includes a
   stage that runs here because every Sentinel the project has for it is offline (``agentapi.sentinel_dispatch.offline_fallback``).
-* **The fallback cap** (``admit_fallback``, ``note_fallback``): how many stage runs per hour may fall back from a Sentinel to local execution
-  (nmap 30, naabu 10 by default; 0 is unlimited). Over the cap the addresses are not scanned here and stay due for the next run. A warning in
+* **The fallback cap** (``admit_fallback``, ``note_fallback``): how many stage runs in each UTC clock hour may fall back from a Sentinel to local
+  execution (nmap 30, naabu 10 by default; 0 is unlimited). Over the cap the addresses are not scanned here and stay due for the next run. A warning in
   the activity log and a problem in ``get_system_status`` say when tasks keep falling back, and name the Sentinels that are offline or full.
 * **The opt-in skip list** (``CVENGINE_LOCAL_SKIP_PORTS``, default empty): ports this server never connects to at all. Every local nmap and
   naabu run excludes them, testssl.sh STARTTLS, the nmap probes and validation checks on them are not run here, and in-process connections to
@@ -58,7 +62,8 @@ OWED_DAYS = 30  # an owed port nobody could probe for this long is forgotten, en
 OWED_TTL = 2 * OWED_DAYS * 24 * HOUR  # only a backstop for the whole list; each entry ages out on its own after OWED_DAYS
 BURST_SHARE = 4  # at most a quarter of an hour's budget in any 15 minutes: an hour's allowance is never spent in one burst
 # One testssl.sh run with this app's arguments (-p -s -S -U -f, --starttls smtp) opened 159 connections against a modern TLS mail server and
-# 231 against a legacy one (testssl.sh 3.2.4, counted at the server): charged 240, rounded up, all or nothing against the hourly budget only.
+# 231 against a legacy one (testssl.sh 3.2.4, counted at the server): charged 240, rounded up, all or nothing; being more than a quarter of the
+# default budget, a run goes alone in its 15 minutes (see _TAKE).
 TESTSSL_CONNECTIONS = 240
 # A nuclei target host:25: an estimate, not a measurement. nuclei's HTTP probe of a host:port (http and https), plus the ssl and tcp templates
 # that run against the port the input names, about ten here, each retried at most once (-retries 1): about 24, rounded up to 25.
@@ -520,6 +525,9 @@ def snapshot(now=None, hours=24):
 # what was granted in the current minute and the 15 before it never a quarter of it. Any 3600 seconds span at most 61 minute buckets (any 900
 # seconds at most 16), so "never more than N in any hour, never more than N/4 in any 15 minutes" holds exactly, not just on average, and the
 # whole budget stays usable hour after hour. ``whole`` grants all of ``want`` or nothing (one testssl.sh run is many connections, not a few).
+# ``alone`` (ARGV[7] = 0) is the one exception to the quarter: a whole run larger than the quarter (one testssl.sh run, 240 of 400) is granted
+# only when nothing was granted in the current minute and the 15 before it, and then fills that quarter by itself, so nothing else is granted
+# in the 15 minutes after it either: any 15 minutes hold at most a quarter of the budget, or that one run and nothing else.
 _TAKE = """
 local now = tonumber(ARGV[1])
 if now < 0 then
@@ -545,7 +553,11 @@ for i = 1, #rows, 2 do
   end
 end
 local grant = math.min(want, cap_hour - hour)
-if use_burst == 1 then grant = math.min(grant, cap_burst - burst) end
+if use_burst == 1 or want <= cap_burst then
+  grant = math.min(grant, cap_burst - burst)
+elseif burst > 0 then
+  grant = 0
+end
 if grant < 0 then grant = 0 end
 if whole == 1 and grant < want then grant = 0 end
 local used_key = ARGV[8] .. tostring(math.floor(now / 3600))
@@ -566,9 +578,10 @@ def bucket_size(per_hour):
 
 def take(port, want, now=None, whole=False, burst=True):
     """Up to ``want`` new connections to ``port`` (all or none with ``whole``): never more than the port's hourly budget in any 60 minutes, and
-    (with ``burst``, every caller but one testssl.sh run) never more than a quarter of it in any 15. The window runs on the Redis server's clock
-    (``now`` replaces it in tests), so workers whose clocks differ share one window. Returns how many were granted: ``want`` for a port with
-    no budget, and when Redis cannot be read (fail open)."""
+    never more than a quarter of it in any 15. ``burst=False`` (one testssl.sh run, with ``whole``) lets a run larger than the quarter go, but
+    only alone: when nothing was granted in its 15 minutes, and nothing else is then granted in the 15 after it. The window runs on the Redis
+    server's clock (``now`` replaces it in tests), so workers whose clocks differ share one window. Returns how many were granted: ``want``
+    for a port with no budget, and when Redis cannot be read (fail open)."""
     want = int(want)
     per_hour = budgets().get(int(port))
     if not per_hour or want <= 0:
@@ -813,7 +826,8 @@ def _catch_up(runner, now, batch):
         _drop(port, aged, f'owed for more than {OWED_DAYS} days, forgotten (the address is probed again at its next regular rescan)')
         entries = [e for e in entries if e not in aged]
         live = set(Project.objects.filter(pk__in={e[3] for e in entries if e[3]}).values_list('pk', flat=True))
-        _drop(port, [e for e in entries if e[3] not in live], 'its project no longer exists, so it is out of scope')
+        _drop(port, [e for e in entries if e[3] is None], 'no project was recorded with it, so its scope cannot be checked')
+        _drop(port, [e for e in entries if e[3] is not None and e[3] not in live], 'its project no longer exists, so it is out of scope')
         ready = []
         by_project = {}
         for entry in entries:

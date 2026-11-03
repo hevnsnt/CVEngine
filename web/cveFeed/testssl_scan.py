@@ -120,9 +120,10 @@ def command(host, ip, port, starttls, out_path, proxy_args=()):
     return args + [_destination(host, port)]
 
 
-def run_testssl(host, ip, port, starttls=None, runner=None):
+def run_testssl(host, ip, port, starttls=None, runner=None, on_start=None):
     """Run testssl.sh against ``host:port`` at ``ip`` and return its findings, a flat list of ``{id, severity, finding, cve?}``.
-    ``runner(args, env, timeout)`` replaces the subprocess in tests. Raises ``TestsslError``."""
+    ``runner(args, env, timeout)`` replaces the subprocess in tests. ``on_start()`` is called once testssl.sh is let start (after the memory
+    wait), right before it runs. Raises ``TestsslError``."""
     from targetApp.target_types import refuse_local
     refuse_local('testssl.sh')
     with tempfile.TemporaryDirectory(prefix='testssl-') as work:
@@ -134,7 +135,12 @@ def run_testssl(host, ip, port, starttls=None, runner=None):
         args = command(host, ip, port, starttls, out, proxy_args)
         env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': work, 'TERM': 'dumb', 'LC_ALL': 'C'}
         try:
-            (runner or _run)(args, env, timeout_seconds())
+            if runner is None:
+                _run(args, env, timeout_seconds(), on_start=on_start)
+            else:
+                if on_start is not None:
+                    on_start()
+                runner(args, env, timeout_seconds())
         except subprocess.TimeoutExpired:
             raise TestsslError('testssl.sh did not finish in time') from None
         except OSError as exc:
@@ -149,9 +155,9 @@ def run_testssl(host, ip, port, starttls=None, runner=None):
     return flatten(report)
 
 
-def _run(args, env, timeout):
+def _run(args, env, timeout, on_start=None):
     from cveFeed import heavy_process  # under the resource gate: a pause or stop kills testssl.sh and its openssl children, and memory is admitted
-    heavy_process.run('testssl', args, timeout, label=args[-1], env=env)
+    heavy_process.run('testssl', args, timeout, label=args[-1], env=env, on_start=on_start)
 
 
 def flatten(report):
@@ -444,10 +450,12 @@ def sweep(project_id, runner=None, resolve=None):
                         activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
                                         f'{local_egress.held_text(port, held)}; the target stays due')
                         continue
-                    # testssl.sh opens 159 to 231 sockets to this one host and port (measured): counted as TESTSSL_CONNECTIONS (240)
-                    local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
-                    local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=sub.scan_history_id)
-                    items = run_testssl(host, ip, port, starttls, runner=runner)
+                    def started(ip=ip, port=port, scan_id=sub.scan_history_id):
+                        # testssl.sh opens 159 to 231 sockets to this one host and port (measured): counted as TESTSSL_CONNECTIONS (240), and
+                        # only once it is let start (a run refused at its memory wait sent nothing; its grant stays spent, the safe side)
+                        local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
+                        local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=scan_id)
+                    items = run_testssl(host, ip, port, starttls, runner=runner, on_start=started)
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TestsslError(_why(items))
