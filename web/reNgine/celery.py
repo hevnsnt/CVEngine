@@ -24,6 +24,11 @@ app.conf.worker_enable_prefetch_count_reduction = False
 from reNgine import broker_acks
 
 broker_acks.install()
+# On a gevent worker, remote control (ping, inspect, autoscale, revoke) reconnects after a dropped broker connection instead of ending for good
+# (reNgine/gevent_pidbox.py)
+from reNgine import gevent_pidbox
+
+gevent_pidbox.install()
 app.autodiscover_tasks()
 
 

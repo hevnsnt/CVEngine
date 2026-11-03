@@ -85,3 +85,18 @@ class AckFreesTheSlotTests(unittest.TestCase):
             qos.reject('a', requeue=True)
         restore.assert_called_once_with('a', leftmost=True)
         self.assertTrue(qos.can_consume())
+
+
+class InstallIsFailSafeTests(unittest.TestCase):
+
+    def test_a_kombu_that_does_not_look_as_expected_is_left_alone_with_a_warning_and_nothing_raises(self):
+        import kombu
+        before = kombu_redis.QoS.ack
+        with mock.patch.object(kombu_redis, 'QoS', None), self.assertLogs('reNgine.broker_acks', 'WARNING') as logs:
+            self.assertFalse(broker_acks.install())  # the transport has no QoS
+        self.assertIn(f'kombu {kombu.__version__} lacks kombu.transport.redis.QoS', logs.output[0])
+        with mock.patch.object(broker_acks, '_install', side_effect=RuntimeError('odd kombu')), \
+                self.assertLogs('reNgine.broker_acks', 'WARNING') as logs:
+            self.assertFalse(broker_acks.install())  # anything unexpected
+        self.assertIn('Could not guard kombu', logs.output[0])
+        self.assertIs(kombu_redis.QoS.ack, before)

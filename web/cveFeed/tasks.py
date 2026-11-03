@@ -1446,8 +1446,9 @@ def run_internal_scan(self, scan_id):
     """Scan an internal target through a Sentinel inside its network, never from this server (see cveFeed.internal_scan)."""
     from cveFeed import internal_scan
     from startScan.models import ScanHistory
-    if self.request.id:
-        ScanHistory.objects.filter(pk=scan_id).update(celery_ids=[self.request.id])
+    from cveFeed.discovery import FAILED, SUCCESS
+    if self.request.id:  # a redelivered message for a scan that already ended keeps the id of the task that ran it
+        ScanHistory.objects.filter(pk=scan_id).exclude(scan_status__in=(FAILED, SUCCESS)).update(celery_ids=[self.request.id])
     return internal_scan.run(scan_id)
 
 

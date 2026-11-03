@@ -13,7 +13,11 @@ BRPOP connection (it reconnects in place), where earlier versions restarted the 
 ``install`` (called by ``reNgine/celery.py``) makes the ack try the removal once more on a connection error (the connection pool hands out a
 fresh connection for the dropped one; removing an index entry twice is harmless) and free the delivery whatever happens. When the removal
 fails twice the error is still raised, so kombu logs it as before, and the message stays in the unacked index: the broker hands it out again
-after the visibility timeout, as it does for any message whose ack never reached it. Rejections without requeue go the same way."""
+after the visibility timeout, as it does for any message whose ack never reached it. Rejections without requeue go the same way; a rejection
+with requeue (``reject(requeue=True)``) is left to kombu, which puts the message back in its queue and frees the delivery itself.
+
+``install`` never raises: when kombu's Redis transport, its ``QoS`` or anything the patch relies on is missing (another kombu version), it
+logs a warning naming the kombu version and leaves acknowledgements as kombu makes them."""
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,37 +35,64 @@ def _remove(qos, delivery_tag):
         qos._remove_from_indices(delivery_tag).execute()
 
 
+def _kombu_version():
+    try:
+        import kombu
+        return getattr(kombu, '__version__', 'unknown')
+    except Exception:  # noqa: BLE001
+        return 'not importable'
+
+
 def install():
-    """Patch kombu's Redis QoS once (idempotent). Returns True when the patch is in place."""
+    """Patch kombu's Redis QoS once (idempotent). Returns True when the patch is in place, False (with a warning) when it cannot be. Never
+    raises."""
+    try:
+        return _install()
+    except Exception:  # a worker must start whatever kombu looks like
+        logger.warning('Could not guard kombu %s acknowledgements; they are left as kombu makes them.', _kombu_version(), exc_info=True)
+        return False
+
+
+def _install():
     try:
         from kombu.transport import redis as kombu_redis
         from kombu.transport import virtual
-    except ImportError:  # pragma: no cover - kombu without its Redis transport (redis-py missing): nothing to patch
+    except ImportError:
+        logger.warning('kombu %s has no Redis transport here; acknowledgements are left as kombu makes them.', _kombu_version())
         return False
-    qos_cls = kombu_redis.QoS
+    qos_cls = getattr(kombu_redis, 'QoS', None)
+    base_ack = getattr(getattr(virtual, 'QoS', None), 'ack', None)
+    missing = [name for name, ok in (
+        ('kombu.transport.redis.QoS', isinstance(qos_cls, type)),
+        ('kombu.transport.virtual.QoS.ack', callable(base_ack)),
+        ('QoS._remove_from_indices', callable(getattr(qos_cls, '_remove_from_indices', None))),
+        ('QoS.reject', callable(getattr(qos_cls, 'reject', None))),
+        ('kombu.transport.virtual.QoS._delivered', hasattr(getattr(virtual, 'QoS', None), '_delivered')),
+    ) if not ok]
+    if missing:
+        logger.warning('kombu %s lacks %s: acknowledgements are left as kombu makes them.', _kombu_version(), ', '.join(missing))
+        return False
     if getattr(qos_cls, _MARK, False):
         return True
-    if not callable(getattr(qos_cls, '_remove_from_indices', None)):
-        logger.warning('kombu.transport.redis.QoS has no _remove_from_indices: acknowledgements are left as kombu makes them')
-        return False
     original_reject = qos_cls.reject
 
     def ack(self, delivery_tag):
         try:
             _remove(self, delivery_tag)
         finally:
-            virtual.QoS.ack(self, delivery_tag)  # frees the delivery (and with it a prefetch slot) even when the broker was not told
+            base_ack(self, delivery_tag)  # frees the delivery (and with it a prefetch slot) even when the broker was not told
 
     def reject(self, delivery_tag, requeue=False):
-        if requeue:
+        if requeue:  # left to kombu: it restores the message to its queue and frees the delivery
             return original_reject(self, delivery_tag, requeue=True)
         try:
             _remove(self, delivery_tag)
         finally:
-            virtual.QoS.ack(self, delivery_tag)
+            base_ack(self, delivery_tag)
         return None
 
     qos_cls.ack = ack
     qos_cls.reject = reject
     setattr(qos_cls, _MARK, True)
+    logger.info('Guarded kombu %s Redis acknowledgements: a dropped connection no longer costs a prefetch slot.', _kombu_version())
     return True
