@@ -821,8 +821,9 @@ class ImportTests(Fixture, TestCase):
         self.run_scan([APACHE, PLAIN])
         run = OpenvasRun.objects.get()
         self.assertEqual((run.status, run.summary['findings'], run.summary['without_cve']), ('done', 1, 1))
-        message = AgentActivity.objects.filter(kind='run_check', message__startswith='OpenVAS:').latest('id').message
+        message = AgentActivity.objects.filter(kind='run_check', message__contains='host(s) scanned').latest('id').message
         self.assertIn('1 result(s) without a CVE not imported', message)
+        self.assertTrue(message.startswith(f'OpenVAS run {run.pk} on api.rt.test, www.rt.test (GVM task cvengine-run-{run.pk}): '), message)
 
     def test_many_results_are_read_a_page_at_a_time_and_capped(self):
         run_results = [{**APACHE, 'oid': f'1.3.6.1.4.1.25623.1.0.{200000 + i}', 'cves': []} for i in range(250)]
@@ -830,12 +831,14 @@ class ImportTests(Fixture, TestCase):
         run = self.finish_task(run_results)
         self.tick()
         self.assertEqual(OpenvasRun.objects.get().summary['results'], 250)
-        pages = [r for r in self.gvmd.sent('get_results')]
-        self.assertEqual(len(pages), 3)
+        pages = self.gvmd.sent('get_reports')  # read from the task's report, a page of 100 at a time
+        self.assertEqual([(r.get('details'), re.search(r'first=(\d+)', r.get('filter')).group(1)) for r in pages], [('1', '1'), ('1', '101'), ('1', '201')])
+        self.assertTrue(all('result_hosts_only=0' in r.get('filter') and 'min_qod=0' in r.get('filter') for r in pages))
+        self.assertEqual(self.gvmd.sent('get_results'), [])
         with mock.patch.object(ov, 'MAX_RESULTS', 100):
             gmp_results = self.factory()
             with gmp_results as gmp:
-                items, _no_cve, _bad = ov.fetch_results(gmp, run.task_id)
+                items = ov.fetch_results(gmp, run.task_id)['items']
         self.assertEqual(len(items), 100)
 
     def test_hostile_text_is_stored_clipped_and_plain(self):
@@ -1096,7 +1099,7 @@ class HostContextTests(Fixture, TestCase):
 
 class BootstrapTests(GvmdFixture, TestCase):
     def test_the_default_login_is_replaced_over_gmp_and_the_new_one_is_saved_encrypted(self):
-        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)  # a gvmd that lets a user change its own password
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             name = ov.bootstrap(token=lambda n: 'generated-password-0123456789')
         self.assertEqual(name, 'admin')
@@ -1119,12 +1122,48 @@ class BootstrapTests(GvmdFixture, TestCase):
 
     def test_the_command_prints_only_the_user_name(self):
         from io import StringIO
-        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)
         out = StringIO()
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             call_command('openvas_bootstrap', stdout=out)
         self.assertIn('GMP login for admin generated and saved', out.getvalue())
         self.assertNotIn(gvmd.users['admin'], out.getvalue())
+
+    def test_gvmd_22_7_refuses_admin_changing_itself_so_a_login_of_cvengines_own_is_made(self):
+        # gvmd 22.7: modify_user of the user signed in answers 404 "Failed to find user '<uuid>'" (issue #394); an Admin may create a user
+        from io import StringIO
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        out = StringIO()
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            call_command('openvas_bootstrap', stdout=out)
+        row = OpenvasSettings.current()
+        self.assertEqual(row.gmp_username, 'cvengine')
+        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
+        self.assertEqual(gvmd.user_roles['cvengine'], 'Admin')
+        self.assertEqual(gvmd.owners['cvengine'], 'admin')
+        self.assertEqual(gvmd.users['admin'], 'admin')  # nothing over GMP can change it: the command says how to retire it
+        self.assertIn('GMP login for cvengine generated and saved', out.getvalue())
+        self.assertIn('--new-password', out.getvalue())
+        self.assertIn('restart openvas-gvmd', out.getvalue())
+        self.assertNotIn(row.gmp_password, out.getvalue())
+        self.assertEqual(gvmd.sent('modify_user')[0].get('user_id'), str(__import__('uuid').uuid5(__import__('uuid').NAMESPACE_DNS, 'admin')))
+
+    def test_a_cvengine_user_left_by_an_earlier_attempt_gets_the_new_password(self):
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd.users['cvengine'], gvmd.owners['cvengine'] = 'lost-password', 'admin'
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            self.assertEqual(ov.bootstrap(token=lambda n: 'generated-password-0123456789'), 'cvengine')
+        self.assertEqual(gvmd.users['cvengine'], 'generated-password-0123456789')
+        self.assertEqual(gvmd.sent('create_user'), [])
+
+    def test_when_gvmd_refuses_both_the_error_says_what_to_do(self):
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd.fail['create_user'] = ('403', 'Permission denied')
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            with self.assertRaises(ov.OpenvasError) as raised:
+                ov.bootstrap()
+        self.assertIn('openvas_credentials', str(raised.exception))
+        self.assertFalse(OpenvasSettings.current().gmp_password)
 
     def test_a_manual_login_is_read_from_standard_input_never_an_argument(self):
         from io import StringIO
@@ -1435,8 +1474,8 @@ class AutoSetupTests(GvmdFixture, TestCase):
         gvmd = self.start_gvmd(user='admin', password='admin')
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             row = ov.ensure_login()
-        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('admin', True))
-        self.assertNotEqual(gvmd.users['admin'], 'admin')
+        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('cvengine', True))  # gvmd 22.7: a login of cvENGINE's own
+        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
 
     def test_a_saved_login_is_left_alone(self):
         row = OpenvasSettings.current()
