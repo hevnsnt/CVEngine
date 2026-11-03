@@ -128,7 +128,8 @@ class JsonParityTests(Base):
 
 	def test_odd_version_confidence_values_agree(self):
 		entry = self.entry('CVE-2099-6201', [])
-		banner = {'source': 'tech', 'version_source': 'body', 'copy_state': 'effective'}
+		banner = {'source': 'tech', 'version_source': 'body', 'copy_state': 'effective', 'script_url': 'https://x/jquery.js',
+				  'copies': [{'url': 'https://x/jquery.js', 'source': 'body', 'state': 'effective'}]}
 		odd = {'true': True, 'list': [1], 'object': {'x': 1}, 'string': '0.9', 'null': None, 'one': 1, 'high': 0.9}
 		rows = {}
 		for i, (name, value) in enumerate(odd.items()):

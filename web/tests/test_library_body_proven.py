@@ -400,6 +400,15 @@ class ExistingRowsTests(Base):
 		self.assertEqual([Triage.objects.get(match_id=m.pk).classification for m in ms], ['confirmed'] * 3)
 		self.assertEqual(tasks.settle_library_proven_task(), {'state': 'done'})
 
+	def test_an_untriaged_row_gets_the_read_but_no_classification(self):
+		self.reading()
+		m = self.match()
+		row = self.triage_all(None)[m.pk]
+		self.assertEqual(self.settle_all(), 1)
+		row.refresh_from_db()
+		self.assertEqual((row.status, row.classification), ('not_triaged', ''))  # never confirmed by the model's absence
+		self.assertIsNotNone(validation.library_read_step(row.validation_steps))
+
 	def test_closed_matches_are_untouched(self):
 		fixed = self.match(remediation_status='fixed')
 		ruled_out = self.match(name='blog.example.com')

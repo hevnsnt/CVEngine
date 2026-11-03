@@ -36,7 +36,8 @@ CVES = {
 HOT = {'kev, medium score': True, 'exploit only, low score': True, 'critical score and epss, not hot': False, 'high score, not hot': False,
 	   'low score, not hot': False}
 
-FILE_BANNER = {'source': 'tech', 'version_source': 'body', 'version_confidence': 0.9, 'copy_state': 'effective', 'script_url': 'https://x/jquery.js'}
+FILE_BANNER = {'source': 'tech', 'version_source': 'body', 'version_confidence': 0.9, 'copy_state': 'effective', 'script_url': 'https://x/jquery.js',
+			   'copies': [{'url': 'https://x/jquery.js', 'source': 'body', 'state': 'effective'}]}
 # evidence kind -> (match fields, the Triage row's validation_status, proven?)
 EVIDENCE = {
 	# proven: hard evidence about the host
@@ -59,6 +60,9 @@ EVIDENCE = {
 										 'evidence': {**FILE_BANNER, 'version_source': 'filename', 'version_confidence': 0.4}}, '', False),
 	'library copy shadowed by a later one': ({'source': 'tech', 'version_in_range': True,
 											  'evidence': {**FILE_BANNER, 'copy_state': 'shadowed', 'version_confidence': 0.4}}, '', False),
+	'library read copy shadowed by a later unread one': ({'source': 'tech', 'version_in_range': True, 'evidence': {
+		**FILE_BANNER, 'copies': [{'url': 'https://x/jquery.js', 'source': 'body', 'state': 'shadowed'},
+								  {'url': 'https://cdn.x/jquery-1.min.js', 'source': 'filename', 'state': 'effective'}]}}, '', False),
 	'library copy of an unresolved set': ({'source': 'tech', 'version_in_range': True,
 										   'evidence': {**FILE_BANNER, 'copy_state': 'unresolved', 'copies_unresolved': True,
 														'version_confidence': 0.5}}, '', False),
