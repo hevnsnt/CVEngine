@@ -9,9 +9,12 @@ answers it can prove. This module puts the findings already closed that way back
 while their own review is asked, ``triage.own_signature``), replaces the shared words on other projects' findings with a fixed sentence, and
 deletes the shared not_affected rows nothing reads any more.
 
-It only ever acts across organizations: on an instance with one organization (or none) nothing was shared with another tenant, and it changes
-nothing. A finding's own closure is never reopened: an answer reached on its own project and host, an identity or operating-system closure
-that its own sighting still supports (``correlation.invalid_identity_reason``), and a closure of the same organization. It never touches a
+It only reopens across organizations: on an instance with one organization (or none) nothing was shared with another tenant, and it only
+takes other projects' words off findings and deletes the shared closing rows. A finding's own closure is never reopened: an answer reached
+on its own project and host, an identity or operating-system closure that its own sighting still supports
+(``correlation.invalid_identity_reason``), a closure reached in the same organization, and one of unknown origin whose findings are all in
+that organization. The words of the shared correlation rows (``MatchVerdict``) and of the matches they seeded are replaced by migration 0140
+itself, so a later organization never sees them. It never touches a
 finding a validation hit confirmed, a remediation status, an assignee or a comment.
 
 Run it with ``manage.py release_shared_closures`` (a dry run that only counts) and ``--apply``. ``release_once`` runs it once, by itself,
@@ -60,18 +63,39 @@ def _own_identity_closure(row):
     return bool(match is not None and (row.verdict.model or '').startswith('deterministic') and correlation.invalid_identity_reason(match))
 
 
-def _decide(row, owner):
+def _holders(verdict_id, cache):
+    """The projects whose findings hold the stored answer ``verdict_id`` (read once per answer)."""
+    from cveFeed.models import Triage
+    if verdict_id not in cache:
+        cache[verdict_id] = set(Triage.objects.filter(verdict_id=verdict_id).values_list('project_id', flat=True).distinct())
+    return cache[verdict_id]
+
+
+def _decide(row, owner, holders):
     """What happens to one Triage row holding a stored closing answer: 'keep' (its own closure, or one of its own organization), 'own'
     (its own identity closure: kept, detached from the shared answer) or 'release' (held for validation; its own review is asked)."""
     from cveFeed import triage
     verdict = row.verdict
+    if len(set(owner.values())) <= 1:
+        return 'keep'  # one organization on the instance: nothing was shared with another tenant
     if triage.closure_reusable(verdict, row, row.kind, row.match):
         return 'keep'
     if verdict.project_id is not None and owner.get(verdict.project_id) == owner.get(row.project_id):
         return 'keep'  # reached in another project of the same organization: not across tenants
+    if verdict.project_id is None and {owner.get(p) for p in _holders(verdict.pk, holders)} == {owner.get(row.project_id)}:
+        return 'keep'  # origin unknown, but every finding holding it is in this organization: it was never another tenant's
     if row.kind == 'cve_match' and _own_identity_closure(row):
         return 'own'
     return 'release'
+
+
+def _foreign_words(verdict, row, owner, holders):
+    """Whether ``row`` shows words of an answer reached in another project: known when the answer has an origin; with none, only when
+    its findings are in more than one organization (in one organization they may be its own, and are left)."""
+    from cveFeed import triage
+    if verdict.project_id is not None:
+        return not triage.same_project(verdict, row)
+    return len({owner.get(p) for p in _holders(verdict.pk, holders)}) > 1
 
 
 def _note(per_project, project_id, key, n=1):
@@ -90,15 +114,14 @@ def release_shared_closures(apply=False):
       ``triage.SHARED_REASON``.
     * ``seeded_matches``: CVE matches correlation started as not affected from a shared row, never closed by their own check: back to
       unjudged, so their own triage decides; matches seeded with a shared row's words get the fixed sentence.
-    * ``shared_rows``: the shared not_affected rows deleted after that; the others keep their verdict and get the fixed sentence.
+    * ``shared_rows``: the shared not_affected rows deleted after that.
 
     ``projects`` holds the same counts per project, for one activity line each."""
     from cveFeed import scoring, triage
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     counts, per_project = dict.fromkeys(COUNTS, 0), {}
-    owner = tenants()
-    if len(set(owner.values())) <= 1:
-        return {**counts, 'projects': per_project}  # one organization: nothing was ever shared with another tenant
+    owner, holders = tenants(), {}
+    single = len(set(owner.values())) <= 1  # one organization: nothing was shared with another tenant, only other projects' words go
     touched = set()
     now = timezone.now()
     base = (Triage.objects.filter(verdict__isnull=False, status='triaged').exclude(validation_status='hit')
@@ -115,15 +138,15 @@ def release_shared_closures(apply=False):
                 row.match.triage = row  # is_version_only reads the validation status here, not with a query per row
             verdict = row.verdict
             if row.classification in triage.CLOSING and verdict.classification in triage.CLOSING:
-                decision = _decide(row, owner)
+                decision = _decide(row, owner, holders)
                 if decision == 'release':
                     release.append(row)
                     continue
                 if decision == 'own':
                     own.append(row)
                     continue
-            if not triage.same_project(verdict, row) and row.reason and row.reason != triage.SHARED_REASON and verdict.reason \
-                    and verdict.reason in row.reason:
+            if row.reason and row.reason != triage.SHARED_REASON and verdict.reason and verdict.reason in row.reason \
+                    and _foreign_words(verdict, row, owner, holders):
                 text.append(row)
         for key, found in (('triage_rows', release), ('kept_own', own), ('shared_text', text)):
             counts[key] += len(found)
@@ -146,13 +169,13 @@ def release_shared_closures(apply=False):
                     CVEMatch.objects.filter(pk=row.match_id, ai_reason=row.reason[:2000]).update(ai_reason=triage.SHARED_REASON)
     last = 0
     while True:
-        shared = list(MatchVerdict.objects.filter(pk__gt=last).order_by('pk')[:CHUNK])
+        shared = list(MatchVerdict.objects.filter(pk__gt=last, ai_verdict='not_affected').order_by('pk')[:CHUNK])
         if not shared:
             break
         last = shared[-1].pk
         with transaction.atomic():
-            for mv in shared:
-                if mv.ai_verdict == 'not_affected':
+            for mv in shared:  # (migration 0140 already took the words off the others and the matches they seeded)
+                if not single:
                     seeded = list(_seeded(mv).values_list('pk', 'subdomain__target_domain__project_id'))
                     counts['seeded_matches'] += len(seeded)
                     for _, project_id in seeded:
@@ -161,13 +184,6 @@ def release_shared_closures(apply=False):
                         ids = [pk for pk, _ in seeded]
                         CVEMatch.objects.filter(pk__in=ids, ai_verdict='not_affected').update(ai_verdict='', ai_reason='', ai_model='', updated_at=now)
                         touched.update(ids)
-                elif mv.ai_reason != triage.SHARED_REASON:
-                    if apply:  # the matches it seeded with its words (not one whose own review holds them), then the row: the verdict stays
-                        from django.db.models import Exists, OuterRef
-                        own = Triage.objects.filter(match=OuterRef('pk'), reason=mv.ai_reason)
-                        _same_key(mv).filter(ai_verdict=mv.ai_verdict, ai_reason=mv.ai_reason).exclude(Exists(own)).update(
-                            ai_reason=triage.SHARED_REASON)
-                        MatchVerdict.objects.filter(pk=mv.pk).update(ai_reason=triage.SHARED_REASON)
     closing = MatchVerdict.objects.filter(ai_verdict='not_affected')
     counts['shared_rows'] = closing.delete()[0] if apply else closing.count()
     if touched:

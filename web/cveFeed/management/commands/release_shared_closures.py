@@ -2,8 +2,8 @@
 
 A dry run by default: it counts and changes nothing. With --apply the findings are put back where their own evidence leaves them (held for
 validation while their own review is asked, or unjudged so their own triage decides), the words of another organization's answer are taken
-off them, and the shared not_affected rows are deleted. A finding's own closure is kept. On an instance with one organization it changes
-nothing. Safe to run again: a second run finds nothing.
+off them, and the shared not_affected rows are deleted. A finding's own closure is kept. On an instance with one organization it reopens
+nothing (other projects' notes still go). Safe to run again: a second run finds nothing.
 
     python3 manage.py release_shared_closures
     python3 manage.py release_shared_closures --apply

@@ -1140,6 +1140,7 @@ def save_matches(rows, covered=None):
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch, MatchVerdict
+    from cveFeed.triage import SHARED_REASON
 
     unique = {}
     for r in rows:  # two sightings of one product on one host (two ports, two banners): keep the strongest evidence, not the last
@@ -1191,7 +1192,8 @@ def save_matches(rows, covered=None):
         signature = (row["cve_entry_id"], row["matched_product"], row["matched_version"], row["version_in_range"], row["source"])
         if match is None:
             verdict = _seedable(verdicts.get(signature), row)
-            extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": verdict.ai_reason, "ai_model": verdict.ai_model}
+            # never the stored row's words: it has no tenant, so only the fixed note goes with a seeded verdict (task 256)
+            extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": SHARED_REASON, "ai_model": verdict.ai_model}
                      if verdict else {})
             fresh.append(CVEMatch(**row, **extra))
         elif key in moved or any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
@@ -1200,7 +1202,7 @@ def save_matches(rows, covered=None):
             if key in moved:
                 verdict = _seedable(verdicts.get(signature), row)
                 match.ai_verdict = verdict.ai_verdict if verdict else ""
-                match.ai_reason = verdict.ai_reason if verdict else ""
+                match.ai_reason = SHARED_REASON if verdict else ""
                 match.ai_model = verdict.ai_model if verdict else ""
             match.updated_at = now
             changed.append(match)

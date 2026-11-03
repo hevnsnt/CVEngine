@@ -228,7 +228,8 @@ class WorkedMatchGuardTests(Fixture):
 		match = self.match_for(php, product='PHP', version='5.6.40', in_range=None, evidence={'source': 'tech', 'branch_unlisted': True})
 		pairs = triage.track([match])
 		verdict = TriageVerdict.objects.create(kind='cve_match', signature=pairs[0][0].signature, classification='not_applicable',
-											   reason='different product', model='test')
+											   reason='different product', model='test', project_id=pairs[0][0].project_id,
+											   host=pairs[0][0].host)  # reached on this finding: only the guard below may keep it open
 		triage._apply(verdict, pairs)
 		self.assertEqual(self.verdict(match), 'uncertain')
 

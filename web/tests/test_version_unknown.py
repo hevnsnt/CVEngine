@@ -127,7 +127,8 @@ class VersionUnknownTests(Fixture):
 		match = self.only_match()
 		pairs = triage.track(triage.with_cves([match]))
 		verdict = TriageVerdict.objects.create(kind='cve_match', signature=pairs[0][0].signature, classification='not_applicable',
-											   reason='the model said so', model='a-model')
+											   reason='the model said so', model='a-model', project_id=pairs[0][0].project_id,
+											   host=pairs[0][0].host)  # reached on this finding: only the version-unknown guard keeps it open
 		triage._apply(verdict, pairs)
 		match.refresh_from_db()
 		self.assertEqual(match.ai_verdict, 'uncertain')

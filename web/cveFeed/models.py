@@ -1006,11 +1006,12 @@ class TriageVerdict(models.Model):
     ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). The model's words may
     quote what the host it was asked about showed (a page title, a certificate, a banner, a path).
 
-    ``project`` and ``host`` record where the answer was reached (the finding the model was asked about). An answer that raises attention or
-    leaves the finding for validation is reused by every host with the same signature, but only its classification and severity step up:
-    its words are shown only in that project (``triage.verdict_text``). A closing one (likely_false_positive, not_applicable) is reused only
+    ``project`` and ``host`` record where the answer was reached (the finding the model was asked about). An answer that raises attention is
+    reused by every host with the same signature, and so is a needs-validation one where the finding's own question could not do better
+    (``triage.answer_reusable``), but only its classification and severity step up: its words are shown only in that project
+    (``triage.verdict_text``). A closing one (likely_false_positive, not_applicable) is reused only
     within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE match) only on
-    that host; elsewhere the finding asks its own question, stored under ``triage.own_signature`` (task 256). An answer whose origin could not
+    that host; elsewhere the finding asks its own question, stored under ``triage.own_candidates`` (task 256). An answer whose origin could not
     be proven (stored before it was recorded: migration 0140) has none: it closes no other finding and its words are shown nowhere."""
 
     CLASSIFICATIONS = ("confirmed", "likely", "needs_validation", "likely_false_positive", "not_applicable")

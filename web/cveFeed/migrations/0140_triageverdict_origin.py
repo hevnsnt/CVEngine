@@ -1,6 +1,9 @@
 from django.db import migrations, models
 import django.db.models.deletion
 
+# cveFeed.triage.SHARED_REASON at the time of writing (a migration does not import app code that may change)
+SHARED_REASON = 'Assessed from a matching finding elsewhere (the same evidence on another host); no host-specific notes.'
+
 
 def record_origins(apps, schema_editor):
     """Give the answers already stored the origin they can be proven from, so a closing one closes only that tenant's findings and its
@@ -40,10 +43,34 @@ def record_origins(apps, schema_editor):
             TriageVerdict.objects.filter(pk=pk, project__isnull=True).update(project_id=project_id, host=(first if first and first == final else '')[:500])
 
 
+def drop_shared_words(apps, schema_editor):
+    """The shared correlation table (MatchVerdict) has no tenant, yet it kept the model's words about the host an answer was reached on, and
+    correlation copied them onto every new match it seeded, in any organization (task 256). Every non-closing row gets the fixed sentence, and
+    so does every match still holding words it was seeded with (same key, verdict and words, and no Triage row of its own with those words:
+    a match whose own review wrote them keeps them). Unconditional, and before any organization is added: the table has no tenant. The
+    not_affected rows keep their words until ``cveFeed.verdict_tenancy`` has found the matches they seeded closed, then they are deleted
+    (nothing seeds from them any more). Two UPDATE statements per kind of range result, whatever the size of the tables."""
+    from django.db.models import Exists, OuterRef
+    MatchVerdict = apps.get_model('cveFeed', 'MatchVerdict')
+    CVEMatch = apps.get_model('cveFeed', 'CVEMatch')
+    Triage = apps.get_model('cveFeed', 'Triage')
+    worded = MatchVerdict.objects.exclude(ai_verdict='not_affected').exclude(ai_reason=SHARED_REASON)
+    own = Triage.objects.filter(match=OuterRef('pk'), reason=OuterRef('ai_reason'))
+    for unknown in (True, False):
+        same = worded.filter(cve_entry_id=OuterRef('cve_entry_id'), matched_product=OuterRef('matched_product'),
+                             matched_version=OuterRef('matched_version'), source=OuterRef('source'), ai_verdict=OuterRef('ai_verdict'),
+                             ai_reason=OuterRef('ai_reason'),
+                             **({'version_in_range__isnull': True} if unknown else {'version_in_range': OuterRef('version_in_range')}))
+        (CVEMatch.objects.filter(version_in_range__isnull=unknown).exclude(ai_reason=SHARED_REASON).filter(Exists(same)).exclude(Exists(own))
+         .update(ai_reason=SHARED_REASON))
+    worded.update(ai_reason=SHARED_REASON)
+
+
 class Migration(migrations.Migration):
     """Where a stored triage answer was reached (task 256): two nullable or defaulted columns, so adding them rewrites nothing, and an index
-    on the provider-call ledger by signature; then the answers already stored get the origin they can be told from (``record_origins``).
-    Reversing drops the columns and the index.
+    on the provider-call ledger by signature; then the answers already stored get the origin they can be told from (``record_origins``), and
+    the shared correlation table gives up the model's words (``drop_shared_words``). Reversing drops the columns and the index (the words are
+    not put back).
 
     Numbered 0140 after develop's 0138 (#390); #386 takes 0139 and the dependency is moved to it when both are merged."""
 
@@ -69,4 +96,5 @@ class Migration(migrations.Migration):
             index=models.Index(fields=["signature", "status"], name="triagecall_signature_idx"),
         ),
         migrations.RunPython(record_origins, migrations.RunPython.noop),
+        migrations.RunPython(drop_shared_words, migrations.RunPython.noop),
     ]
