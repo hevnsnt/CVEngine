@@ -18,7 +18,8 @@ A ``manual`` strategy is never overwritten by either.
 import json
 import re
 
-SCHEMA_VERSION = 2  # 2 adds the plain-language guidance (identify, confirm_steps, true/false-positive signs); version 1 records stay valid
+SCHEMA_VERSION = 3  # 2 adds the plain-language guidance (identify, confirm_steps, true/false-positive signs); 3 adds the script_version
+#                     remote check (a client-side JavaScript library read from the script files a page loads). Older records stay valid
 MAX_CHECKS = 8
 GUIDANCE_LISTS = {'confirm_steps': (6, 240), 'true_positive_signs': (4, 180), 'false_positive_signs': (4, 180)}
 GUIDANCE_TEXT = {'identify': 320, 'scope_reason': 200, 'revision_note': 200}
@@ -41,6 +42,111 @@ ECOSYSTEMS = ('any', 'dpkg', 'rpm', 'apk', 'pip', 'npm', 'gem', 'maven', 'nuget'
 HTTP_METHODS = ('GET', 'HEAD')  # a check never changes anything on the target
 TLS_PROPERTIES = ('protocol', 'cipher', 'cert_expiry', 'cert_key_bits')
 VERSION_SOURCES = ('service_banner', 'http_header', 'technology', 'any')
+
+
+# The system-wide packages that ship a client-side library (cveFeed.js_libraries.LIBRARIES key -> [(ecosystem, package, major)]): the only host
+# check that means anything for such a library. A copy a website bundles is not a package; only reading the page's scripts finds it. Checked
+# against the Debian and Fedora package indexes: Debian and Ubuntu package the libraries as libjs-* (node-* for the npm copy), Fedora and EPEL
+# as js-*; Alpine packages none of them. ``major`` names the one major release line a package ships (Debian's libjs-bootstrap is Bootstrap 3,
+# libjs-bootstrap4 is 4.x, libjs-bootstrap5 and node-bootstrap are 5.x): such a package is checked only against a range of its own line,
+# because a package check compares with the fixed release alone and would flag a 3.x package for a 4.x-only flaw.
+SYSTEM_PACKAGES = {
+    'jquery': (('dpkg', 'libjs-jquery', None), ('dpkg', 'node-jquery', None), ('rpm', 'js-jquery', None)),
+    'jquery-ui': (('dpkg', 'libjs-jquery-ui', None), ('rpm', 'js-jquery-ui', None)),
+    'bootstrap': (('dpkg', 'libjs-bootstrap', 3), ('dpkg', 'libjs-bootstrap4', 4), ('dpkg', 'libjs-bootstrap5', 5), ('dpkg', 'node-bootstrap', 5)),
+    'angularjs': (('dpkg', 'libjs-angularjs', None),),
+    'lodash': (('dpkg', 'libjs-lodash', None), ('dpkg', 'node-lodash', None)),
+    'underscore': (('dpkg', 'libjs-underscore', None), ('dpkg', 'node-underscore', None), ('rpm', 'js-underscore', None)),
+    'moment': (('dpkg', 'libjs-moment', None), ('dpkg', 'node-moment', None)),
+    'datatables': (('dpkg', 'libjs-jquery-datatables', None),),
+}
+# Packages, by their exact name, that vendor a library into an application (a Rails gem, a Sass port): their versions are the package's own,
+# and the copy they put on a page is the one the script read finds. Anything else an advisory names (lodash.merge, a separate npm package with
+# its own versions) keeps its own checks.
+BUNDLED_BY = {'jquery': ('jquery-rails',), 'jquery-ui': ('jquery-ui-rails',), 'bootstrap': ('bootstrap-sass',)}
+LIBRARY_TOOL = 'html-libraries probe'
+
+
+def _libraries():
+    from cveFeed.js_libraries import LIBRARIES
+    return LIBRARIES
+
+
+def _token(name):
+    return re.sub(r'[^a-z0-9]', '', str(name or '').lower())
+
+
+def library_key(name):
+    """The ``cveFeed.js_libraries.LIBRARIES`` key an advisory's product or package name is, or ''. The name must be the library itself (its
+    key or product name, any case or punctuation: ``jQuery``, ``jquery_ui``, ``Vue.js``), or a packaging that keeps the library's own version
+    numbers and names it as its last part (``components/jquery`` on Composer, ``org.webjars.npm:jquery``). A plugin or a framework that ships
+    the library (``jquery-validation``, ``jquery-rails``) and a different product with a similar name (``@angular/core``) are not it."""
+    tokens = {_token(n): key for key, (product, _s, _d) in _libraries().items() for n in (key, product)}
+    raw = str(name or '').strip().lower()
+    found = tokens.get(_token(raw), '')
+    if not found and re.search(r'[/:]', raw):
+        found = tokens.get(_token(re.split(r'[/:]', raw)[-1]), '')
+    return found
+
+
+def _bundles(name, keys):
+    """Whether ``name`` (an advisory entry that is not the library itself) is, by its exact name, a package that vendors one of the libraries
+    ``keys`` (BUNDLED_BY: ``jquery-rails`` in a jQuery advisory). Its version is the package's, not the library's, and the copy it puts on a
+    page is found by the script read. A package merely named after the library (``lodash.merge``) is not one."""
+    name = str(name or '').strip().lower()
+    return bool(name) and any(name in BUNDLED_BY.get(key, ()) for key in keys)
+
+
+# Libraries whose name an advisory also gives to server-side code (``react``: React Server Components, react-server-dom-*, react-dom/server,
+# Next.js; ``vue``: vue-server-renderer). Such an advisory is about code that runs on the server, which no script a page loads shows, so it is
+# never taken for the browser library. Decided on the package names the advisory lists and its words, conservatively: a sign of either
+# keeps the CVE's ordinary record.
+SERVER_SIDE = {
+    'react': (re.compile(r'^(?:react-server(?:-dom-[a-z0-9-]+)?|react-dom/server|next|nextjs|next\.js|@next/[a-z0-9-]+|react-router|@remix-run/[a-z0-9-]+'
+                         r'|@vercel/[a-z0-9-]+|waku|@parcel/rsc)$'),
+              re.compile(r'server[ -]?components?|server[ -]?functions?|server[ -]?actions?|react-server|\bRSC\b|server[ -]side render|\bSSR\b|'
+                         r'renderTo(?:String|PipeableStream|ReadableStream|StaticMarkup)|react-dom/server|next\.js|\bnextjs\b|flight protocol|'
+                         r'node\.js', re.IGNORECASE)),
+    'vue': (re.compile(r'^(?:vue-server-renderer|@vue/server-renderer|nuxt|@nuxt/[a-z0-9-]+|vue-template-compiler|@vue/compiler-sfc)$'),
+            re.compile(r'server[ -]?render|server[ -]side|\bSSR\b|nuxt|node\.js', re.IGNORECASE)),
+}
+
+
+def _server_side(key, affected, text=''):
+    """Whether an advisory naming library ``key`` (SERVER_SIDE) is about its server-side code: one of its entries is a server package, or its
+    words say so. A library with no such twin is never server-side."""
+    rules = SERVER_SIDE.get(key)
+    if not rules:
+        return False
+    packages, words = rules
+    for item in affected or []:
+        if not isinstance(item, dict):
+            continue
+        for field in ('product', 'package'):
+            name = str(item.get(field) or '').strip().lower()
+            if name and packages.match(name.split(':')[-1]):
+                return True
+    return bool(words.search(text or ''))
+
+
+def client_libraries(affected, text=None):
+    """``{library key: [ranges of each entry naming it]}`` for the entries of a CVE's ``affected`` list that name a client-side library
+    cvENGINE reads from script files (``library_key``), in the order the advisory names them. Each value is a list of the entries' range
+    lists, as the feed gives them. A library whose advisory is about its server-side code (``_server_side``: a server package among the
+    entries, or, with ``text``, the advisory's own words) is left out: that CVE keeps its ordinary checks."""
+    from cveFeed.correlation import clean_affected
+    out = {}
+    for item in clean_affected(affected):
+        key = next((k for k in (library_key(item.get(f)) for f in ('product', 'package') if isinstance(item.get(f), str)) if k), '')
+        if key:
+            out.setdefault(key, []).append(item.get('ranges') or [])
+    return {key: ranges for key, ranges in out.items() if not _server_side(key, affected, text or '')}
+
+
+def cve_libraries(cve):
+    """``client_libraries`` for a CVE record, read with its title and description: the one every caller with a CVEEntry uses."""
+    text = ' '.join(str(getattr(cve, field, '') or '') for field in ('title', 'original_description', 'summary'))
+    return client_libraries(getattr(cve, 'affected', None) or [], text)
 
 
 def _nse_allowlist():
@@ -85,6 +191,17 @@ def _p_version_banner(p):
     if product is None or ranges is None or source not in VERSION_SOURCES:
         return None
     return {'product': product, 'ranges': ranges, 'source': source}
+
+
+def _p_script_version(p):
+    """A client-side library read from the script files a page loads: ``library`` is a ``js_libraries.LIBRARIES`` key; ``product`` is always
+    that library's own name, whatever the input said."""
+    if set(p) - {'product', 'library', 'ranges'} or p.get('library') not in _libraries():
+        return None
+    ranges = _ranges(p.get('ranges'))
+    if ranges is None:
+        return None
+    return {'product': _libraries()[p['library']][0], 'library': p['library'], 'ranges': ranges}
 
 
 def _p_http_probe(p):
@@ -189,7 +306,7 @@ def _p_service_state(p):
 
 
 REMOTE_KINDS = {'version_banner': _p_version_banner, 'http_probe': _p_http_probe, 'nuclei_template': _p_nuclei_template,
-                'nse_script': _p_nse_script, 'tls_check': _p_tls_check, 'port_service': _p_port_service}
+                'nse_script': _p_nse_script, 'tls_check': _p_tls_check, 'port_service': _p_port_service, 'script_version': _p_script_version}
 LOCAL_KINDS = {'package_version': _p_package_version, 'file_version': _p_file_version, 'config_setting': _p_config_setting,
                'service_state': _p_service_state}
 
@@ -302,14 +419,24 @@ def _range_params(rng):
 
 def rules_strategy(cve, template_ids=()):
     """The strategy the CVE's own record supports, with no AI: a version check per affected product, a package check where the
-    record names a package and a fixed version, and any installed nuclei template. None when the record names no product."""
+    record names a package and a fixed version, and any installed nuclei template. None when the record names no product.
+
+    A client-side JavaScript library cvENGINE reads from script files (``client_libraries``) gets a ``script_version`` check instead of a
+    banner check, and host checks only for the system-wide packages that ship it (SYSTEM_PACKAGES); an entry that is a package bundling the
+    library (``jquery-rails``) gets no check of its own: the copy it puts on a page is the one the script read finds."""
     from cveFeed.correlation import clean_affected, prepared_ranges
+    libraries = cve_libraries(cve)
     remote, local = [], []
+    if libraries:
+        remote, local = _library_checks(libraries)
     for item in clean_affected(cve.affected)[:6]:
         product = next((item.get(k) for k in ('product', 'package') if isinstance(item.get(k), str) and _PRODUCT.match(item[k])), None)
         ranges = [r for r in (_range_params(x) for x in prepared_ranges(item.get('ranges'))[:10]) if r]  # as matching reads them, then capped
         if not product or not ranges:
             continue
+        if libraries and (any(library_key(item.get(k)) for k in ('product', 'package')) or
+                          any(_bundles(item.get(k), libraries) for k in ('product', 'package') if isinstance(item.get(k), str))):
+            continue  # the library itself, or a package that bundles it: the script read above decides, never a banner or a host package name
         slug = re.sub(r'[^a-z0-9]+', '-', product.lower()).strip('-')[:24] or 'product'
         remote.append({'id': f'version-{slug}', 'kind': 'version_banner', 'confidence': 'medium',
                        'description': f'{product} reports a version inside an affected range (a banner can hide a backported fix)',
@@ -331,6 +458,56 @@ def rules_strategy(cve, template_ids=()):
     return strategy
 
 
+def _major(version):
+    found = re.match(r'(\d+)', str(version or ''))
+    return int(found.group(1)) if found else None
+
+
+def _package_bound(ranges, major):
+    """The one fixed release a package check compares with: for a package of every release line (``major`` None) the advisory's only fix;
+    for a package of one line, the only fix of the ranges that cover that line (introduced, or 0, at or below it; fixed at or above it).
+    None when there is none, or more than one."""
+    fixes = set()
+    for rng in ranges:
+        if not rng.get('fixed'):
+            continue
+        if major is not None:
+            low, high = _major(rng.get('introduced') or '0'), _major(rng['fixed'])
+            if low is None or high is None or not low <= major <= high:
+                continue
+        fixes.add(rng['fixed'])
+    return fixes.pop() if len(fixes) == 1 else None
+
+
+def _library_checks(libraries):
+    """``(remote, local)``: one ``script_version`` check per library the advisory names, with its ranges as matching reads them (each range
+    once), and a package check for each system-wide package that ships the library, against the one fixed release of its release line
+    (``_package_bound``)."""
+    from cveFeed.correlation import prepared_ranges
+    remote, local = [], []
+    for key, entries in list(libraries.items())[:4]:
+        ranges = []
+        for entry in entries:
+            for rng in (_range_params(x) for x in prepared_ranges(entry)[:10]):
+                if rng and rng not in ranges:
+                    ranges.append(rng)
+        if not ranges:
+            continue
+        product = _libraries()[key][0]
+        remote.append({'id': f'script-{key}', 'kind': 'script_version', 'confidence': 'medium',
+                       'description': f'a script the page loads states a {product} version inside an affected range (read from the file itself)',
+                       'params': {'library': key, 'ranges': ranges[:10]}})
+        for ecosystem, package, major in SYSTEM_PACKAGES.get(key, ()):
+            fixed = _package_bound(ranges, major)
+            if not fixed:
+                continue  # no range of this package's release line, or several fixes: no one bound fits a package whose release is not known yet
+            local.append({'id': f'pkg-{package}'[:40], 'kind': 'package_version', 'confidence': 'medium',
+                          'description': f'the system-wide {package} package is older than {fixed} (a distribution may backport the fix; '
+                                         'a copy a website bundles is not a package)',
+                          'params': {'ecosystem': ecosystem, 'package': package, 'affected_below': fixed}})
+    return remote, local
+
+
 def _range_text(params):
     parts = []
     if params.get('introduced'):
@@ -345,6 +522,8 @@ def _range_text(params):
 def rules_guidance(remote, local, has_template):
     """Plain guidance a person can follow, written from the checks alone (no model): what is affected, the steps to confirm it, and what
     makes a match true or false. A model-written record replaces it with something specific to the CVE."""
+    if any(c['kind'] == 'script_version' for c in remote):
+        return library_guidance(remote, local, has_template)
     versions = [c for c in remote if c['kind'] == 'version_banner']
     fixed = next((r['fixed'] for c in versions for r in c['params']['ranges'] if r.get('fixed')), None)
     identify = '; '.join(f"{c['params']['product']} {_range_text(c['params']['ranges'][0])}" for c in versions[:2])
@@ -365,6 +544,47 @@ def rules_guidance(remote, local, has_template):
         'false_positive_signs': ['The version found is at or above the fixed release.',
                                  'The distribution backported the fix, so the older version number is already patched.',
                                  'The component is not installed, not reachable, or not the product the match was made on.'],
+    }
+
+
+def library_guidance(remote, local, has_template):
+    """``rules_guidance`` for a client-side JavaScript library: the version is read from the script files a page loads, which copy runs
+    decides, and a vulnerable version is not yet an exploitable page. An advisory that also names another product (CVE-2020-11022 names
+    maximebf/debugbar beside jQuery) says how to check that one too."""
+    scripts = [c for c in remote if c['kind'] == 'script_version']
+    others = [c for c in remote if c['kind'] == 'version_banner']
+    products = list(dict.fromkeys(_libraries()[c['params']['library']][0] for c in scripts))
+    product = products[0]
+    fixed = next((r['fixed'] for c in scripts for r in c['params']['ranges'] if r.get('fixed')), None)
+    identify = '; '.join(f"{_libraries()[c['params']['library']][0]} {_range_text(c['params']['ranges'][0])}" for c in scripts[:2])
+    also = '; '.join(f"{c['params']['product']} {_range_text(c['params']['ranges'][0])}" for c in others[:2])
+    steps = [f'Read the {product} version from the script files the page loads: the html-libraries probe (Validate now runs it) reads each '
+             'file\'s own banner or code, never a ?ver= query string or the file name alone.',
+             'When the page loads several copies, look at the one that runs (effective): a copy shadowed by a later one, or a fallback that '
+             'loads only when another script fails, may never run.',
+             'Compare that version with the affected range' + (f' and the fixed release {fixed}.' if fixed else '.'),
+             f'Check how the page uses {product}: the flaw needs attacker-controlled input (for an XSS flaw, HTML) to reach the affected '
+             'functions, so a vulnerable version alone does not make the page exploitable.']
+    if others:
+        steps.append(f"For {', '.join(dict.fromkeys(c['params']['product'] for c in others[:2]))}, which the advisory also names, find the exact "
+                     'version on the host (the Services tab shows what cvENGINE saw) and compare it with its own range.')
+    if has_template:
+        steps.append('Run Validate now: the nuclei template for this CVE checks it from outside.')
+    if local:
+        steps.append(f'On a host that ships {product} system-wide, run the package check below; a copy a website bundles is not a '
+                     'package, and only the script read finds it.')
+    return {
+        'identify': (f'Affects {identify}, wherever a web page loads it (a copy bundled with the site or served from a CDN), or a '
+                     'system-wide package ships it.' + (f' Also {also}.' if also else '')),
+        'confirm_steps': steps[:6],
+        'true_positive_signs': (['The nuclei template for this CVE matches.'] if has_template else []) + [
+            f'The {product} file the page loads states a version inside the affected range (its banner or code), and it is the copy that runs.',
+            f'A public CDN URL with an affected {product} version in it (for example /ajax/libs/jquery/1.12.4/), whose file states that version.',
+            f'The page passes attacker-controlled input to the affected {product} functions.'],
+        'false_positive_signs': ['The version the file states is at or above the fixed release.',
+                                 'Only a ?ver= query string or the file name carried the version; the file itself states another or none.',
+                                 'The script is shadowed by a later copy that is fixed, or is a fallback that loads only when another fails.',
+                                 'The host only redirects to another one (a redirect alias): the page and its scripts are that host\'s.'],
     }
 
 
@@ -416,6 +636,7 @@ def validation_profile(strategy, cvss_vector=''):
     needs_validation."""
     remote, local = strategy.get('remote_checks', []), strategy.get('local_checks', [])
     vector = attack_vector(cvss_vector)
+    scripts = [c for c in remote if is_script_read(c)]  # a client-side library: read from the page's script files, never by nmap
     decisive = [c for c in remote if c['kind'] in ('nuclei_template', 'http_probe', 'nse_script') and c['confidence'] in ('high', 'medium')]
     if vector in ('local', 'physical') and not decisive:
         determinable = 'no'
@@ -427,9 +648,9 @@ def validation_profile(strategy, cvss_vector=''):
         determinable = 'no'
     max_state = {'yes': 'confirmed', 'partial': 'likely', 'no': 'needs_validation'}[determinable]
     tools = []
-    kinds = {c['kind'] for c in remote}
-    for kind, tool in (('nuclei_template', 'nuclei'), ('version_banner', 'nmap'), ('nse_script', 'nmap'), ('port_service', 'nmap'),
-                       ('http_probe', 'curl'), ('tls_check', 'openssl')):
+    kinds = {'script_version' if is_script_read(c) else c['kind'] for c in remote}
+    for kind, tool in (('nuclei_template', 'nuclei'), ('script_version', LIBRARY_TOOL), ('version_banner', 'nmap'), ('nse_script', 'nmap'),
+                       ('port_service', 'nmap'), ('http_probe', 'curl'), ('tls_check', 'openssl')):
         if kind in kinds and tool not in tools:
             tools.append(tool)
     for check in local:
@@ -445,13 +666,20 @@ def validation_profile(strategy, cvss_vector=''):
             validated.append(f"{p['method']} {p['path']} answers as described in the check")
         elif check['kind'] == 'nse_script':
             validated.append(f"the nmap script {p['script']} output matches")
+        elif is_script_read(check):
+            product = _script_product(check)
+            needs.append(f"only the {product} version a script file on the page states is in an affected range: whether the page can be "
+                         f"exploited depends on how it uses {product}")
         elif check['kind'] == 'version_banner':
             needs.append(f"only the reported {p['product']} version is in an affected range (a banner can hide a backported fix)")
         elif check['kind'] in ('tls_check', 'port_service'):
             needs.append('the exposed service looks like the affected one, but nothing proves the vulnerable code path')
     for check in local:
         p = check['params']
-        if check['kind'] == 'package_version':
+        if check['kind'] == 'package_version' and scripts:
+            validated.append(f"on the host, the system-wide {p['package']} package is older than "
+                             f"{p.get('affected_below') or p.get('fixed_version')} (a copy a website bundles is not a package: the script read decides that)")
+        elif check['kind'] == 'package_version':
             validated.append(f"on the host, the installed {p['package']} is older than {p.get('affected_below') or p.get('fixed_version')}")
         elif check['kind'] in ('file_version', 'config_setting', 'service_state'):
             validated.append(f"on the host, the {check['kind'].replace('_', ' ')} check matches")
@@ -459,7 +687,16 @@ def validation_profile(strategy, cvss_vector=''):
         needs.append('the record names no check: read the advisory')
     needs.append('a check could not run (host unreachable, port filtered, login unavailable)')
     false_positive += ['the version is at or above the fixed release', "the distribution lists the package as patched (a backported fix)"]
-    return {
+    not_applicable = ['the affected component is not installed or not exposed on the host']
+    if scripts:
+        product = _script_product(scripts[0])
+        false_positive = ['the version the script file states is at or above the fixed release',
+                          'only a ?ver= query string or the file name carried the version; the file itself states another or none',
+                          'the affected copy is shadowed by a later, fixed copy, or the page is a redirect alias of another host'] + (
+            ['the distribution lists the system-wide package as patched (a backported fix)'] if local else [])
+        not_applicable = [f'no page on the host loads {product} and no system-wide package ships it (a copy a website bundles is found only '
+                          'by reading its pages)']
+    out = {
         'attack_vector': vector,
         'remote_determinable': determinable,
         'max_remote_state': max_state,
@@ -468,9 +705,31 @@ def validation_profile(strategy, cvss_vector=''):
         'validated_when': validated[:8],
         'needs_validation_when': needs[:8],
         'likely_false_positive_when': false_positive,
-        'not_applicable_when': ['the affected component is not installed or not exposed on the host'] + (
+        'not_applicable_when': not_applicable + (
             ['the host cannot be reached by a local attacker'] if vector in ('local', 'physical') else []),
     }
+    if scripts:
+        product = _script_product(scripts[0])
+        out['remote_note'] = (f'cvENGINE reads the {product} version from the script files the page loads (the html-libraries probe), from '
+                              'the file itself, never from a ?ver= string or the file name alone. A hit proves that version is on the page, '
+                              'not that the page is exploitable: that depends on how the page uses it.')
+    return out
+
+
+def is_script_read(check):
+    """Whether a remote check is a client-side library version read from a page's script files: a ``script_version`` check, or a
+    ``version_banner`` (an older or model-written record) whose product is a library cvENGINE reads that way. nmap cannot read either. A
+    banner check of a library whose name is also server-side code (SERVER_SIDE: React, Vue) is not reinterpreted: without the advisory it
+    cannot be told which one it is, so it stays as it was written."""
+    if check['kind'] == 'script_version':
+        return True
+    key = library_key(check['params'].get('product')) if check['kind'] == 'version_banner' else ''
+    return bool(key) and key not in SERVER_SIDE
+
+
+def _script_product(check):
+    key = check['params'].get('library') or library_key(check['params'].get('product'))
+    return _libraries()[key][0] if key in _libraries() else check['params'].get('product', '')
 
 
 def finalize(strategy, cvss_vector=''):
@@ -505,5 +764,6 @@ def prompt_guidance(cve):
            'true_positive_signs': (strategy.get('true_positive_signs') or [])[:3],
            'false_positive_signs': (strategy.get('false_positive_signs') or [])[:3],
            'decidable_from_outside': profile.get('remote_determinable') or '',
+           'how_checked': profile.get('remote_note') or '',
            'written_by': row.source}
     return {k: v for k, v in out.items() if v} or None

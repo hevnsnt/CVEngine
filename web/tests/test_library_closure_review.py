@@ -220,11 +220,13 @@ class EveryScriptOfThePageTests(ReviewScenarioBase):
 
     def test_the_counts_rule(self):
         read = js_libraries.every_script_read
-        self.assertTrue(read({'scripts': 3, 'unread': 0, 'inline_unread': 0}))
-        self.assertTrue(read({'scripts': 0, 'inline_unread': 0}))  # no script with a source: nothing to read
-        for page in ({'scripts': 3, 'inline_unread': 0}, {'scripts': 3, 'unread': 1, 'inline_unread': 0},
-                     {'scripts': 3, 'unread': 0, 'inline_unread': 2}, {'scripts': 3, 'unread': 0},
-                     {'scripts': 3, 'unread': '0', 'inline_unread': 0}, {'scripts': 3, 'unread': False, 'inline_unread': 0}):
+        self.assertTrue(read({'scripts': 3, 'unread': 0, 'inline_unread': 0, 'loaders': []}))
+        self.assertTrue(read({'scripts': 0, 'inline_unread': 0, 'loaders': []}))  # no script with a source: nothing to read
+        for page in ({'scripts': 3, 'inline_unread': 0, 'loaders': []}, {'scripts': 3, 'unread': 1, 'inline_unread': 0, 'loaders': []},
+                     {'scripts': 3, 'unread': 0, 'inline_unread': 2, 'loaders': []}, {'scripts': 3, 'unread': 0, 'loaders': []},
+                     {'scripts': 3, 'unread': '0', 'inline_unread': 0, 'loaders': []},
+                     {'scripts': 3, 'unread': False, 'inline_unread': 0, 'loaders': []},
+                     {'scripts': 3, 'unread': 0, 'inline_unread': 0}, {'scripts': 3, 'unread': 0, 'inline_unread': 0, 'loaders': ['module script']}):
             self.assertFalse(read(page), page)
 
 
@@ -499,3 +501,28 @@ class LoaderReadingTests(SimpleTestCase):
                                    reader=js_libraries.Reader(sleep=lambda s: None), coverage=coverage)
         self.assertEqual(asked, [None])  # read again, not revalidated with the old ETag
         self.assertEqual(coverage, {'scripts': 1, 'read': 0})
+
+
+class OneSearchForBothFeaturesTests(SimpleTestCase):
+    """After #387: the route check's page read and the validation's script read share one whole-body search (``whole_body``) and one loader
+    rule (``runtime_loaders``), so every closure path takes the stricter of the two."""
+
+    def test_states_all_takes_the_whole_body_doubts(self):
+        unplaceable = JQ_371_MIN + '\n' + 'x.fn=x.prototype={jquery:v,constructor:x};'  # jQuery code whose version cannot be told
+        self.assertIn('jquery', js_libraries.whole_body(unplaceable)['unplaceable'])
+        self.assertFalse(js_libraries._states_all(unplaceable, js_libraries.read_body(unplaceable)))
+        stray = JQ_371_MIN + '\n/*! acme-widget */ var w=1;\n/*! jQuery v3.7.1 | (c) OpenJS Foundation */'  # as many banners as blocks
+        self.assertTrue(js_libraries.whole_body(stray)['blocks'])
+        self.assertFalse(js_libraries._states_all(stray, js_libraries.read_body(stray)))
+        self.assertTrue(js_libraries._states_all(JQ_371_MIN, js_libraries.read_body(JQ_371_MIN)))
+
+    def test_one_loader_rule(self):
+        for code in ('require(["legacy"],f)', '__webpack_require__.e(1)', 'new Worker(u)', "var p='vendor/jquery-1.12.4.min';"):
+            self.assertTrue(js_libraries.whole_body(code)['loaders'], code)  # this PR's loaders reach the validation's read
+        for markup in ('<script type="module" src="/m.js"></script>', '<script src="/a.js" data-main="app"></script>',
+                       '<script type="text/plain" data-cookieconsent="statistics" src="/t.js"></script>', '<script type="importmap">{}</script>'):
+            self.assertTrue(js_libraries.parse_page(markup, 'https://h.test/').loaders, markup)  # #387's loaders reach the route check
+        page = '<script src="/js/jquery-1.12.4.min.js"></script><script src="/app.js"></script>'
+        self.assertEqual(js_libraries.whole_body(page, page=True)['loaders'], [])  # a src attribute is a tag the page parse reads
+        self.assertEqual(js_libraries.parse_page(page, 'https://h.test/').loaders, [])
+        self.assertTrue(js_libraries.whole_body(page + "<script>var p='/js/legacy.js';</script>", page=True)['loaders'])

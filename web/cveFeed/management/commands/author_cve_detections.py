@@ -21,7 +21,8 @@ class Command(BaseCommand):
             if not written:
                 break
         refreshed = detection_author.refresh_rules(batch=options['batch'])
-        self.stdout.write(f'{total} detection record(s) written, {refreshed} refreshed')
+        libraries = detection_author.refresh_client_library_records(seconds=3600)
+        self.stdout.write(f'{total} detection record(s) written, {refreshed} refreshed, {libraries} client-library record(s) corrected')
         if options['ai']:
             from reNgine.ai_settings import get_configured_provider
             provider = get_configured_provider()
