@@ -85,8 +85,16 @@ class CVEEntry(models.Model):
         return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
 
     @property
+    def attention_tier(self):
+        """The legacy fire / smoke / ice rating (KEV, exploit, CVSS, EPSS): what decides which CVEs are looked for and tested, under either
+        heat policy (cveFeed.threat.attention_tier)."""
+        from cveFeed.threat import attention_tier
+
+        return attention_tier(kev=self.kev, epss_reached=self.epss_reached, exploit_db=self.exploit_db, cvss=self.cvss)
+
+    @property
     def threat_tier(self):
-        """CVEngine fire / smoke / ice tier (see cveFeed.threat)."""
+        """CVEngine fire / smoke / ice tier of the CVE in general, under the heat policy (see cveFeed.threat.classify_threat_tier)."""
         from cveFeed.threat import classify_threat_tier
 
         return classify_threat_tier(
@@ -209,9 +217,12 @@ class CVEMatch(models.Model):
     # What the match rests on, so a reviewer need not redo the correlation: {source: "port"|"tech", source_id, raw_version,
     # service_extra, cpe, method, affected_index, range, distro}. Written by correlation.
     evidence = models.JSONField(default=dict, blank=True)
-    # When this match was announced as fire on the host (cveFeed.notify.fire_matches when it was made fire, or fire_confirmed when hard
-    # evidence turned a version-only match fire later): each match is paged as fire at most once.
+    # When this match was announced as fire on the host (cveFeed.notify: fire_matches when it was made fire, fire_confirmed when evidence turned
+    # it fire later, cves_turned_hot when its CVE joined the KEV), or marked as announced without a message (notify.baseline_heat_policy), and
+    # under which heat rule (threat.heat_signature: "kev", "legacy:smoke", ...). A match is paged as fire at most once PER RULE: a mark made under
+    # one rule never holds back a page that is new under another (notify.unannounced_q).
     fire_notified_at = models.DateTimeField(null=True, blank=True)
+    fire_notified_rule = models.CharField(max_length=24, blank=True, default="")
 
     # Remediation workflow, driven by people or agents through the API / MCP. fixed, accepted_risk and false_positive close a finding
     # (cveFeed.closure.CLOSED); remediation_note is the note on why, with who (remediation_by) and when (remediation_updated_at).

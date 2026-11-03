@@ -177,6 +177,32 @@ def sync_tailscale_link(link_id):
     return tailscale_sync.sync_link(link_id)
 
 
+def _follow_signal_changes(changes):
+    """After cve.now rewrote stored CVEs (``changes``: ``(cvss, kev, epss_reached, exploit_db)`` as they were, or None for a CVE that was not
+    stored, and the CVEEntry now): the hosts of a CVE whose score or exploitation signals moved are rescored (the heat of its matches moved), and
+    the proven matches of a CVE that joined the KEV or gained an exploit are paged once (``notify.cves_turned_hot``). Never raises."""
+    from cveFeed.threat import is_hot
+    moved, turned_hot = [], []
+    for before, obj in changes:
+        if before is None or not getattr(obj, 'pk', None):
+            continue
+        after = (obj.cvss, obj.kev, obj.epss_reached, obj.exploit_db)
+        if tuple(before) != after:
+            moved.append(obj.pk)
+            if is_hot(obj.kev, obj.exploit_db) and not is_hot(before[1], before[3]):
+                turned_hot.append(obj.pk)
+    if not moved:
+        return
+    try:
+        from cveFeed import notify, scoring
+        from cveFeed.models import CVEMatch
+        for ids in scoring._chunks(moved, scoring.CHUNK):
+            scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=ids).select_related('subdomain__target_domain'))
+        notify.cves_turned_hot(turned_hot)
+    except Exception:  # noqa: BLE001 - the CVEs are stored; scores catch up at the daily pass
+        logger.exception('could not follow up %d CVEs whose signals changed', len(moved))
+
+
 def _known_in_batches(summaries, size=100):
     """Yield (summary, ids already stored) with one lookup per ``size`` summaries instead of one per entry."""
     from itertools import islice
@@ -244,6 +270,7 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
     due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
+    signals = []
     for old in list(due):
         try:
             entry = client.get_entry(old.cve_id)
@@ -255,9 +282,11 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
                 changed += 1
                 CVEEntry.objects.filter(pk=obj.pk).update(needs_recorrelation=True)
                 MatchVerdict.objects.filter(cve_entry_id=obj.pk).delete()
+            signals.append((before[1:5], obj))
         except Exception as exc:
             failed += 1
             logger.warning('cve.now: failed to refresh %s: %s', old.cve_id, exc)
+    _follow_signal_changes(signals)
     result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed, "changed": changed, "failed": failed}
     logger.info(f"cve.now sync complete: {result}")
     tiers = [e.threat_tier for e in new_entries]
@@ -417,12 +446,17 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             return result
     result['wanted'] = len(wanted)
     created_rows, refused = [], []
+    # an entry already stored (a forced walk, or ids given) is rewritten: what its signals were, to follow up a change (_follow_signal_changes)
+    stored = {c: (cvss, kev, epss, exploit) for c, cvss, kev, epss, exploit in CVEEntry.objects.filter(cve_id__in=wanted[:max_new])
+              .values_list('cve_id', 'cvss', 'kev', 'epss_reached', 'exploit_db')}
+    signals = []
     for entry_id in wanted[:max_new]:
         try:
             entry = client.get_entry(entry_id)
             if isinstance(entry, dict) and first_seen.get(entry_id):
                 entry.setdefault('firstSeenAt', first_seen[entry_id])
             obj, _ = CVEEntry.from_api(entry)
+            signals.append((stored.get(obj.cve_id), obj))
             created_rows.append(obj)
             result['created'] += 1
             failures.pop(entry_id, None)
@@ -477,6 +511,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['continues'] = True
         elif failures_changed:
             row.save(update_fields=['failures', 'updated_at'])
+    _follow_signal_changes(signals)
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
@@ -544,6 +579,9 @@ def sync_threat_intel():
             scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=cve_ids)
                                         .select_related('subdomain__target_domain')
                                         .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
+    if result.get('signals_turned_hot'):  # a CVE that joined the KEV or gained an exploit: its proven matches turned fire, paged once
+        from cveFeed import notify
+        notify.cves_turned_hot(result['signals_turned_hot'])
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
     if result.get('ranges_repaired'):  # entries whose ranges were re-derived are correlated again (cveFeed.intel.repair_ranges)
@@ -722,7 +760,7 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
         if batch:
             hit_batch.record(batch, pairs)
         else:
-            notify.template_hits(pairs)  # one message per CVE test, never per host
+            notify.template_hits(pairs, project=project_id)  # one message per CVE test, never per host
         return {"cve": cve.cve_id, "source": outcome["source"], "vulnerable": vulnerable}
     finally:
         if batch:
@@ -1882,6 +1920,13 @@ def report_resources():
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     from cveFeed import autotune
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
+    from cveFeed import scoring
+    scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
+    try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)
+        from cveFeed import notify
+        notify.baseline_heat_policy()
+    except Exception:  # noqa: BLE001 - the next tick tries again
+        logger.exception('could not baseline the fire pages for the heat rule')
     return {}
 
 

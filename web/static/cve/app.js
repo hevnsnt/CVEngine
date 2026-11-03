@@ -70,13 +70,21 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
-// a CVE listed as exploited in the wild, shown on its row whatever the heat: a match that rests on its version alone is held at
-// smoke (CVENGINE_VERSION_ONLY_MAX_HEAT) until a check confirms it, and KEV must still be visible at a glance
+// a CVE listed as exploited in the wild, shown on its row whatever the heat: under the KEV heat policy a KEV match is fire only when its
+// version is proven on the host (otherwise smoke until a check proves it), and KEV must still be visible at a glance
 const kevBadge = (heatCapped) => {
   const b = badge("KEV", "critical");
   b.title = heatCapped
-    ? "Listed as exploited in the wild. The match rests on a version alone, so it shows below fire until a check confirms it; it is validated first."
+    ? "Listed as exploited in the wild. On the KEV; version not proven on this host, so it shows smoke until a check proves it; it is validated first."
     : "Listed as exploited in the wild";
+  return b;
+};
+// why a CVE finding has its heat, from the server (threat.heat_reason): "on the KEV; version not proven", "not on the KEV and no known
+// exploit", "on the KEV; version proven: template hit". Text only (el() sets textContent).
+const heatWhy = (reason) => (reason ? el("span", "note heat-why", reason, { title: `Why this heat: ${reason}` }) : null);
+const heatBadge = (heat, reason) => {
+  const b = badge(heat, heat);
+  if (reason) b.title = `Why ${heat}: ${reason}`;
   return b;
 };
 // a hostname printed anywhere (except the host page itself) links to that host's page
@@ -3392,7 +3400,7 @@ const pages = {
           const label = r.id
             ? el("a", "", text, { href: `/cve/${encodeURIComponent(projectOf(h))}/${r.finding === "match" ? "matches" : "vulns"}/#${r.id}` })
             : el("span", "", text);
-          line.append(badge(r.temp, r.temp), label, el("span", "note", r.detail));
+          line.append(heatBadge(r.temp, r.heat_reason), label, el("span", "note", r.detail));
           if (r.kev) line.append(kevBadge(r.heat_capped));
           if (r.kind === "cve") line.append(el("span", "note host-why", r.description || "Description unavailable in the CVE feed."));
           if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }, { project: projectOf(h), kind: r.finding === "match" ? "match" : "vulnerability", id: r.id }));
@@ -3726,7 +3734,7 @@ const pages = {
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
     const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
-    // KEV whatever the heat: a match that rests on its version alone is smoke at most, so heat alone no longer finds every exploited CVE
+    // KEV whatever the heat: a KEV match whose version is not proven is smoke, so heat alone does not find every exploited CVE
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
     kev.value = wanted.get("kev") === "1" ? "1" : "";
     const type = picker(
@@ -3902,7 +3910,7 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
@@ -3957,7 +3965,7 @@ const pages = {
       status.refresh();
       list.reload();
     });
-    // KEV whatever the heat: a match that rests on its version alone is smoke at most
+    // KEV whatever the heat: a KEV match whose version is not proven is smoke
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => {
       status.refresh();
       list.reload();
@@ -3987,7 +3995,7 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
+        meta: [heatBadge(m.cve.tier, m.heat_reason), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

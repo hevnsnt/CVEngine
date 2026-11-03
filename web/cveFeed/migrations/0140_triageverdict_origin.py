@@ -72,11 +72,11 @@ class Migration(migrations.Migration):
     the shared correlation table gives up the model's words (``drop_shared_words``). Reversing drops the columns and the index (the words are
     not put back).
 
-    Numbered 0140 after develop's 0138 (#390); #386 takes 0139 and the dependency is moved to it when both are merged."""
+    Numbered 0140, after develop's 0139 (#386, heat policy), which follows 0138 (#390)."""
 
     dependencies = [
         ("dashboard", "0031_ai_provider_request_settings"),
-        ("cveFeed", "0138_supplierfinding_false_positive"),
+        ("cveFeed", "0139_heat_policy_baseline"),
     ]
 
     operations = [

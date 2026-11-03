@@ -6,9 +6,9 @@ the Hosts page, search and the graph already read.
 
 | Component | Points | Cap |
 | --- | --- | --- |
-| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: a version-only match is smoke at most): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
+| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: under the KEV heat policy a KEV or exploited CVE is fire when its version is proven and smoke otherwise, anything else ice): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
-| Open findings: critical/high 25, medium 10, low 3 | worst | 25 |
+| Open findings: critical/high 25, medium 10, low 3; under the KEV heat policy a finding that names CVEs counts by its heat instead (``threat.finding_heat``: fire 25, smoke 10, ice 3) | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
 | Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
 | Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS, cleartext Telnet, FTP and r-services): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
@@ -32,6 +32,7 @@ CVE_POINTS = {'fire': 40, 'smoke': 20, 'ice': 5}
 CVE_CAP, AI_BONUS = 50, 10
 VERSION_UNKNOWN_CAP = 2  # the most a host's score takes from CVE matches that have no affected version range (review, not exposure)
 FINDING_POINTS = {4: 25, 3: 25, 2: 10, 1: 3}
+FINDING_HEAT_POINTS = {'fire': 25, 'smoke': 10, 'ice': 3}  # a finding that names CVEs, under the KEV heat policy: by its heat, not its severity
 FINDING_NAMES = {4: 'Critical', 3: 'High', 2: 'Medium', 1: 'Low'}
 HYGIENE_POINTS = {4: 20, 3: 15, 2: 8, 1: 3}
 HYGIENE_CAP, HYGIENE_EXTRA = 20, 2
@@ -123,10 +124,14 @@ def score_host(inputs):
     ``{'label', 'points'}`` that add up to the score (at most 100)."""
     detail = _cve_lines(inputs.get('cves') or [])
     findings = [f for f in inputs.get('findings') or [] if f.get('severity') in FINDING_POINTS]
+
+    def points(f):
+        return FINDING_HEAT_POINTS[f['heat']] if f.get('heat') in FINDING_HEAT_POINTS else FINDING_POINTS[f['severity']]
     if findings:
-        worst = max(findings, key=lambda f: FINDING_POINTS[f['severity']] * 10 + f['severity'])
-        detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip(),
-                       'points': FINDING_POINTS[worst['severity']]})
+        worst = max(findings, key=lambda f: points(f) * 10 + f['severity'])
+        detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip()
+                       + (f' ({worst["heat"]}: its CVE rated by the heat policy)' if worst.get('heat') in FINDING_HEAT_POINTS else ''),
+                       'points': points(worst)})
     detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
     detail += _capped(_route_line(routes), ROUTE_CAP)
@@ -161,8 +166,27 @@ def _cve_inputs(sub):
     for m in sub.cve_matches.all():
         if not match_is_live(m):  # ruled out, or closed: fixed, accepted risk or false positive
             continue
-        # the heat the host card shows: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT (smoke), KEV or not
+        # the heat the host card shows (threat.match_heat: the heat policy)
         out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
+    return out
+
+
+def _hot_finding_cves(subs):
+    """The hot CVE ids among the CVEs the hosts' findings name (one query), or None under the legacy heat policy (severity only)."""
+    from cveFeed.threat import LEGACY_POLICY, finding_cve_names, heat_policy, hot_cve_names
+    if heat_policy() == LEGACY_POLICY:
+        return None
+    return hot_cve_names({n for sub in subs for v in sub.vulnerability_set.all() for n in finding_cve_names(v)})
+
+
+def _finding_input(v, hot):
+    """One open finding for ``score_host``: its severity and name, and under the KEV policy, for a finding that names CVEs, its heat."""
+    from cveFeed.threat import finding_cve_names, finding_heat
+    out = {'severity': v.severity, 'name': v.name}
+    if hot is not None and finding_cve_names(v):
+        heat = finding_heat(v, hot_names=hot)
+        if heat:
+            out['heat'] = heat
     return out
 
 
@@ -209,7 +233,8 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         newest = (usable_rows(Subdomain.objects.filter(target_domain__project_id=project_id, name__in=chunk))
                   .order_by('name', *row_preference(scan_id)).distinct('name')
                   .prefetch_related('ip_addresses', Prefetch('cve_matches', queryset=CVEMatch.objects.select_related('cve_entry', 'triage')),
-                                    'vulnerability_set'))  # a score reads a CVE's tier fields
+                                    'vulnerability_set', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
+                                    'vulnerability_set__triage'))  # a score reads a CVE's tier fields, and a finding's CVEs
         subs = {s.name.lower(): s for s in newest}
         routes, recent, zombies, hygiene = {}, {}, {}, {}
         for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
@@ -227,9 +252,10 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
             if any(r['zombie_since'] for r in items):
                 zombies.setdefault(host, {})['zombie_route'] = True
         scores = {}
+        hot = _hot_finding_cves(subs.values())
         for name, sub in subs.items():
             inputs = {'cves': _cve_inputs(sub),
-                      'findings': [{'severity': v.severity, 'name': v.name} for v in sub.vulnerability_set.all() if finding_is_live(v)],
+                      'findings': [_finding_input(v, hot) for v in sub.vulnerability_set.all() if finding_is_live(v)],
                       'hygiene': hygiene.get(name, []), 'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
             inputs.update(zombies.get(name, {}))
             scores[name] = score_host(inputs)
@@ -250,11 +276,13 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
     return scored
 
 
-HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the version-only cap the stored scores were last asked to follow
+HEAT_CAP_KEY = 'cvengine:scoring:version_only_max_heat'  # the heat signature (threat.heat_signature) the stored scores were last asked to follow
 
 
 def rescore_if_heat_cap_changed():
-    """Queue one full rescore when the owner changed CVENGINE_VERSION_ONLY_MAX_HEAT: the cap differs from the one last recorded. Heat itself
+    """Queue one full rescore when the owner changed the heat rule: ``threat.heat_signature()`` (the heat policy, ``CVENGINE_HEAT_POLICY`` or
+    the Heat policy card, and under ``legacy`` CVENGINE_VERSION_ONLY_MAX_HEAT) differs from the one last recorded. Called when a worker starts
+    and from the 30 second tick, so a policy saved on the page reaches the stored scores within minutes. Heat itself
     needs nothing (it is computed when read); a score is stored, so it follows here, or at the next daily pass. The first time a cap is
     seen (the upgrade that introduced it, or a Redis without a volume that came back empty after ``docker compose down``) it is only
     recorded: a forced rescore of every host on each restart would cost far more than scores that catch up at the daily pass. One GETSET,
@@ -262,13 +290,13 @@ def rescore_if_heat_cap_changed():
     worker start tries again). The rescore it queues runs even when another full rescore holds the hour-long
     sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
     the old cap until the next day. Returns whether it queued. Never raises."""
-    from cveFeed.threat import version_only_max_heat
+    from cveFeed.threat import heat_signature
     from reNgine import resources
     try:
         client = getattr(resources.get_store(), 'r', None)
         if client is None:
             return False
-        cap = version_only_max_heat()
+        cap = heat_signature()
         previous = client.getset(HEAT_CAP_KEY, cap)
         if previous is None or previous == cap:
             return False
@@ -283,7 +311,7 @@ def rescore_if_heat_cap_changed():
             raise
         return True
     except Exception:  # noqa: BLE001 - the next worker start or the daily pass tries again
-        logger.exception('could not queue the rescore for the version-only heat cap')
+        logger.exception('could not queue the rescore for the heat rule')
         return False
 
 
@@ -334,7 +362,7 @@ def rescore_subdomain_ids(subdomain_ids):
 def evidence_arrived(match_ids, confirmed=()):
     """Hard evidence (``match_policy.has_hard_evidence``) just reached these CVE matches without a template hit: the host's inventory report
     (``inventory_match``), runZero (``runzero_sync``), or a validation hit recorded, adopted from a sibling row or carried to a rescan's match
-    (``validation``, ``triage``). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
+    (``validation``, ``triage``); or a version-class template hit proved their version (``templategen.record_outcomes``, KEV rule). Heat is read live, but the score is stored and the dashboards and the graph serve a snapshot: rescore the
     hosts and make every snapshot re-read (``bump_stats_revision``). ``confirmed`` are the matches among them that were version-only just
     before the write (the caller checked, before it wrote): those that are fire now are paged once (``notify.fire_confirmed``). A hit adopted
     from a sibling or carried to a rescan pages nothing: the finding and its hit were announced already. Never raises."""
