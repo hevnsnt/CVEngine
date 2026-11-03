@@ -18,6 +18,10 @@ from cveFeed.threat import FIRE, SMOKE
 from startScan.models import Vulnerability
 from tests.test_match_policy import JQUERY, Cve, Fixture
 
+# The legacy heat policy rates a version-only match smoke at most (CVENGINE_VERSION_ONLY_MAX_HEAT). Under the KEV heat policy (the default) a
+# version-class hit proves the version, so a KEV match it reads turns fire and is paged once: TemplateHitTests has a kev counterpart of each.
+LEGACY = {'CVENGINE_HEAT_POLICY': 'legacy'}
+
 # --- version-only templates, as the AI writer and the community write them ---------------------------------------------------------
 
 # a script banner regex: the shape C.6 of the design review describes
@@ -460,6 +464,7 @@ class TemplateHitTests(Fixture):
             result = template_test_for_cve(self.entry.pk, [HOST], project_id=self.project.pk)
         return result, send
 
+    @mock.patch.dict(os.environ, LEGACY)
     def test_a_version_regex_hit_is_not_hard_evidence_not_fire_and_not_paged(self):
         result, send = self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
         match = CVEMatch.objects.select_related('triage').get(pk=self.match.pk)
@@ -520,6 +525,7 @@ class TemplateHitTests(Fixture):
                                       return_value=[{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': hit}]):
                 self.assertEqual(validation.run_nuclei_template(check)['status'], status)
 
+    @mock.patch.dict(os.environ, LEGACY)
     def test_a_version_hit_through_validation_pages_nothing_and_stays_smoke(self):
         row = Triage.objects.get(match=self.match)
         check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': HOST,
@@ -549,9 +555,65 @@ class TemplateHitTests(Fixture):
             self.assertTrue(notify.template_hits(pair))  # nor is a genuine hit held back because its result is not recorded yet
         self.assertEqual(send.call_count, 3)
 
+    @mock.patch.dict(os.environ, LEGACY)
     def test_fire_confirmed_never_pages_a_version_class_hit(self):
         CVEMatch.objects.filter(pk=self.match.pk).update(template_result=templategen.VERSION_ONLY_RESULT)
         with mock.patch('cveFeed.notify._send', return_value=True) as send:
             scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])
         self.assertEqual(send.call_count, 0)
         self.assertIsNone(CVEMatch.objects.get(pk=self.match.pk).fire_notified_at)
+
+    # --- the same under the KEV heat policy (the default) ----------------------------------------------------------------------------
+
+    def test_under_the_kev_rule_a_version_regex_hit_proves_the_version_and_pages_once(self):
+        with mock.patch.object(scoring, 'rescore_for_matches') as rescored:
+            result, send = self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
+        match = CVEMatch.objects.select_related('triage').get(pk=self.match.pk)
+        self.assertEqual(match.template_result, templategen.VERSION_ONLY_RESULT)
+        self.assertEqual(self.heat(), FIRE)  # on the KEV and the version proven on the host
+        self.assertTrue(match_policy.version_proven(match))
+        self.assertFalse(match_policy.has_hard_evidence(match.source, match.evidence, match.template_result, match.distro_status,
+                                                        match.triage.validation_status))  # the flaw is not shown: triage unchanged
+        self.assertFalse(Vulnerability.objects.filter(source='nuclei-cve').exists())  # still no confirmed finding
+        self.assertEqual(result['vulnerable'], [])
+        self.assertEqual(send.call_count, 1)  # one page: confirmed, now fire-tier (never a "template test confirmed" message)
+        self.assertIn('confirmed, now fire-tier', send.call_args.args[0])
+        self.assertTrue(rescored.called)
+        self.assertEqual(match.fire_notified_rule, 'kev')
+        _result, send = self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)  # the same hit again: already fire, not paged again
+        self.assertEqual(send.call_count, 0)
+
+    def test_under_the_kev_rule_fire_confirmed_pages_a_version_class_hit_on_a_kev_match_once(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result=templategen.VERSION_ONLY_RESULT)
+        with mock.patch('cveFeed.notify._send', return_value=True) as send:
+            scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])
+            scoring.evidence_arrived([self.match.pk], confirmed=[self.match.pk])
+        self.assertEqual(send.call_count, 1)
+        self.assertIsNotNone(CVEMatch.objects.get(pk=self.match.pk).fire_notified_at)
+
+    def test_under_the_kev_rule_a_version_hit_through_validation_proves_the_version_and_pages_once(self):
+        row = Triage.objects.get(match=self.match)
+        check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': HOST,
+                 'service': 'validate-nuclei', 'asset': HOST, 'params': {'template': '/templates/x.yaml'}}
+        with mock.patch('cveFeed.validation.approved_template', return_value=(JQUERY_VERSION_REGEX, '')), \
+                mock.patch.object(templategen, '_run_template_with_retry',
+                                  return_value=[{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': VERSION_HIT}]), \
+                mock.patch('cveFeed.notify._send', return_value=True) as send:
+            validation.apply_validation(row, check, validation.run_nuclei_template(check))
+            row.refresh_from_db()
+            validation.apply_validation(row, check, validation.run_nuclei_template(check))  # the same check again: not paged again
+        row.refresh_from_db()
+        match = CVEMatch.objects.select_related('triage').get(pk=self.match.pk)
+        self.assertEqual(row.validation_status, 'observed')  # a re-read version, not a validation hit
+        self.assertNotEqual(row.classification, 'confirmed')
+        self.assertEqual(match.template_result, templategen.VERSION_ONLY_RESULT)
+        self.assertEqual(self.heat(), FIRE)  # the same proof as the template pass: on the KEV and the version proven
+        self.assertFalse(Vulnerability.objects.filter(source='nuclei-cve').exists())
+        self.assertEqual(send.call_count, 1)
+        self.assertIn('confirmed, now fire-tier', send.call_args.args[0])
+
+    def test_under_the_kev_rule_a_version_hit_on_a_cve_that_is_not_hot_pages_nothing(self):
+        CVEEntry.objects.filter(pk=self.entry.pk).update(kev=False, exploit_db=False)
+        _result, send = self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
+        self.assertEqual(send.call_count, 0)
+        self.assertEqual(threat.match_heat(CVEMatch.objects.select_related('cve_entry', 'triage').get(pk=self.match.pk)), threat.ICE)
