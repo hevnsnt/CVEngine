@@ -2,6 +2,8 @@
 // A supplier is not an owned host: nothing here scans, and the checks behind it are passive (a TLS handshake, normal page requests, DNS).
 // DOM is built with textContent only; everything shown that came from a supplier's own responses is text, never markup.
 import { api, ask, badge, copyText, dialog, el, field, selectOf, shortDate, text, toast } from "/staticfiles/cve/ui.js";
+import { SUPPLIER_CLOSE_OPTIONS } from "/staticfiles/cve/closure-logic.js";
+import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 
 const TIER_BADGE = { critical: "critical", high: "high", normal: "info" };
 const STATE_WORDS = {
@@ -102,16 +104,22 @@ async function findingsPanel(supplier, canEdit, refresh) {
     row.append(top);
     if (f.ask) row.append(el("p", "note", f.ask));
     if (canEdit) {
-      const accept = el("button", "btn ghost sm", "Accept", { type: "button", title: "Keep checking, but take it off the open list" });
-      accept.onclick = async () => {
-        try {
-          await api("PATCH", `/api/v1/projects/${encodeURIComponent(supplier.slug)}/suppliers/findings/${f.id}`, { status: "accepted" });
-          refresh();
-        } catch (err) {
-          toast(err.message, true);
-        }
-      };
-      row.append(accept);
+      // accepted: keep checking, off the open list; false positive: the check got it wrong, left closed. Either asks why first.
+      const titles = { accepted: "Keep checking, but take it off the open list", false_positive: "The check got this wrong: close it and keep it closed" };
+      SUPPLIER_CLOSE_OPTIONS.forEach(([status, label]) => {
+        const close = el("button", "btn ghost sm", status === "accepted" ? "Accept" : label, { type: "button", title: titles[status] });
+        close.onclick = async () => {
+          const answer = await askClosureNote(status, 1);
+          if (!answer) return;
+          try {
+            await api("PATCH", `/api/v1/projects/${encodeURIComponent(supplier.slug)}/suppliers/findings/${f.id}`, { status, note: answer.note });
+            refresh();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        };
+        row.append(close);
+      });
     }
     box.append(row);
   });
@@ -238,6 +246,8 @@ export async function suppliersPage(mount, { slug, all }) {
     head.append(el("span", "note", s.last_checked ? `last checked ${shortDate(s.last_checked)}` : "not checked yet"));
     const f = s.findings;
     if (f.open) head.append(badge(`${f.open} open finding${f.open === 1 ? "" : "s"}`, f.critical ? "critical" : f.high ? "high" : f.medium ? "medium" : "low"));
+    const closed = [f.accepted && `${f.accepted} accepted`, f.false_positive && `${f.false_positive} false positive`].filter(Boolean);
+    if (closed.length) head.append(el("span", "note", closed.join(" · ")));
     const actions = el("div", "supplier-actions");
     const copy = el("button", "btn ghost sm", t.length ? "Copy message about this tech" : "Copy message to supplier", { type: "button", title: "A plain-text note with the technology they announce and what to ask. Nothing is sent." });
     copy.onclick = async () => {
