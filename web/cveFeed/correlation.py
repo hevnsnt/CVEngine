@@ -908,6 +908,82 @@ def _names(values, limit=3):
     return ', '.join('"%s"' % v for v in seen[:limit])
 
 
+LIBRARY_DAMPING_DAYS = 14  # a library match reopened this recently is not closed again on weak grounds (an absence, a cache-buster)
+_WEAK_LIBRARY_CLOSURES = ('no_such_script', 'cache_buster')
+
+
+def _library_standing(match):
+    """Whether someone or something vouches for a library match (``match_policy.has_standing``: worked, assigned, commented, AI-confirmed,
+    host-reported, a template hit...) or a validation confirmed it (its Triage row is a hit or classified confirmed): no page reading
+    closes it."""
+    from django.db.models import Q
+
+    from cveFeed.models import Triage
+    if match_policy.has_standing(match):
+        return True
+    return Triage.objects.filter(match_id=match.pk).filter(Q(validation_status='hit') | Q(classification='confirmed')).exists()
+
+
+def _recently_reopened(match, now=None, days=LIBRARY_DAMPING_DAYS):
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+    stamp = (match.evidence or {}).get('library_reopened_at') if isinstance(match.evidence, dict) else None
+    when = parse_datetime(stamp) if isinstance(stamp, str) else None
+    return bool(when) and when >= (now or timezone.now()) - timedelta(days=days)
+
+
+def host_library_versions(subdomain):
+    """``{(library key, version)}`` the host's technologies name (its prefetched ``technologies`` when loaded)."""
+    out = set()
+    for tech in subdomain.technologies.all():
+        name, version = split_name_version(tech.name)
+        key = js_libraries.PRODUCTS.get((name or '').strip().lower())
+        if key and version:
+            out.add((key, version))
+    return out
+
+
+def library_closure(match, libraries, name=None, now=None, present=None):
+    """``(reason, hold)`` for a stored JavaScript library match against its host's page (``libraries``, a ``js_libraries.HostLibraries``):
+    the stored reason to close it because the page contradicts it, and whether it must be kept open instead. Only a version the host's
+    technologies still name is judged against the page (``present``: ``host_library_versions``); a version the host no longer names is an
+    ordinary stale match (``close_stale``'s own closure, as for every product). A page-based closure is held back when a person or a check
+    vouches for the match, or when it reopened lately and the contradiction is weak (an absence or a cache-buster, which an A/B or
+    rotating page can show one day and not the next). The reason is never shared with another host (``close_invalid_correlation``,
+    ``_seedable``)."""
+    name = name or (match.matched_product if js_libraries.PRODUCTS.get((match.matched_product or '').strip().lower())
+                    else match_policy.sighting_of(match)[0])
+    key = js_libraries.PRODUCTS.get((name or '').strip().lower())
+    if getattr(match, 'source', '') != 'tech' or not match.matched_version or not key:
+        return '', False
+    if present is None:
+        present = host_library_versions(match.subdomain)
+    if (key, match.matched_version) not in present:
+        return '', False
+    skip, evidence, _cap = libraries.judge(name, match.matched_version)
+    if not (skip and evidence.get('reason')):
+        return '', False
+    if _library_standing(match):
+        return '', True
+    reason = js_libraries.closed_reason(evidence['reason'])
+    if js_libraries.closure_kind(reason) in _WEAK_LIBRARY_CLOSURES and _recently_reopened(match, now):
+        return '', True
+    return reason, False
+
+
+def library_provenance_reason(match):
+    """The stored reason to close a JavaScript library match the host's own page contradicts (``library_closure``), or ''. Read by
+    ``invalid_identity_reason``, so triage never asks the AI about it; ``tasks.reconcile_library_provenance`` sweeps the stored ones."""
+    if getattr(match, 'source', '') != 'tech' or not match.matched_version or match.subdomain_id is None:
+        return ''
+    name, _cpe = match_policy.sighting_of(match)
+    if not js_libraries.is_library(name):
+        return ''
+    return library_closure(match, js_libraries.HostLibraries.for_subdomain(match.subdomain), name=name)[0]
+
+
 def invalid_identity_reason(match):
     """A reason to close this *candidate correlation*, never a claim that the host lacks backend software.
 
@@ -920,6 +996,9 @@ def invalid_identity_reason(match):
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
+    reason = library_provenance_reason(match)
+    if reason:
+        return reason
     # The sighting the match was made from, not the product the advisory names: a match in range stores the advisory's own name, which
     # always matches itself, so only the original sighting can show that a different product was linked (an "nginx" fingerprint
     # against ingress-nginx's ranges).
@@ -958,7 +1037,7 @@ def close_invalid_correlation(match, reason=None):
     reason = reason or invalid_identity_reason(match)
     if not reason:
         return False
-    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(AUTO_CLOSED):
+    if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(AUTO_CLOSED + (js_libraries.LIBRARY_CLOSED,)):
         return False
     pairs = triage.track([match])
     if not pairs:
@@ -966,7 +1045,8 @@ def close_invalid_correlation(match, reason=None):
     row, _ = pairs[0]
     # A verdict is shared by every host with the same evidence. One reached by comparing names is only about this sighting, and a
     # version inside the affected range is the evidence another host with the same product and version stands on: it never leaves this row.
-    shared = match.version_in_range is not True
+    # ... and a reason about this host's own page (cveFeed.js_libraries) is never anyone else's
+    shared = match.version_in_range is not True and not reason.startswith(js_libraries.LIBRARY_CLOSED)
     verdict = None
     if shared:
         verdict, _ = TriageVerdict.objects.update_or_create(kind='cve_match', signature=row.signature, defaults={
@@ -997,6 +1077,8 @@ def _seedable(verdict, row):
     and never an "affected" one for a match that stands on its version string alone (``match_policy.version_only``): the verdict may
     have been earned on a host with a template hit or a distribution listing, which this match does not have, and the ceiling
     (``triage.ceiling``) holds such a match at needs_validation. It starts unjudged instead and is triaged under the ceiling."""
+    if verdict and (verdict.ai_reason or '').startswith(js_libraries.LIBRARY_CLOSED):
+        return None  # about one host's own page, never another's (and never the same host's once it matches again)
     if verdict and verdict.ai_verdict == "affected" and match_policy.version_only(
             row.get("source"), row.get("evidence"), row.get("version_in_range"), row.get("template_result", ""), row.get("distro_status", "")):
         return None
@@ -1085,12 +1167,28 @@ def save_matches(rows, covered=None):
         for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "ai_model",
             *_MATCH_FIELDS)}
-    fresh, changed = [], []
+    # a library match the host's page closed is reopened on any fresh reading of the page that no longer supports the closure (even a partial
+    # one: js_libraries.HostLibraries.judge page_fresh), never because the only reading went stale: that neither reopens it nor starts its
+    # damping
     now = timezone.now()
+    for key in [k for k, r in unique.items() if k in existing and existing[k].ai_verdict == 'not_affected'
+                and (existing[k].ai_reason or '').startswith(js_libraries.LIBRARY_CLOSED)
+                and isinstance(r.get("evidence"), dict) and r["evidence"].get("page_fresh") is False]:
+        del unique[key]
+    fresh, changed = [], []
     verdicts = {}
+    for key, row in unique.items():  # a library match the host's page closed matches again (on a fresh reading): remembered, so a flapping
+        match = existing.get(key)      # page does not close it daily, and its evidence differs from the closed row's, so it reopens
+        if match is not None:
+            reopened = (match.evidence or {}).get('library_reopened_at') if isinstance(match.evidence, dict) else None
+            if match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(js_libraries.LIBRARY_CLOSED):
+                row["evidence"] = {**row["evidence"], "library_reopened_at": now.isoformat()}
+            elif reopened and _recently_reopened(match, now):
+                row["evidence"] = {**row["evidence"], "library_reopened_at": reopened}
     moved = {k for k, r in unique.items() if k in existing and (
         existing[k].matched_version != r["matched_version"] or existing[k].version_in_range != r["version_in_range"]
         or existing[k].distro_status != r["distro_status"]
+        # (a library match the host's page closed always differs when it comes back: its evidence carries library_reopened_at, above)
         or ((existing[k].ai_reason or '').startswith('Closed automatically:') and
             any(getattr(existing[k], field) != r[field] for field in _MATCH_FIELDS)))}
     if any(key not in existing for key in unique) or moved:  # a new match of a kind the AI already judged starts out judged
@@ -1104,7 +1202,7 @@ def save_matches(rows, covered=None):
             extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": verdict.ai_reason, "ai_model": verdict.ai_model}
                      if verdict else {})
             fresh.append(CVEMatch(**row, **extra))
-        elif any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
+        elif key in moved or any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
             for f in _MATCH_FIELDS:
                 setattr(match, f, row[f])
             if key in moved:
@@ -1162,8 +1260,8 @@ def close_stale(current, covered):
         return set()
     stale_keep, hosts = [], set()
     for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
-            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "template_result",
-            "remediation_status", "version_in_range"):
+            "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
+            "template_result", "remediation_status", "version_in_range", "assignee_id", "distro_status"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
             continue
         if m.template_result == 'vulnerable':
@@ -1177,10 +1275,18 @@ def close_stale(current, covered):
         stale_keep.append(m)
         hosts.add(m.subdomain_id)
     if stale_keep:
-        CVEMatch.objects.filter(pk__in=[m.pk for m in stale_keep]).update(
-            ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-            ai_reason="Closed automatically: the host no longer matches this CVE (the version moved out of the affected range "
-                      "or the product is gone).")
+        reasons, held = _library_closures([m for m in stale_keep if m.source == 'tech' and js_libraries.is_library(m.matched_product)])
+        stale_keep = [m for m in stale_keep if m.pk not in held]
+        hosts = {m.subdomain_id for m in stale_keep}
+    if stale_keep:
+        by_reason = {}
+        for m in stale_keep:
+            reason = reasons.get(m.pk) or (
+                "Closed automatically: the host no longer matches this CVE (the version moved out of the affected range "
+                "or the product is gone).")
+            by_reason.setdefault(reason, []).append(m.pk)
+        for reason, ids in by_reason.items():
+            CVEMatch.objects.filter(pk__in=ids).update(ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(), ai_reason=reason)
         from cveFeed import activity
         from startScan.models import Subdomain
         projects = dict(Subdomain.objects.filter(pk__in=hosts).values_list('id', 'target_domain__project_id'))
@@ -1189,6 +1295,46 @@ def close_stale(current, covered):
                 activity.log('confirm', 'CVE candidate closed after its product or version disappeared from inventory',
                              project=projects[match.subdomain_id], match_id=match.pk, decision='closed_not_applicable')
     return hosts
+
+
+def _vouched_on_another_row(subdomain, name, version):
+    """Whether another row of this host (an earlier scan's: same name and target) has a library match of ``name`` ``version`` that a person
+    or a check vouches for (``_library_standing``)."""
+    from cveFeed.models import CVEMatch
+    key = js_libraries.PRODUCTS.get((name or '').strip().lower())
+    if not key or not subdomain.target_domain_id:
+        return False
+    tokens = {re.sub(r'[^a-z0-9]', '', key), re.sub(r'[^a-z0-9]', '', js_libraries.LIBRARIES[key][0].lower())}
+    for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id, source='tech',
+                                          matched_version=version).exclude(subdomain_id=subdomain.pk)
+                  .only('id', 'source', 'matched_product', 'evidence', 'ai_verdict', 'remediation_status', 'assignee_id', 'template_result',
+                        'distro_status')):
+        if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens and _library_standing(match):
+            return True
+    return False
+
+
+def _library_closures(matches):
+    """``({match id: stored reason}, {match ids to keep open})`` for the JavaScript library matches among ``matches`` (stale tech matches):
+    the reason for those the host's own page contradicts (``library_closure``), and those no page reading may close (vouched for, or
+    reopened lately on a weak contradiction), which stay as they are."""
+    if not matches:
+        return {}, set()
+    from startScan.models import Subdomain
+    subs = {sub.pk: sub for sub in Subdomain.objects.filter(pk__in={m.subdomain_id for m in matches}).select_related('target_domain')
+            .prefetch_related('ip_addresses__ports', 'technologies')}
+    hosts = {pk: (js_libraries.HostLibraries.for_subdomain(sub), host_library_versions(sub)) for pk, sub in subs.items()}
+    reasons, held = {}, set()
+    for m in matches:
+        if m.subdomain_id not in hosts:
+            continue
+        libraries, present = hosts[m.subdomain_id]
+        reason, hold = library_closure(m, libraries, present=present)
+        if hold:
+            held.add(m.pk)
+        elif reason:
+            reasons[m.pk] = reason
+    return reasons, held
 
 
 def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidence=0.0, scan_history=None, rows=None,
@@ -1220,6 +1366,12 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         library, cap = {}, None
         if libraries is not None and version:
             skip, library, cap = libraries.judge(name, version)
+            if skip and _vouched_on_another_row(subdomain, name, version):
+                # a person or a check vouched for this version's match on an earlier scan's row of the host: the new row keeps the match
+                # (its remediation, assignee and status carried), so a page reading never undoes their work across a rescan
+                skip, cap = False, js_libraries.CONFIDENCE['filename']
+                library = {'version_source': 'other', 'version_confidence': cap, 'page_fresh': True,
+                           'version_note': 'kept: vouched for on an earlier scan of this host, although its page does not show this version'}
             if skip:
                 continue
         _record_matches(

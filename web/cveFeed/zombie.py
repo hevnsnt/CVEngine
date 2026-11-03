@@ -66,6 +66,12 @@ def tcp_endpoints(state, limit=ZOMBIE_PORTS_PER_HOST):
 def tcp_alive(ip, port):
     """Whether a TCP connection to ``ip:port`` is accepted: connect, close, nothing sent, no banner read."""
     import socket
+
+    from cveFeed import local_egress
+    try:
+        local_egress.check_connect(port, 'zombie-check', address=ip)  # a port held on this server (skip list, egress budget) is not probed, so it is not listed
+    except local_egress.PortHeld:
+        return False
     try:
         with socket.create_connection((ip, port), timeout=CHECK_TIMEOUT[0]):
             return True

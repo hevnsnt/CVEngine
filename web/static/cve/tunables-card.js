@@ -7,6 +7,16 @@ import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.
 import { canPin, canReset, changesFrom, originLines, rangeText, runningText, softWarning, sourceLabel, usageText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/tunables`;
+// A small addition under one card's intro: the Outbound connections card links the connection log (every local connection to the logged
+// ports, 25, 465 and 587 by default) as a CSV a person can hand to a hosting provider.
+const EXTRAS = {
+  egress: () => {
+    const p = el("p", "note", "", { style: "margin:0 0 12px" });
+    p.append(el("a", "", "Download the connection log (CSV)", { href: `${API}/egress/connections.csv`, download: "cvengine-egress-connections.csv" }),
+      el("span", "", " · every connection this server's own scanners opened, paced or skipped to ports 25, 465 and 587, exact or estimated (kept 14 days by default)"));
+    return p;
+  },
+};
 const inputId = (key) => `tn-${key.replace(/[^a-z0-9]/gi, "-")}`;
 
 function row(field, onInput, save, mode, reload) {
@@ -61,6 +71,7 @@ async function build(host, groupId, focusId = "", ctx = {}) {
   const fields = (data.fields || []).filter((f) => f.group === groupId);
   const card = el("div", "card", null, { style: "max-width:720px" });
   card.append(el("h2", "", group.title, { style: "margin-bottom:12px" }), el("p", "note", group.intro || "", { style: "margin:0 0 12px" }));
+  if (EXTRAS[groupId]) card.append(EXTRAS[groupId]());
   const inputs = [];
   const drafts = () => Object.fromEntries(inputs.map((i) => [i.dataset.key, i.value]));
   const touched = () => new Set(inputs.filter((i) => i.dataset.touched).map((i) => i.dataset.key));
@@ -111,3 +122,4 @@ export function registerTunableGroup(id, title) {
 registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
+registerTunableGroup("egress", "Outbound connections");
