@@ -281,6 +281,31 @@ def request_containers(on):
         return False
 
 
+RESTART = '.openvas-restart'  # written here when gvmd must be restarted; scripts/openvas-sync.sh restart-gvmd answers with .openvas-restarted
+RESTART_EVERY_SECONDS = 6 * 3600  # at most one restart request this often, whatever number of runs find gvmd's NVT cache stale
+
+
+def request_gvmd_restart():
+    """Ask the host's watcher to restart gvmd, whose NVT cache is out of date (``openvas_scan.stale_cache_error``): gvmd 26.35 and later reload
+    that cache only after a restart. At most once every ``RESTART_EVERY_SECONDS``. An install without the watcher (``make openvas-up`` by hand,
+    Docker Desktop) gets the same advice in the run's own message. Returns whether a request was written."""
+    try:
+        if time.time() - os.stat(_path(RESTART)).st_mtime < RESTART_EVERY_SECONDS:
+            return False
+    except OSError:
+        pass
+    tmp = _path(RESTART + '.tmp')
+    try:
+        with open(tmp, 'w') as f:
+            f.write('gvmd\n')
+        os.replace(tmp, _path(RESTART))
+        logger.warning('gvmd\'s NVT cache is out of date: asked the host to restart openvas-gvmd')
+        return True
+    except OSError:
+        logger.warning('could not write %s', RESTART)
+        return False
+
+
 APPLYING_STALE_SECONDS = 1800  # a request still "applying" after this long means the script died midway
 AGENT_FIX = 'scripts/install-updater.sh'
 

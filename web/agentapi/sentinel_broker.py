@@ -1375,8 +1375,10 @@ def _clean_openvas_result(body):
     scanned_addresses = scanned_addresses + sorted(str(a) for a in seen if str(a) not in scanned_addresses)[:MAX_ADDRESSES]
     without_cve = _ov_num(body.get('without_cve'), 0, MAX_OPENVAS_RESULTS, int, 0)
     unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
+    # results whose CVE references the Sentinel's gvmd left out (a stale NVT cache, ``cveFeed.openvas_scan.parse_result``): the run is partial
+    stale = _ov_num(body.get('nvt_cache_stale'), 0, MAX_OPENVAS_RESULTS, int, 0)
     return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
-            'partial': body.get('partial') is True}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
+            'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,

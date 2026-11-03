@@ -55,6 +55,16 @@ class OpenvasStateTests(unittest.TestCase):
             self.assertEqual(self.state('openvas-applied', bad).returncode, 1, bad)
         self.assertFalse((self.tmp / 'web' / '.openvas-applied').exists())
 
+    def test_the_gvmd_restart_answer_replaces_a_planted_link(self):
+        (self.tmp / 'web' / '.openvas-restarted').symlink_to(self.victim)
+        result = self.state('openvas-restarted', 'ok')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.victim.read_text(), 'keep me')
+        published = self.tmp / 'web' / '.openvas-restarted'
+        self.assertFalse(published.is_symlink())
+        self.assertTrue(json.loads(published.read_text())['ok'])
+        self.assertFalse(json.loads((self.state('openvas-restarted', 'failed'), published.read_text())[1])['ok'])
+
     def test_the_log_tail_replaces_a_planted_link(self):
         (self.tmp / 'web' / '.openvas-log').symlink_to(self.victim)
         private = self.tmp / 'private.log'

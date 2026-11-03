@@ -244,6 +244,9 @@ def main():
                     or not isinstance(row.get('at'), int)):
                 raise ValueError('invalid OpenVAS answer')
             publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
+        elif action == 'openvas-restarted':
+            # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
+            publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
         elif action == 'openvas-log':
             # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
