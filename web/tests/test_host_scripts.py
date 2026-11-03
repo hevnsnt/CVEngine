@@ -113,6 +113,57 @@ class OpenvasStateTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_SCRIPTS and os.geteuid() == 0 and shutil.which('git'), 'needs root and git')
+class RedisPasswordTests(unittest.TestCase):
+    """scripts/redis-password.sh: an installation without a broker password gets one from `make up` and every update, headless (security
+    review 1.3.4: the host network overlay publishes the broker on the host's loopback, where an open one runs anything as root)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def ensure(self, env_file=''):
+        script = f'. {SCRIPTS / "redis-password.sh"} && cvengine_ensure_redis_password "$1"'
+        return subprocess.run(['bash', '-c', script, 'x', env_file], cwd=self.tmp, capture_output=True, text=True).returncode
+
+    def value(self, name='.env'):
+        lines = [l for l in (self.tmp / name).read_text().splitlines() if l.startswith('REDIS_PASSWORD=')]
+        return lines[-1].split('=', 1)[1] if lines else None
+
+    def test_an_empty_password_is_generated_once(self):
+        (self.tmp / '.env').write_text('POSTGRES_PASSWORD=x\nREDIS_PASSWORD=\nOTHER=y\n')
+        os.chmod(self.tmp / '.env', 0o600)
+        self.assertEqual(self.ensure(), 0)
+        password = self.value()
+        self.assertRegex(password, r'^[A-Za-z0-9]{32}$')
+        self.assertIn('POSTGRES_PASSWORD=x\n', (self.tmp / '.env').read_text())
+        self.assertEqual(oct((self.tmp / '.env').stat().st_mode & 0o777), '0o600')  # rewritten in place
+        self.assertEqual(self.ensure(), 1)  # already has one: nothing changes, nothing is recreated
+        self.assertEqual(self.value(), password)
+
+    def test_a_missing_line_is_added(self):
+        (self.tmp / '.env').write_text('OTHER=y')  # no trailing newline
+        self.assertEqual(self.ensure(), 0)
+        self.assertIn('OTHER=y\nREDIS_PASSWORD=', (self.tmp / '.env').read_text())
+
+    def test_the_overlay_env_file_gets_the_same_password(self):
+        (self.tmp / '.env').write_text('REDIS_PASSWORD=\n')
+        (self.tmp / '.env.vps').write_text('REDIS_PASSWORD=\n')
+        self.assertEqual(self.ensure('.env.vps'), 0)
+        self.assertEqual(self.value('.env'), self.value('.env.vps'))
+        # .env already has one and Compose reads another file: that file gets it, the password is not changed
+        (self.tmp / '.env.vps').write_text('X=1\n')
+        password = self.value('.env')
+        self.assertEqual(self.ensure('.env.vps'), 0)
+        self.assertEqual((self.value('.env'), self.value('.env.vps')), (password, password))
+        self.assertEqual(self.ensure('.env.vps'), 1)
+
+    def test_every_start_path_uses_it(self):
+        for name in ('update-deploy.sh', 'update.sh', 'apply-update.sh'):
+            self.assertIn('cvengine_ensure_redis_password', (SCRIPTS / name).read_text(), name)
+        self.assertIn('cvengine_ensure_redis_password', (SCRIPTS.parent / 'Makefile').read_text())
+        self.assertNotIn('${REDIS_PASSWORD:?', (SCRIPTS.parent / 'docker-compose.hostnet.yml').read_text())
+
+
 class RootOwnershipTests(unittest.TestCase):
     """cron and systemd start the updater as root with no SUDO_UID; git refuses another user's repository ("dubious ownership") unless told."""
 
