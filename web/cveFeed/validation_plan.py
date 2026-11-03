@@ -21,7 +21,10 @@ SYSTEM = ("You investigate whether a CVE really applies to one product on one ho
           "matches. Then say which missing fact decides the question: the product's version, which look-alike product it is (nginx, "
           "ingress-nginx and nginx-ui are different software), whether an edge hides the origin, or local state that no network check "
           "can read. Choose only checks that can establish that fact. Kind fact_probe is a catalogue of read-only version and identity "
-          "probes the application runs itself; prefer it whenever a version or identity is missing. A check being safe and available "
+          "probes the application runs itself; prefer it whenever a version or identity is missing. Kind script_read reads a JavaScript "
+          "library's version again from the script files the page loads (the file's own banner, which copy runs): it is the check for "
+          "a client-side library, where nmap and a HEAD see nothing, and a version it reads is not proof the page is exploitable. "
+          "A check being safe and available "
           "does not make it relevant. Generic HTTP banners and nmap service versions cannot verify local kernel, driver, NIC, KVM or "
           "hardware prerequisites: say they need the host inventory reporter. Behind a CDN or WAF the Server header, X-Powered-By and "
           "error pages describe the edge, so origin software and versions cannot be known from here; a tag such as cloudflare names "
@@ -89,7 +92,8 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
     (cveFeed.host_context.host_context), given to the model as untrusted data. Version and identity probes need no relevance decision:
     they are the way to learn the missing fact, so they are always part of the plan when the planner offers them."""
     can_generate = not template[0]
-    probe_kinds = ['fact_probe'] if any(c['kind'] == 'fact_probe' for c in checks) else []
+    # the version and identity probes, and the script read of a client-side library: the deterministic way to learn the missing fact
+    probe_kinds = [kind for kind in ('fact_probe', 'script_read') if any(c['kind'] == kind for c in checks)]
     # An exact CVE template is relevant by construction; generic banners are not. A probe finds the fact itself.
     fallback = {'check_kinds': (['nuclei_template'] if any(c['kind'] == 'nuclei_template' for c in checks) else []) + probe_kinds,
                 'generate_template': False,
@@ -122,9 +126,12 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
         from reNgine.ai_providers import usage_stage
         with usage_stage('validation_plan'):
             decision = parse_plan(provider.complete(SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
-        if decision and probe_kinds and 'fact_probe' not in decision['check_kinds']:
-            decision['check_kinds'].append('fact_probe')  # an empty or narrow plan never ends a request while a probe can still find the fact
-            decision['reason'] = clean_text(decision['reason'] + ' (Version and identity probes still run to establish the missing fact.)', MAX_REASON)
+        missing = [kind for kind in probe_kinds if kind not in (decision or {}).get('check_kinds', [])]
+        if decision and missing:
+            decision['check_kinds'] += missing  # an empty or narrow plan never ends a request while a probe can still find the fact
+            decision['reason'] = clean_text(decision['reason'] + (' (Version and identity probes still run to establish the missing fact.)'
+                                                                  if 'fact_probe' in missing else
+                                                                  ' (The script read still runs: it reads the library version from the page.)'), MAX_REASON)
         TriageCall.objects.filter(pk=claim.pk, status='running').update(
             status='succeeded' if decision else 'failed', finished_at=timezone.now())
         if decision:

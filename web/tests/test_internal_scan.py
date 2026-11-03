@@ -145,6 +145,26 @@ class RunTests(Base):
         self.assertEqual(scan.scan_status, FAILED)
         self.assertIn('network:internal', scan.error_message)
 
+    def test_a_redelivered_message_for_a_finished_scan_runs_nothing_again(self):
+        # run_internal_scan is acks_late: a message redelivered after the scan ended (a worker lost mid-ack, the visibility timeout, the
+        # reaper sending it again) must not run the pipeline or send the Sentinel tasks again, as discovery.run_pipeline already does
+        from cveFeed.tasks import run_internal_scan
+        for status in (SUCCESS, FAILED):
+            scan = self.queued_scan()
+            ScanHistory.objects.filter(pk=scan.pk).update(scan_status=status, celery_ids=['the-task-that-ran-it'], error_message='kept')
+            seen = []
+            with mock.patch('cveFeed.tasks.correlate_cves') as correlate, mock.patch('reNgine.tasks.persist_bbot_result') as persist:
+                out = internal_scan.run(scan.id, dispatch=lambda *a, seen=seen, **k: seen.append(a) or NMAP_RESULT,
+                                        nuclei_stream=lambda kind: iter_none, provider=None)
+                self.assertEqual(run_internal_scan.apply(args=(scan.id,), task_id='a-redelivery').get()['status'], 'finished')
+            self.assertEqual(out, {'scan_id': scan.id, 'status': 'finished'})
+            self.assertEqual(seen, [])
+            correlate.assert_not_called()
+            persist.assert_not_called()
+            self.assertEqual(SentinelTask.objects.count(), 0)
+            scan.refresh_from_db()
+            self.assertEqual((scan.scan_status, scan.celery_ids, scan.error_message), (status, ['the-task-that-ran-it'], 'kept'))
+
     def test_a_range_removed_after_queueing_scans_nothing(self):
         scan = self.queued_scan()
         self.pa.internal_ranges.all().delete()

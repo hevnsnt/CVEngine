@@ -223,6 +223,8 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     ip = domain.name
     if scan.scan_status == 3:
         return {'scan_id': scan_id, 'status': 'aborted'}
+    if scan.scan_status in (FAILED, SUCCESS):  # a second message for a scan that already ended (a redelivery, the reaper) runs nothing
+        return {'scan_id': scan_id, 'status': 'finished'}
     if not sentinel_only_target(ip, project.id):  # the range was removed (or the operator now allows private targets) since it was queued
         message = f'{ip} is no longer inside an internal range of this project; nothing was scanned'
         ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)

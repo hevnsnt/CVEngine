@@ -821,8 +821,9 @@ class ImportTests(Fixture, TestCase):
         self.run_scan([APACHE, PLAIN])
         run = OpenvasRun.objects.get()
         self.assertEqual((run.status, run.summary['findings'], run.summary['without_cve']), ('done', 1, 1))
-        message = AgentActivity.objects.filter(kind='run_check', message__startswith='OpenVAS:').latest('id').message
+        message = AgentActivity.objects.filter(kind='run_check', message__contains='host(s) scanned').latest('id').message
         self.assertIn('1 result(s) without a CVE not imported', message)
+        self.assertTrue(message.startswith(f'OpenVAS run {run.pk} on api.rt.test, www.rt.test (GVM task cvengine-run-{run.pk}): '), message)
 
     def test_many_results_are_read_a_page_at_a_time_and_capped(self):
         run_results = [{**APACHE, 'oid': f'1.3.6.1.4.1.25623.1.0.{200000 + i}', 'cves': []} for i in range(250)]
@@ -830,12 +831,14 @@ class ImportTests(Fixture, TestCase):
         run = self.finish_task(run_results)
         self.tick()
         self.assertEqual(OpenvasRun.objects.get().summary['results'], 250)
-        pages = [r for r in self.gvmd.sent('get_results')]
-        self.assertEqual(len(pages), 3)
+        pages = self.gvmd.sent('get_reports')  # read from the task's report, a page of 100 at a time
+        self.assertEqual([(r.get('details'), re.search(r'first=(\d+)', r.get('filter')).group(1)) for r in pages], [('1', '1'), ('1', '101'), ('1', '201')])
+        self.assertTrue(all('result_hosts_only=0' in r.get('filter') and 'min_qod=0' in r.get('filter') for r in pages))
+        self.assertEqual(self.gvmd.sent('get_results'), [])
         with mock.patch.object(ov, 'MAX_RESULTS', 100):
             gmp_results = self.factory()
             with gmp_results as gmp:
-                items, _no_cve, _bad = ov.fetch_results(gmp, run.task_id)
+                items = ov.fetch_results(gmp, run.task_id)['items']
         self.assertEqual(len(items), 100)
 
     def test_hostile_text_is_stored_clipped_and_plain(self):
@@ -980,6 +983,26 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertIsNone(ov.dispatch_to_sentinel(self.link, [('db.rt.test', '93.184.214.7', 1)]))
         self.assertEqual(OpenvasRun.objects.count(), 1)
 
+    def test_hosts_per_task_are_held_to_what_a_sentinel_takes(self):
+        # The Sentinel client refuses an OpenVAS task of more than 16 hosts, so the setting is held to 16 (warned once per value) and a task
+        # target never names more.
+        self.assertEqual(ov.MAX_HOSTS_PER_TASK, 16)
+        ov._warned_max_hosts.clear()
+        for raw, expected in (('16', 16), ('3', 3), ('0', 1), ('x', ov.DEFAULT_MAX_HOSTS)):
+            with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': raw}), self.assertNoLogs('cveFeed.openvas_scan', 'WARNING'):
+                self.assertEqual(ov.max_hosts(), expected, raw)
+        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '40'}):
+            with self.assertLogs('cveFeed.openvas_scan', 'WARNING') as logs:
+                self.assertEqual(ov.max_hosts(), 16)
+            self.assertIn('CVENGINE_OPENVAS_MAX_HOSTS=40 is above 16', logs.output[0])
+            with self.assertNoLogs('cveFeed.openvas_scan', 'WARNING'):
+                self.assertEqual(ov.max_hosts(), 16)  # said once, not at every tick
+        batch = [(f'h{i}.rt.test', f'93.184.215.{i}', 1) for i in range(20)]
+        run = ov.dispatch_to_sentinel(self.link, batch)
+        self.assertEqual(len(run.sentinel_task.target['hosts']), 16)
+        self.assertEqual(len(run.sentinel_task.ips), 16)
+        self.assertEqual(run.sentinel_task.target['hosts'], {ip: host for host, ip, _ in batch[:16]})
+
     def test_while_the_addon_is_off_a_sentinel_is_never_asked_either(self):
         self.make_sentinel()
         self.settings.enabled = False
@@ -1076,7 +1099,7 @@ class HostContextTests(Fixture, TestCase):
 
 class BootstrapTests(GvmdFixture, TestCase):
     def test_the_default_login_is_replaced_over_gmp_and_the_new_one_is_saved_encrypted(self):
-        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)  # a gvmd that lets a user change its own password
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             name = ov.bootstrap(token=lambda n: 'generated-password-0123456789')
         self.assertEqual(name, 'admin')
@@ -1099,12 +1122,48 @@ class BootstrapTests(GvmdFixture, TestCase):
 
     def test_the_command_prints_only_the_user_name(self):
         from io import StringIO
-        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)
         out = StringIO()
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             call_command('openvas_bootstrap', stdout=out)
         self.assertIn('GMP login for admin generated and saved', out.getvalue())
         self.assertNotIn(gvmd.users['admin'], out.getvalue())
+
+    def test_gvmd_22_7_refuses_admin_changing_itself_so_a_login_of_cvengines_own_is_made(self):
+        # gvmd 22.7: modify_user of the user signed in answers 404 "Failed to find user '<uuid>'" (issue #394); an Admin may create a user
+        from io import StringIO
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        out = StringIO()
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            call_command('openvas_bootstrap', stdout=out)
+        row = OpenvasSettings.current()
+        self.assertEqual(row.gmp_username, 'cvengine')
+        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
+        self.assertEqual(gvmd.user_roles['cvengine'], 'Admin')
+        self.assertEqual(gvmd.owners['cvengine'], 'admin')
+        self.assertEqual(gvmd.users['admin'], 'admin')  # nothing over GMP can change it: the command says how to retire it
+        self.assertIn('GMP login for cvengine generated and saved', out.getvalue())
+        self.assertIn('--new-password', out.getvalue())
+        self.assertIn('restart openvas-gvmd', out.getvalue())
+        self.assertNotIn(row.gmp_password, out.getvalue())
+        self.assertEqual(gvmd.sent('modify_user')[0].get('user_id'), str(__import__('uuid').uuid5(__import__('uuid').NAMESPACE_DNS, 'admin')))
+
+    def test_a_cvengine_user_left_by_an_earlier_attempt_gets_the_new_password(self):
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd.users['cvengine'], gvmd.owners['cvengine'] = 'lost-password', 'admin'
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            self.assertEqual(ov.bootstrap(token=lambda n: 'generated-password-0123456789'), 'cvengine')
+        self.assertEqual(gvmd.users['cvengine'], 'generated-password-0123456789')
+        self.assertEqual(gvmd.sent('create_user'), [])
+
+    def test_when_gvmd_refuses_both_the_error_says_what_to_do(self):
+        gvmd = self.start_gvmd(user='admin', password='admin')
+        gvmd.fail['create_user'] = ('403', 'Permission denied')
+        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
+            with self.assertRaises(ov.OpenvasError) as raised:
+                ov.bootstrap()
+        self.assertIn('openvas_credentials', str(raised.exception))
+        self.assertFalse(OpenvasSettings.current().gmp_password)
 
     def test_a_manual_login_is_read_from_standard_input_never_an_argument(self):
         from io import StringIO
@@ -1300,6 +1359,18 @@ class ComposeTests(SimpleTestCase):
                 self.assertEqual(rest, 'community', name)  # a data image: a pinned feed would be a stale one
         self.assertEqual(seen, programs)
 
+    def test_the_scanner_is_pinned_to_a_digest_the_registry_still_serves(self):
+        # Greenbone removed sha256:5067aa68... (the registry answers 404, so a fresh pull of the add-on failed). Both services that run the scanner
+        # image (openvas-configure and openvas-openvasd) pin the stable digest read on 2026-11-02, the one the Sentinel client pins too.
+        withdrawn = '5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee'
+        current = '7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632'
+        scanner = [s['image'] for s in self.openvas.values() if s['image'].rpartition('/')[2].startswith('openvas-scanner:')]
+        self.assertEqual(len(scanner), 2)
+        for image in scanner:
+            self.assertEqual(image, f'registry.community.greenbone.net/community/openvas-scanner:stable@sha256:{current}')
+        for path in ('docker-compose.yml', 'docs/OPENVAS.md'):
+            self.assertNotIn(f'sha256:{withdrawn}', (ROOT / path).read_text(), path)
+
     def test_only_celery_mounts_gvmds_socket_and_read_only(self):
         for name, service in self.services.items():
             mounts = [v for v in service.get('volumes', []) if 'gvmd_socket_vol' in v]
@@ -1403,8 +1474,8 @@ class AutoSetupTests(GvmdFixture, TestCase):
         gvmd = self.start_gvmd(user='admin', password='admin')
         with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
             row = ov.ensure_login()
-        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('admin', True))
-        self.assertNotEqual(gvmd.users['admin'], 'admin')
+        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('cvengine', True))  # gvmd 22.7: a login of cvENGINE's own
+        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
 
     def test_a_saved_login_is_left_alone(self):
         row = OpenvasSettings.current()
@@ -1738,6 +1809,11 @@ class HeatGateTests(Fixture, TestCase):
     def setUp(self):
         super().setUp()
         mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()  # the shipped default
+        # the ordering below rests on a CVSS 7.5 CVE reading smoke: the legacy heat policy. Under the KEV rule (the default) a CVE that is
+        # neither on the KEV nor exploited is ice and its host does not qualify (tests.test_heat_policy covers that gate)
+        legacy = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})
+        legacy.start()
+        self.addCleanup(legacy.stop)
         self.link.hosts, self.link.forced_hosts = [], []
         self.link.save()
         self.kev = CVEEntry.objects.create(cve_id='CVE-2024-0001', title='Exploited', published_at=timezone.now(), cvss=9.8, kev=True)
@@ -1897,6 +1973,73 @@ class HeatGateTests(Fixture, TestCase):
         out = self.tick()
         self.assertEqual((out['status'], out['hosts']), ('running', 1))
         self.assertEqual(OpenvasRun.objects.get().hosts, {'93.184.216.6': 'api.rt.test'})
+
+
+class KevHeatGateTests(Fixture, TestCase):
+    """The heat gate under the KEV heat policy (the default; HeatGateTests pins legacy): a host qualifies through a CVE on the KEV or with a
+    known exploit (rated by its validation heat, the heat once proven: OpenVAS is how it is proven), or an open finding of medium severity or
+    more that names no CVE; a CVE that is neither on the KEV nor exploited is ice, whatever its CVSS, and a host with only such CVEs (as matches
+    or as scanner findings) is not scanned. Fire before smoke, then the most reasons, then the longest waiting."""
+
+    def setUp(self):
+        super().setUp()
+        mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}).start()
+        kev = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'kev'})
+        kev.start()
+        self.addCleanup(kev.stop)
+        self.link.hosts, self.link.forced_hosts = [], []
+        self.link.save()
+        self.kev = CVEEntry.objects.create(cve_id='CVE-2024-0001', title='Exploited', published_at=timezone.now(), cvss=6.5, kev=True)
+        self.exploit = CVEEntry.objects.create(cve_id='CVE-2024-0005', title='Exploit', published_at=timezone.now(), cvss=4.0, exploit_db=True)
+        self.critical = CVEEntry.objects.create(cve_id='CVE-2024-0002', title='Critical', published_at=timezone.now(), cvss=9.8, epss_reached=True)
+
+    def latest(self, host):
+        return Subdomain.objects.filter(name=host).order_by('-scan_history_id').first()
+
+    def heat(self, host, cve, **kw):
+        return CVEMatch.objects.update_or_create(cve_entry=cve, subdomain=self.latest(host), matched_product='x',
+                                                 defaults={'confidence': 0.9, 'matched_version': '1', **kw})[0]
+
+    def finding(self, host, severity, cves=(), source='nuclei-cve'):
+        from startScan.models import CveId
+        sub = self.latest(host)
+        v = Vulnerability.objects.create(name=f'finding {severity}', severity=severity, source=source, subdomain=sub,
+                                         target_domain=sub.target_domain, scan_history=sub.scan_history, open_status=True)
+        for cve in cves:
+            v.cve_ids.add(CveId.objects.create(name=cve))
+        return v
+
+    def batch(self):
+        link = OpenvasProject.objects.get(pk=self.link.pk)
+        return [h for h, _ip, _d in ov.next_batch(link, resolve=self.resolve, blocked=lambda h: False)]
+
+    def test_a_critical_score_alone_does_not_qualify_a_host_and_a_kev_cve_does(self):
+        self.heat('www.rt.test', self.critical)
+        self.finding('db.rt.test', 4, ['CVE-2024-0002'])  # the same CVE confirmed by a template: still neither on the KEV nor exploited
+        self.assertEqual(self.batch(), [])
+        self.assertEqual({h: v[0] for h, v in ov.host_heat(self.project.id, ['www.rt.test', 'db.rt.test']).items()},
+                         {'www.rt.test': 'ice', 'db.rt.test': 'ice'})
+        match = self.heat('api.rt.test', self.kev)  # version not proven: smoke on the host, fire here (validation heat)
+        self.assertEqual(self.batch(), ['api.rt.test'])
+        match.remediation_status = 'fixed'
+        match.save()
+        self.assertEqual(self.batch(), [])  # cooled
+
+    def test_fire_before_smoke_then_the_most_reasons_then_the_longest_waiting(self):
+        from cveFeed import ledger
+        self.finding('www.rt.test', 2, source='bbot')  # a medium finding that names no CVE: smoke by its severity
+        self.heat('api.rt.test', self.exploit)
+        self.finding('db.rt.test', 2, source='bbot')
+        self.finding('db.rt.test', 2, source='wapiti')
+        ready, _v = ov.assess(self.project.id, ov.hot_names(self.project.id), resolve=self.resolve, blocked=lambda h: False)
+        self.assertEqual([h for h, _ip, _d in ready], ['api.rt.test', 'db.rt.test', 'www.rt.test'])
+        self.assertEqual(self.batch(), ['api.rt.test'])
+        ledger.record(ov.SERVICE, ['api.rt.test'], self.project.id)
+        self.assertEqual(self.batch(), ['db.rt.test'])
+
+    def test_a_hot_cve_finding_qualifies_its_host(self):
+        self.finding('www.rt.test', 3, ['CVE-2024-0001'], source='openvas')
+        self.assertEqual(self.batch(), ['www.rt.test'])
 
 
 class BudgetTests(Fixture, TestCase):

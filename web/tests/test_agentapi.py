@@ -549,7 +549,8 @@ class AgentApiTests(TestCase):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
 		plans = [({'check_kinds': ['http_head'], 'generate_template': False, 'reason': 'Identify the frontend first.', 'source': 'ai'}, None),
 			({'check_kinds': ['nmap_sv'], 'generate_template': False, 'reason': 'Inspect the observed service.', 'source': 'ai'}, None)]
-		def run_check(project_id, ids, selected_kinds):
+		def run_check(project_id, ids, selected_kinds, unattended=True):
+			self.assertFalse(unattended)  # a person's own Validate now: the bug bounty gate holds it to the program's scope only
 			if selected_kinds == {'http_head'}:
 				Triage.objects.filter(pk__in=ids).update(validation_status='observed', validation_steps=[
 					{'kind': 'http_head', 'result': 'observed', 'summary': 'HEAD answered 200, Server: nginx/1.18.0'}])
@@ -1084,11 +1085,17 @@ class MatchTemperatureTests(TestCase):
 
 	def test_rules(self):
 		from cveFeed.threat import match_temperature as mt
-		self.assertEqual(mt('smoke', 7.5), 'smoke')  # high, nobody has confirmed it affects the host
-		self.assertEqual(mt('smoke', 7.5, 'affected'), 'fire')  # high and the AI confirmed it
-		self.assertEqual(mt('smoke', 7.5, 'uncertain'), 'smoke')
-		self.assertEqual(mt('ice', 4.3, 'affected'), 'ice')  # a low score stays low even when confirmed
-		self.assertEqual(mt('fire', None), 'fire')
+		# the legacy heat policy (CVENGINE_HEAT_POLICY=legacy): a CVSS 7+ match the AI confirmed reads fire
+		self.assertEqual(mt('smoke', 7.5, policy='legacy'), 'smoke')  # high, nobody has confirmed it affects the host
+		self.assertEqual(mt('smoke', 7.5, 'affected', policy='legacy'), 'fire')  # high and the AI confirmed it
+		self.assertEqual(mt('smoke', 7.5, 'uncertain', policy='legacy'), 'smoke')
+		self.assertEqual(mt('ice', 4.3, 'affected', policy='legacy'), 'ice')  # a low score stays low even when confirmed
+		self.assertEqual(mt('fire', None, policy='legacy'), 'fire')
+		# the KEV rule (the default): a CVE's tier is fire (KEV or exploited) or ice; on the host fire needs proof, and the AI is not proof
+		self.assertEqual(mt('ice', 9.8, 'affected'), 'ice')
+		self.assertEqual(mt('fire', 6.1, 'affected', version_only=True), 'smoke')
+		self.assertEqual(mt('fire', 6.1, 'uncertain', proven=True), 'fire')
+		self.assertEqual(mt('fire', None), 'fire')  # hard evidence (version_only not set)
 
 	def test_host_api_explains_its_colour_and_matches_use_the_host_rating(self):
 		from agentapi.services import Ctx, list_hosts, list_matches
@@ -1100,17 +1107,23 @@ class MatchTemperatureTests(TestCase):
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-9', cvss=7.5, title='PHP-CGI RCE', published_at=now)  # high, no KEV flag
 		m = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, confidence=0.9, ai_verdict='affected')
 		user = User.objects.create_user('m-admin', password='x', is_superuser=True)
-		# 1.3.2: the AI's word is not evidence about the host, so with nothing else the confirmed high CVE stays smoke (validated as fire)
+		# the KEV rule: a high score that is neither on the KEV nor exploited is ice, and the host says why
+		host = list_hosts(Ctx(user=user), 'mt-p', {})['results'][0]
+		self.assertEqual(host['heat'], 'ice')
+		self.assertEqual(host['heat_reasons'][0]['heat_reason'], 'not on the KEV and no known exploit')
+		CVEEntry.objects.filter(pk=cve.pk).update(kev=True)
+		# on the KEV, but the AI's word is not evidence about the host: smoke (validated as fire)
 		host = list_hosts(Ctx(user=user), 'mt-p', {})['results'][0]
 		self.assertEqual(host['heat'], 'smoke')
 		match = list_matches(Ctx(user=user), 'mt-p', {})['results'][0]
-		self.assertEqual((match['cve']['tier'], match['cve']['feed_tier'], match['cve']['validation_tier']), ('smoke', 'smoke', 'fire'))
+		self.assertEqual((match['cve']['tier'], match['cve']['feed_tier'], match['cve']['validation_tier']), ('smoke', 'fire', 'fire'))
+		self.assertEqual(match['heat_reason'], 'on the KEV; version not proven')
 		CVEMatch.objects.filter(pk=m.pk).update(distro_status='vulnerable')  # the distribution's tracker lists the package: hard evidence
 		host = list_hosts(Ctx(user=user), 'mt-p', {})['results'][0]
 		self.assertEqual(host['heat'], 'fire')
 		self.assertEqual(host['heat_reasons'][0]['label'], 'CVE-2099-9')
 		match = list_matches(Ctx(user=user), 'mt-p', {})['results'][0]
-		self.assertEqual((match['cve']['tier'], match['cve']['feed_tier']), ('fire', 'smoke'))
+		self.assertEqual((match['cve']['tier'], match['cve']['feed_tier']), ('fire', 'fire'))
 
 
 class BulkDiscoveryTests(TestCase):

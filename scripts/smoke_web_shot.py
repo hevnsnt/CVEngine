@@ -7,7 +7,9 @@
 It serves a small page, a redirect and a page that loads an image from a host the guard refuses, all on 127.0.0.1, then runs the real child process
 (one browser, a fresh context per page) over them through the real vetting proxy (``cveFeed/shot_proxy.py``) with a stand-in guard, and checks: a non-empty PNG and a
 thumbnail, the title, the HTTP status, a redirect hop that the guard refuses (blocked, with the reason), a sub-resource that is dropped (the page
-is still photographed), an allowed redirect (its final URL is recorded) and a closed port (unreachable). Exit status 0 when all of that holds."""
+is still photographed), an allowed redirect (its final URL is recorded) and a closed port (unreachable). Chromium's sandbox is checked first (the
+same check the celery container runs at start) and the pages are captured with it, unless CVENGINE_SCREENSHOT_SANDBOX=0. Exit status 0 when all of
+that holds."""
 import http.server
 import os
 import shutil
@@ -86,6 +88,13 @@ def main():
     if not web_shot.browser_installed() and not os.environ.get('CVENGINE_SMOKE_ANY_BROWSER'):
         print('Chromium for this Playwright release is not installed (PLAYWRIGHT_BROWSERS_PATH=%s)' % web_shot.browsers_dir())
         return 2
+    if web_shot.sandbox_wanted():
+        state = web_shot.check_sandbox() or {}
+        if not state.get('engaged'):
+            print("FAIL Chromium's sandbox:", state.get('reason') or 'the check did not finish')
+            print('smoke test FAILED')
+            return 1
+        print(f"sandbox: engaged (Chromium {state.get('version')}: the renderer runs in its own user and PID namespace under its own seccomp filter)")
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     port = server.server_address[1]
     import socket as _socket
@@ -124,7 +133,8 @@ def main():
     targets = [{'key': key, 'url': url, 'out': os.path.join(workdir, f'{key}.png')} for key, url in pages.items()]
     results = {}
     with shot_proxy.VettingProxy(admit, lambda target, host, number, timeout: socket.create_connection((target, number), timeout), secret) as proxy:
-        job = {'targets': targets, 'proxy': {'server': proxy.server, 'password': secret}, 'settings': {'total_seconds': 20, 'nav_timeout_ms': 12000}}
+        job = {'targets': targets, 'proxy': {'server': proxy.server, 'password': secret},
+               'settings': {'total_seconds': 20, 'nav_timeout_ms': 12000, 'sandbox': web_shot.sandbox_wanted()}}
         failure = web_shot.run_child(job, lambda message: results.__setitem__(message['key'], message), 120, heavy=False, workdir=workdir)
     problems = []
     if failure:

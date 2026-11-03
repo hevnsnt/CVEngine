@@ -321,13 +321,14 @@ class SavingTests(Isolated, TestCase):
     def test_configmaxxing_lists_the_cards_and_reset_all_clears_every_group(self):
         send(self.c, 'PUT', 'tunables', {'values': {'triage_max_per_day': 800, 'stage_parallel': 2, 'work_min_gap_hours': 5}})
         listing = send(self.c, 'GET', 'config_maxxing')[1]
-        self.assertEqual([c['id'] for c in listing['cards']], ['autotune', 'scan_concurrency', 'ai_spend', 'throughput', 'autotune_pace'])
+        self.assertEqual([c['id'] for c in listing['cards']], ['autotune', 'scan_concurrency', 'ai_spend', 'throughput', 'autotune_pace', 'egress', 'heat'])
         status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
-        self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 0, 'ai_spend': 1, 'throughput': 2, 'autotune_pace': 0}))
+        self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 0, 'ai_spend': 1, 'throughput': 2, 'autotune_pace': 0,
+                                                           'egress': 0, 'heat': 0}))
         self.assertEqual(TunableSettings.current().values, {})
         self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
         groups = AuditLog.objects.filter(action='config_maxxing.tunables_reset_all')
-        self.assertEqual(sorted(groups.values_list('target', flat=True)), ['ai_spend', 'autotune_pace', 'throughput'])
+        self.assertEqual(sorted(groups.values_list('target', flat=True)), ['ai_spend', 'autotune_pace', 'egress', 'heat', 'throughput'])
         self.assertEqual(AuditLog.objects.filter(action='tunable.reset').count(), 3)
 
     def test_the_snapshot_carries_what_the_cards_need_for_warnings_usage_and_when_a_change_applies(self):
@@ -607,12 +608,14 @@ class DocumentationTests(unittest.TestCase):
         for g in tunables.GROUPS:
             self.assertIn(f'**{g.title}**', text, g.id)
 
-    def test_the_changelog_mentions_it_in_its_newest_section(self):
-        # The newest section is '## Unreleased' between releases and '## vX.Y.Z (date)' once a release is cut, so read whichever comes first.
+    def test_a_released_changelog_section_mentions_it(self):
+        # The newest released section ('## vX.Y.Z (date)'): an '## Unreleased' section above it (the fixes collected for the next release) is
+        # skipped, so a fix noted there does not hide the release that shipped this.
         changelog = (ROOT / 'CHANGELOG.md').read_text()
-        newest = changelog.split('\n## ', 1)[1].split('\n## ', 1)[0]
-        self.assertIn('configMaxxing', newest)
-        self.assertIn('AI spend', newest)
+        sections = changelog.split('\n## ')[1:]
+        released = [s for s in sections if re.match(r'v\d', s)]
+        # the release that shipped auto-tuning (1.3.2) names it; a later release section need not repeat it
+        self.assertTrue(any('configMaxxing' in s and 'AI spend' in s for s in released))
 
 
 if __name__ == '__main__':

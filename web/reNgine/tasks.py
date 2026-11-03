@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import validators
 
@@ -334,6 +335,25 @@ def send_task_notif(
 #-------------#
 
 
+NUCLEI_CVE_ID = re.compile(r'CVE-\d{4}-\d+', re.IGNORECASE)
+NUCLEI_CWE_ID = re.compile(r'CWE-\d+', re.IGNORECASE)
+
+
+def nuclei_ids(classification, kind, pattern):
+	"""The CVE (or CWE) ids of a nuclei result's ``info.classification``, upper-cased and in order: nuclei writes them under ``cve-id`` and
+	``cwe-id`` (its JSON tags), as a list or a string (``"cve-2021-44228"``, or several separated by commas); ``cve_id``/``cwe_id`` are read
+	too. Anything that is not an id is dropped."""
+	if not isinstance(classification, dict):
+		return []
+	found = []
+	for key in (f'{kind}-id', f'{kind}_id'):
+		value = classification.get(key)
+		for item in (value if isinstance(value, list) else [value]):
+			if isinstance(item, str):
+				found += [m.upper() for m in pattern.findall(item)]
+	return list(dict.fromkeys(found))
+
+
 def parse_nuclei_result(line):
 	"""Parse results from nuclei JSON output.
 
@@ -358,8 +378,8 @@ def parse_nuclei_result(line):
 		'extracted_results': line.get('extracted-results', []),
 		'cvss_metrics': line['info'].get('classification', {}).get('cvss-metrics', ''),
 		'cvss_score': line['info'].get('classification', {}).get('cvss-score'),
-		'cve_ids': line['info'].get('classification', {}).get('cve_id', []) or [],
-		'cwe_ids': line['info'].get('classification', {}).get('cwe_id', []) or [],
+		'cve_ids': nuclei_ids(line['info'].get('classification'), 'cve', NUCLEI_CVE_ID),
+		'cwe_ids': nuclei_ids(line['info'].get('classification'), 'cwe', NUCLEI_CWE_ID),
 		'references': line['info'].get('reference', []) or [],
 		'tags': line['info'].get('tags', []),
 		'source': NUCLEI,
@@ -634,11 +654,17 @@ def save_subdomain(subdomain_name, ctx={}):
 		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
 			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
 			return None, False
+		if not domain.includes_host(subdomain_name):  # a target added as exactly one host (=example.com): nothing under it is kept
+			logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+			return None, False
 
 	scan = ctx.get('_scan')
 	if scan is None or str(scan.pk) != str(scan_id):
 		scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
 	domain = scan.domain if scan else None
+	if domain is not None and domain.exact_host_only() and not domain.includes_host(subdomain_name):  # the scan's own target, when the caller named none
+		logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+		return None, False
 	if domain is not None:
 		from cveFeed.exclusions import excluded_names, normalize
 		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch

@@ -537,10 +537,10 @@ class CaptureTests(ShotFixture, TestCase):
 
 	def test_a_page_that_redirects_to_another_host_says_so(self):
 		row = self.queue()
-		self.drain({'www.rt.test': {'final_url': 'https://mybluegrace.example/'}})
+		self.drain({'www.rt.test': {'final_url': 'https://acme-site.example/'}})
 		row.refresh_from_db()
 		self.assertEqual(row.outcome, 'ok')
-		self.assertEqual(row.reason, 'Redirects to https://mybluegrace.example/ (another host).')
+		self.assertEqual(row.reason, 'Redirects to https://acme-site.example/ (another host).')
 
 	def test_an_error_page_is_still_a_picture_with_its_status_as_the_reason(self):
 		row = self.queue()
@@ -894,6 +894,72 @@ class RunChildTests(SimpleTestCase):
 		with mock.patch('os.geteuid', return_value=0), mock.patch('pwd.getpwnam', side_effect=KeyError('nobody')):
 			with self.assertLogs('cveFeed.web_shot', 'WARNING'):
 				self.assertIsNone(web_shot._unprivileged())
+
+
+class SandboxTests(ShotFixture, TestCase):
+	"""Chromium's sandbox: asked for on every batch, and while it cannot start no page is opened and every place that shows screenshots says why."""
+
+	def drain(self, runner):
+		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
+			return web_shot.drain(runner=runner, proxy_factory=FakeProxy)
+
+	def test_every_batch_asks_for_the_sandbox_unless_it_is_switched_off(self):
+		self.host(ports=((443, 'https'),))
+		self.make_row()
+		seen = []
+		self.drain(runner_for({}, seen))
+		self.assertIs(seen[0][0]['settings']['sandbox'], True)
+		self.assertTrue(web_shot.sandbox_state()['engaged'])  # the child checks it before the first page
+		HostScreenshot.objects.update(outcome='queued')
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOT_SANDBOX': '0'}):
+			self.drain(runner_for({}, seen))
+			self.assertIs(seen[1][0]['settings']['sandbox'], False)
+			self.assertEqual(web_shot.sandbox_status()['state'], 'off')
+			self.assertEqual(web_shot.unavailable_reason(), '')
+
+	def test_a_sandbox_that_cannot_start_turns_screenshots_off_with_the_reason_everywhere(self):
+		from agentapi import system_status
+		from cveFeed import shot_worker
+		from cveFeed.models import AgentActivity
+		sub = self.host(ports=((443, 'https'),))
+		row = self.make_row()
+		with self.assertLogs('cveFeed.web_shot', 'ERROR'):
+			self.drain(lambda job, on_result, wall, label='', workdir=None: shot_worker.SANDBOX_PREFIX + shot_worker.NO_USERNS)
+		row.refresh_from_db()
+		self.assertEqual(row.outcome, 'unavailable')
+		self.assertIn('seccomp profile', row.reason)
+		why = web_shot.unavailable_reason()
+		self.assertIn("Chromium's sandbox could not start", why)
+		self.assertEqual(web_shot.status_counts([self.project.pk])['sandbox']['state'], 'failed')
+		problems, notes = [], []
+		system_status._screenshots(problems, notes)
+		self.assertTrue(any('sandbox could not start' in p for p in problems))
+		self.assertEqual(AgentActivity.objects.filter(message__startswith='Screenshots are off').count(), 1)
+		# from now on nothing is planned or opened, and a page that waits says why instead of "waiting"
+		self.assertEqual(web_shot.backfill()['skipped'], why)
+		self.assertFalse(web_shot.has_work_for_scan(sub.scan_history))
+		HostScreenshot.objects.update(outcome='queued')
+		self.assertIn('sandbox could not start', web_shot.note_for(list(HostScreenshot.objects.all()), has_web_evidence=True))
+		self.assertEqual(self.drain(mock.Mock(side_effect=AssertionError('no browser may start')))['skipped'], why)
+
+	def test_the_start_check_records_what_the_probe_found(self):
+		from cveFeed import shot_worker
+
+		def probe(found):
+			def run(job, on_result, wall, argv=None, heavy=True, label='', workdir=None):
+				self.assertEqual((argv[-1], heavy), ('--probe', False))
+				if found:
+					on_result({'op': 'result', 'key': 'sandbox', **found})
+				return '' if found else 'the browser process ended before it finished (status 2)'
+			return run
+		self.assertTrue(web_shot.check_sandbox(runner=probe({'engaged': True, 'reason': '', 'version': '156.0.8078.4'}))['engaged'])
+		self.assertEqual(web_shot.sandbox_status()['state'], 'engaged')
+		with self.assertLogs('cveFeed.web_shot', 'ERROR'):
+			web_shot.check_sandbox(runner=probe({'engaged': False, 'reason': shot_worker.AS_ROOT}))
+		self.assertIn('as root', web_shot.unavailable_reason())
+		with self.assertLogs('cveFeed.web_shot', 'WARNING'):
+			self.assertIsNone(web_shot.check_sandbox(runner=probe({})))  # a check that did not finish changes nothing
+		self.assertIn('as root', web_shot.unavailable_reason())
 
 
 # ------------------------------------------------------------------------------------------------ the hourly backfill

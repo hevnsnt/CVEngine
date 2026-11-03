@@ -8,15 +8,25 @@ from cveFeed.views import tier_counts
 
 class ThreatTierTests(TestCase):
 	def test_rules(self):
+		# the KEV rule (the default): known exploited or a public exploit is fire, anything else ice, whatever its CVSS or EPSS
 		self.assertEqual(classify_threat_tier(kev=True, cvss=2.0), FIRE)  # known exploited, whatever the score
 		self.assertEqual(classify_threat_tier(exploit_db=True, cvss=2.0), FIRE)
-		self.assertEqual(classify_threat_tier(cvss=9.0), FIRE)  # critical, as cve.now's own rule says
-		self.assertEqual(classify_threat_tier(cvss=9.8), FIRE)
-		self.assertEqual(classify_threat_tier(epss_reached=True, cvss=7.5), FIRE)
-		self.assertEqual(classify_threat_tier(cvss=8.9), SMOKE)
-		self.assertEqual(classify_threat_tier(epss_reached=True, cvss=3.0), SMOKE)
-		self.assertEqual(classify_threat_tier(cvss=6.9), ICE)
+		self.assertEqual(classify_threat_tier(cvss=9.8), ICE)
+		self.assertEqual(classify_threat_tier(epss_reached=True, cvss=7.5), ICE)
 		self.assertEqual(classify_threat_tier(), ICE)
+
+	def test_legacy_rules(self):
+		def legacy(**kw):
+			return classify_threat_tier(policy='legacy', **kw)
+		self.assertEqual(legacy(kev=True, cvss=2.0), FIRE)  # known exploited, whatever the score
+		self.assertEqual(legacy(exploit_db=True, cvss=2.0), FIRE)
+		self.assertEqual(legacy(cvss=9.0), FIRE)  # critical, as cve.now's own rule says
+		self.assertEqual(legacy(cvss=9.8), FIRE)
+		self.assertEqual(legacy(epss_reached=True, cvss=7.5), FIRE)
+		self.assertEqual(legacy(cvss=8.9), SMOKE)
+		self.assertEqual(legacy(epss_reached=True, cvss=3.0), SMOKE)
+		self.assertEqual(legacy(cvss=6.9), ICE)
+		self.assertEqual(legacy(), ICE)
 
 	def test_database_counts_agree_with_the_classifier_for_every_cve(self):
 		rows = [dict(cvss=9.8), dict(cvss=9.0), dict(kev=True, cvss=3.0), dict(exploit_db=True), dict(epss_reached=True, cvss=7.1),

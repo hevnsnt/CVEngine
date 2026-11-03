@@ -17,6 +17,10 @@ How it works (docs/PIPELINE.md, "Web screenshots"):
   vetting proxy in the worker (``cveFeed/shot_proxy.py``), which asks the platform's guards about EVERY connection (the page, each redirect hop,
   every sub-resource: the organization's exclusions, the bug bounty scope and the addresses a scanner may never touch) and connects to the
   address it vetted, through Settings > Proxy when one is set. A redirect to an internal address never leaves the proxy.
+* **Chromium's sandbox, or no picture.** The browser runs with its own sandbox (``CVENGINE_SCREENSHOT_SANDBOX``, on by default), which needs the
+  celery container's seccomp profile (``config/seccomp/playwright-chromium.json``). Every launch is checked (``shot_worker.launch``), the celery
+  container checks once at start (``check_sandbox``), and while the sandbox cannot be used no page is opened: the reason is shown on the host page,
+  in the system status and in the log.
 * **Nothing is silently missing.** Each attempt records an ``outcome`` and a plain ``reason`` on the row; the host page shows them instead of "none".
 """
 import concurrent.futures
@@ -45,6 +49,10 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shot_worker.py')
+SANDBOX_KEY = 'screenshots:sandbox'          # what the last check of Chromium's sandbox found (cache, shared by the web and celery containers)
+SANDBOX_PREFIX = 'sandbox: '                 # shot_worker.SANDBOX_PREFIX: the child refused to load anything because of the sandbox
+SANDBOX_FAILED_SECONDS = 3600                # a failed check keeps screenshots off this long, then the next drain tries again (and every celery start)
+SANDBOX_OK_SECONDS = 7 * 24 * 3600
 HEAVY_KIND = 'screenshot'                   # the heavy_job kind (reNgine.resources.BASE_COSTS_MB)
 DRAIN_CLAIM = 'cvengine:screenshots:drain'  # one drain at a time, across workers
 SWEEP_CLAIM = 'screenshot-backfill'
@@ -82,6 +90,12 @@ def _env_int(name, default, low=0, high=10 ** 9):
 
 def enabled():
     return os.environ.get('CVENGINE_SCREENSHOTS', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def sandbox_wanted():
+    """Whether the browser must run inside Chromium's sandbox (the default). ``CVENGINE_SCREENSHOT_SANDBOX=0`` runs it without: unsafe, for a host
+    that cannot give the container user namespaces and accepts that a renderer exploit runs as ``nobody`` in the celery container."""
+    return os.environ.get('CVENGINE_SCREENSHOT_SANDBOX', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
 def ttl():
@@ -156,7 +170,73 @@ def unavailable_reason():
         return 'Screenshots are switched off on this server (CVENGINE_SCREENSHOTS=0).'
     if not browser_installed():
         return 'Chromium is not installed on this server, so screenshots cannot be taken (the image has to be rebuilt).'
+    state = sandbox_state() if sandbox_wanted() else None
+    if state and not state.get('engaged'):
+        return f"Screenshots are off: {state.get('reason') or 'Chromium sandbox did not engage.'}"
     return ''
+
+
+def sandbox_state():
+    """What the last check of Chromium's sandbox on this server found, ``{'engaged', 'reason', 'at', 'version'}``, or None (not checked lately)."""
+    try:
+        from django.core.cache import cache
+        return cache.get(SANDBOX_KEY)
+    except Exception:  # noqa: BLE001 - a cache outage is "not known"; every launch is still checked by the child itself
+        return None
+
+
+def record_sandbox(engaged, reason='', version=''):
+    """Remember what a check of the sandbox found, and say so in the log and the activity feed when it changes."""
+    previous = sandbox_state() or {}
+    state = {'engaged': bool(engaged), 'reason': '' if engaged else (reason or 'Chromium sandbox did not engage.')[:400],
+             'at': timezone.now().isoformat(), 'version': version or previous.get('version') or ''}
+    try:
+        from django.core.cache import cache
+        cache.set(SANDBOX_KEY, state, SANDBOX_OK_SECONDS if engaged else SANDBOX_FAILED_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    if not engaged and (previous.get('engaged') is not False or previous.get('reason') != state['reason']):
+        logger.error('Web screenshots are off: %s', state['reason'])
+        try:
+            from cveFeed import activity
+            activity.log('run_check', f"Screenshots are off: {state['reason']}"[:500])
+        except Exception:  # noqa: BLE001
+            pass
+    elif engaged and previous.get('engaged') is False:
+        logger.warning("Chromium's sandbox engaged: web screenshots are on again")
+    return state
+
+
+def check_sandbox(runner=None):
+    """Start the browser once, as the screenshot worker does (same account, same environment, ``shot_worker.py --probe``), and record whether its
+    sandbox engaged. The celery container runs this at start (``manage.py check_screenshot_sandbox``). Returns the recorded state, or None when
+    there is nothing to check (screenshots off, no browser, the sandbox switched off) or the check itself did not finish."""
+    if not enabled() or not browser_installed():
+        return None
+    if not sandbox_wanted():
+        logger.warning('CVENGINE_SCREENSHOT_SANDBOX=0: the screenshot browser runs without Chromium\'s sandbox (unsafe)')
+        return None
+    found = {}
+    workdir = make_workdir()
+    try:
+        failure = (runner or run_child)({}, found.update, 90, argv=[sys.executable, SCRIPT, '--probe'], heavy=False, label='sandbox check', workdir=workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    if 'engaged' not in found:
+        logger.warning('the screenshot sandbox check did not finish: %s', failure or 'no answer')
+        return None
+    return record_sandbox(found['engaged'], found.get('reason', ''), found.get('version', ''))
+
+
+def sandbox_status():
+    """For the system status: whether the sandbox is required here and what its last check found (``state``: engaged, failed, unchecked or off)."""
+    if not sandbox_wanted():
+        return {'required': False, 'state': 'off', 'reason': "CVENGINE_SCREENSHOT_SANDBOX=0: the screenshot browser runs without Chromium's sandbox (unsafe)."}
+    state = sandbox_state()
+    if not state:
+        return {'required': True, 'state': 'unchecked', 'reason': None, 'checked_at': None}
+    return {'required': True, 'state': 'engaged' if state.get('engaged') else 'failed', 'reason': state.get('reason') or None,
+            'checked_at': state.get('at'), 'chromium_version': state.get('version') or None}
 
 
 def available():
@@ -407,8 +487,9 @@ def _due_names(project_id, limit, now):
     limit = min(limit, 200)
     banned = excluded_names(project_id)
     names = []
-    from targetApp.models import Domain
+    from targetApp.models import Domain, in_target_scope_q
     never = (Subdomain.objects.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: not photographed on a schedule
+             .filter(in_target_scope_q())  # a name kept under a target that is now exactly one host is not photographed on a schedule
              .filter(_web_evidence_q()).annotate(lname=Lower('name'))
              .exclude(lname__in=list(archived_names(project_id)))
              .annotate(has=Exists(HostScreenshot.objects.filter(project_id=project_id, host=OuterRef('lname'))))
@@ -427,6 +508,8 @@ def _due_names(project_id, limit, now):
         due = list(due)
         from cveFeed.manual_only import only_manual_hosts
         held = only_manual_hosts(project_id, set(due))  # held only by manual only targets: not photographed on a schedule
+        from targetApp.models import narrowed_names
+        held |= narrowed_names(project_id, due)  # held only under a target that is now exactly one host: not photographed again
         for host in due:
             if host not in names and normalize(host) not in banned and host.strip().lower().rstrip('.') not in held:
                 names.append(host)
@@ -640,9 +723,9 @@ def connect(target, host, port, timeout):
 # ----------------------------------------------------------------------------- the child process
 
 def _unprivileged():
-    """``(uid, gid)`` of the account the browser runs as, or None to run as the worker's own. The browser renders pages hostile hosts control and runs
-    without its own sandbox (a container has no user namespaces to give it one), so as root it would hand a renderer exploit the worker's whole
-    container: when the worker is root, the child runs as ``nobody`` (``CVENGINE_SCREENSHOT_USER`` names another account; ``root`` or ``-`` turns this off)."""
+    """``(uid, gid)`` of the account the browser runs as, or None to run as the worker's own. The browser renders pages hostile hosts control: as root a
+    renderer exploit would get the worker's whole container, and Chromium's sandbox refuses to run as root at all. When the worker is root, the child runs
+    as ``nobody`` (``CVENGINE_SCREENSHOT_USER`` names another account; ``root`` or ``-`` turns this off, which with the sandbox on stops the captures)."""
     if os.geteuid() != 0:
         return None
     name = os.environ.get('CVENGINE_SCREENSHOT_USER', 'nobody').strip() or 'nobody'
@@ -1108,7 +1191,8 @@ def _run_batch(items, runner, summary, proxy_factory=None, ctx=None):
     try:
         with proxy:
             job = {'targets': targets, 'proxy': {'server': proxy.server, 'password': secret},
-                   'settings': {'total_seconds': nav_timeout_seconds(), 'nav_timeout_ms': min(nav_timeout_seconds() - 3, 15) * 1000}}
+                   'settings': {'total_seconds': nav_timeout_seconds(), 'nav_timeout_ms': min(nav_timeout_seconds() - 3, 15) * 1000,
+                                'sandbox': sandbox_wanted()}}
             failure = runner(job, on_result, wall, label=f'{len(items)} pages', workdir=workdir)
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:
         summary['stopped'] = type(exc).__name__  # paused, stopped or short of memory: the rows stay queued
@@ -1126,13 +1210,19 @@ def _run_batch(items, runner, summary, proxy_factory=None, ctx=None):
         summary['too_big'] = summary.get('too_big', 0) + 1
     if not failure and done:
         _note_error(None)  # the browser ran: whatever it last said is over
+        if sandbox_wanted():
+            record_sandbox(True)  # the child checks the sandbox before the first page
+    reason = f'The browser could not run: {failure}'
+    if failure.startswith(SANDBOX_PREFIX):  # the browser loaded nothing: its sandbox could not start or did not engage
+        record_sandbox(False, failure[len(SANDBOX_PREFIX):])
+        reason = f'Not captured: screenshots are off. {failure[len(SANDBOX_PREFIX):]}'
     if failure:
         summary['error'] = failure
         _note_error(failure)
         # nothing came back for the pages the browser never reached: say so on their rows, so they are not retried in a tight loop
         for key in order:
             if key not in done:
-                apply_result(by_key[key].row, {'outcome': 'unavailable', 'reason': f'The browser could not run: {failure}'[:300]})
+                apply_result(by_key[key].row, {'outcome': 'unavailable', 'reason': reason[:300]})
                 summary['failed'] += 1
 
 
@@ -1279,6 +1369,9 @@ def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=
             return 'No screenshot: no web page has answered on this host, so there is nothing to capture.'
         return 'No screenshot yet: this host answers on the web and is waiting for the next screenshot pass (every hour), or press Take screenshot.'
     if queued:
+        why = unavailable_reason()
+        if why:
+            return f'No screenshot: {why}'
         return 'Waiting for the screenshot worker: ' + ', '.join(f'{r.scheme}://{r.host}:{r.port}' for r in queued[:3]) + '.'
     return 'No screenshot: ' + _reasons(failed)
 
@@ -1302,7 +1395,7 @@ def status_counts(project_ids):
     web_hosts = (Subdomain.objects.filter(target_domain__project_id__in=list(project_ids)).filter(_web_evidence_q())
                  .values('target_domain__project_id', 'name').distinct().count())
     last = rows.filter(outcome__in=FAILURES).exclude(attempted_at=None).order_by('-attempted_at').values('host', 'scheme', 'port', 'outcome', 'reason', 'attempted_at').first()
-    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None,
+    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status(),
             'hosts_with_web': web_hosts, 'hosts_with_screenshot': shot_hosts, 'pages': by_outcome,
             'queued': by_outcome.get(QUEUED, 0), 'failed': sum(by_outcome.get(k, 0) for k in FAILURES), 'blocked': by_outcome.get(BLOCKED, 0),
             'nla_required': HostScreenshot.objects.filter(project_id__in=list(project_ids), outcome=NLA).count(),

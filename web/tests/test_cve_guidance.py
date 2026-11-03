@@ -76,7 +76,7 @@ class GuidanceFlowTests(TestCase):
 		self.assertEqual(detection_author.author_rules(batch=10), 1)
 		row = CVEDetection.objects.get(cve_entry=self.cve)
 		s = row.strategy
-		self.assertEqual(row.schema_version, 2)
+		self.assertEqual(row.schema_version, detection.SCHEMA_VERSION)
 		self.assertIn('nginx', s['identify'])
 		self.assertIn('1.20.0', s['identify'])
 		self.assertTrue(any('1.20.0' in step for step in s['confirm_steps']))

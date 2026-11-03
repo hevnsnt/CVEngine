@@ -1,0 +1,192 @@
+{
+ "wordpress": {
+  "size": 248915,
+  "scripts": [
+   [
+    9882,
+    "<script id=\"jquery-core-js\" src=\"https://acme.test/wp-includes/js/jquery/jquery.min.js?ver=3.7.1\"></script>"
+   ],
+   [
+    9996,
+    "<script id=\"jquery-migrate-js\" src=\"https://acme.test/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1\"></script>"
+   ],
+   [
+    229221,
+    "<script async defer id='hs-script-loader' src=\"https://js.hs-scripts.com/1000000.js?integration=WordPress&#038;ver=11.3.75\"></script>"
+   ],
+   [
+    229355,
+    "<script id=\"color-modes-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/color-modes.js?ver=1.0.4\"></script>"
+   ],
+   [
+    229497,
+    "<script id=\"bootstrap-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/bootstrap.bundle.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    229646,
+    "<script id=\"swiper-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/swiper-bundle.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    229789,
+    "<script id=\"aos-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/aos.js?ver=1.0.4\"></script>"
+   ],
+   [
+    229915,
+    "<script id=\"wow-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/wow.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230045,
+    "<script id=\"headhesive-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/headhesive.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230189,
+    "<script id=\"smart-stick-nav-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/smart-stick-nav.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230339,
+    "<script id=\"magnific-popup-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/jquery.magnific-popup.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230498,
+    "<script id=\"gsap-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/gsap.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230630,
+    "<script id=\"imagesloaded-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/imagesloaded.pkgd.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230783,
+    "<script id=\"isotope-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/isotope.pkgd.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    230926,
+    "<script id=\"scroll-to-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/ScrollToPlugin.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231073,
+    "<script id=\"scroll-trigger-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/ScrollTrigger.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231224,
+    "<script id=\"carousel-ticker-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/jquery.carouselTicker.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231384,
+    "<script id=\"odometer-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/jquery.odometer.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231531,
+    "<script id=\"appear-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/jquery.appear.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231670,
+    "<script id=\"gsap-custom-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/gsap-custom.js?ver=1.0.4\"></script>"
+   ],
+   [
+    231812,
+    "<script id=\"bouncing-blob-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/vendors/bouncing-blob.js?ver=1.0.4\"></script>"
+   ],
+   [
+    232139,
+    "<script id=\"main-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/main.js?ver=1.0.4\"></script>"
+   ],
+   [
+    232259,
+    "<script id=\"datapicker-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/datepicker-full.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    232400,
+    "<script id=\"inputmask-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/inputmask.min.js?ver=1.0.4\"></script>"
+   ],
+   [
+    232760,
+    "<script id=\"forms-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/forms.js?ver=1.0.4\"></script>"
+   ],
+   [
+    233108,
+    "<script id=\"search-js-js\" src=\"https://acme.test/wp-content/themes/acme/assets/js/search.js?ver=1.0.4\"></script>"
+   ],
+   [
+    233232,
+    "<script id=\"wp-dom-ready-js\" src=\"https://acme.test/wp-includes/js/dist/dom-ready.min.js?ver=3fe927cab37bf38d6a23\"></script>"
+   ],
+   [
+    233363,
+    "<script id=\"wp-hooks-js\" src=\"https://acme.test/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255\"></script>"
+   ],
+   [
+    233486,
+    "<script id=\"wp-i18n-js\" src=\"https://acme.test/wp-includes/js/dist/i18n.min.js?ver=1dfe7db3940c23ea9216\"></script>"
+   ],
+   [
+    233746,
+    "<script id=\"wp-a11y-js\" src=\"https://acme.test/wp-includes/js/dist/a11y.min.js?ver=31c6cec5a4ff7aff483d\"></script>"
+   ],
+   [
+    233867,
+    "<script id=\"gform_json-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/js/jquery.json.min.js?ver=3.2.1\"></script>"
+   ],
+   [
+    240775,
+    "<script id=\"gform_gravityforms-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/js/gravityforms.min.js?ver=3.2.1\"></script>"
+   ],
+   [
+    240929,
+    "<script id=\"gform_placeholder-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/js/placeholders.jquery.min.js?ver=3.2.1\"></script>"
+   ],
+   [
+    241089,
+    "<script id=\"gform_gravityforms_utils-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/assets/js/dist/utils.min.js?ver=d7e103405223e60d2719f4c330fd11cf\"></script>"
+   ],
+   [
+    241281,
+    "<script id=\"gform_gravityforms_theme_vendors-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/assets/js/dist/vendor-theme.min.js?ver=ddae8d403393f0e5eaeedeb511ce46e0\"></script>"
+   ],
+   [
+    242487,
+    "<script id=\"gform_gravityforms_theme-js\" defer='defer' src=\"https://acme.test/wp-content/plugins/gravityforms/assets/js/dist/scripts-theme.min.js?ver=f7ff0a7a4cbd950275384188b97da558\"></script>"
+   ]
+  ]
+ },
+ "hosted_404": {
+  "size": 32163,
+  "scripts": [
+   [
+    4082,
+    "<script charset=\"utf-8\" src=\"/hs/cta/cta/current.js\"></script>"
+   ],
+   [
+    26689,
+    "<script charset=\"utf-8\" src=\"/hs/cta/cta/current.js\"></script>"
+   ],
+   [
+    30209,
+    "<script src=\"/hs/hsstatic/jquery-libs/static-1.4/jquery/jquery-1.11.2.js\"></script>"
+   ],
+   [
+    30386,
+    "<script defer src=\"/hs/hsstatic/content-cwv-embed/static-1.1293/embed.js\"></script>"
+   ],
+   [
+    30470,
+    "<script src=\"https://info.acme.test/hubfs/hub_generated/template_assets/1/10000000001/1000000000001/template_main.min.js\"></script>"
+   ],
+   [
+    30682,
+    "<script src=\"/hs/hsstatic/cos-i18n/static-1.53/bundles/project.js\"></script>"
+   ],
+   [
+    30759,
+    "<script src=\"https://info.acme.test/hubfs/hub_generated/module_assets/1/10000000002/1000000000002/module_menu-section.min.js\"></script>"
+   ],
+   [
+    31397,
+    "<script type=\"text/javascript\" id=\"hs-script-loader\" async defer src=\"/hs/scriptloader/1000000.js\"></script>"
+   ],
+   [
+    32042,
+    "<script defer src=\"/hs/hsstatic/HubspotToolsMenu/static-1.640/js/index.js\"></script>"
+   ]
+  ]
+ }
+}

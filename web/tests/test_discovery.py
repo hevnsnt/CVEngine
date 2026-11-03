@@ -576,7 +576,7 @@ NUCLEI_LINES = [
 	 'host': 'https://www.example.test', 'matched-at': 'https://www.example.test/', 'matcher-name': 'v'},
 	{'template': 'http/cves/CVE-2099-1.yaml', 'template-id': 'CVE-2099-1', 'type': 'http',
 	 'info': {'name': 'Example RCE', 'severity': 'critical', 'description': 'bad',
-	          'classification': {'cve-id': ['CVE-2099-1'], 'cve_id': ['CVE-2099-1'], 'cvss-score': 9.8}, 'reference': ['https://x']},
+	          'classification': {'cve-id': ['cve-2099-1'], 'cwe-id': ['cwe-77'], 'cvss-score': 9.8}, 'reference': ['https://x']},  # nuclei's own keys and case
 	 'host': 'www.example.test:8443', 'matched-at': 'https://www.example.test:8443/x'},
 ]
 

@@ -512,6 +512,9 @@ def _queue_one(ctx, project, match, kind, mode, tier, created):
         task_mode, needs = agent_tasks.describe(match, kind, mode)
     except ApiError as exc:
         return exc.message
+    from targetApp.models import narrowed_names
+    if task_mode == 'network' and narrowed_names(project.pk, [match.subdomain.name]):  # an agent's remote checks are a scan of the name
+        return 'its target is set to this host only: a name under it is not scanned'
     sub = match.subdomain
     try:
         with transaction.atomic():
@@ -827,7 +830,7 @@ def _apply_result(task, agent, user, result):
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
         before = match.remediation_status
         svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user)
-        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user)
+        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
 
 
 def report_result(ctx, task_id, body):

@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from unittest import mock
 
@@ -13,6 +14,19 @@ from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tenancy import roles
 
+
+
+# The lanes these tests drive rest on CVSS-rated CVEs (a 7.5 is smoke, a 9.8 fire): the legacy heat policy. Under the KEV rule (the default)
+# the lane is fire for a KEV or exploited CVE and ice otherwise (tests.test_heat_policy); the queueing, backoff and cap mechanics are the same.
+_LEGACY = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})
+
+
+def setUpModule():
+	_LEGACY.start()
+
+
+def tearDownModule():
+	_LEGACY.stop()
 
 class HotValidationTests(TestCase):
     def setUp(self):
@@ -357,8 +371,8 @@ class HotValidationTests(TestCase):
             self.assertEqual(hot_validation.enqueue(row, 'smoke'), 'queued')
         job = AutomaticValidation.objects.get(triage=row)
         old_signature = row.signature
-        def checked(project_id, ids):
-            self.assertEqual((project_id, ids), (self.project.pk, [row.pk]))
+        def checked(project_id, ids, unattended=True):
+            self.assertEqual((project_id, ids, unattended), (self.project.pk, [row.pk], True))  # an automatic job is unattended
             Triage.objects.filter(pk=row.pk).update(validation_status='observed')
             return {'ran': 1, 'reused': 0, 'no_check': 0}
         with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
@@ -629,3 +643,81 @@ class EveryMatchIsValidatedTests(TestCase):
             self.assertEqual((result['ice'], calls), (0, [0, 6]), value)  # Fire and Smoke exactly as before
             self.assertEqual(set(self.queued()), {'CVE-2099-10', 'CVE-2099-11'})
         self.assertTrue(hot_validation.validate_all_matches())  # on by default
+
+
+class KevLaneTests(TestCase):
+    """The same lanes, backoff and caps under the KEV heat policy (the default; this module pins legacy for the classes above): a CVE match is
+    in the fire lane when its CVE is on the KEV or has a known exploit (proven or not: proof is what validation adds), and in the ice lane
+    otherwise, whatever its CVSS or EPSS. Scanner and hygiene findings keep their severity lanes."""
+
+    def setUp(self):
+        kev = mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'kev'})
+        kev.start()
+        self.addCleanup(kev.stop)
+        now = timezone.now()
+        org = Org.objects.create(name='Kev', slug='kev')
+        self.project = Project.objects.create(name='Kev', slug='kev', org=org, insert_date=now)
+        domain = Domain.objects.create(name='kev.example', project=self.project, insert_date=now)
+        self.sub = Subdomain.objects.create(name='www.kev.example', target_domain=domain)
+
+        def match(cve_id, cvss, **signals):
+            entry = CVEEntry.objects.create(cve_id=cve_id, cvss=cvss, affected=[{'product': 'nginx'}], published_at=now, **signals)
+            return CVEMatch.objects.create(cve_entry=entry, subdomain=self.sub, matched_product='nginx')
+        self.kev = match('CVE-2099-20', 5.0, kev=True)
+        self.exploit = match('CVE-2099-21', 4.0, exploit_db=True)
+        self.critical = match('CVE-2099-22', 9.8, epss_reached=True)  # neither on the KEV nor exploited: ice under the KEV rule
+        self.high = Vulnerability.objects.create(name='High scanner observation', severity=3, source='bbot', subdomain=self.sub, target_domain=domain)
+        self.medium = Vulnerability.objects.create(name='Medium scanner observation', severity=2, source='bbot', subdomain=self.sub, target_domain=domain)
+        triage.track([self.kev, self.exploit, self.critical, self.high, self.medium])
+
+    def sweep(self, **kwargs):
+        calls = []
+        record = lambda name: (lambda *a, **kw: calls.append((name, kw['priority'])))  # noqa: E731
+        with mock.patch('cveFeed.hot_validation._backfill_projects', return_value=0), \
+                mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async', side_effect=record('cve')), \
+                mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async', side_effect=record('finding')):
+            return hot_validation.sweep(**kwargs), calls
+
+    def queued(self):
+        return {j.match.cve_entry.cve_id: j.priority for j in OnDemandValidation.objects.filter(status='queued').select_related('match__cve_entry')}
+
+    def test_hot_cves_take_the_fire_lane_first_and_a_critical_score_alone_is_ice(self):
+        result, calls = self.sweep()
+        self.assertEqual((result['fire'], result['smoke'], result['ice']), (3, 1, 1))
+        self.assertEqual(result['stale'], 1)  # the high finding is a candidate of the smoke lane too (as under legacy); no CVE match is
+        self.assertEqual([priority for _name, priority in calls], [0, 0, 0, 6, 9])
+        self.assertEqual(self.queued(), {'CVE-2099-20': 0, 'CVE-2099-21': 0, 'CVE-2099-22': 9})
+        again, calls = self.sweep()
+        self.assertEqual((again['fire'], again['smoke'], again['ice'], calls), (0, 0, 0, []))
+
+    def test_a_queued_ice_job_moves_up_when_its_cve_joins_the_kev(self):
+        row = Triage.objects.get(match=self.critical)
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'stale')  # a critical score alone is not the fire lane
+            self.assertEqual(hot_validation.enqueue(row, 'ice'), 'queued')
+            CVEEntry.objects.filter(pk=self.critical.cve_entry_id).update(kev=True)
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'promoted')
+        self.assertEqual([c.kwargs['priority'] for c in dispatch.call_args_list], [9, 0])
+        self.assertEqual(OnDemandValidation.objects.filter(match=self.critical).count(), 1)
+
+    def test_broker_failure_backs_off_and_the_project_caps_hold(self):
+        row = Triage.objects.get(match=self.kev)
+        with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async', side_effect=RuntimeError('broker down')):
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'failed')
+        first = OnDemandValidation.objects.get(match=self.kev)
+        self.assertEqual(hot_validation.enqueue(row, 'fire'), 'fresh')  # backing off
+        OnDemandValidation.objects.filter(pk=first.pk).update(finished_at=timezone.now() - timedelta(minutes=6))
+        with mock.patch('cveFeed.hot_validation._active_count', return_value=hot_validation.PROJECT_ACTIVE_CAP):
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'project_cap')
+        cold = Triage.objects.get(match=self.critical)
+        with mock.patch('cveFeed.hot_validation._active_count', return_value=hot_validation.PROJECT_ICE_CAP), \
+                mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as dispatch:
+            self.assertEqual(hot_validation.enqueue(cold, 'ice'), 'project_cap')
+            self.assertEqual(hot_validation.enqueue(row, 'fire'), 'queued')  # cold jobs never block a fire one
+        dispatch.assert_called_once_with(args=[mock.ANY], priority=0)
+
+    def test_ice_only_uses_the_capacity_fire_and_smoke_leave(self):
+        result, _ = self.sweep(max_jobs=4)
+        self.assertEqual((result['fire'], result['smoke'], result['ice']), (3, 1, 0))
+        result, _ = self.sweep(max_jobs=1)
+        self.assertEqual(result['ice'], 1)

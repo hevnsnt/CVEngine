@@ -48,7 +48,8 @@ const tunable = (over) => ({key: 'triage_max_per_day', label: 'Triage questions 
   min: 1, max: 50000, unit: 'questions', value: 2000, source: 'default', env_name: 'CVENGINE_TRIAGE_MAX_PER_DAY', env_value: null, saved: null, set_by: null, set_at: null,
   applies: 'live', applies_text: 'Applies within a few seconds, with no restart', ...over});
 const snapshot = () => ({
-  groups: [{id: 'ai_spend', title: 'AI spend', intro: 'Every call costs money <b>x</b>.'}, {id: 'throughput', title: 'Scan pacing', intro: 'How eagerly scans start.'}],
+  groups: [{id: 'ai_spend', title: 'AI spend', intro: 'Every call costs money <b>x</b>.'}, {id: 'throughput', title: 'Scan pacing', intro: 'How eagerly scans start.'},
+    {id: 'egress', title: 'Outbound connections', intro: 'What this server sends.'}],
   fields: [
     tunable(),
     tunable({key: 'validate_max_per_day', label: 'Validation checks per day', default: 1500, value: 300, source: 'admin', saved: 300, set_by: 'alice <i>x</i>', set_at: '2026-10-31T10:00:00Z',
@@ -56,6 +57,8 @@ const snapshot = () => ({
     tunable({key: 'stage_parallel', label: 'Chunks of one scan stage at once', group: 'throughput', default: 4, value: 6, source: 'environment', env_name: 'CVENGINE_STAGE_PARALLEL', env_value: 6,
       max: 16, unit: 'chunks'}),
     tunable({key: 'work_min_gap_hours', label: 'Hours before rescan', group: 'throughput', default: 2, value: 2, min: 0, max: 168, unit: 'hours', env_name: 'CVENGINE_WORK_MIN_GAP_HOURS', applies: 'restart', applies_text: 'Applies after the next restart'}),
+    tunable({key: 'egress_port25_per_hour', label: 'Local connections to port 25 per hour', group: 'egress', default: 400, value: 400, min: 0, max: 100000, unit: 'connections',
+      env_name: 'CVENGINE_LOCAL_PORT25_PER_HOUR', used_today: 12, used_since: 'this hour'}),
   ],
   cache_seconds: 5,
 });
@@ -70,8 +73,8 @@ const maxxing = await import('../static/cve/config-maxxing.js');
 await import('../static/cve/tunables-card.js');
 
 test('the generic cards register themselves, one per group of the registry, and draw their own title and intro', async () => {
-  assert.deepEqual(maxxing.cards().map((c) => c.id), ['ai_spend', 'throughput', 'autotune_pace']);
-  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace']);
+  assert.deepEqual(maxxing.cards().map((c) => c.id), ['ai_spend', 'throughput', 'autotune_pace', 'egress', 'heat']);
+  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace', 'Outbound connections', 'Heat policy']);
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
   assert.match(host.textContent, /^AI spend/);
@@ -151,7 +154,7 @@ test('a card that fails to build shows its error line and the others still draw'
 test('the page code and the server registry name the same groups', () => {
   const dir = new URL('../static/cve/', import.meta.url);
   const src = readFileSync(new URL('tunables-card.js', dir), 'utf8');
-  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace']]);
+  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace'], ['egress', 'Outbound connections'], ['heat', 'Heat policy']]);
   assert.match(readFileSync(new URL('settings.js', dir), 'utf8'), /tunables-card\.js/);
 });
 
@@ -289,4 +292,18 @@ test('the daily caps show what was used, and every Reset button has its own acce
   assert.equal(new Set(names).size, names.length);
   assert.match(names[0], /^Reset Triage questions per day to default$/);
   restoreFetch();
+});
+
+test('the Outbound connections card links the connection log as CSV and shows the use this hour; the other cards have no such link', async () => {
+  const card = maxxing.cards().find((c) => c.id === 'egress');
+  const host = new Node('div');
+  await card.build(host);
+  const links = find(host, (n) => n.tag === 'a');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].attrs.href, '/cve/api/settings/egress/connections.csv');
+  assert.match(host.textContent, /Download the connection log \(CSV\)/);
+  assert.match(host.textContent, /Used this hour: 12/);
+  const other = new Node('div');
+  await maxxing.cards()[0].build(other);
+  assert.equal(find(other, (n) => n.tag === 'a').length, 0);
 });

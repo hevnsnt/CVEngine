@@ -34,12 +34,14 @@ def join(batch):
     cache.incr(_key(batch, 'pending'))
 
 
-def record(batch, hits):
-    """Leave a finished test's (CVE id, host) pairs in the batch."""
+def record(batch, hits, project=None):
+    """Leave a finished test's (CVE id, host) pairs in the batch, each with the ``project`` it was tested for when one is given: a run
+    gathers the tests of several projects, and ``notify.template_hits`` checks each hit against its own project's matches only."""
     if not hits:
         return
     index = cache.incr(_key(batch, 'n'))
-    cache.set(_key(batch, f'hits:{index}'), list(hits)[:MAX_HITS], TTL)
+    kept = [(cve, host, project) for cve, host in list(hits)[:MAX_HITS]] if project is not None else list(hits)[:MAX_HITS]
+    cache.set(_key(batch, f'hits:{index}'), kept, TTL)
 
 
 def leave(batch, send=None):

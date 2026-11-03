@@ -43,6 +43,12 @@ services:
     init: true
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
+    # Chromium's sandbox for the web screenshots (cveFeed/web_shot.py) needs user namespaces, which Docker's default seccomp profile refuses. This is
+    # Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and unshare), vendored unchanged
+    # from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). Without it the sandbox cannot start and screenshots stay off, with the reason shown
+    # (docs/PIPELINE.md, "Web screenshots"); `make up` and the update scripts recreate this container, so an upgrade applies it with no manual step.
+    security_opt:
+      - seccomp=./config/seccomp/playwright-chromium.json
     volumes:
       - ./web:/usr/src/app
       - github_repos:/usr/src/github
@@ -415,7 +421,7 @@ services:
   # writes the scanner's configuration (notus, and where openvasd listens) into a volume, then exits
   openvas-configure:
     profiles: ["openvas"]
-    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee"
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632"
     volumes:
       - openvas_data_vol:/mnt
       - openvas_log_data_vol:/var/log/openvas
@@ -436,7 +442,7 @@ services:
   openvas-openvasd:
     profiles: ["openvas"]
     restart: always
-    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee"
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632"
     environment:
       OPENVASD_MODE: service_notus
       GNUPGHOME: /etc/openvas/gnupg
