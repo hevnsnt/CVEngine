@@ -36,7 +36,8 @@ class ReopenOnAFreshReadingTests(ReviewScenarioBase):
     def test_a_host_that_redirected_now_serves_its_own_login_page(self):
         sub = self.host('al.x.test', ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root('al.x.test', 301, '', location='https://other.example/')
+        self.host('other.x.test', [])  # an alias closes only to a host the project inventories
+        self.read_root('al.x.test', 301, '', location='https://other.x.test/')
         self.assertIn('only redirects', self.correlate(sub)[('al.x.test', 'CVE-2020-11023', '1.12.4')].ai_reason)
         self.read_root('al.x.test', 200, '<html><title>Sign in</title><form><input type="password" name="p"></form>'
                                           '<script src="/app.js"></script></html>', title='Sign in')

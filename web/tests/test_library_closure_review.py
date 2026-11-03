@@ -18,7 +18,9 @@ def filler(n):
     return FILLER * (n // len(FILLER) + 1)
 
 
-PAGE = '<script src="/js/jquery.min.js"></script><script src="/dist/app.js"></script>'  # core jQuery 3.7.1 file, then the app bundle
+# every page here explains the technology scan's 1.12.4 (a script's ?ver=), so only the rule under test keeps the match open
+EXPLAINS = '<script src="/site.js?ver=1.12.4"></script>'
+PAGE = '<script src="/js/jquery.min.js"></script><script src="/dist/app.js"></script>' + EXPLAINS  # core jQuery 3.7.1 file, the app bundle
 
 
 class NotAJqueryCopyButCarriesOne(ReviewScenarioBase):
@@ -56,7 +58,7 @@ class SecondCopyInTheSameFile(ReviewScenarioBase):
     def _run(self, host, bundle):
         sub = self.host(host, ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root(host, 200, '<script src="/js/vendor.js"></script>', scripts={f'https://{host}/js/vendor.js': bundle})
+        self.read_root(host, 200, '<script src="/js/vendor.js"></script>' + EXPLAINS, scripts={f'https://{host}/js/vendor.js': bundle})
         copies = RouteAuth.objects.get(host=host).evidence['libraries']['jquery']['copies']
         self.assertEqual([(c['version'], c['whole']) for c in copies], [('3.7.1', False)])  # a second copy further in: not known whole
         return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
@@ -78,7 +80,8 @@ class VouchOnAlias(ReviewScenarioBase):
         sub = self.host('al.x.test', ['jQuery:1.12.4'])
         m = self.correlate(sub)[('al.x.test', 'CVE-2020-11023', '1.12.4')]
         CVEMatch.objects.filter(pk=m.pk).update(assignee=user)
-        self.read_root('al.x.test', 301, '', location='https://elsewhere.example/')
+        self.host('elsewhere.x.test', [])  # an alias closes only to a host the project inventories
+        self.read_root('al.x.test', 301, '', location='https://elsewhere.x.test/')
         self.correlate(sub)
         scan = ScanHistory.objects.create(domain=self.site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='y')
         later = Subdomain.objects.create(name='al.x.test', target_domain=self.site, scan_history=scan)
@@ -177,8 +180,8 @@ class StatedAnywhereTests(SimpleTestCase):
         self.assertTrue(js_libraries._states_all(text, found))
 
     def test_what_counts_as_read_whole(self):
-        self.assertTrue(js_libraries.read_whole({'sha256': 'x', 'whole': True}))
-        for read in (None, {}, {'sha256': '', 'whole': True}, {'sha256': 'x', 'whole': False}, {'sha256': 'x'}):
+        self.assertTrue(js_libraries.read_whole({'sha256': 'x', 'whole': True, 'loaders': []}))
+        for read in (None, {}, {'sha256': '', 'whole': True, 'loaders': []}, {'sha256': 'x', 'whole': False, 'loaders': []}, {'sha256': 'x'}):
             self.assertFalse(js_libraries.read_whole(read), read)
 
 
@@ -189,11 +192,11 @@ class EveryScriptOfThePageTests(ReviewScenarioBase):
     def _closed(self, host, page, scripts=None):
         sub = self.host(host, ['jQuery:1.12.4'])
         self.correlate(sub)
-        self.read_root(host, 200, page, scripts=scripts)
+        self.read_root(host, 200, page + EXPLAINS, scripts=scripts)
         return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')].ai_verdict == 'not_affected'
 
     def test_the_page_read_whole_still_closes(self):
-        self.assertTrue(self._closed('w0.x.test', '<script src="/js/jquery.min.js"></script><script src="/site.js"></script>'))
+        self.assertTrue(self._closed('w0.x.test', '<script src="/js/jquery.min.js"></script>'))
 
     def test_a_third_party_script_never_read(self):
         page = '<script src="/js/jquery.min.js"></script><script src="https://widgets.partner.example/embed.js"></script>'
@@ -210,8 +213,8 @@ class EveryScriptOfThePageTests(ReviewScenarioBase):
         self.assertEqual(RouteAuth.objects.get(host='w3.x.test').evidence['script_page']['inline_unread'], 1)
 
     def test_a_script_over_the_read_budget(self):
-        page = '<script src="/js/jquery.min.js"></script>' + ''.join(f'<script src="/s{i}.js"></script>' for i in range(8))
-        scripts = {f'https://w4.x.test/s{i}.js': 'var s=1;' for i in range(8)}
+        page = '<script src="/js/jquery.min.js"></script>' + ''.join(f'<script src="/s{i}.js"></script>' for i in range(5))
+        scripts = {f'https://w4.x.test/s{i}.js': 'var s=1;' for i in range(5)}  # with the jQuery file and site.js, seven: one over six
         self.assertFalse(self._closed('w4.x.test', page, scripts))
         self.assertGreater(RouteAuth.objects.get(host='w4.x.test').evidence['script_page']['unread'], 0)
 
@@ -231,7 +234,8 @@ class ContradictsRuleTests(SimpleTestCase):
     COPY = {'url': 'https://h.test/js/jquery.min.js', 'version': '3.7.1', 'source': 'body', 'whole': True, 'state': 'effective'}
 
     def judge(self, record, page_read=True):
-        return js_libraries.HostLibraries({'jquery': record}, page_read=page_read).judge('jQuery', '1.12.4')[0]
+        # the page explains 1.12.4 (a script URL carries it): only the copies decide here
+        return js_libraries.HostLibraries({'jquery': record}, page_read=page_read, page_versions={'1.12.4'}).judge('jQuery', '1.12.4')[0]
 
     def test_the_whole_page_with_one_effective_copy_closes(self):
         self.assertTrue(self.judge({'version': '3.7.1', 'version_source': 'body', 'copies': [dict(self.COPY)]}))
@@ -308,3 +312,190 @@ class StatusLineAndExtractorTests(SimpleTestCase):
             self.assertFalse(templategen._version_shaped(pattern), pattern)
         for pattern in (r'Version: ([0-9.]+)', r'(\d+\.\d+\.\d+)', r'v([\d.]+)', r'([0-9]+\.[0-9]{1,3})', r'([0-9.]+)_([A-Z_0-9]+)'):
             self.assertTrue(templategen._version_shaped(pattern), pattern)
+
+
+class LoadedAtRuntime(ReviewScenarioBase):
+    """A copy no script tag references, loaded by a same-host script at run time (a script loader, a module import, a webpack lazy chunk).
+    The technology scan (a browser) sees the runtime jQuery 1.12.4; the static page has only the core 3.7.1 file. The page explains 1.12.4
+    (a ?ver= string), so only the run-time loader keeps the match open here."""
+
+    def _run(self, host, page, scripts):
+        sub = self.host(host, ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root(host, 200, page + EXPLAINS, scripts=scripts)
+        self.assertEqual(RouteAuth.objects.get(host=host).evidence['script_page']['unread'], 1)  # the loading script is not known whole
+        return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
+
+    def test_p5_script_loader(self):
+        host = 'p5.x.test'
+        loader = ("(function(){var s=document.createElement('script');s.src='/js/legacy/jquery-1.12.4.min.js';"
+                  "s.onload=function(){window.legacy$=jQuery.noConflict(true)};document.head.appendChild(s)})();")
+        m = self._run(host, '<script src="/js/jquery.min.js"></script><script src="/js/loader.js"></script>',
+                      {f'https://{host}/js/loader.js': loader})
+        self.assertNotEqual(m.ai_verdict, 'not_affected')
+
+    def test_p5b_module_import(self):
+        host = 'p5b.x.test'
+        main = "import $ from './vendor/jquery-1.12.4.js';\n$(function(){ $('.x').show(); });\n"
+        m = self._run(host, '<script src="/js/jquery.min.js"></script><script type="module" src="/js/main.js"></script>',
+                      {f'https://{host}/js/main.js': main})
+        self.assertNotEqual(m.ai_verdict, 'not_affected')
+
+    def test_p5c_webpack_lazy_chunk(self):
+        host = 'p5c.x.test'
+        runtime = ('(()=>{var e={},r={};function t(o){var n=r[o];if(void 0!==n)return n.exports;var a=r[o]={exports:{}};return e[o](a,a.exports,t),'
+                   'a.exports}t.u=e=>"static/js/"+e+"."+{512:"3f9a1c"}[e]+".chunk.js",t.e=e=>Promise.all([]);t.e(512).then(t.bind(t,7512))})();')
+        m = self._run(host, '<script src="/js/jquery.min.js"></script><script src="/static/js/main.4b1d.js"></script>',
+                      {f'https://{host}/static/js/main.4b1d.js': runtime})
+        self.assertNotEqual(m.ai_verdict, 'not_affected')
+
+    def test_an_inline_loader_and_an_import_map(self):
+        for host, extra in (('p5d.x.test', "<script>var s=document.createElement('script');s.src=window.legacyUrl;document.head.appendChild(s);</script>"),
+                            ('p5e.x.test', '<script type="importmap">{"imports":{"jquery":"/js/vendor/jq.js"}}</script>'),
+                            ('p5f.x.test', '<svg><script href="/js/legacy.js"></script></svg>')):
+            with self.subTest(host=host):
+                sub = self.host(host, ['jQuery:1.12.4'])
+                self.correlate(sub)
+                self.read_root(host, 200, '<script src="/js/jquery.min.js"></script>' + extra + EXPLAINS)
+                self.assertEqual(RouteAuth.objects.get(host=host).evidence['script_page']['inline_unread'], 1)
+                self.assertNotEqual(self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+
+
+class RuntimeLoaderRuleTests(SimpleTestCase):
+    def test_each_kind_of_loader(self):
+        for code in ("var s=document.createElement('script');s.src=u;", 'import("./chunk-a1.js").then(f)', "import $ from './jq.js';",
+                     "export { a } from './a.js';", '$.getScript(url)', 'require(["legacy"], function(l){})', 'define(["jquery"], function($){})',
+                     'System.import("app")', '__webpack_require__.e(12)', '(self.webpackChunkapp=self.webpackChunkapp||[]).push([])',
+                     't.e=e=>Promise.all([])', 'navigator.serviceWorker.register(sw)', 'importScripts(x)', 'var u = "/js/widget.js";',
+                     "var p = 'vendor/jquery-1.12.4.min';", 'requirejs.config({baseUrl:"/js"})', 'new Worker(url)'):
+            with self.subTest(code=code):
+                self.assertTrue(js_libraries.runtime_loaders(code), code)
+
+    def test_what_is_no_loader(self):
+        for code in ('if(e==="import")return t;', 'var k="require";', "x.type==='define'", '// var jQuery = require("jquery")(window);',
+                     '"function"==typeof define&&define.amd&&define("jquery",[],function(){return n})',
+                     '"object"==typeof module&&module.exports?module.exports=t(require("jquery")):t(jQuery)',
+                     'var o=C.createElement("script");o.text=e;C.head.appendChild(o).parentNode.removeChild(o)',
+                     'throw new Error("requires at least jQuery v1.9.1")', 'var a="http://errors.angularjs.org/1.8.3/"', 'var a=1;'):
+            with self.subTest(code=code):
+                self.assertEqual(js_libraries.runtime_loaders(code), [], code)
+
+    def test_a_reading_before_loaders_were_looked_for_is_not_whole(self):
+        self.assertFalse(js_libraries.read_whole({'sha256': 'x', 'whole': True}))
+        self.assertFalse(js_libraries.read_whole({'sha256': 'x', 'whole': True, 'loaders': ['import()']}))
+        self.assertTrue(js_libraries.read_whole({'sha256': 'x', 'whole': True, 'loaders': []}))
+
+
+class ExplainedByThePageTests(ReviewScenarioBase):
+    """Decision 2: the contradicted-by-file closure closes only a technology-scan version this front page itself explains."""
+
+    def _verdict(self, host, page, version='1.12.4', scripts=None):
+        sub = self.host(host, [f'jQuery:{version}'])
+        self.correlate(sub)
+        self.read_root(host, 200, page, scripts=scripts)
+        return self.correlate(sub)[(host, 'CVE-2020-11023', version)]
+
+    def test_a_version_the_page_does_not_explain_stays_a_capped_candidate(self):
+        m = self._verdict('ex0.x.test', '<script src="/js/jquery.min.js"></script><script src="/site.js"></script>')
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+
+    def test_a_query_string_version_explains_it(self):
+        m = self._verdict('ex1.x.test', '<script src="/js/jquery.min.js"></script><script src="/site.js?ver=1.12.4"></script>')
+        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertIn("the page's own scripts say jQuery 3.7.1", m.ai_reason)
+
+    def test_a_file_name_version_explains_it(self):
+        m = self._verdict('ex2.x.test', '<script src="/js/jquery.min.js"></script><script src="/js/site-1.12.4.js"></script>',
+                          scripts={'https://ex2.x.test/js/site-1.12.4.js': 'var s=1;'})
+        self.assertEqual(m.ai_verdict, 'not_affected')
+
+    def test_another_librarys_version_on_the_page_explains_it(self):
+        migrate = '/*! jQuery Migrate v3.4.1 | (c) OpenJS Foundation and other contributors */\nvar m=1;'
+        m = self._verdict('ex3.x.test', '<script src="/js/jquery.min.js"></script><script src="/js/migrate.js"></script>', version='3.4.1',
+                          scripts={'https://ex3.x.test/js/migrate.js': migrate})
+        self.assertEqual(m.ai_verdict, 'not_affected')
+
+    def test_the_rule(self):
+        libraries = js_libraries.HostLibraries({'jquery-migrate': {'copies': [{'version': '3.4.1', 'source': 'body'}]}},
+                                               page_versions={'1.0.4'}, inline_versions={('jquery-ui', '1.13.2')})
+        self.assertTrue(libraries.explains('jquery', '1.0.4'))
+        self.assertTrue(libraries.explains('jquery', '3.4.1'))
+        self.assertTrue(libraries.explains('jquery', '1.13.2'))
+        self.assertFalse(libraries.explains('jquery', '1.12.4'))
+        self.assertFalse(libraries.explains('jquery-ui', '1.13.2'))  # the library's own inline copy is a copy, not an explanation
+        self.assertEqual(js_libraries.url_versions(['https://h.test/wp-content/themes/t/js/jquery.fancybox-1.0.4.js?ver=2.0',
+                                                    'https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js', 'https://h.test/app.4b1d.js']),
+                         ['1.0.4', '2.0', '3.4.1'])
+
+
+class AliasToSameSite(ReviewScenarioBase):
+    """Decision 3: a redirect alias closes only when the target is a host the project inventories."""
+
+    def test_a1_apex_301_to_www_not_in_inventory_keeps_the_match(self):
+        apex = self.host('y.x.test', ['jQuery:1.12.4'])
+        self.correlate(apex)
+        self.read_root('y.x.test', 301, '', location='https://www.y.x.test/')
+        self.assertNotEqual(self.correlate(apex)[('y.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+        self.assertGreater(CVEMatch.objects.exclude(ai_verdict='not_affected').count(), 0)
+
+    def test_an_alias_to_an_inventoried_host_closes(self):
+        apex = self.host('z.x.test', ['jQuery:1.12.4'])
+        self.host('www.z.x.test', [])
+        self.correlate(apex)
+        self.read_root('z.x.test', 301, '', location='https://www.z.x.test/')
+        m = self.correlate(apex)[('z.x.test', 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertIn('only redirects to www.z.x.test', m.ai_reason)
+
+    def test_a_host_of_the_same_name_in_another_project_is_not_inventory(self):
+        from dashboard.models import Org, Project
+        from targetApp.models import Domain
+        org = Org.objects.create(name='Elsewhere', slug='elsewhere')
+        other = Project.objects.create(name='E', slug='elsewhere-p', insert_date=timezone.now(), org=org)
+        site = Domain.objects.create(name='w.x.test', project=other, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=site, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='z')
+        Subdomain.objects.create(name='www.w.x.test', target_domain=site, scan_history=scan)
+        apex = self.host('w.x.test', ['jQuery:1.12.4'])
+        self.correlate(apex)
+        self.read_root('w.x.test', 308, '', location='https://www.w.x.test/')
+        self.assertNotEqual(self.correlate(apex)[('w.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+
+
+class MoreExposureAndStatusTests(SimpleTestCase):
+    def test_more_exposure_paths(self):
+        for path in ('/swagger.json', '/.npmrc', '/v2/_catalog', '/.aws/credentials', '/id_rsa', '/nginx_status', '/fpm-status', '/status',
+                     '/cgi-bin/printenv', '/error_log'):
+            with self.subTest(path=path):
+                self.assertEqual(templategen.template_evidence(_tpl('Acme - Exposure', path, r'acme.{0,3}2\.[0-3]\.\d')),
+                                 templategen.BEHAVIOR_EVIDENCE)
+
+    def test_more_status_line_forms(self):
+        for regex in (r'HTTP\S1\.1', r'HTTP\x2F1\.1 200', r'HTTP\s1\.0', r'HTTP/1\.1', r'HTTP\057\d'):
+            with self.subTest(regex=regex):
+                self.assertEqual(templategen.template_evidence(_tpl('Acme', '/', regex)), templategen.BEHAVIOR_EVIDENCE)
+
+
+class LoaderReadingTests(SimpleTestCase):
+    def test_a_read_script_with_a_loader_is_not_whole(self):
+        def fetch(url, headers=None):
+            return {'status': 200, 'body': "import $ from './vendor/jquery-1.12.4.js';", 'raw_headers': {'etag': '"a"'}}
+        read, _why = js_libraries._read_one('https://h.test/js/main.js', fetch)
+        self.assertEqual((read['whole'], read['loaders']), (False, ['static import', 'script file name', 'library file name']))
+        read, _why = js_libraries._read_one('https://h.test/js/site.js', lambda url, headers=None: {'status': 200, 'body': 'var a=1;'})
+        self.assertEqual((read['whole'], read['loaders']), (True, []))
+
+    def test_a_cached_reading_from_before_loaders_were_looked_for_is_read_again(self):
+        from unittest import mock
+        old = {'found': [], 'truncated': False, 'whole': True, 'sha256': 'x', 'etag': '"a"', 'length': '', 'checked': __import__('time').time()}
+        asked = []
+
+        def fetch(url, headers=None):
+            asked.append(headers)
+            return {'status': 200, 'body': "import x from './x.js';"}
+        entries = js_libraries.parse_page('<script src="/js/main.js"></script>', 'https://h.test/')
+        with mock.patch.object(js_libraries, '_cached', return_value=old), mock.patch.object(js_libraries, '_remember'):
+            coverage = {}
+            js_libraries.read_page(entries, 'https://h.test/', fetch, lambda url: '', {'left': 6},
+                                   reader=js_libraries.Reader(sleep=lambda s: None), coverage=coverage)
+        self.assertEqual(asked, [None])  # read again, not revalidated with the old ETag
+        self.assertEqual(coverage, {'scripts': 1, 'read': 0})

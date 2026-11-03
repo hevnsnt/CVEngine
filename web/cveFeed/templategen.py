@@ -339,21 +339,25 @@ _CONSTRAINT = re.compile(r"""^\s*(?:'\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s
 _COMPARE = re.compile(r"compare_versions\(\s*([A-Za-z_]\w{0,40})\s*((?:,\s*(?:'[^'\n]{1,60}'|\"[^\"\n]{1,60}\")\s*){1,6})\)")
 _CONTAINS = re.compile(r"""^\s*(?:i?contains|contains_all|contains_any)\(\s*(?:body|header|all|response|content_type)\s*((?:,\s*(?:'[^'\n]{1,80}'|"[^"\n]{1,80}")\s*){1,8})\)\s*$""")
 _STATUS_DSL = re.compile(r"^\s*status_code\s*==\s*2\d\d\s*$")
-# "HTTP/1.1 200", and its regex forms with or without the slash ("HTTP\/1\.1", "HTTP[/]1\.1", "^HTTP.1\.0 200", "HTTP/\d"): a status line,
-# never a product's version. "HTTP" then up to eight marks (a slash, a dot, a class bracket, an escape) and a protocol digit; a product
+# "HTTP/1.1 200", and its regex forms with or without the slash ("HTTP\/1\.1", "HTTP[/]1\.1", "^HTTP.1\.0 200", "HTTP/\d", "HTTP\S1\.1",
+# "HTTP\x2F1\.1"): a status line, never a product's version. "HTTP" then up to eight marks (a slash, a dot, a class bracket, an escaped
+# character, a character class such as \S or \s, a hex, unicode or octal escape) and a protocol digit; a product
 # word after it ("Apache HTTP Server 2.4", "IBM_HTTP_Server/8.5", "HTTPd/2.4") is no status line
-_STATUS_LINE = re.compile(r"(?i)HTTP(?:[^A-Za-z0-9\\]|\\[^A-Za-z0-9]){0,8}(?:[0-3]|\\d|\[)")
+_STATUS_LINE = re.compile(r"(?i)HTTP(?:[^A-Za-z0-9\\]|\\(?:[^A-Za-z0-9]|[sw]|x[0-9a-f]{2}|u[0-9a-f]{4}|u\{[0-9a-f]{1,6}\}|[0-7]{3})){0,8}"
+                          r"(?:[0-3]|\\d|\[)")
 
 
 # a page whose answer is itself the exposure (status pages, configuration and backup files, the process table, a Java app's descriptors,
-# metrics, environment and diagnostic endpoints, password files): a version read there is read from a disclosure, so the hit is the
-# disclosure's
+# metrics, environment and diagnostic endpoints, password and key files, API descriptions, a registry's catalogue, CGI scripts, error
+# logs): a version read there is read from a disclosure, so the hit is the disclosure's
 _EXPOSURE_PATH = re.compile(r"(?i)server-(?:status|info)|application\.(?:properties|ya?ml)|(?:^|/)\.(?:env|git|svn|hg|ds_store)|actuator|phpinfo"
                             r"|info\.php|backup|\.(?:bak|old|orig|swp|sql|zip|tar|gz|tgz|7z|rar|ya?ml|ini|conf|config|log|properties|env)$"
                             r"|web\.config|wp-config|(?:^|/)(?:config|configuration|debug|console|admin|proc|etc|sys|dev|boot|windows|winnt)(?:/|$)"
                             r"|(?:^|/)(?:config|settings|appsettings|credentials|secrets?)\.json|web-inf|meta-inf|jolokia|\.axd(?:/|$)"
                             r"|(?:^|/)(?:env|metrics|prometheus|health|trace|dump|heapdump|threaddump|mappings|beans|configprops|loggers)(?:/|$|\.)"
-                            r"|(?:^|/)\.ht[a-z]{1,10}$")
+                            r"|(?:^|/)\.ht[a-z]{1,10}$|(?:^|/)(?:swagger|openapi|api-docs)(?:\.json|\.ya?ml|/|$)|(?:^|/)\.(?:npmrc|aws|docker|ssh|kube)(?:/|$)"
+                            r"|(?:^|/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$|(?:^|/)v2/_catalog|(?:^|/)(?:nginx|fpm|php-fpm|apc|haproxy)[_-]?status"
+                            r"|(?:^|/)status(?:/|$|\.)|cgi-bin/|(?:^|/)error[_.-]?log")
 
 
 def _plain_path(value):

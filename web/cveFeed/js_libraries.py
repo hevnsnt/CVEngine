@@ -34,7 +34,7 @@ import os
 import re
 import threading
 import time
-from urllib.parse import parse_qsl, urljoin, urlsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +344,12 @@ def parse_page(body, page_url):
         attrs = _attributes(tag.group(1))
         kind = (attrs.get('type') or '').split(';')[0].strip().lower()
         alternative = 'nomodule' if 'nomodule' in attrs else (f'type={kind}' if kind in _DEFERRED_TYPES else '')
+        if kind == 'importmap':
+            out.inline_unread += 1  # an import map: module specifiers resolve to files the page names nowhere else
         if kind not in _JS_TYPES and not alternative:
+            continue
+        if 'src' not in attrs and ('href' in attrs or 'xlink:href' in attrs):
+            out.inline_unread += 1  # an SVG script given by href: a browser loads it, the parse (``src`` only) never reads it
             continue
         timing = 'async' if 'async' in attrs else 'defer' if ('defer' in attrs or kind == 'module') else 'sync'
         if 'src' in attrs:
@@ -364,8 +369,9 @@ def parse_page(body, page_url):
             inline_read += 1
             found = _inline_libraries(code)
             inline += found
-            if len(inner) > MAX_INLINE or (not found and _LIBRARY_SHAPED.search(code)):
-                out.inline_unread += 1  # more than is read, or third-party code no rule names: what it carries is unknown
+            if len(inner) > MAX_INLINE or (not found and _LIBRARY_SHAPED.search(code)) or runtime_loaders(code):
+                # more than is read, third-party code no rule names, or code that loads another script at run time: what it carries is unknown
+                out.inline_unread += 1
         elif code.strip():
             out.capped = True
         for written in itertools.islice(_WRITE_SRC.finditer(code), 3):
@@ -624,6 +630,61 @@ def _remember(url, read, project=None):
 _ETAG = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]{0,100}"$')
 
 
+# ------------------------------------------------------------------ code that loads more scripts at run time
+
+# code that loads a script at run time, by a path the read never follows: a module loader's configuration or call, a dynamic import, a static
+# ``import``/``export ... from`` (the files it imports are never read), a loader call (``$.getScript``), a
+# bundler's chunk loader, a worker, a service worker, a script element made in code and given a source, or a string that names a script
+# file or a library (``"/js/legacy/jquery-1.12.4.min.js"``, ``"static/js/" + id + ".chunk.js"``). Whatever such code loads is never read,
+# so it can hold any library at any version. Keywords are matched as code, not as a word inside a string (``e==="import"`` is a token name,
+# hence the quotes in the look-behinds); a library's own UMD wrapper (``define``/``require`` behind ``typeof define``, ``define.amd``,
+# ``typeof module``, ``module.exports``) and jQuery's DOMEval (a script element given code and no source) load nothing on a page.
+_LOADERS = (
+    ('requirejs', re.compile(r'\brequire(?:js)?\.config\s{0,4}\(|\brequirejs\s{0,4}\(|\bdata-main\s{0,4}=')),
+    ('systemjs', re.compile(r'\bSystem(?:JS)?\.(?:config|import|register)\s{0,4}\(')),
+    ('paths', re.compile(r'''(?<![\w$.])["']?paths["']?\s{0,4}:\s{0,4}\{''')),
+    ('import()', re.compile(r'''(?<![\w$."'`])import\s{0,4}\(''')),
+    ('static import', re.compile(r'''(?<![\w$."'`])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
+    ('re-export', re.compile(r'''(?<![\w$."'`])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
+    ('getScript', re.compile(r'\.getScript\s{0,4}\(|\bloadScript\s{0,4}\(|\$script\s{0,4}\(|\bheadjs\b|\bLazyLoad\.js\b')),
+    ('webpack chunk', re.compile(r'__webpack_require__\s{0,4}\.\s{0,4}[elf]\b|webpackChunk|webpackJsonp|ChunkLoadError|\.chunk\.m?js\b|'
+                                 r'\.e\s{0,4}=\s{0,4}(?:function\s{0,4}\([\w$]{0,30}\)\s{0,4}\{\s{0,4}(?:return\s{1,4})?|\(?[\w$]{1,30}\)?\s{0,4}=>\s{0,4})'
+                                 r'Promise\.all\s{0,4}\(')),
+    ('worker', re.compile(r'\bimportScripts\s{0,4}\(|\bnew\s{1,4}(?:Shared)?Worker\s{0,4}\(|serviceWorker\s{0,4}\.\s{0,4}register\s{0,4}\(')),
+    ('script file name', re.compile(r'''["'`][^"'`\n]{0,300}\.m?js(?:[?#][^"'`\n]{0,120})?["'`]''')),
+    # a library's file named by its version in a string (``"jquery-1.12.4.min"``, ``'/vendor/bootstrap@3.3.7/js/bootstrap'``): a path to load
+    ('library file name', re.compile(r'''["'`][^"'`\n]{0,200}?(?<![\w-])(?:''' + '|'.join(sorted(map(re.escape, _STEMS), key=len, reverse=True))
+                                     + r''')(?:[-.@/]|/dist/|/js/){1,3}v?\d{1,4}\.\d{1,4}(?:\.\d{1,4})?(?:[.-][a-z]{2,12}){0,3}'''
+                                     + r'''(?:/[\w.-]{1,60}){0,3}(?:[?#][^"'`\n]{0,120})?["'`]''', re.IGNORECASE)),
+)
+# ``require(`` and ``define(`` load modules through an AMD or CommonJS loader, unless they sit behind the guard a UMD wrapper puts before them
+_MODULE_CALL = re.compile(r'''(?<![\w$."'`])(?:require|define)\s{0,4}\(''')
+_MODULE_GUARD = re.compile(r'typeof\s{0,4}(?:define|require|module|exports)\b|define\.amd|module\.exports|typeof\s{0,4}module')
+_COMMENT_LINE = re.compile(r'^\s{0,200}(?://|/\*|\*)')
+_SCRIPT_ELEMENT = re.compile(r'''createElement\(\s{0,4}(?:["']script["']|[A-Za-z_$][\w$]{0,30}\s{0,4}\))''')
+_GIVEN_SOURCE = re.compile(r'''\.src\s{0,4}=(?!=)|setAttribute\(\s{0,4}["']src["']|\bsrc\s{0,4}:\s{0,4}(?!["'`]?data:)''')
+MAX_LOADER_HITS = 50  # occurrences of one construct looked at in one file
+
+
+def runtime_loaders(text):
+    """The kinds of run-time script loading ``text`` (one script, or an inline script's code) does (``_LOADERS``, an unguarded ``require``
+    or ``define``, a script element given a source), [] when none. When unsure it names one: a script that may load another file is not
+    known whole."""
+    text = text or ''
+    found = [name for name, pattern in _LOADERS if pattern.search(text)]
+    for call in itertools.islice(_MODULE_CALL.finditer(text), MAX_LOADER_HITS):
+        line = text[text.rfind('\n', 0, call.start()) + 1:call.start()]
+        if _COMMENT_LINE.match(line) or _MODULE_GUARD.search(text, max(0, call.start() - 200), call.start()):
+            continue  # a comment, or a UMD wrapper's guarded branch: no loader of its own on the page
+        found.append('require/define')
+        break
+    for made in itertools.islice(_SCRIPT_ELEMENT.finditer(text), MAX_LOADER_HITS):
+        if _GIVEN_SOURCE.search(text, made.end(), made.end() + 1500):
+            found.append('createElement(script)')  # a script element given a source: it loads a file the read never sees
+            break
+    return found
+
+
 def _read_one(url, fetch, cached=None):
     """``(read, reason)`` for one script: what it states, or why nothing was read. A ``304`` to the stored ETag keeps the cached reading."""
     etag = (cached or {}).get('etag') or ''
@@ -642,7 +703,9 @@ def _read_one(url, fetch, cached=None):
     truncated = size >= MAX_SCRIPT_BYTES
     headers = got.get('raw_headers') or {}
     found = read_body(text)
-    return {'found': [list(f) for f in found], 'truncated': truncated, 'whole': not truncated and _states_all(text, found),
+    loaders = runtime_loaders(text)  # a script that loads another at run time is not known whole: what it loads is never read
+    return {'found': [list(f) for f in found], 'truncated': truncated, 'loaders': loaders[:10],
+            'whole': not truncated and not loaders and _states_all(text, found),
             'sha256': '' if truncated else hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest(),
             'etag': str(headers.get('etag') or '')[:120], 'length': str(headers.get('content-length') or '')[:20]}, ''
 
@@ -710,6 +773,8 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             entry.update({'read': known[0]} if known[0] is not None else {'skipped': known[1]})
             continue
         cached = _cached(url, project)
+        if cached is not None and not isinstance(cached.get('loaders'), list):
+            cached = None  # read before run-time loaders were looked for: read again, never revalidated as it was
         if cached is not None and not reader.fresh and time.time() - (cached.get('checked') or 0) < _fresh_for(url):
             entry['read'] = {k: v for k, v in cached.items() if k != 'checked'}
             continue
@@ -741,9 +806,11 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
 
 
 def read_whole(read):
-    """Whether one script's reading (``_read_one``) covers the whole file and everything it says: not cut, and nothing in it beyond what was
-    found. A reading stored before ``whole`` was recorded is not."""
-    return isinstance(read, dict) and bool(read.get('sha256')) and read.get('whole') is True
+    """Whether one script's reading (``_read_one``) covers the whole file and everything it says: not cut, nothing in it beyond what was
+    found, and no code in it that loads another script at run time (``runtime_loaders``). A reading stored before ``whole`` and ``loaders``
+    were recorded is not."""
+    return (isinstance(read, dict) and bool(read.get('sha256')) and read.get('whole') is True and isinstance(read.get('loaders'), list)
+            and not read['loaders'])
 
 
 # ------------------------------------------------------------------ several copies: which one runs
@@ -904,9 +971,29 @@ def page_status(status):
 _THEME_OR_PLUGIN = re.compile(r'/wp-content/(?:themes|plugins)/', re.IGNORECASE)
 
 
+_URL_VERSION = re.compile(r'(?<![\w.])v?(\d{1,4}\.\d{1,4}(?:\.\d{1,4})?)(?![\w]|\.\d)')
+MAX_URL_VERSIONS = 120
+
+
+def url_versions(urls):
+    """Every version a script URL of the page carries, in its path (a file name, a CDN directory: ``jquery.fancybox-1.0.4.js``,
+    ``/npm/jquery@3.4.1/``) or its query string (``?ver=3.2.1``): what a technology scan reading this page may have taken for a library's
+    version."""
+    out = {}
+    for url in urls:
+        try:
+            parts = urlsplit(url or '')
+        except ValueError:
+            continue
+        for found in itertools.islice(_URL_VERSION.finditer(unquote(f'{parts.path}?{parts.query}')), 20):
+            out.setdefault(found.group(1), None)
+    return list(out)[:MAX_URL_VERSIONS]
+
+
 def script_page(entries):
-    """What correlation keeps of a parsed front page (``parse_page`` entries): how many scripts with a source it loads and the ``?ver=``
-    strings they carry, each with the library its script is ('' for a theme's or plugin's own script)."""
+    """What correlation keeps of a parsed front page (``parse_page`` entries): how many scripts with a source it loads, the ``?ver=``
+    strings they carry, each with the library its script is ('' for a theme's or plugin's own script), and every version their URLs carry
+    (``url_versions``)."""
     urls = [entry['url'] for entry in entries if entry.get('url')]
     seen = {}
     for url in urls:
@@ -916,7 +1003,7 @@ def script_page(entries):
             # core path's ?ver= (wp-includes: jQuery UI's real version on ui/core.min.js) or any other script's may be a library's own
             owner = found['library'] or ('' if _THEME_OR_PLUGIN.search(urlsplit(url).path or '') else 'other')
             seen.setdefault((found['query_version'], owner), None)
-    return {'scripts': len(urls), 'query_versions': [{'version': v, 'library': k} for v, k in list(seen)[:60]],
+    return {'scripts': len(urls), 'query_versions': [{'version': v, 'library': k} for v, k in list(seen)[:60]], 'url_versions': url_versions(urls),
             'capped': bool(getattr(entries, 'capped', False)), 'inline_unread': int(getattr(entries, 'inline_unread', 0)),
             'inline': [{'library': k, 'version': v} for k, v in getattr(entries, 'inline', ())]}
 
@@ -1005,13 +1092,31 @@ class HostLibraries:
     stored version may make a match and with what evidence. ``alias_of`` is the host the front page only redirects to (``redirect_alias_of``):
     such a host serves no scripts of its own, so no library version stored for it is matched."""
 
-    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, inline=(), fresh=False):
+    def __init__(self, records=None, legacy=None, alias_of='', page_read=False, inline=(), fresh=False, page_versions=(), inline_versions=()):
         self.records = records or {}  # library key -> record
         self.legacy = legacy or {}    # (library key, version) -> source, from fingerprints that predate records
         self.alias_of = alias_of
         self.page_read = page_read    # every web port's front page was read whole, lately, and is the site itself (complete_page)
         self.inline = set(inline)  # the libraries an inline script of the page states (their banner or code is in the page itself)
         self.fresh = fresh            # some reading of the host's page is recent (a route check or the libraries probe in FRESH_DAYS)
+        self.page_versions = set(page_versions)      # every version the current front pages' script URLs carry (``url_versions``)
+        self.inline_versions = set(inline_versions)  # (library key, version) the current front pages' inline scripts state
+
+    def explains(self, key, version):
+        """Whether this front page itself shows where a technology scan's ``version`` of library ``key`` came from: a script URL of the page
+        carries it (a ``?ver=`` value, a file name or CDN directory version), or the page states it as ANOTHER library's version (a file or
+        inline script of jQuery Migrate 3.4.1 explains a "jQuery 3.4.1"). Only such a version may close as contradicted by the page's files:
+        one the page does not explain was seen elsewhere (a deeper page, a chunk loaded later) and stays a candidate."""
+        if version in self.page_versions:
+            return True
+        if any(other != key and stated == version for other, stated in self.inline_versions):
+            return True
+        for other, record in self.records.items():
+            if other == key or not isinstance(record, dict):
+                continue
+            if any(isinstance(c, dict) and c.get('version') == version and c.get('source') == 'body' for c in record.get('copies') or []):
+                return True
+        return False
 
     @classmethod
     def for_subdomain(cls, subdomain, now=None):
@@ -1021,6 +1126,7 @@ class HostLibraries:
 
         from cveFeed.models import ProbeObservation, RouteAuth
         from cveFeed.route_auth import web_bases
+        from startScan.models import Subdomain
         project = subdomain.target_domain.project_id if subdomain.target_domain_id else None
         if not project:
             return cls()
@@ -1064,13 +1170,23 @@ class HostLibraries:
             seen = {(c.get('url'), c.get('version')) for c in records[key]['copies'] if isinstance(c, dict)}
             records[key]['copies'] += [c for c in record.get('copies') or [] if isinstance(c, dict) and (c.get('url'), c.get('version')) not in seen]
         roots = [(row.url, row.http_status, row.redirect_to) for row in current.values()]
+        alias_of = redirect_alias_of(roots, host, bases) if roots else ''
+        if alias_of and not Subdomain.objects.filter(target_domain__project_id=project, name__iexact=alias_of).exists():
+            # a redirect to a host this project does not inventory: the CVE would silently leave the project, so the match stays
+            alias_of = ''
+        page_versions, inline_versions = set(), set()
+        for row in current.values():
+            script_page = (row.evidence or {}).get('script_page') or {}
+            page_versions |= {str(v) for v in script_page.get('url_versions') or [] if isinstance(v, str)}
+            inline_versions |= {(PRODUCTS.get(str(item.get('library')).lower(), str(item.get('library'))), str(item.get('version')))
+                                for item in script_page.get('inline') or [] if isinstance(item, dict) and item.get('version')}
         # the host's page is known only when every web port's front page was read whole, lately, and is the site itself
         page_read = bool(origins) and all(origin in current and complete_page(current[origin]) for origin in origins)
         inline = set()
         for row in current.values():
             script_page = (row.evidence or {}).get('script_page') or {}
             inline |= {str(item.get('library')) for item in script_page.get('inline') or [] if isinstance(item, dict) and item.get('library')}
-        return cls(records, legacy, redirect_alias_of(roots, host, bases) if roots else '', page_read, inline, bool(current) or bool(dated))
+        return cls(records, legacy, alias_of, page_read, inline, bool(current) or bool(dated), page_versions, inline_versions)
 
     def judge(self, product, version):
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
@@ -1152,7 +1268,9 @@ class HostLibraries:
             # the string a script's query or name carries, where the file itself was read and states otherwise or nothing
             return True, {'reason': (f'the page\'s own scripts say {name} {said}; the {version} came from a script\'s name or query string'
                                      if said else f'the {name} script\'s own file does not state {version}')}, None
-        if stated and self._contradicts(key, record, copies):  # every copy of the library on the page, read whole, states another version
+        if stated and self.explains(key, version) and self._contradicts(key, record, copies):
+            # the page itself explains the version (a script URL or another library on it carries it), and every script of it, read whole,
+            # states another version of the library
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
         if named:  # the script was never read: its query or name string is all there is, kept at the file-name confidence
             copy = named[0]

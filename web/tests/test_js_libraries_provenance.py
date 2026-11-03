@@ -32,9 +32,11 @@ NGINX_BUG = FakeCVE(42945, [{'vendor': 'f5', 'product': 'nginx', 'ranges': [{'in
 WORDPRESS_BUG = FakeCVE(77001, [{'vendor': 'wordpress', 'product': 'wordpress', 'ranges': [{'introduced': '7.0.0', 'fixed': '7.1.5'}]}])
 CVES = (JQUERY_XSS, NGINX_BUG, WORDPRESS_BUG)
 
-# the live WordPress 7.1.x page: core jQuery 3.7.1 and a theme plugin whose cache-buster Wappalyzer reads as "jQuery 1.0.4"
+# the live WordPress 7.1.x page: core jQuery 3.7.1, a theme plugin whose cache-buster Wappalyzer reads as "jQuery 1.0.4" and a forms plugin
+# whose cache-buster it reads as "jQuery 3.2.1"
 WORDPRESS_PAGE = ('<script src="/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script>'
-                  '<script src="/wp-content/themes/acme/js/jquery.fancybox.js?ver=1.0.4"></script>')
+                  '<script src="/wp-content/themes/acme/js/jquery.fancybox.js?ver=1.0.4"></script>'
+                  '<script src="/wp-content/plugins/forms/js/forms.min.js?ver=3.2.1"></script>')
 FANCYBOX = '/*! fancyBox v2.1.5 fancyapps.com | fancyapps.com/fancybox/#license */\n(function(r,G,f,v){})(window,document,jQuery);'
 
 
@@ -401,6 +403,12 @@ class SystemicLibraryTests(Hosts):
         page = '<script src="/js/bootstrap.min.js"></script><script src="/js/lodash.min.js"></script>'
         bodies = {'/js/bootstrap.min.js': '/*!\n  * Bootstrap v5.3.2 (https://getbootstrap.com/)\n  */',
                   '/js/lodash.min.js': '/**\n * @license\n * Lodash 4.17.21 <https://lodash.com/>\n */'}
+        # versions the page does not explain (no script URL of it, no other library on it carries them) stay capped candidates
+        found, _libraries = self.found(page, bodies, 'Bootstrap:3.3.7', 'Lodash:4.17.4', 'Bootstrap:5.3.2', 'Lodash:4.17.21')
+        self.assertEqual({key: m['confidence'] for key, m in found.items()},
+                         {('bootstrap', '3.3.7'): js_libraries.CONFIDENCE['filename'], ('lodash', '4.17.4'): js_libraries.CONFIDENCE['filename']})
+        # a theme's scripts carry them as ?ver= strings: the technology scan misread this page, and its files say otherwise
+        page += '<script src="/wp-content/themes/acme/js/theme.js?ver=3.3.7"></script><script src="/wp-content/plugins/p/p.js?ver=4.17.4"></script>'
         found, libraries = self.found(page, bodies, 'Bootstrap:3.3.7', 'Lodash:4.17.4', 'Bootstrap:5.3.2', 'Lodash:4.17.21')
         self.assertEqual(found, {})
         self.assertEqual(libraries.judge('Bootstrap', '3.3.7')[1]['reason'],
@@ -421,7 +429,9 @@ class SystemicLibraryTests(Hosts):
         self.assertFalse(libraries.judge('Bootstrap', '4.17.4')[0])
 
 
-CONTRA = '<script src="/js/jquery.min.js"></script>'  # a whole page whose one jQuery file (served by read_root) says 3.7.1
+# a whole page whose one jQuery file (served by read_root) says 3.7.1, and whose other script carries the 1.12.4 the technology scan reported
+# (a ?ver= string): only a version the page itself explains is ever closed as contradicted by its files
+CONTRA = '<script src="/js/jquery.min.js"></script><script src="/site.js?ver=1.12.4"></script>'
 
 
 ORACLE = os.path.join(os.path.dirname(__file__), 'fixtures', 'js_provenance')
@@ -530,6 +540,11 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
             self.assertTrue(all(m.confidence <= js_libraries.CONFIDENCE['filename'] for m in is_open if m.subdomain.name == 'acme.test'))
         script_page = RouteAuth.objects.get(host='acme.test').evidence['script_page']
         self.assertEqual((script_page['scripts'], script_page['unread']), (36, 34))
+        # the page explains every jQuery version the technology scans named (two ?ver= strings, jQuery Migrate 3.4.1): only the 34 scripts
+        # not read whole keep them open
+        libraries = js_libraries.HostLibraries.for_subdomain(self.subs['acme.test'])
+        self.assertEqual([libraries.explains('jquery', v) for v in ('1.0.4', '3.2.1', '3.4.1')], [True, True, True])
+        self.assertFalse(libraries.page_read)
         self.assertEqual(len(closed), 15)
         kinds = {}
         for m in closed:
@@ -803,7 +818,7 @@ class ReviewScenarioTests(ReviewScenarioBase):
         self.assertEqual(self.correlate(gone)[('gone.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, '')
         # a front page that answered 200 once and now answers 404 is retired, and the hosted 404 page it serves is the page now
         hosted = self.host('hosted.x.test', ['jQuery:1.12.4', 'jQuery:1.11.2'])
-        self.read_root('hosted.x.test', 404, '<script src="/hs/jquery-1.11.2.js"></script>',
+        self.read_root('hosted.x.test', 404, '<script src="/hs/jquery-1.11.2.js"></script><script src="/site.js?ver=1.12.4"></script>',
                        scripts={'https://hosted.x.test/hs/jquery-1.11.2.js': oracle('jquery-1.11.2-head.js')})
         RouteAuth.objects.filter(host='hosted.x.test').update(retired_at=timezone.now(), previous_state='open')
         found = self.correlate(hosted)
@@ -826,7 +841,8 @@ class ReviewScenarioTests(ReviewScenarioBase):
         reconcile_library_provenance()
         self.assertEqual(CVEMatch.objects.get(pk=held.pk).ai_verdict, '')
         # ... a host that now only redirects elsewhere is not a page that alternates: that still closes
-        self.read_root('flap.x.test', 301, '', location='https://elsewhere.example/')
+        self.host('elsewhere.x.test', [])  # an alias closes only to a host the project inventories
+        self.read_root('flap.x.test', 301, '', location='https://elsewhere.x.test/')
         self.assertEqual(self.correlate(sub)[('flap.x.test', 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
 
     def test_the_library_sweep_looks_only_at_open_matches_in_bounded_batches(self):
