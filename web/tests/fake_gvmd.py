@@ -14,6 +14,11 @@ v26.43.0, which speaks GMP 22.7), not a guess:
 * ``get_reports``: ``<report id>`` (the envelope) holding ``<report id>`` (the report). Only with ``details=1`` does the report carry
   ``<results start max>`` (paged by the filter's ``first`` and ``rows``) and a ``<host>`` per host; with ``details=0`` it has the counts
   (``<hosts><count>``, ``<result_count>``) and no ``<host>`` at all. ``result_hosts_only`` (default 1) leaves out the hosts without a result;
+* ``get_tasks``: the ``<last_report>``'s ``<result_count>`` names its levels ``hole``, ``info``, ``log``, ``warning`` and ``false_positive``, as
+  gvmd 22.4 to 24.x print it (src/gmp.c at v22.7.0); ``count_names='25'`` prints gvmd 25's ``critical``, ``high``, ``medium``, ``low`` and
+  ``log`` with ``hole``, ``info`` and ``warning`` as deprecated duplicates;
+* ``max_rows`` is gvmd's "Max Rows Per Page" setting: every ``rows`` of ``get_results`` and ``get_reports`` (``-1`` too) is clamped to it;
+* ``delete_task`` of a task gvmd does not have answers 404 "Failed to find task";
 * ``modify_user`` answers 404 "Failed to find user" for a user the caller does not own: the community containers' ``admin`` is created by
   ``gvmd --create-user``, owned by nobody, so it cannot change its own password over GMP (``modify_self=False``, as gvmd 22.7 does).
 """
@@ -46,7 +51,7 @@ class FakeGvmd:
     never the password) and ``connections``."""
 
     def __init__(self, user='cvengine', password='fake-gmp-password-not-real', nvts=95000, syncing=False, feeds=FEED_TYPES, version='22.7',
-                 modify_self=False):
+                 modify_self=False, count_names='22.7', max_rows=1000):
         self.user, self.password, self.version = user, password, version
         self.users = {user: password}  # name -> password: a test adds more
         self.owners = {user: None}  # name -> the user who created it (None: made by gvmd --create-user, as the containers' admin is)
@@ -54,6 +59,8 @@ class FakeGvmd:
         self.user_roles = {user: 'Admin'}
         self.modify_self = modify_self  # False: gvmd 22.7's answer to a user changing its own password (404 Failed to find user)
         self.nvts, self.syncing, self.feeds = nvts, syncing, set(feeds)
+        self.count_names = count_names  # '22.7': hole/info/log/warning (gvmd 22.4 .. 24.x); '25': critical/high/medium/low/log plus the old names
+        self.max_rows = max_rows  # gvmd's "Max Rows Per Page" (1000 by default)
         self.tmp = tempfile.mkdtemp(prefix='fake-gvmd-')
         self.path = os.path.join(self.tmp, 'gvmd.sock')
         self.requests, self.connections = [], 0
@@ -296,8 +303,9 @@ class FakeGvmd:
 
     def cmd_delete_task(self, root):
         task = self.tasks.pop(root.get('task_id'), None)
-        if task is not None:
-            self.deleted_reports.add(task['report'])  # ultimate: the task's reports go with it
+        if task is None:  # send_find_error_to_client
+            return f'<delete_task_response status="404" status_text="Failed to find task &apos;{escape(root.get("task_id") or "")}&apos;"/>'
+        self.deleted_reports.add(task['report'])  # ultimate: the task's reports go with it
         return ok('delete_task_response')
 
     def cmd_get_tasks(self, root):
@@ -306,7 +314,13 @@ class FakeGvmd:
             return f'<get_tasks_response status="404" status_text="Failed to find task \'{task_id}\'"/>'
         task = self.tasks[task_id]
         counts = self._level_counts(task_id)
-        result_count = ''.join(f'<{level}>{counts[level]}</{level}>' for level in ('critical', 'high', 'medium', 'low', 'log')) + '<false_positive>0</false_positive>'
+        if self.count_names == '25':  # gvmd 25.0.0 and later: the new names, the old ones kept as deprecated duplicates
+            result_count = (f"<critical>{counts['critical']}</critical><hole deprecated='1'>{counts['high']}</hole><high>{counts['high']}</high>"
+                            f"<info deprecated='1'>{counts['low']}</info><low>{counts['low']}</low><log>{counts['log']}</log>"
+                            f"<warning deprecated='1'>{counts['medium']}</warning><medium>{counts['medium']}</medium><false_positive>0</false_positive>")
+        else:  # gvmd 22.4 to 24.x (src/gmp.c at v22.7.0): no critical level, and the old names only
+            result_count = (f"<hole>{counts['critical'] + counts['high']}</hole><info>{counts['low']}</info><log>{counts['log']}</log>"
+                            f"<warning>{counts['medium']}</warning><false_positive>0</false_positive>")
         if task['status'] in ('Done', 'Stopped', 'Interrupted'):
             report = (f'<last_report><report id="{task["report"]}"><timestamp>2026-10-27T12:30:00Z</timestamp><scan_start>2026-10-27T11:00:00Z</scan_start>'
                       f'<scan_end>2026-10-27T12:30:00Z</scan_end><result_count>{result_count}</result_count><severity>9.8</severity></report></last_report>')
@@ -337,6 +351,7 @@ class FakeGvmd:
         words = self._filter(root)
         task_id = words.get('task_id') or root.get('task_id')
         rows, first = int(words.get('rows', 100)), int(words.get('first', 1))
+        rows = self.max_rows if rows < 1 else min(rows, self.max_rows)  # "Max Rows Per Page"
         every = self._filtered(self.results.get(task_id, []), words)
         page = every[first - 1:first - 1 + rows]
         # gvmd's shape (handle_get_results, send_get_end): the results are direct children, <results/> is an empty marker after them
@@ -353,7 +368,7 @@ class FakeGvmd:
         words = self._filter(root)
         details = root.get('details') == '1'
         rows, first = int(words.get('rows', 100)), int(words.get('first', 1))
-        rows = 1000 if rows < 1 else min(rows, 1000)  # "Max Rows Per Page" caps rows=-1 too
+        rows = self.max_rows if rows < 1 else min(rows, self.max_rows)  # "Max Rows Per Page" caps rows=-1 too
         every = self._filtered(self.results.get(task_id, []), words)
         scanned = set(self.report_hosts.get(task_id, set())) if self.report_has_hosts else set()
         with_results = {etree.fromstring(x).findtext('host').strip() for x in every}

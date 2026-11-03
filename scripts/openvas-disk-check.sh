@@ -8,7 +8,7 @@
 # Where the free space is read: the Docker data directory when it is on this machine (Linux), else from inside a running container of this stack
 # (Docker Desktop keeps its data directory in a VM, whose disk the containers' file systems are on).
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit
 
 setting() {
   local key=$1 value=${!1:-}

@@ -43,6 +43,7 @@ class Command(BaseCommand):
             'task': task_id, 'name': openvas_scan._text(task, 'name'), 'status': openvas_scan._text(task, 'status'),
             'progress': openvas_scan._text(task, 'progress'), 'report': got['report_id'],
             'gvm_result_count': got['gvm_count'], 'results_read': len(got['items']) + got['unusable'],
+            'report_result_count': got['count'], 'read_short_of_count': got['short'],
             'with_cve': sum(1 for i in got['items'] if i['cves']), 'without_cve': got['no_cve'], 'unusable': got['unusable'],
             'report_hosts': got['hosts'], 'host_minutes': openvas_scan.host_minutes(got['hosts']), 'scanned': sorted(scanned),
             # the first page of get_results, read as 1.3.2 read it (inside <results>) and as gvmd sends it (direct children): issue #394

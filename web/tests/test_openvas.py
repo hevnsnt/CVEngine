@@ -838,7 +838,7 @@ class ImportTests(Fixture, TestCase):
         with mock.patch.object(ov, 'MAX_RESULTS', 100):
             gmp_results = self.factory()
             with gmp_results as gmp:
-                items, _no_cve, _bad = ov.fetch_results(gmp, run.task_id)
+                items = ov.fetch_results(gmp, run.task_id)['items']
         self.assertEqual(len(items), 100)
 
     def test_hostile_text_is_stored_clipped_and_plain(self):

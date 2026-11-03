@@ -333,6 +333,17 @@ def _int(text):
         return 0
 
 
+def _count(text):
+    """A count from gvmd's text: ASCII digits only (``int`` would also take other scripts' digits, a sign, spaces or ``_``), a negative one is
+    0, and ``None`` when it is not a number at all."""
+    value = str(text or '').strip()
+    if re.fullmatch(r'[0-9]+', value):
+        return int(value)
+    if re.fullmatch(r'-[0-9]+', value):
+        return 0
+    return None
+
+
 def _find(items, spec, tag):
     """The entity (``<config>``, ``<scanner>``, ``<port_list>``) of ``spec`` = (id, name): by its id when the name agrees, else by name."""
     by_name = None
@@ -990,7 +1001,10 @@ def _delete_task(gmp, run):
     try:
         gmp.delete_task(run.task_id, ultimate=True)
         return True
-    except Exception:  # noqa: BLE001 - the results are imported; a leftover task is harmless
+    except Exception as exc:  # noqa: BLE001 - the results are imported; a leftover task is harmless
+        if _task_gone(exc):  # gvmd no longer has it (removed by hand, or its database was reset): nothing is left to remove
+            logger.info('the GVM task of run %s was already gone', run.pk)
+            return True
         logger.info('could not remove the GVM task of run %s', run.pk)
         return False
 
@@ -1166,18 +1180,54 @@ def _parse_into(elements, out):
             out['items'].append(parsed)
 
 
-def fetch_results(gmp, task_id):
-    """Every result of a task through ``get_results`` (filter ``task_id=``), a page at a time, at most ``MAX_RESULTS``: ``(items, no_cve,
-    unusable)``. The fallback for a task whose report id gvmd did not name; ``read_report`` is the main path."""
-    out, first = {'items': [], 'no_cve': 0, 'unusable': 0}, 1
-    while first <= MAX_RESULTS:
-        page = gmp.get_results(filter_string=f'task_id={task_id} {RESULT_FILTER} rows={RESULT_PAGE} first={first}', details=True)
-        elements = _results_of(page)
-        _parse_into(elements, out)
-        if len(elements) < RESULT_PAGE:
+def _last_page(elements, read, count):
+    """Whether paging stops after this page. gvmd clamps ``rows`` to its "Max Rows Per Page" setting, so with that set below ``RESULT_PAGE``
+    every page is short and a short page is not the end: paging goes on until a page is empty or as many results as gvmd counts are read. Only
+    when gvmd gives no count does a page shorter than asked end it. A count below what was read is wrong, so paging goes on to an empty page."""
+    if not elements:
+        return True
+    if count is None:
+        return len(elements) < RESULT_PAGE
+    return read == count
+
+
+def _short(out):
+    """Whether fewer results were read than gvmd counts (and fewer than ``MAX_RESULTS``, which is partial by itself): a read that stopped early
+    says nothing about the results it did not get, so it is imported as partial and resolves nothing."""
+    return out['count'] is not None and len(out['items']) + out['unusable'] < min(out['count'], MAX_RESULTS)
+
+
+def _paged(ask, out):
+    """Read pages of results with ``ask(first)`` (an answer holding ``<result>``s) into ``out`` (``_parse_into``), from ``first=1`` on by as many
+    as each page gave, until ``_last_page``, at most ``MAX_RESULTS`` results and ``MAX_RESULTS // RESULT_PAGE`` pages (a gvmd that never ends a
+    page still stops). ``out['count']`` is set from the first answer by ``ask`` when gvmd gives one."""
+    first = 1
+    for _page in range(max(1, MAX_RESULTS // RESULT_PAGE)):
+        if first > MAX_RESULTS:
             break
-        first += RESULT_PAGE
-    return out['items'], out['no_cve'], out['unusable']
+        elements = ask(first)
+        if elements is None:
+            break
+        _parse_into(elements, out)
+        if _last_page(elements, len(out['items']) + out['unusable'], out['count']):
+            break
+        first += len(elements)  # gvmd may give fewer than asked ("Max Rows Per Page"): continue from what it gave
+    out['short'] = _short(out)
+    return out
+
+
+def fetch_results(gmp, task_id):
+    """Every result of a task through ``get_results`` (filter ``task_id=``), a page at a time, at most ``MAX_RESULTS``: ``{items, no_cve,
+    unusable, count, short}``, ``count`` being the results gvmd says match (``<result_count><filtered>``). The fallback for a task whose report
+    id gvmd did not name; ``read_report`` is the main path."""
+    out = {'items': [], 'no_cve': 0, 'unusable': 0, 'count': None}
+
+    def ask(first):
+        page = gmp.get_results(filter_string=f'task_id={task_id} {RESULT_FILTER} rows={RESULT_PAGE} first={first}', details=True)
+        if first == 1:
+            out['count'] = _report_count(page)
+        return _results_of(page)
+    return _paged(ask, out)
 
 
 def report_id_of(task_status):
@@ -1191,12 +1241,19 @@ def report_id_of(task_status):
 
 
 def gvm_result_count(task_status):
-    """How many results gvmd counts in the task's last report (critical, high, medium, low and log; ``hole``, ``info`` and ``warning`` are the
-    deprecated names of the same counts and are not added again), or ``None`` when it does not say."""
+    """How many results gvmd counts in the task's last report, or ``None`` when it does not say. gvmd 22.4 to 24.x name the levels ``hole``,
+    ``warning``, ``info`` and ``log`` only; gvmd 25.0.0 and later print ``critical``, ``high``, ``medium``, ``low`` and ``log`` and keep ``hole``,
+    ``warning`` and ``info`` as deprecated duplicates of high, medium and low. Each level is counted once, by the first of its names present."""
     counts = task_status.find('./task/last_report/report/result_count') if task_status is not None else None
     if counts is None:
         return None
-    return sum(_int(_text(counts, level)) for level in ('critical', 'high', 'medium', 'low', 'log'))
+
+    def level(*names):
+        for name in names:
+            if counts.find(name) is not None:
+                return _count(_text(counts, name)) or 0
+        return 0
+    return level('critical') + level('high', 'hole') + level('medium', 'warning') + level('low', 'info') + level('log')
 
 
 def _report_element(answer):
@@ -1211,9 +1268,9 @@ def _report_count(report):
     counts = report.find('result_count') if report is not None else None
     if counts is None:
         return None
-    for value in (_text(counts, 'filtered'), _text(counts, 'full'), (counts.text or '').strip()):
-        if value.strip().lstrip('-').isdigit():
-            return int(value)
+    for value in (_text(counts, 'filtered'), _text(counts, 'full'), counts.text):
+        if _count(value) is not None:
+            return _count(value)
     return None
 
 
@@ -1221,27 +1278,22 @@ def read_report(gmp, report_id):
     """Every result of one report and every host it scanned, read from the report itself a page at a time (``first``, ``rows``; a ``rows=-1``
     is capped by gvmd's "Max Rows Per Page", so it is not relied on). ``details`` is on: without it gvmd sends neither the results nor a
     ``<host>``, only counts. Returns ``{items, no_cve, unusable, hosts: {address: {start, end}}, count}``: ``count`` is the number of results gvmd
-    says the report holds under the same filter, ``None`` when it does not say."""
+    says the report holds under the same filter, ``None`` when it does not say; ``short`` is true when fewer results were read than that
+    count (``_short``). Paging does not stop at a page shorter than asked while gvmd counts more (``_last_page``)."""
     out = {'items': [], 'no_cve': 0, 'unusable': 0, 'hosts': {}, 'count': None}
-    first = 1
-    while first <= MAX_RESULTS:
-        answer = gmp.get_report(report_id, filter_string=f'{REPORT_FILTER} first={first} rows={RESULT_PAGE}', details=True)
-        report = _report_element(answer)
+
+    def ask(first):
+        report = _report_element(gmp.get_report(report_id, filter_string=f'{REPORT_FILTER} first={first} rows={RESULT_PAGE}', details=True))
         if report is None:
-            break
+            return None
         if first == 1:
             out['count'] = _report_count(report)
             for host in report.findall('host'):
                 address = _text(host, 'ip')
                 if address:
                     out['hosts'][address] = {'start': _text(host, 'start'), 'end': _text(host, 'end')}
-        elements = _results_of(report)
-        _parse_into(elements, out)
-        read = len(out['items']) + out['unusable']
-        if len(elements) < RESULT_PAGE or (out['count'] is not None and read >= out['count']):
-            break
-        first += RESULT_PAGE
-    return out
+        return _results_of(report)
+    return _paged(ask, out)
 
 
 def task_results(gmp, task_status, task_id):
@@ -1251,8 +1303,7 @@ def task_results(gmp, task_status, task_id):
     if report_id:
         out = read_report(gmp, report_id)
     else:
-        items, no_cve, unusable = fetch_results(gmp, task_id)
-        out = {'items': items, 'no_cve': no_cve, 'unusable': unusable, 'hosts': {}, 'count': None}
+        out = {**fetch_results(gmp, task_id), 'hosts': {}}
     counted = [c for c in (gvm_result_count(task_status), out['count']) if c is not None]
     out['report_id'], out['gvm_count'] = report_id, (max(counted) if counted else None)
     return out
@@ -1445,14 +1496,18 @@ def import_results(run, gmp, status_xml):
                 got['gvm_count'] if got['gvm_count'] is not None else 'no', run.task_id, got['report_id'] or 'unknown', len(items) + unusable,
                 len(got['hosts']))
     extra = {'gvm_results': got['gvm_count'], 'report_id': got['report_id'] or '', 'host_minutes': host_minutes(got['hosts'])}
+    if got.get('short'):  # gvmd counts more than it gave: what was read is kept, and nothing earlier is resolved by it
+        extra['short_read'] = {'read': len(items) + unusable, 'count': got['count']}
+        logger.warning('OpenVAS run %s: read %s of the %s result(s) gvmd counts in the report; imported as partial', run.pk, len(items) + unusable,
+                       got['count'])
     if got['gvm_count'] and not (items or unusable):
         summary = {'results': 0, 'without_cve': 0, 'unusable': 0, 'hosts_scanned': 0, 'hosts_not_scanned': len(run.hosts), 'findings': 0,
                    'evidence': 0, 'resolved': 0, 'not_in_batch': 0, 'partial': False, 'read_mismatch': True, **extra}
         return summary, []
     scanned = scanned_addresses(gmp, status_xml, items, hosts=got['hosts'] if got['report_id'] else None)
     # Results come highest severity first and stop at MAX_RESULTS: a scan that hit the cap says nothing about what lies beyond it, so it is
-    # partial (nothing earlier is resolved by it) rather than a complete answer.
-    summary, names = _apply_import(run, items, scanned, no_cve, unusable, partial=len(items) + unusable >= MAX_RESULTS)
+    # partial (nothing earlier is resolved by it) rather than a complete answer. So is a read that ended before the count gvmd gives.
+    summary, names = _apply_import(run, items, scanned, no_cve, unusable, partial=len(items) + unusable >= MAX_RESULTS or 'short_read' in extra)
     return {**summary, **extra}, names
 
 
@@ -1676,8 +1731,9 @@ POLL_RETRIES = 4  # polls in a row (15 minutes apart) gvmd may fail to answer ab
 
 
 def _task_gone(exc):
-    """Whether ``exc`` is gvmd saying it has no such task (a 404 answer), as opposed to a socket timeout, a restart or any other trouble."""
-    return str(getattr(exc, 'status', '')) == '404'
+    """Whether ``exc`` is gvmd saying it has no such task (a 404 answer, "Failed to find task"), as opposed to a socket timeout, a restart or any
+    other trouble."""
+    return str(getattr(exc, 'status', '')) == '404' or str(getattr(exc, 'message', '') or '').startswith('Failed to find task')
 
 
 def _trouble_key(run):
@@ -1747,7 +1803,10 @@ def poll(run, gmp, now=None):
         empty = inconclusive(summary)
         if empty:  # nothing to show for the run: the task and its report stay in gvmd for a person to look at (removed after keep_days())
             summary['kept_task_until'] = keep_until().isoformat()
+        short = summary.get('short_read')
         error = (READ_MISMATCH if summary.get('read_mismatch') else INCONCLUSIVE if empty
+                 else f'only {short["read"]} of the {short["count"]} results gvmd counts could be read: imported as partial, nothing earlier is '
+                      'resolved by it' if short
                  else f'more than {MAX_RESULTS} results: the lowest-severity ones were not imported' if summary['partial'] else '')
         finish(run, 'done', error=error, summary=summary)
         if not empty:
