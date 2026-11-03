@@ -537,10 +537,10 @@ class CaptureTests(ShotFixture, TestCase):
 
 	def test_a_page_that_redirects_to_another_host_says_so(self):
 		row = self.queue()
-		self.drain({'www.rt.test': {'final_url': 'https://mybluegrace.example/'}})
+		self.drain({'www.rt.test': {'final_url': 'https://acme-site.example/'}})
 		row.refresh_from_db()
 		self.assertEqual(row.outcome, 'ok')
-		self.assertEqual(row.reason, 'Redirects to https://mybluegrace.example/ (another host).')
+		self.assertEqual(row.reason, 'Redirects to https://acme-site.example/ (another host).')
 
 	def test_an_error_page_is_still_a_picture_with_its_status_as_the_reason(self):
 		row = self.queue()

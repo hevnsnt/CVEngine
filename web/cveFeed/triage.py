@@ -344,7 +344,8 @@ def describe_cve_match(m):
 
 LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',
                    'filename': 'only the script\'s file name or CDN path; the file could not be read or states no version',
-                   'other': 'another fingerprinting tool; the page\'s own scripts were read and are listed under copies'}
+                   'other': ('another fingerprinting tool, not the script file: no more than a file-name hint; any copies list what the '
+                             'page\'s files state')}
 
 
 def library_brief(evidence, names=()):

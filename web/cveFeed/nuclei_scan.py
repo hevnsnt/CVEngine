@@ -258,9 +258,73 @@ def host_of(line):
     return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
 
 
+def _target_host(target):
+    raw = str(target).strip()
+    if '://' in raw:
+        return urlparse(raw).hostname or raw
+    if raw.startswith('['):
+        return raw[1:].split(']', 1)[0]
+    return raw.rsplit(':', 1)[0] if raw.count(':') == 1 else raw
+
+
+def _target_ports(target):
+    """The ports a nuclei target names: its own port, or 80 and 443 for a bare host or address (the web templates' defaults)."""
+    raw = str(target).strip()
+    if '://' in raw:
+        parsed = urlparse(raw)
+        try:
+            return [parsed.port or (443 if parsed.scheme == 'https' else 80)]
+        except ValueError:
+            return []
+    if raw.count(':') == 1 or raw.startswith('['):
+        tail = raw.rsplit(':', 1)[1] if not raw.endswith(']') else ''
+        if tail.isdigit():
+            return [int(tail)]
+    return list(DEFAULT_PORTS)
+
+
 def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
-    reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter)."""
+    reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter).
+
+    A target on a port of the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``, ``host:25``) is left out of this server's run; the run is counted
+    in the egress ledger from its target list (an estimate: a network template may connect to a port of its own)."""
+    from cveFeed import local_egress
+    try:
+        with open(targets_file) as f:
+            listed = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        listed = None
+    path, scratch = targets_file, None
+    if listed is not None:
+        skip = local_egress.skipped_ports()
+        kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
+        if len(kept) != len(listed):
+            local_egress.note_skipped('nuclei', skip, [_target_host(t) for t in listed if t not in kept])
+            if not kept:
+                return
+            handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+            handle.write('\n'.join(kept) + '\n')
+            handle.close()
+            path = scratch = handle.name
+        per_port = {}
+        for target in kept:
+            for port in _target_ports(target):
+                per_port[port] = per_port.get(port, 0) + 1
+        local_egress.record('nuclei', sum(per_port.values()), per_port)
+        for port in local_egress.log_ports() & set(per_port):
+            local_egress.log_connections([_target_host(t) for t in kept if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
+    try:
+        yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file)
+    finally:
+        if scratch:
+            try:
+                os.remove(scratch)
+            except OSError:
+                pass
+
+
+def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     from targetApp.target_types import refuse_local
     refuse_local('nuclei')
     from reNgine import resources
@@ -723,7 +787,8 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
             ledger.record(service, failed_hosts, project, scan, 'failed')
             not_tested.update(failed_hosts)
         tested.update(done_hosts)
-        vulnerable += [(cve.cve_id, h) for h in done_hosts if results[h].get('vulnerable')]
+        from cveFeed.templategen import is_confirmed
+        vulnerable += [(cve.cve_id, h) for h in done_hosts if is_confirmed(results[h])]  # a version-class hit confirms nothing
     return {'cves': len(wanted), 'hosts': len(tested), 'not_tested': len(not_tested), 'vulnerable': vulnerable}
 
 

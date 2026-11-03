@@ -9,13 +9,13 @@ const app = readFileSync(new URL('../static/cve/app.js', import.meta.url), 'utf8
 const member = (id, host, extra = {}) => ({id, host, heat: 'ice', status: 'open', remediation_status: 'open', classification: 'needs_validation',
   validation_status: 'none', ...extra});
 const groupRow = (members, extra = {}) => ({
-  type: 'cve', kind: 'match', id: members[0].id, title: 'CVE-2020-11023', host: members[0].host, project: 'bluegrace', status: members[0].status,
-  group: {id: 'gabc', hosts: members.length, findings: members.length, registrable_domain: 'mybluegrace.com', member_ids: members.map((m) => m.id),
+  type: 'cve', kind: 'match', id: members[0].id, title: 'CVE-2020-11023', host: members[0].host, project: 'acmesite', status: members[0].status,
+  group: {id: 'gabc', hosts: members.length, findings: members.length, registrable_domain: 'acme-site.com', member_ids: members.map((m) => m.id),
     members, members_truncated: false, status_counts: {open: members.length}, heat_counts: {ice: members.length},
     member_status: Object.fromEntries(members.map((m) => [String(m.id), m.remediation_status])), ruled_out_ids: [], ...extra},
 });
 const keyOf = (i) => `${i.kind}-${i.id}`;
-const six = ['www', 'blog', 'info', 'careers', 'bgu', 'givinggrace'].map((h, i) => member(10 + i, `${h}.mybluegrace.com`));
+const six = ['www', 'blog', 'info', 'careers', 'learn', 'donate'].map((h, i) => member(10 + i, `${h}.acme-site.com`));
 
 test('the list asks for groups by default and for every host when toggled', () => {
   assert.deepEqual(G.listParams({type: 'all'}, G.GROUPED), {type: 'all', group: 'cve'});
@@ -34,11 +34,11 @@ test('the chips count rows when grouped and findings otherwise', () => {
 });
 
 test('a group sends every member through the per-finding route, with nothing else', () => {
-  const lone = {kind: 'vulnerability', id: 7, project: 'bluegrace'};
+  const lone = {kind: 'vulnerability', id: 7, project: 'acmesite'};
   const out = G.expandForBulk([groupRow(six), lone]);
   assert.deepEqual(out.map(keyOf), [...six.map((m) => `match-${m.id}`), 'vulnerability-7']);
-  assert.ok(out.slice(0, 6).every((m) => m.project === 'bluegrace' && m.__groupOf === 'gabc'));
-  assert.equal(out[1].host, 'blog.mybluegrace.com');
+  assert.ok(out.slice(0, 6).every((m) => m.project === 'acmesite' && m.__groupOf === 'gabc'));
+  assert.equal(out[1].host, 'blog.acme-site.com');
   // member_ids beyond the members listed in full are still sent
   const big = groupRow(six.slice(0, 2), {member_ids: [10, 11, 99], members_truncated: true});
   assert.deepEqual(G.expandForBulk([big]).map((m) => m.id), [10, 11, 99]);
@@ -54,7 +54,7 @@ test('a group succeeds when every member did, and a failure keeps only the membe
   assert.deepEqual(some.ok, []);
   assert.equal(some.failed.length, 1);
   assert.equal(G.isGroup(some.failed[0].item), false);  // one member left: its own finding
-  assert.deepEqual([some.failed[0].item.kind, some.failed[0].item.id, some.failed[0].item.host], ['match', 12, 'info.mybluegrace.com']);
+  assert.deepEqual([some.failed[0].item.kind, some.failed[0].item.id, some.failed[0].item.host], ['match', 12, 'info.acme-site.com']);
   assert.match(some.failed[0].error, /^1 of 6 hosts not updated: finding not found$/);
   // a retry of the failed row touches only that member
   assert.deepEqual(G.expandForBulk([some.failed[0].item]).map((m) => m.id), [12]);
@@ -69,7 +69,7 @@ test('a group succeeds when every member did, and a failure keeps only the membe
 });
 
 test('undo puts each member back to its own earlier status, from the full status map even past the listed members', () => {
-  const mixed = groupRow([six[0], member(11, 'blog.mybluegrace.com', {status: 'in_progress', remediation_status: 'in_progress'}), six[2]]);
+  const mixed = groupRow([six[0], member(11, 'blog.acme-site.com', {status: 'in_progress', remediation_status: 'in_progress'}), six[2]]);
   const prior = G.priorOf(mixed);
   assert.deepEqual(prior, {byMember: {10: 'open', 11: 'in_progress', 12: 'open'}});
   const batches = new Map(G.restoreBatches([mixed], () => prior).map(([was, items]) => [was, items.map((i) => i.id)]));
@@ -90,8 +90,8 @@ test('undo puts each member back to its own earlier status, from the full status
 
 // the probe from the review: four open hosts, one accepted risk, one fixed
 const probe = () => {
-  const ms = [...six.slice(0, 4), member(14, 'bgu.mybluegrace.com', {status: 'accepted_risk', remediation_status: 'accepted_risk'}),
-    member(15, 'givinggrace.mybluegrace.com', {status: 'fixed', remediation_status: 'fixed'})];
+  const ms = [...six.slice(0, 4), member(14, 'learn.acme-site.com', {status: 'accepted_risk', remediation_status: 'accepted_risk'}),
+    member(15, 'donate.acme-site.com', {status: 'fixed', remediation_status: 'fixed'})];
   return groupRow(ms, {status_counts: {open: 4, accepted_risk: 1, fixed: 1}});
 };
 
@@ -136,8 +136,8 @@ test('the row says how many hosts and how their own states split, worst first', 
 });
 
 test('a member links to its own finding on this page', () => {
-  assert.equal(G.memberHash({id: 12}, 'bluegrace', false), 'match-12');
-  assert.equal(G.memberHash({id: 12}, 'bluegrace', true), 'bluegrace:match-12');
+  assert.equal(G.memberHash({id: 12}, 'acmesite', false), 'match-12');
+  assert.equal(G.memberHash({id: 12}, 'acmesite', true), 'acmesite:match-12');
 });
 
 test('the header keeps findings per host and says what the rows are', () => {

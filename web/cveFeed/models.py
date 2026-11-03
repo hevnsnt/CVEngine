@@ -194,8 +194,9 @@ class CVEMatch(models.Model):
     ai_reason = models.TextField(blank=True, default="")
     ai_model = models.CharField(max_length=128, blank=True, default="")
 
-    # What a nuclei template test said about this host for this CVE: vulnerable | no_match | error, or "" when untested.
-    TEMPLATE_RESULTS = ("vulnerable", "no_match", "error")
+    # What a nuclei template test said about this host for this CVE: vulnerable | no_match | error, or "" when untested. version_only: a
+    # version-class template (cveFeed.templategen.template_evidence) matched, which reads the version again and is not hard evidence.
+    TEMPLATE_RESULTS = ("vulnerable", "no_match", "error", "version_only")
     template_result = models.CharField(max_length=12, blank=True, default="")
     template_id = models.CharField(max_length=128, blank=True, default="")
     template_tested_at = models.DateTimeField(null=True, blank=True)

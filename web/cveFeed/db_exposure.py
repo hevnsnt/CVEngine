@@ -7,6 +7,8 @@ was required to reach this service", which is itself the vulnerability for a net
 import logging
 import socket
 
+from cveFeed import local_egress
+
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 3
@@ -282,6 +284,11 @@ def run_db_exposure_checks(scan_id, checks=None):
                 subs = [sub for sub in subs if normalize(sub.name) not in banned]
                 if not subs or not is_scannable_ip(host, project=project):
                     continue
+                held = local_egress.admit_one(number, 'db-exposure', host)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
+                if held:
+                    logger.info('db exposure check of %s:%s not run from this server: %s', host, number, local_egress.held_text(number, held))
+                    continue
+                local_egress.record_one(number, 'db-exposure', project=project, address=host)
                 checked += 1
                 try:
                     is_open = fn(host, number)

@@ -735,6 +735,16 @@ def tunables_get(request):
     return tunables.snapshot()
 
 
+def egress_log_csv(request):
+    """The connection log of this server's own scanners to the logged ports, as CSV (the link on the Outbound connections card)."""
+    from agentapi import egress
+    from agentapi.services import ApiError, Ctx
+    try:
+        return egress.connections_csv(Ctx(request.user), request.GET)
+    except ApiError as exc:
+        raise SettingsError(exc.status, exc.message) from None
+
+
 def tunables_put(request):
     """Save a partial change: {"values": {"triage_max_per_day": 1000, "stage_parallel": null}}. A number sets a tunable, null puts it back to the default."""
     from cveFeed import tunables
@@ -938,6 +948,7 @@ ROUTES = [
     ('GET', r'config_maxxing', lambda r, **k: config_maxxing_get(r)), ('POST', r'config_maxxing/reset', lambda r, **k: config_maxxing_reset(r)),
     ('GET', r'scan_concurrency', lambda r, **k: scan_concurrency_get(r)), ('PUT', r'scan_concurrency', lambda r, **k: scan_concurrency_put(r)),
     ('GET', r'tunables', lambda r, **k: tunables_get(r)), ('PUT', r'tunables', lambda r, **k: tunables_put(r)),
+    ('GET', r'egress/connections\.csv', lambda r, **k: egress_log_csv(r)),
     ('GET', r'autotune', lambda r, **k: autotune_get(r)), ('PUT', r'autotune', lambda r, **k: autotune_put(r)),
     ('GET', r'autotune/decisions', lambda r, **k: autotune_decisions(r)),
     ('POST', r'autotune/decisions/(?P<decision_id>\d+)/apply', lambda r, decision_id, **k: autotune_apply(r, decision_id)),
