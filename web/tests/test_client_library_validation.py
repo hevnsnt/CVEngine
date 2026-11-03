@@ -410,6 +410,30 @@ class LibraryValidationTests(Base):
 					self.assertIn(words, step['summary'])
 				self.assert_open(m)
 
+	def test_a_port_the_egress_governor_holds_is_not_read_and_nothing_is_concluded(self):
+		from cveFeed import local_egress
+		m = self.match()
+		site = Site(error=local_egress.PortHeld(443, 'paced'))
+		row, _stats, _calls = self.validate(site)
+		self.assertEqual(row.validation_status, 'failed')
+		self.assertIn('not run from this server', self.step(row)['summary'])
+		self.assert_open(m)
+
+	def test_the_read_goes_through_the_egress_gate_of_the_pinned_transport(self):
+		from cveFeed import local_egress, probes
+		m = self.match()
+		from cveFeed import pinned_transport
+		answer = [(2, 1, 6, '', ('198.51.100.7', 443))]
+		with mock.patch('cveFeed.local_egress.check_connect', side_effect=local_egress.PortHeld(443, 'skipped')) as gate, \
+				mock.patch.object(pinned_transport.socket, 'getaddrinfo', return_value=answer), \
+				mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True), \
+				mock.patch.object(pinned_transport.socket, 'socket') as sock, \
+				mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
+			reading = probes.read_host_libraries(self.project.id, m.subdomain, ['https://www.v.test'])
+		self.assertTrue(gate.called)
+		self.assertFalse(sock.called)  # held before any socket was opened
+		self.assertEqual(reading['pages'][0]['outcome'], 'held')
+
 	def test_a_failed_read_changes_nothing_and_is_retried(self):
 		m = self.match()
 		(before,) = self.rows()

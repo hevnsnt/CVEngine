@@ -1702,10 +1702,19 @@ def weekly_deep_nuclei():
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan, udp_scan
+    from cveFeed import fullscan, local_egress, udp_scan
     result = fullscan.run()
     udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
+    local_egress.kick_catch_up()  # and so does the paced pass over ports the egress governor held back (only when one is owed)
     return result
+
+
+@app.task(name='egress_catch_up', bind=False, queue='cve_feed_queue')
+def egress_catch_up():
+    """Queued by the background full scan's firing when a port is owed: probe the ports the egress governor held back (port 25 over its
+    hourly budget, by default), paced by the same budget (see ``cveFeed.local_egress``)."""
+    from cveFeed import local_egress
+    return local_egress.catch_up()
 
 
 @app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')

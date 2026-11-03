@@ -410,7 +410,7 @@ def _address(host, port, project_id):
 def sweep(project_id, runner=None, resolve=None):
     """Test the due targets of one project, one at a time. Returns ``{'tested', 'failed', 'issues', 'proven'}`` (and ``skipped`` with the
     reason when nothing ran)."""
-    from cveFeed import activity, exclusions, ledger
+    from cveFeed import activity, exclusions, ledger, local_egress
     from reNgine import resources
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     if runner is None and not installed():
@@ -437,6 +437,16 @@ def sweep(project_id, runner=None, resolve=None):
                 from agentapi import sentinel_dispatch
                 items = sentinel_dispatch.try_testssl(sub.target_domain.project, host, ip, port, starttls, scan=sub.scan_history)
                 if items is None:
+                    held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
+                    if held:
+                        if held == 'skipped':
+                            local_egress.note_skipped('testssl.sh', {port})  # the log record was written by admit_one
+                        activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
+                                        f'{local_egress.held_text(port, held)}; the target stays due')
+                        continue
+                    # testssl.sh opens some tens of sockets to this one host and port: counted as TESTSSL_CONNECTIONS, an estimate
+                    local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
+                    local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=sub.scan_history_id)
                     items = run_testssl(host, ip, port, starttls, runner=runner)
                 result = evaluate(items, where)
                 if not result.tested:

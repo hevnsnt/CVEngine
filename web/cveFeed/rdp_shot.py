@@ -229,6 +229,12 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
         asset = f'{addr}:{port}'
         if not _allowed(project, sub.name, addr):  # excluded since the candidates were listed
             continue
+        from cveFeed import local_egress
+        held = local_egress.admit_one(port, 'rdp-shot', addr)  # the opt-in skip list and the egress governor: a held port stays due
+        if held:
+            logger.info('rdp screenshot of %s not taken from this server: %s', asset, local_egress.held_text(port, held))
+            continue
+        local_egress.record_one(port, 'rdp-shot', project=project, address=addr)
         try:
             png = capturer(addr, port)
         except Exception as exc:  # noqa: BLE001 - one bad target must never interrupt the scan

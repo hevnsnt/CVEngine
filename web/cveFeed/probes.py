@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, versions
+from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
 
 logger = logging.getLogger(__name__)
 
@@ -630,8 +630,9 @@ def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep):
     seen as it is), then the scripts of every page through ``js_libraries`` (its vetter, one fresh ``Reader`` with the usual budgets, the
     per-host script limit shared by the bases), past the script cache. Nothing is stored. ``get(url, headers=None)`` replaces the network
     (tests). Returns ``{'pages': [...]}``, one per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were
-    read), ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered`` or ``refused`` (the gate refused the
-    address); a read page carries ``records`` (``js_libraries.resolve``), ``skipped`` (scripts it wanted and did not read, with why),
+    read), ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered``, ``refused`` (the gate refused the
+    address) or ``held`` (this server's egress governor or skip list held the port: ``cveFeed.local_egress``; nothing was sent). Every
+    connection goes through the pinned transport, so it is counted, logged and paced like any in-process connection; a read page carries ``records`` (``js_libraries.resolve``), ``skipped`` (scripts it wanted and did not read, with why),
     ``truncated`` (scripts read only up to the size cap), ``read_whole`` (scripts whose file was read whole), ``capped`` (the parse could
     not see every script), ``inline`` (``[library key, version]`` inline scripts state), ``inline_unread`` (inline code no rule reads),
     ``scripts`` (how many scripts with a source the page has) and ``lazy`` (libraries the page adds at run time)."""
@@ -653,6 +654,10 @@ def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep):
             first = page_get(base.rstrip('/') + '/') or {}
         except ValueError:
             page['outcome'] = 'refused'
+            pages.append(page)
+            continue
+        except local_egress.PortHeld as exc:  # this server's egress governor or skip list held the port: nothing was sent (cveFeed.local_egress)
+            page.update(outcome='held', error=str(exc)[:200])
             pages.append(page)
             continue
         except OSError as exc:
@@ -946,6 +951,10 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
         for asset, entry in todo.items():
             try:
                 found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
+            except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
+                logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
+                stats['held'] = stats.get('held', 0) + 1
+                continue
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
                 logger.warning('probe %s failed on host %s: %s', entry['probe'], sub.pk, type(exc).__name__)
                 ledger.record(SERVICE, [asset], project, scan, 'failed')
