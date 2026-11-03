@@ -830,7 +830,7 @@ def _apply_result(task, agent, user, result):
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
         before = match.remediation_status
         svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user)
-        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user)
+        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
 
 
 def report_result(ctx, task_id, body):

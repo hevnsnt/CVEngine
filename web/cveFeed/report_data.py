@@ -17,11 +17,12 @@ from datetime import datetime, timezone as dt_timezone
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
+from cveFeed import closure
 from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 
 HEAT_NAMES = {3: 'fire', 2: 'smoke', 1: 'ice'}
 SEVERITY_ORDER = ('critical', 'high', 'medium', 'low')
-STATUS_LABELS = {'open': 'Open', 'in_progress': 'In progress', 'fixed': 'Fixed', 'accepted_risk': 'Accepted risk'}
+STATUS_LABELS = closure.LABELS  # Open, In progress, Fixed, Accepted risk, False positive
 PROVING = ('hit', 'observed', 'reaffirmed')  # the validation results that show the finding on the host
 FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')  # triage classes a client report leaves out
 HOST_PAGE = 100
@@ -133,6 +134,16 @@ def _tally(sources):
     return total, {k: heat[k] for k in ('fire', 'smoke', 'ice')}, {k: severity[k] for k in SEVERITY_ORDER}
 
 
+def _status_counts(sources):
+    """``{status label: count}`` over the whole set (CVE matches, scanner and hygiene findings), in the order of closure.STATUSES: the
+    report's status legend when it includes closed findings."""
+    tally = Counter()
+    for qs in sources.values():
+        for row in qs.order_by().values('remediation_status').annotate(n=Count('id')):
+            tally[row['remediation_status']] += row['n']
+    return {STATUS_LABELS.get(k, clean(k, 24)): tally[k] for k in (*closure.STATUSES, *sorted(set(tally) - set(closure.STATUSES))) if tally[k]}
+
+
 def _per_host(sources):
     """``{lowercase host: how many findings it has}`` over the whole set, for the host table."""
     out = Counter()
@@ -159,8 +170,9 @@ def _proof(triage):
 
 
 def _tracking(obj):
-    """The remediation state a person or agent recorded: status, assignee, note and when it last changed."""
-    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)),
+    """The remediation state a person or agent recorded: status, assignee, note and when it last changed. ``closed``: the status closes the
+    finding (fixed, accepted risk, false positive), so the note is printed as why it was closed."""
+    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)), 'closed': closure.is_closed(obj.remediation_status),
             'assignee': _person(getattr(obj, 'assignee', None)), 'note': clean(obj.remediation_note, 800),
             'changed': _stamp(obj.remediation_updated_at), 'changed_by': _person(getattr(obj, 'remediation_by', None))}
 
@@ -386,6 +398,7 @@ def collect(project, host=None, include_closed=False, now=None):
         'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
         'summary': {'findings': total, 'heat': heat, 'severity': severity, 'hygiene': hygiene_total, 'hygiene_severity': hygiene_severity,
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
+                    'status_counts': _status_counts(sources),
                     'top': detailed[:TOP_RISKS]},
         'hosts': hosts, 'findings': detailed, 'hygiene': hygiene,
         'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),

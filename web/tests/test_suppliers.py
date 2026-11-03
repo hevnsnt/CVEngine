@@ -805,6 +805,18 @@ class SweepTests(Fixture, TestCase):
         self.sweep()
         self.assertEqual(self.finding(self.s, self.D, 'hsts_missing').status, 'resolved')
 
+    def test_a_false_positive_stays_closed_while_found_and_is_not_resolved_or_reopened(self):
+        self.sweep()
+        SupplierFinding.objects.filter(supplier=self.s, check_name='hsts_missing').update(status='false_positive', status_note='HSTS on the apex')
+        self.expire()
+        self.sweep()
+        row = self.finding(self.s, self.D, 'hsts_missing')
+        self.assertEqual((row.status, row.status_note), ('false_positive', 'HSTS on the apex'))
+        self.net.site(self.D, tls=cert(self.D, days=300))
+        self.expire()
+        self.sweep()  # no longer found: a false positive is left as it is, never resolved and so never reopened as new
+        self.assertEqual(self.finding(self.s, self.D, 'hsts_missing').status, 'false_positive')
+
     def test_a_check_that_got_no_answer_changes_nothing_and_is_asked_again_tomorrow(self):
         self.sweep()
         before = self.checks(self.s)
