@@ -222,7 +222,7 @@ class CVEMatch(models.Model):
     # under which heat rule (threat.heat_signature: "kev", "legacy:smoke", ...). A match is paged as fire at most once PER RULE: a mark made under
     # one rule never holds back a page that is new under another (notify.unannounced_q).
     fire_notified_at = models.DateTimeField(null=True, blank=True)
-    fire_notified_rule = models.CharField(max_length=24, blank=True, default="")
+    fire_notified_rule = models.CharField(max_length=24, blank=True, default="", db_default="")  # db_default: old code still inserting during an update
 
     # Remediation workflow, driven by people or agents through the API / MCP. fixed, accepted_risk and false_positive close a finding
     # (cveFeed.closure.CLOSED); remediation_note is the note on why, with who (remediation_by) and when (remediation_updated_at).
@@ -1041,7 +1041,7 @@ class TriageVerdict(models.Model):
     model = models.CharField(max_length=128, blank=True, default="")
     invalid_output = models.BooleanField(default=False)  # the reply failed validation: stored as needs_validation
     project = models.ForeignKey("dashboard.Project", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # where it was reached
-    host = models.CharField(max_length=500, blank=True, default="")
+    host = models.CharField(max_length=500, blank=True, default="", db_default="")  # db_default: old code still inserting during an update
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = models.Manager()

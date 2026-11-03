@@ -40,7 +40,7 @@
   <li class="card">
     <span class="how-n">4</span>
     <h2>Prove it, safely</h2>
-    <p>The AI reviews each match and, when no test exists, writes a nuclei template on the spot. cvENGINE then reproduces the finding with read-only checks and records the exact command and result. The AI can rule a match out, but it can never confirm one by itself: only hard evidence does.</p>
+    <p>The AI reviews each match and, when no test exists, writes a nuclei template on the spot. cvENGINE then reproduces the finding with read-only checks and records the exact command and result. The AI can rule a match out, but it can never confirm one by itself: only hard evidence does, such as a check that reproduced it or a library version read from the very file the page serves.</p>
     <p class="how-tools"><span class="chip">AI triage</span><span class="chip">nuclei</span><span class="chip">version probes</span></p>
   </li>
   <li class="card">
@@ -55,7 +55,7 @@
   <h2>Why you can trust a finding</h2>
   <ul class="how-list">
     <li><b>Evidence, not opinion.</b> Every finding lists the checks that ran and what they returned.</li>
-    <li><b>Safe by design.</b> Checks are read-only. No exploit payloads, no password lists, and nothing that changes a host. Secrets found on a target are masked before an AI provider sees them, and discovery does not try found credentials against the live service unless you turn that on. Bug bounty projects are never scanned automatically until you confirm automated testing is allowed, and then only inside the program's scope.</li>
+    <li><b>Safe by design.</b> Checks are read-only. No exploit payloads, no password lists, and nothing that changes a host. The browser that takes screenshots runs inside Chromium's sandbox, and takes none when the sandbox cannot start. Secrets found on a target are masked before an AI provider sees them, and discovery does not try found credentials against the live service unless you turn that on. Bug bounty projects are never scanned automatically until you confirm automated testing is allowed, and then only inside the program's scope.</li>
     <li><b>Always watching.</b> Scans repeat on a schedule, certificates are watched daily, and every change to your attack surface is recorded. Each web page's screenshot can be compared with the one before.</li>
     <li><b>Yours to inspect.</b> Open source under the GPL-3.0, built on proven scanners, and self-hosted so your inventory stays with you.</li>
   </ul>
