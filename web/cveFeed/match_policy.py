@@ -247,7 +247,10 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
         read the version from the service or the file itself and found it inside the range;
       * a JavaScript library whose OWN FILE states the version: ``evidence.source`` tech, ``version_source`` body (the file's comment banner
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
-        ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set);
+        ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set),
+        and that copy is the file that was read: the ``evidence.copies`` entry whose ``url`` is the ``script_url`` is itself ``source`` body
+        and ``state`` effective (``script_copy_read``; ``copy_state`` is the best state of any copy of the version, so a read copy a later
+        unread one shadows would pass on it alone);
       * a network service that answered nmap's version probe itself: ``evidence.source`` port, ``method`` probed (``table`` is nmap's
         guess from the port number), a vendor-built product (``evidence.vendor_banner``: ``vendor_built``, recorded by correlation)
         and NO distribution packaging read from the banner (``evidence.distro``). A distribution backports fixes without changing the
@@ -272,21 +275,53 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
         confidence = evidence.get('version_confidence')
         return (evidence.get('version_source') == 'body' and evidence.get('copy_state') == 'effective'
                 and isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= PROVEN_LIBRARY_CONFIDENCE
-                and not evidence_flag(evidence, 'copies_unresolved'))
+                and not evidence_flag(evidence, 'copies_unresolved') and script_copy_read(evidence))
     if source == 'port':
         return evidence.get('method') == 'probed' and evidence_flag(evidence, 'vendor_banner') and not evidence_flag(evidence, 'distro')
     return False
+
+
+def script_copy_read(evidence):
+    """Whether the copy at a library match's ``script_url`` is the file that was read and the one that runs: its ``evidence.copies`` entry
+    (same ``url``) is ``source`` body and ``state`` effective. No such entry is no proof. ``script_copy_read_q`` is the database form."""
+    url = evidence.get('script_url') if isinstance(evidence, dict) else None
+    copies = evidence.get('copies') if isinstance(evidence, dict) else None
+    return bool(isinstance(url, str) and url and isinstance(copies, list) and any(
+        isinstance(c, dict) and c.get('url') == url and c.get('source') == 'body' and c.get('state') == 'effective' for c in copies))
+
+
+_SCRIPT_COPY_PATH = '$.copies[*] ? (@.url == $u && $u != "" && @.source == "body" && @.state == "effective")'
+
+
+def script_copy_read_q(prefix=''):
+    """The database form of ``script_copy_read`` (PostgreSQL ``jsonb_path_exists``, the ``script_url`` passed in as ``$u``)."""
+    from django.db.models import BooleanField, F, Func, Q
+
+    class ScriptCopyRead(Func):
+        output_field = BooleanField()
+        conditional = True
+        template = (f"jsonb_path_exists(%(expressions)s, '{_SCRIPT_COPY_PATH}'::jsonpath, "
+                    "jsonb_build_object('u', (%(expressions)s) -> 'script_url'))")
+    return Q(ScriptCopyRead(F(prefix + 'evidence')))
+
+
+def library_read_q(prefix=''):
+    """``version_read_from_component_q``'s library clause alone (a library's own file states the version, for the copy that runs)."""
+    from django.db.models import Q
+    _register_json_typeof()
+    p = prefix
+    return (Q(**{p + 'evidence__source': 'tech', p + 'evidence__version_source': 'body', p + 'evidence__copy_state': 'effective',
+                 p + 'evidence__version_confidence__jsontype': 'number',
+                 p + 'evidence__version_confidence__gte': PROVEN_LIBRARY_CONFIDENCE}) & ~evidence_flag_q('copies_unresolved', p)
+            & script_copy_read_q(p))
 
 
 def version_read_from_component_q(prefix=''):
     """The database form of ``version_read_from_component``. The confidence must be a JSON number (``jsonb_typeof``), as Python's
     ``isinstance`` test requires: JSONB orders true, arrays and objects above every number."""
     from django.db.models import Q
-    _register_json_typeof()
     p = prefix
-    library = (Q(**{p + 'evidence__source': 'tech', p + 'evidence__version_source': 'body', p + 'evidence__copy_state': 'effective',
-                    p + 'evidence__version_confidence__jsontype': 'number',
-                    p + 'evidence__version_confidence__gte': PROVEN_LIBRARY_CONFIDENCE}) & ~evidence_flag_q('copies_unresolved', p))
+    library = library_read_q(p)
     service = (Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & evidence_flag_q('vendor_banner', p)
                & ~evidence_flag_q('distro', p))
     template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})

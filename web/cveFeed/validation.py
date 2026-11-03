@@ -982,8 +982,9 @@ def interpret(subject, check, result):
 
 def rollup(steps):
     """The row-level validation status from its steps: hit if any step confirmed it, else failed if any step errored (so it is retried,
-    never counted clean), else skipped_blocked if every step was blocked, else observed if checks only gathered metadata."""
-    results = [s.get('result') for s in steps]
+    never counted clean), else skipped_blocked if every step was blocked, else observed if checks only gathered metadata. The record of
+    the library body read (``LIBRARY_READ``) is not a check that ran here and is left out, so it never moves the status or the schedule."""
+    results = [s.get('result') for s in steps if not (isinstance(s, dict) and s.get('kind') == LIBRARY_READ)]
     if not results:
         return 'none'
     if 'hit' in results:
@@ -1323,40 +1324,63 @@ def _reserve_validation_check(project_id):
     return True
 
 
-LIBRARY_READ = 'library_read'  # the step kind of cvENGINE's own read of a library's served file (``record_library_read``); never a runnable check
+LIBRARY_READ = 'library_read'  # the step kind of cvENGINE's own read of a library's served file (``library_step``); never a runnable check
 
 
-def library_reading(match):
-    """``{'page_url', 'read_at', 'how'}`` of the newest reading of the host's front page in which the match's ``script_url`` stated the match's
-    version in its own body (a route check's ``libraries`` record, else the html-libraries probe's), or ``{}`` when no such reading is kept.
-    ``how`` is ``banner`` (the file's comment banner) or ``signature`` (the library's own code). Read only."""
+def library_readings(matches):
+    """``{match pk: {'page_url', 'read_at', 'how'}}``: for each match, a reading of its host's front page in which the match's ``script_url``
+    stated the match's version in its own body (a route check's ``libraries`` record, else the html-libraries probe's). ``how`` is ``banner``
+    (the file's comment banner) or ``signature`` (the library's own code). A match with no such reading kept is left out. Two queries for
+    any number of matches. Read only."""
     from cveFeed import js_libraries
     from cveFeed.models import ProbeObservation, RouteAuth
-    evidence = match.evidence if isinstance(match.evidence, dict) else {}
-    url, version = evidence.get('script_url') or '', match.matched_version or ''
-    key = js_libraries.PRODUCTS.get((match.matched_product or '').strip().lower())
-    sub = getattr(match, 'subdomain', None)
-    if not url or not version or not key or sub is None or not sub.target_domain_id:
+    wanted = {}
+    for m in matches:
+        evidence = m.evidence if isinstance(m.evidence, dict) else {}
+        url, version = evidence.get('script_url'), m.matched_version or ''
+        key = js_libraries.PRODUCTS.get((m.matched_product or '').strip().lower())
+        sub = getattr(m, 'subdomain', None)
+        if isinstance(url, str) and url and version and key and sub is not None and sub.target_domain_id:
+            wanted[m.pk] = (sub.target_domain.project_id, sub.name.lower(), key, url, version)
+    if not wanted:
         return {}
-    project, host = sub.target_domain.project_id, sub.name.lower()
+    projects, hosts = {w[0] for w in wanted.values()}, {w[1] for w in wanted.values()}
 
-    def stated(record):
-        for copy in (record or {}).get('copies') or [] if isinstance(record, dict) else []:
+    def stated(record, url, version):
+        for copy in (record.get('copies') or []) if isinstance(record, dict) else []:
             if isinstance(copy, dict) and copy.get('url') == url and copy.get('version') == version and copy.get('source') == 'body':
                 return copy
         return None
-    for row in (RouteAuth.objects.filter(project_id=project, host=host, path='/', checked_at__isnull=False)
-                .only('url', 'checked_at', 'evidence').order_by('-checked_at')[:20]):
-        copy = stated(((row.evidence or {}).get('libraries') or {}).get(key))
-        if copy:
-            return {'page_url': row.url or '', 'read_at': row.checked_at, 'how': copy.get('how') or ''}
-    for row in (ProbeObservation.objects.filter(project_id=project, host=host, kind='version', probe='html-libraries')
-                .only('url', 'observed_at', 'evidence').order_by('-observed_at')[:20]):
-        record = (row.evidence or {}).get('library')
-        copy = stated(record) if isinstance(record, dict) and js_libraries.PRODUCTS.get(str(record.get('product', '')).lower()) == key else None
-        if copy:
-            return {'page_url': row.url if str(row.url or '').startswith('http') else '', 'read_at': row.observed_at, 'how': copy.get('how') or ''}
-    return {}
+    routes, probes = {}, {}
+    for row in (RouteAuth.objects.filter(project_id__in=projects, host__in=hosts, path='/', checked_at__isnull=False)
+                .only('project_id', 'host', 'url', 'checked_at', 'evidence').order_by('-checked_at')):
+        routes.setdefault((row.project_id, row.host), []).append(row)
+    for row in (ProbeObservation.objects.filter(project_id__in=projects, host__in=hosts, kind='version', probe='html-libraries')
+                .only('project_id', 'host', 'url', 'observed_at', 'evidence').order_by('-observed_at')):
+        probes.setdefault((row.project_id, row.host), []).append(row)
+    out = {}
+    for pk, (project, host, key, url, version) in wanted.items():
+        for row in routes.get((project, host), []):
+            copy = stated(((row.evidence or {}).get('libraries') or {}).get(key), url, version)
+            if copy:
+                out[pk] = {'page_url': row.url or '', 'read_at': row.checked_at, 'how': copy.get('how') or ''}
+                break
+        if pk in out:
+            continue
+        for row in probes.get((project, host), []):
+            record = (row.evidence or {}).get('library')
+            if isinstance(record, dict) and js_libraries.PRODUCTS.get(str(record.get('product', '')).lower()) == key:
+                copy = stated(record, url, version)
+                if copy:
+                    out[pk] = {'page_url': row.url if str(row.url or '').startswith('http') else '', 'read_at': row.observed_at,
+                               'how': copy.get('how') or ''}
+                    break
+    return out
+
+
+def library_reading(match):
+    """``library_readings`` of one match: ``{}`` when no reading is kept."""
+    return library_readings([match]).get(match.pk, {})
 
 
 def library_read_step(steps):
@@ -1364,44 +1388,54 @@ def library_read_step(steps):
     return next((s for s in steps or [] if isinstance(s, dict) and s.get('kind') == LIBRARY_READ), None)
 
 
-def record_library_read(row, match, now=None, save=True):
-    """Record, on the Triage ``row`` of ``match``, the read of the library's served file that proved its version (``triage.library_body_proven``)
-    as cvENGINE's own completed check: what was fetched (the script URL), what it stated (the file's banner or the library's own code, and the
-    version), which page runs it and when it was read. Its result is ``reaffirmed`` ("still holds"), never a hit: the file proves the version,
-    not a check of the flaw, so ``match_policy.has_hard_evidence`` and the heat do not move. A match the file does not prove gets nothing, and
-    an earlier such step is dropped. Returns whether the row changed (and was saved, with ``save``)."""
+def library_step(match, reading=None):
+    """The validation step that records the read of the library's served file which proved ``match``'s version
+    (``triage.library_body_proven``) as cvENGINE's own completed check: what was fetched (the script URL), what it stated (the file's banner
+    or the library's own code, and the version), which page runs it and when it was read (``reading``, from ``library_readings``; the match's
+    creation when none is kept). Its result is ``reaffirmed`` ("still holds"), never a hit: the file proves the version, not a check of the
+    flaw. None for a match the file does not prove."""
     from shlex import quote
 
     from cveFeed import js_libraries
     evidence = match.evidence if isinstance(match.evidence, dict) else {}
-    steps = [s for s in (row.validation_steps or []) if not (isinstance(s, dict) and s.get('kind') == LIBRARY_READ)]
-    if triage.library_body_proven(match.source, evidence, match.version_in_range, match.distro_status):
-        reading = library_reading(match)
-        url, version, product = evidence['script_url'], match.matched_version, match.matched_product
-        how = reading.get('how') or ('banner' if evidence['version_confidence'] >= js_libraries.CONFIDENCE['banner'] else 'signature')
-        stated = (f"the file's own banner states {product} v{version}" if how == 'banner'
-                  else f"the library's own code in the file names version {version}")
-        page = reading.get('page_url') or ''
-        span = triage.range_text(evidence.get('range'))
-        read_at = reading.get('read_at') or match.created_at
-        step = {'kind': LIBRARY_READ, 'label': f'Library body read: the {product} version its served file states', 'target': url,
-                'display': f'curl -s {quote(url)} | head -c {js_libraries.HEAD}', 'ran_at': read_at.isoformat() if read_at else '',
-                'result': 'reaffirmed', 'error': '', 'output_excerpt': '',
-                'summary': _trim(f'Fetched {url}: {stated}; it is the copy {"the page " + page if page else "the page"} runs. {version} is '
-                                 f'inside the affected range{" " + span if span else ""}.', 300),
-                'library': {'version': version, 'version_source': 'body', 'how': how, 'script_url': url, 'page_url': page,
-                            'version_confidence': evidence['version_confidence'], 'copy_state': 'effective'}}
-        steps.append(step)
-    if steps == (row.validation_steps or []):
+    if not triage.library_body_proven(match.source, evidence, match.version_in_range, match.distro_status):
+        return None
+    reading = reading or {}
+    url, version, product = evidence['script_url'], match.matched_version, match.matched_product
+    how = reading.get('how') or ('banner' if evidence['version_confidence'] >= js_libraries.CONFIDENCE['banner'] else 'signature')
+    stated = (f"the file's own banner states {product} v{version}" if how == 'banner'
+              else f"the library's own code in the file names version {version}")
+    page = reading.get('page_url') or ''
+    span = triage.range_text(evidence.get('range'))
+    read_at = reading.get('read_at') or match.created_at
+    return {'kind': LIBRARY_READ, 'label': f'Library body read: the {product} version its served file states', 'target': url,
+            'display': f'curl -s {quote(url)} | head -c {js_libraries.HEAD}', 'ran_at': read_at.isoformat() if read_at else '',
+            'result': 'reaffirmed', 'error': '', 'output_excerpt': '',
+            'summary': _trim(f'Fetched {url}: {stated}; it is the copy {"the page " + page if page else "the page"} runs. {version} is '
+                             f'inside the affected range{" " + span if span else ""}.', 300),
+            'library': {'version': version, 'version_source': 'body', 'how': how, 'script_url': url, 'page_url': page,
+                        'version_confidence': evidence['version_confidence'], 'copy_state': 'effective'}}
+
+
+def put_library_step(row, step):
+    """Put ``step`` (``library_step``, or None to drop one) among ``row``'s validation steps in place of any earlier one. Only the steps
+    change: the validation status, its time and the retry schedule are the real checks' (``rollup`` leaves this step out), so the step never
+    makes a finding look validated to the schedulers (``due_ids``, ``hot_validation``). Returns whether the steps changed (not saved)."""
+    steps = list(row.validation_steps or [])
+    if library_read_step(steps) == step:
         return False
-    row.validation_steps = steps
-    row.validation_status = rollup(steps) if steps else 'none'
-    if row.validation_status != 'failed':
-        row.attempts, row.next_attempt_at = 0, None
-    row.validated_at = now or timezone.now()
-    if save:
-        row.save(update_fields=['validation_steps', 'validation_status', 'validated_at', 'attempts', 'next_attempt_at', 'updated_at'])
+    kept = [s for s in steps if not (isinstance(s, dict) and s.get('kind') == LIBRARY_READ)]
+    row.validation_steps = kept + ([step] if step else [])
     return True
+
+
+def record_library_read(row, match, save=True):
+    """Record (or drop) the body-read step of ``match`` on its Triage ``row`` (``library_step``, ``put_library_step``). Returns whether it
+    changed (and was saved, with ``save``)."""
+    changed = put_library_step(row, library_step(match, library_reading(match)))
+    if changed and save:
+        row.save(update_fields=['validation_steps', 'updated_at'])
+    return changed
 
 
 def _blocked_step(row, check, why, now):
@@ -1486,20 +1520,14 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             checks = [c for c in checks if c]
             if selected_kinds is not None:
                 checks = [c for c in checks if c['kind'] in selected_kinds]
-            if row.kind == 'cve_match':
-                # the read of a library's served file that proved its version is cvENGINE's own check: recorded, never run again here
-                if not record_library_read(row, finding, now) and not checks and library_read_step(row.validation_steps):
-                    # the same read stands: not due again until the TTL has passed, and a request that queued the row sees it done
-                    row.validated_at, row.validation_status = now, rollup(row.validation_steps)
-                    row.save(update_fields=['validated_at', 'validation_status', 'updated_at'])
-                if not checks and library_read_step(row.validation_steps):
-                    stats['reused'] += 1
-                    continue
+            # the read of a library's served file that proved its version is cvENGINE's own check: recorded beside the others, never
+            # run again here, and never part of the status or the schedule (rollup)
+            library = library_step(finding, library_reading(finding)) if row.kind == 'cve_match' else None
             if not checks:
                 row.validation_status = 'no_check'
-                row.validation_steps = [{'kind': 'none', 'label': n, 'display': '', 'target': row.host, 'ran_at': now.isoformat(),
-                                         'result': 'blocked', 'summary': n, 'output_excerpt': '', 'error': ''} for n in notes[:1]] \
-                    if notes else []
+                row.validation_steps = ([{'kind': 'none', 'label': n, 'display': '', 'target': row.host, 'ran_at': now.isoformat(),
+                                          'result': 'blocked', 'summary': n, 'output_excerpt': '', 'error': ''} for n in notes[:1]]
+                                        if notes else []) + ([library] if library else [])
                 row.save(update_fields=['validation_status', 'validation_steps', 'updated_at'])
                 stats['no_check'] += 1
                 try:
@@ -1512,6 +1540,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             planned = {(c['kind'], c['target']) for c in checks}
             row.validation_steps = [s for s in (row.validation_steps or [])
                                     if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
+            put_library_step(row, library)
             for check in checks:
                 # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
                 # stopped by its watchdog)
