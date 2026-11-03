@@ -526,3 +526,32 @@ class OneSearchForBothFeaturesTests(SimpleTestCase):
         self.assertEqual(js_libraries.whole_body(page, page=True)['loaders'], [])  # a src attribute is a tag the page parse reads
         self.assertEqual(js_libraries.parse_page(page, 'https://h.test/').loaders, [])
         self.assertTrue(js_libraries.whole_body(page + "<script>var p='/js/legacy.js';</script>", page=True)['loaders'])
+
+
+class NamedClosureNeedsTheWholePageTests(ReviewScenarioBase):
+    """Coordinator decision: a library script whose own ?ver= or file name disagrees with what its file states closes the technology scan's
+    version only on a page known whole, like the contradicted-by-file closure: another copy the read did not see may carry the named version."""
+
+    PAGE = '<script src="/js/jquery.min.js?ver=1.12.4"></script>'  # the file says 3.7.1; its query string says 1.12.4
+
+    def _match(self, host, extra='', scripts=None):
+        sub = self.host(host, ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root(host, 200, self.PAGE + extra, scripts=scripts)
+        return self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')]
+
+    def test_the_whole_page_closes(self):
+        m = self._match('nm0.x.test', '<script src="/site.js"></script>')
+        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertIn("the 1.12.4 came from a script's name or query string", m.ai_reason)
+
+    def test_one_unread_script_keeps_it_open(self):
+        for host, extra, scripts in (('nm1.x.test', '<script src="/js/missing.js"></script>', None),  # not served
+                                     ('nm2.x.test', '<script src="https://widgets.partner.example/w.js"></script>', None),  # never read
+                                     ('nm3.x.test', '<script src="/js/loader.js"></script>',
+                                      {'https://nm3.x.test/js/loader.js': "import('./legacy/jq.js')"}),  # loads more at run time
+                                     ('nm4.x.test', "<script>/*! acme-tracker v1 */ var t=1;</script>", None)):  # inline code unread
+            with self.subTest(host=host):
+                m = self._match(host, extra, scripts)
+                self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+                self.assertIn('not every script of the page was read whole', m.evidence['version_note'])

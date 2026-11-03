@@ -1063,6 +1063,8 @@ FALLBACK_NOTES = {'document.write': 'a fallback the page loads only when an earl
                   'nomodule': 'a nomodule script: only browsers without module support run it',
                   'type': 'a script whose type a loader or consent manager switches before it runs'}
 UNREAD_NOTE = ('read from the script\'s {where}; its file was not read ({why}), so the file has not confirmed it')
+NAMED_NOTE = ('read from the script\'s {where}; its file states {said}, but not every script of the page was read whole, so another copy may '
+              'carry this version')
 OTHER_NOTE = ('named by another fingerprinting tool (technology detection), not read from the script file; trusted no further than a '
               'file name until a file on the page states it')
 
@@ -1233,8 +1235,9 @@ class HostLibraries:
         """``(skip, evidence, cap)``: whether a stored ``product`` ``version`` must not make a match, the evidence a match carries, and the
         most its confidence may be (None: no cap). Skipped: every library version of a host whose front page only redirects to another host
         (``alias_of``: the scripts are that host's, whichever tool saw them after following the redirect), a version a script's query
-        string or name carried where that script's own file was read and states another version or none, and a version every copy of the
-        library on the whole page, read to its end, contradicts (``_contradicts``). Nothing is ever skipped for an absence (no script of the
+        string or name carried where that script's own file was read and states another version or none, on a page known whole (the
+        same page conditions as ``_contradicts``: every script of every web port read whole, nothing loaded at run time, no inline code
+        unread, not cut), and a version every copy of the library on the whole page, read to its end, contradicts (``_contradicts``). Nothing is ever skipped for an absence (no script of the
         library on the page) or a theme's ``?ver=``: a script not read may hold it under any name. A copy a later one replaces and a
         fallback stay candidates at SHADOWED_CAP, and a query or name version of a script that was never read (reading off, a budget, a
         refused or failing host) at the file-name confidence: nothing is dropped that a file has not contradicted. A version no file on the
@@ -1305,20 +1308,24 @@ class HostLibraries:
         stated = [c for c in copies if c.get('source') == 'body' and c.get('version')]
         said = (record.get('version') if record.get('version_source') == 'body' and record.get('version') else
                 stated[-1]['version'] if stated else '')
-        if named and any(c.get('file_read', c.get('source') == 'body') for c in named):
-            # the string a script's query or name carries, where the file itself was read and states otherwise or nothing
+        read_named = [c for c in named if c.get('file_read', c.get('source') == 'body')]
+        if read_named and self.page_read and key not in self.inline:
+            # the string a script's query or name carries, where the file itself was read and states otherwise or nothing, on a page known
+            # whole (every script of every web port read whole, nothing loaded at run time, no inline code unread, not cut): no other copy
+            # of the page can carry the version the name gives
             return True, {'reason': (f'the page\'s own scripts say {name} {said}; the {version} came from a script\'s name or query string'
                                      if said else f'the {name} script\'s own file does not state {version}')}, None
         if stated and self.explains(key, version) and self._contradicts(key, record, copies):
             # the page itself explains the version (a script URL or another library on it carries it), and every script of it, read whole,
             # states another version of the library
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
-        if named:  # the script was never read: its query or name string is all there is, kept at the file-name confidence
+        if named:  # the script was never read, or the page is not known whole: its query or name string is kept at the file-name confidence
             copy = named[0]
             where = 'query string' if copy.get('query_version') == version else 'file name'
+            note = (NAMED_NOTE.format(where=where, said=f'{name} {said}' if said else 'no version') if copy in read_named
+                    else UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read'))
             return False, {**base, 'script_url': copy.get('url', ''), 'version_source': 'filename', 'copy_state': copy.get('state') or '',
-                           'version_confidence': CONFIDENCE['filename'],
-                           'version_note': UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read')}, CONFIDENCE['filename']
+                           'version_confidence': CONFIDENCE['filename'], 'version_note': note}, CONFIDENCE['filename']
         # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
         # says, and trusted no further than a file name
         return False, {'copies': summary, **_other()}, CONFIDENCE['filename']
