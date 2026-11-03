@@ -555,3 +555,123 @@ class NamedClosureNeedsTheWholePageTests(ReviewScenarioBase):
                 m = self._match(host, extra, scripts)
                 self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
                 self.assertIn('not every script of the page was read whole', m.evidence['version_note'])
+
+
+# synthetic stand-ins for Moment.js builds (no third-party code is copied): the official minified 2.29.1 build has no banner and no code the
+# read recognises; the unminified 2.29.4 file opens with moment's own //! banner
+MOMENT_2291_MIN = ('!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?module.exports=t():"function"==typeof define&&define.amd'
+                   '?define(t):e.moment=t()}(this,function(){"use strict";var H;function f(){return H.apply(null,arguments)}'
+                   + 'function m(e){return e instanceof Array||"[object Array]"===Object.prototype.toString.call(e)}' * 400
+                   + 'f.version="2.29.1";return f});')
+MOMENT_2294 = '//! moment.js\n//! version : 2.29.4\n//! authors : Tim Wood, Iskren Chernev, Moment.js contributors\n' + MOMENT_2291_MIN.replace(
+    '"2.29.1"', '"2.29.4"')
+APP_WITH_MOMENT_2291 = MOMENT_2291_MIN + '\n;(function(){window.appReady=function(){return moment().format("LL")}})();\n'
+
+
+class OnlyRecognisedLibrariesCloseTests(ReviewScenarioBase):
+    """Final review: a file that states nothing never closes anything (B1), and only a library whose code is recognised wherever it appears
+    (``js_libraries.CLOSABLE``: jQuery, jQuery UI, jQuery Migrate) may be closed by the page's files at all (B2)."""
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import CVEEntry
+        self.mo = CVEEntry.objects.create(cve_id='CVE-2022-31129', cvss=7.5, published_at=timezone.now(),
+                                          affected=[{'vendor': 'momentjs', 'product': 'moment', 'ranges': [{'introduced': '2.18.0', 'fixed': '2.29.4'}]}])
+        self.entries = [self.jq, self.bs, self.mo]
+
+    def _moment(self, host, page, scripts):
+        sub = self.host(host, ['Moment.js:2.29.1'])
+        self.correlate(sub)
+        self.read_root(host, 200, page, scripts=scripts)
+        return sub, self.correlate(sub)[(host, 'CVE-2022-31129', '2.29.1')]
+
+    def test_f1_a_file_that_states_nothing_closes_nothing(self):
+        host = 'f1.x.test'
+        _sub, m = self._moment(host, '<script src="/wp-includes/js/dist/vendor/moment.min.js?ver=2.29.1"></script>',
+                               {f'https://{host}/wp-includes/js/dist/vendor/moment.min.js': MOMENT_2291_MIN})
+        self.assertTrue(js_libraries.HostLibraries.for_subdomain(Subdomain.objects.get(name=host)).page_read)  # the page is whole
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertIn('states no version the read recognises', m.evidence['version_note'])
+
+    def test_f1b_nor_does_the_sweep(self):
+        from cveFeed.tasks import reconcile_library_provenance
+        host = 'f1b.x.test'
+        sub = self.host(host, ['Moment.js:2.29.1'])
+        self.correlate(sub)
+        self.read_root(host, 200, '<script src="/js/moment.min.js?ver=2.29.1"></script>', scripts={f'https://{host}/js/moment.min.js': MOMENT_2291_MIN})
+        out = reconcile_library_provenance()
+        self.assertEqual(out['closed'], 0)
+        self.assertNotEqual(CVEMatch.objects.get(subdomain=sub, cve_entry=self.mo).ai_verdict, 'not_affected')
+
+    def test_f1_also_for_jquery(self):
+        # jQuery's own file with its banner stripped and its code unreadable states nothing either: no closure
+        host = 'f1j.x.test'
+        sub = self.host(host, ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root(host, 200, '<script src="/js/jquery.min.js?ver=1.12.4"></script>', scripts={f'https://{host}/js/jquery.min.js': 'var j=1;'})
+        self.assertNotEqual(self.correlate(sub)[(host, 'CVE-2020-11023', '1.12.4')].ai_verdict, 'not_affected')
+
+    def test_f6a_named_disagreement_beside_an_unrecognised_bundled_copy(self):
+        host = 'f6a.x.test'
+        _sub, m = self._moment(host, '<script src="/js/moment.js?ver=2.29.1"></script><script src="/js/app.js"></script>',
+                               {f'https://{host}/js/moment.js': MOMENT_2294, f'https://{host}/js/app.js': APP_WITH_MOMENT_2291})
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertIn("Moment.js's code is not recognised wherever it appears", m.evidence['version_note'])
+
+    def test_f6b_contradicted_by_file_beside_an_unrecognised_bundled_copy(self):
+        host = 'f6b.x.test'
+        _sub, m = self._moment(host, '<script src="/js/moment.js"></script><script src="/wp-content/themes/acme/js/app.js?ver=2.29.1"></script>',
+                               {f'https://{host}/js/moment.js': MOMENT_2294, f'https://{host}/wp-content/themes/acme/js/app.js': APP_WITH_MOMENT_2291})
+        self.assertEqual((m.ai_verdict, m.confidence), ('', js_libraries.CONFIDENCE['filename']))
+        self.assertIn("Moment.js's code is not recognised wherever it appears", m.evidence['version_note'])
+
+    def test_f6c_an_unrecognised_copy_pasted_inline(self):
+        host = 'f6c.x.test'
+        self.assertLess(len(MOMENT_2291_MIN), js_libraries.MAX_INLINE)
+        _sub, m = self._moment(host, f'<script src="/js/moment.js?ver=2.29.1"></script><script>{MOMENT_2291_MIN}</script>',
+                               {f'https://{host}/js/moment.js': MOMENT_2294})
+        self.assertNotEqual(m.ai_verdict, 'not_affected')
+
+    def test_jquery_still_closes_on_a_whole_page_both_ways(self):
+        # named: the library's own script names 1.12.4, its file says 3.7.1
+        sub = self.host('ok1.x.test', ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root('ok1.x.test', 200, '<script src="/js/jquery.min.js?ver=1.12.4"></script>')
+        m = self.correlate(sub)[('ok1.x.test', 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertEqual(js_libraries.closure_kind(m.ai_reason), 'named_by_script')
+        # contradicted by file: another script of the page carries 1.12.4
+        sub = self.host('ok2.x.test', ['jQuery:1.12.4'])
+        self.correlate(sub)
+        self.read_root('ok2.x.test', 200, '<script src="/js/jquery.min.js"></script><script src="/site.js?ver=1.12.4"></script>')
+        m = self.correlate(sub)[('ok2.x.test', 'CVE-2020-11023', '1.12.4')]
+        self.assertEqual(m.ai_verdict, 'not_affected')
+        self.assertEqual(js_libraries.closure_kind(m.ai_reason), 'contradicted_by_file')
+
+    def test_an_inline_jquery_code_whose_version_cannot_be_told_is_unread(self):
+        page = '<script>x.fn=x.prototype={jquery:v,constructor:x};</script>'
+        self.assertEqual(js_libraries.parse_page(page, 'https://h.test/').inline_unread, 1)
+
+    def test_the_allow_list_and_the_kinds(self):
+        self.assertEqual(js_libraries.CLOSABLE, ('jquery', 'jquery-ui', 'jquery-migrate'))
+        self.assertEqual(set(js_libraries.CLOSABLE), set(js_libraries.SIGNED))  # the libraries the whole-body search finds by their code
+        kind = js_libraries.closure_kind
+        self.assertEqual(kind(js_libraries.closed_reason("the page's own scripts say jQuery 3.7.1; the 1.12.4 came from a script's name or "
+                                                         "query string")), 'named_by_script')
+        self.assertEqual(kind(js_libraries.closed_reason("the page's own scripts say jQuery 3.7.1; the 1.12.4 came from a technology scan")),
+                         'contradicted_by_file')
+        self.assertEqual(kind(js_libraries.closed_reason("the Moment.js script's own file does not state 2.29.1")), 'file_states_nothing')
+        self.assertEqual(kind(js_libraries.closed_reason('the host only redirects to x.test; the jQuery seen there is that host\'s')), 'redirect_alias')
+
+    def test_other_libraries_never_close_by_file(self):
+        copy = {'url': 'https://h.test/js/moment.js', 'version': '2.29.4', 'source': 'body', 'whole': True, 'state': 'effective',
+                'query_version': '2.29.1', 'file_read': True}
+        libraries = js_libraries.HostLibraries({'moment': {'version': '2.29.4', 'version_source': 'body', 'copies': [copy]}}, page_read=True,
+                                               page_versions={'2.29.1'})
+        skip, evidence, cap = libraries.judge('Moment.js', '2.29.1')
+        self.assertEqual((skip, cap), (False, js_libraries.CONFIDENCE['filename']))
+        self.assertIn('not recognised wherever it appears', evidence['version_note'])
+        jq = js_libraries.HostLibraries({'jquery': {'version': '3.7.1', 'version_source': 'body', 'copies': [{**copy, 'version': '3.7.1',
+                                                                                                             'query_version': '1.12.4'}]}},
+                                        page_read=True, page_versions={'1.12.4'})
+        self.assertTrue(jq.judge('jQuery', '1.12.4')[0])

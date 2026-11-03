@@ -399,21 +399,23 @@ class SystemicLibraryTests(Hosts):
                                                      correlation.build_product_index(cves), {c.id: c for c in cves})
         return {(r['matched_product'].lower(), r['matched_version']): r for r in rows}, js_libraries.HostLibraries.for_subdomain(sub)
 
-    def test_bootstrap_and_lodash_versions_the_files_contradict_are_not_matched(self):
+    def test_bootstrap_and_lodash_versions_stay_candidates_whatever_their_files_say(self):
         page = '<script src="/js/bootstrap.min.js"></script><script src="/js/lodash.min.js"></script>'
         bodies = {'/js/bootstrap.min.js': '/*!\n  * Bootstrap v5.3.2 (https://getbootstrap.com/)\n  */',
                   '/js/lodash.min.js': '/**\n * @license\n * Lodash 4.17.21 <https://lodash.com/>\n */'}
+        capped = {('bootstrap', '3.3.7'): js_libraries.CONFIDENCE['filename'], ('lodash', '4.17.4'): js_libraries.CONFIDENCE['filename']}
         # versions the page does not explain (no script URL of it, no other library on it carries them) stay capped candidates
         found, _libraries = self.found(page, bodies, 'Bootstrap:3.3.7', 'Lodash:4.17.4', 'Bootstrap:5.3.2', 'Lodash:4.17.21')
-        self.assertEqual({key: m['confidence'] for key, m in found.items()},
-                         {('bootstrap', '3.3.7'): js_libraries.CONFIDENCE['filename'], ('lodash', '4.17.4'): js_libraries.CONFIDENCE['filename']})
-        # a theme's scripts carry them as ?ver= strings: the technology scan misread this page, and its files say otherwise
+        self.assertEqual({key: m['confidence'] for key, m in found.items()}, capped)
+        # explained too (a theme's ?ver= strings), every script read whole: Bootstrap's and Lodash's code is not recognised wherever it
+        # appears (a copy without its banner looks like any other code), so their files close nothing: only jQuery's family is closable
         page += '<script src="/wp-content/themes/acme/js/theme.js?ver=3.3.7"></script><script src="/wp-content/plugins/p/p.js?ver=4.17.4"></script>'
         found, libraries = self.found(page, bodies, 'Bootstrap:3.3.7', 'Lodash:4.17.4', 'Bootstrap:5.3.2', 'Lodash:4.17.21')
-        self.assertEqual(found, {})
-        self.assertEqual(libraries.judge('Bootstrap', '3.3.7')[1]['reason'],
-                         "the page's own scripts say Bootstrap 5.3.2; the 3.3.7 came from a technology scan")
-        self.assertEqual(libraries.judge('Lodash', '4.17.4')[1]['reason'], "the page's own scripts say Lodash 4.17.21; the 4.17.4 came from a technology scan")
+        self.assertEqual({key: m['confidence'] for key, m in found.items()}, capped)
+        for product, version in (('Bootstrap', '3.3.7'), ('Lodash', '4.17.4')):
+            skip, evidence, _cap = libraries.judge(product, version)
+            self.assertFalse(skip)
+            self.assertIn('is not recognised wherever it appears', evidence['version_note'])
 
     def test_a_themes_ver_never_closes_bootstrap_or_lodash_and_their_own_files_still_prove_them(self):
         page = ('<script src="/js/lodash.min.js"></script><script src="/js/bootstrap.min.js?ver=3.3.7"></script>'

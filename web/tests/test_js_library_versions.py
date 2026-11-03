@@ -465,8 +465,9 @@ class CorrelationTests(RouteFixture, TestCase):
                                                 '/wp-content/themes/acme/js/bootstrap.min.js': BOOTSTRAP_4})
         # the names' ?ver=1.0.4 closes only on a page known whole: another copy the read did not see may carry the named version
         whole = {'scripts': 2, 'unread': 0, 'inline_unread': 0, 'loaders': [], 'truncated': False, 'capped': False, 'stub': False}
-        self.assertEqual(self.host('jquery:1.0.4', 'bootstrap:1.0.4', 'jQuery:3.7.1', 'Bootstrap:4.6.0',
-                                   evidence={'libraries': records, 'script_page': whole}), {})
+        # jQuery's closes; Bootstrap's code is not recognised wherever it appears, so its file closes nothing (js_libraries.CLOSABLE)
+        found = self.host('jquery:1.0.4', 'bootstrap:1.0.4', 'jQuery:3.7.1', 'Bootstrap:4.6.0', evidence={'libraries': records, 'script_page': whole})
+        self.assertEqual({key: m['confidence'] for key, m in found.items()}, {('1.0.4', 10735): 0.4})
         RouteAuth.objects.all().delete()
         candidates = self.host(evidence={'libraries': records, 'script_page': {**whole, 'unread': 1}})
         self.assertEqual({key: m['confidence'] for key, m in candidates.items()}, {('1.0.4', 11023): 0.4, ('1.0.4', 10735): 0.4})
@@ -811,10 +812,14 @@ class SecondReviewTests(NoCache, SimpleTestCase):
         skip, evidence, cap = js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')
         self.assertEqual((skip, cap, evidence['version_note'].startswith("read from the script's query string")), (False, 0.4, True))
         records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN, '/css/bootstrap.min.js': NO_BANNER})  # read: states nothing
-        self.assertTrue(js_libraries.HostLibraries(records, page_read=True).judge('Bootstrap', '3.3.7')[0])
+        skip, evidence, _cap = js_libraries.HostLibraries(records, page_read=True).judge('Bootstrap', '3.3.7')
+        self.assertFalse(skip)  # a file that states nothing proves nothing, the page whole or not
+        self.assertIn('states no version the read recognises', evidence['version_note'])
         records = read(page, {'/js/jquery-3.7.1.min.js': JQ_371_MIN, '/css/bootstrap.min.js': BOOTSTRAP_4})  # read: states another version
-        self.assertTrue(js_libraries.HostLibraries(records, page_read=True).judge('Bootstrap', '3.3.7')[0])
-        self.assertFalse(js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')[0])  # a page not known whole closes nothing
+        skip, evidence, _cap = js_libraries.HostLibraries(records, page_read=True).judge('Bootstrap', '3.3.7')
+        self.assertFalse(skip)  # Bootstrap is not closable by its files (js_libraries.CLOSABLE)
+        self.assertIn('is not recognised wherever it appears', evidence['version_note'])
+        self.assertFalse(js_libraries.HostLibraries(records).judge('Bootstrap', '3.3.7')[0])
 
     def test_a_version_read_from_a_file_is_not_downgraded_by_an_unread_copy_of_it(self):
         page = '<script src="/a/jquery.js"></script><script src="/b/jquery-3.4.1.min.js"></script>'  # the second 404s

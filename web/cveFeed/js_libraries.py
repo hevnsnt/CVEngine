@@ -356,10 +356,13 @@ def parse_page(body, page_url):
         out.append({'order': this, 'url': None, 'timing': 'sync' if kind != 'module' else 'defer', 'noconflict': bool(NOCONFLICT.search(code))})
         if inline_read < MAX_INLINE_READ:  # a library pasted into the page is on the page: its banner or code says which
             inline_read += 1
-            found = _inline_libraries(code)
+            scan = whole_body(code)
+            found = _inline_libraries(code, scan)
             inline += found
-            if len(inner) > MAX_INLINE or (not found and _LIBRARY_SHAPED.search(code)) or runtime_loaders(code):
-                # more than is read, third-party code no rule names, or code that loads another script at run time: what it carries is unknown
+            if (len(inner) > MAX_INLINE or (not found and _LIBRARY_SHAPED.search(code)) or scan['loaders'] or scan['unplaceable']
+                    or scan['overflow']):
+                # more than is read, third-party code no rule names, code that loads another script at run time, or library code whose
+                # version cannot be told: what it carries is unknown
                 out.inline_unread += 1
         elif code.strip():
             out.capped = True
@@ -377,14 +380,14 @@ def parse_page(body, page_url):
 _LIBRARY_SHAPED = re.compile(r'/\*!|@license|\(c\)\s{0,4}(?:19|20)\d\d', re.IGNORECASE)
 
 
-def _inline_libraries(code):
-    """``[(library key, version)]`` an inline script states: ``read_body`` (a banner in its first bytes, the libraries' own code), and a
-    banner anywhere in it (a bundle pasted into the page puts each library's banner where that library starts)."""
+def _inline_libraries(code, scan=None):
+    """``[(library key, version)]`` an inline script states: ``read_body`` (a banner in its first bytes, the libraries' own code), and every
+    banner and code signature anywhere in it (``whole_body``: a bundle pasted into the page puts each library where that library starts, and
+    a second copy may follow the first)."""
     found = [(key, version) for key, version, _how in read_body(code)]
-    for key, pattern in _BANNERS:
-        match = pattern.search(code)
-        if match and (key, match.group(1)) not in found:
-            found.append((key, match.group(1)))
+    for key, version, _how in (scan if scan is not None else whole_body(code))['versions']:
+        if (key, version) not in found:
+            found.append((key, version))
     return found
 
 
@@ -1063,6 +1066,15 @@ FALLBACK_NOTES = {'document.write': 'a fallback the page loads only when an earl
                   'nomodule': 'a nomodule script: only browsers without module support run it',
                   'type': 'a script whose type a loader or consent manager switches before it runs'}
 UNREAD_NOTE = ('read from the script\'s {where}; its file was not read ({why}), so the file has not confirmed it')
+SILENT_NOTE = ('read from the script\'s {where}; its file was read but states no version the read recognises (a build without its banner), '
+               'which proves nothing either way')
+UNRECOGNISED_NOTE = ('the page\'s files state {said}, but {name}\'s code is not recognised wherever it appears (a copy without its banner, '
+                     'in a bundle or inline, looks like any other code), so the page cannot rule this version out')
+# the libraries whose own code names their version, so the whole-body search (``whole_body``) finds every copy of them, banner or not, in
+# any file or inline script, and code of them whose version cannot be told is flagged (``unplaceable``): only for these may the page's files
+# close a technology scan's version (the named and the contradicted-by-file closures). Any other library (Moment.js, Vue, DataTables,
+# Bootstrap 5 builds without banners) may sit unrecognised in a bundle or inline, so its versions stay candidates
+CLOSABLE = ('jquery', 'jquery-ui', 'jquery-migrate')
 NAMED_NOTE = ('read from the script\'s {where}; its file states {said}, but not every script of the page was read whole, so another copy may '
               'carry this version')
 OTHER_NOTE = ('named by another fingerprinting tool (technology detection), not read from the script file; trusted no further than a '
@@ -1081,8 +1093,9 @@ def closed_reason(reason):
 
 
 def closure_kind(reason):
-    """The kind of a stored library closure reason (``closed_reason``), for counts: redirect_alias, contradicted_by_file, cache_buster,
-    no_such_script, or '' for any other reason."""
+    """The kind of a stored library closure reason (``closed_reason``), for counts: redirect_alias, named_by_script (a library script's own
+    ``?ver=`` or file name its file contradicts), contradicted_by_file, and the kinds earlier builds stored (cache_buster, no_such_script,
+    file_states_nothing), or '' for any other reason."""
     text = str(reason or '')
     if not text.startswith(LIBRARY_CLOSED):
         return ''
@@ -1092,6 +1105,10 @@ def closure_kind(reason):
         return 'cache_buster'
     if 'loads no ' in text:
         return 'no_such_script'
+    if "came from a script's name or query string" in text:
+        return 'named_by_script'
+    if 'own file does not state' in text:
+        return 'file_states_nothing'  # stored by an earlier build; no longer made
     return 'contradicted_by_file'
 
 
@@ -1308,27 +1325,38 @@ class HostLibraries:
         stated = [c for c in copies if c.get('source') == 'body' and c.get('version')]
         said = (record.get('version') if record.get('version_source') == 'body' and record.get('version') else
                 stated[-1]['version'] if stated else '')
-        read_named = [c for c in named if c.get('file_read', c.get('source') == 'body')]
-        if read_named and self.page_read and key not in self.inline:
-            # the string a script's query or name carries, where the file itself was read and states otherwise or nothing, on a page known
-            # whole (every script of every web port read whole, nothing loaded at run time, no inline code unread, not cut): no other copy
-            # of the page can carry the version the name gives
-            return True, {'reason': (f'the page\'s own scripts say {name} {said}; the {version} came from a script\'s name or query string'
-                                     if said else f'the {name} script\'s own file does not state {version}')}, None
-        if stated and self.explains(key, version) and self._contradicts(key, record, copies):
+        # the named script's own file, read, positively states ANOTHER version: a file that states nothing the read recognises proves nothing
+        # (a minified build without its banner, Moment.js's for one, is the named version all the same)
+        read_named = [c for c in named if c.get('source') == 'body' and c.get('version') and c.get('version') != version]
+        closable = key in CLOSABLE
+        if read_named and closable and self.page_read and key not in self.inline:
+            # the string a script's query or name carries, where the file itself was read and states another version, on a page known whole
+            # (every script of every web port read whole, nothing loaded at run time, no inline code unread, not cut), for a library whose
+            # code is recognised wherever it is: no other copy of the page can carry the version the name gives
+            return True, {'reason': f'the page\'s own scripts say {name} {read_named[-1]["version"]}; the {version} came from a script\'s name '
+                                    f'or query string'}, None
+        if stated and closable and self.explains(key, version) and self._contradicts(key, record, copies):
             # the page itself explains the version (a script URL or another library on it carries it), and every script of it, read whole,
             # states another version of the library
             return True, {'reason': f'the page\'s own scripts say {name} {said}; the {version} came from a technology scan'}, None
+        unrecognised = (UNRECOGNISED_NOTE.format(name=name, said=f'{name} {said}' if said else 'no version')
+                        if not closable and (read_named or stated) else '')
         if named:  # the script was never read, or the page is not known whole: its query or name string is kept at the file-name confidence
             copy = named[0]
             where = 'query string' if copy.get('query_version') == version else 'file name'
-            note = (NAMED_NOTE.format(where=where, said=f'{name} {said}' if said else 'no version') if copy in read_named
-                    else UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read'))
+            if unrecognised:
+                note = unrecognised
+            elif copy in read_named:
+                note = NAMED_NOTE.format(where=where, said=f'{name} {copy["version"]}')
+            elif copy.get('file_read', copy.get('source') == 'body'):
+                note = SILENT_NOTE.format(where=where)
+            else:
+                note = UNREAD_NOTE.format(where=where, why=copy.get('not_read') or 'not read')
             return False, {**base, 'script_url': copy.get('url', ''), 'version_source': 'filename', 'copy_state': copy.get('state') or '',
                            'version_confidence': CONFIDENCE['filename'], 'version_note': note}, CONFIDENCE['filename']
         # another tool read it (from a script name or query string the page's files do not bear out): shown with what the page itself
         # says, and trusted no further than a file name
-        return False, {'copies': summary, **_other()}, CONFIDENCE['filename']
+        return False, {'copies': summary, **_other(), **({'version_note': unrecognised} if unrecognised else {})}, CONFIDENCE['filename']
 
     def _judge_legacy(self, key, version):
         """A version stored before records existed, from a script's name or its query string (one cannot be told from the other any more):

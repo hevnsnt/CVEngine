@@ -914,7 +914,7 @@ def _names(values, limit=3):
 
 LIBRARY_DAMPING_DAYS = 14  # a library match reopened this recently is not closed again on the page's word (only a redirect alias closes it)
 # every page-based closure but the redirect alias: a page that changes between readings (A/B, rotating bundles) must not flap a match
-_WEAK_LIBRARY_CLOSURES = ('contradicted_by_file', 'no_such_script', 'cache_buster')
+_WEAK_LIBRARY_CLOSURES = ('contradicted_by_file', 'named_by_script', 'file_states_nothing', 'no_such_script', 'cache_buster')
 
 
 def _library_standing(match):
