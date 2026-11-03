@@ -109,10 +109,13 @@ def _screenshots(problems, notes):
         last = cache.get('screenshots:last_browser_error')
     except Exception:  # noqa: BLE001
         last = None
+    sandbox = web_shot.sandbox_status()
     out = {'enabled': web_shot.enabled(), 'chromium_installed': web_shot.browser_installed(), 'chromium_version': pinned.get('version') or None,
-           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last}
+           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last, 'sandbox': sandbox}
     reason = web_shot.unavailable_reason()
-    if reason and web_shot.enabled():
+    if web_shot.enabled() and sandbox['state'] in ('failed', 'off'):
+        problems.append(f"screenshots: {sandbox['reason']}")  # off until the celery container can give Chromium its sandbox, or running without it
+    elif reason and web_shot.enabled():
         notes.append(f'screenshots: {reason}')  # a note, not a problem: an image that predates the feature runs everything else fine
     elif last:
         problems.append(f"screenshots: the browser last failed to run at {last.get('at')}: {last.get('error')}")
