@@ -136,6 +136,10 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 # build that release drives, and the build fails if it launches anything else, so a Playwright bump that moves the browser is read before it ships. Only the
 # headless shell is installed (it is what a screenshot needs, and about 100 MB smaller than the full browser). It is launched as root and as the unprivileged
 # account the screenshot worker runs it as (nobody), against about:blank (there is no checksum of the download to pin: Playwright fetches its own pinned revision, and this launch check is what verifies it), so a missing library or an unreadable install stops the build instead of the first scan.
+# Chromium's sandbox cannot be checked here: build steps run under the builder's default seccomp profile, which refuses the user namespaces the sandbox
+# needs (so this check launches without it). The running celery container has Playwright's seccomp profile (docker-compose.yml) and proves the sandbox
+# engages at every start (manage.py check_screenshot_sandbox) and before every batch of pages (cveFeed/shot_worker.py); CI runs the built image with and
+# without the profile (.github/workflows/build-pr.yml). A Playwright bump that moves the browser means rebuilding the image: nothing updates Chromium in place.
 ARG PLAYWRIGHT_CHROMIUM_VERSION=156.0.8078.4
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN set -e; playwright install --with-deps --only-shell chromium \

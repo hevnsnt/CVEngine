@@ -81,6 +81,11 @@ generate_worker_command() {
 # (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
 python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
 
+# Chromium's sandbox for the web screenshots (cveFeed/web_shot.py): started once here as the screenshot worker starts it. While it cannot engage
+# (a container without config/seccomp/playwright-chromium.json, a kernel without unprivileged user namespaces) screenshots stay off and the host
+# page, get_system_status and this log say why. It never stops the workers from starting.
+python3 manage.py check_screenshot_sandbox || echo "Web screenshots stay off until Chromium's sandbox can start (see above)."
+
 echo "Starting Celery Workers..."
 
 # Three gevent workers instead of one process per queue: every worker process loads all of Django (150-250 MB), so

@@ -138,6 +138,11 @@ class WorkerSupervisionTests(SimpleTestCase):
         self.assertNotIn('manage.py loaddata', text)  # it overwrote edited engines at every start; load_default_fixtures only adds what is missing
         self.assertIn('manage.py load_default_fixtures', text)
 
+    def test_the_screenshot_sandbox_is_checked_before_the_workers(self):
+        text = SCRIPT.read_text()
+        check = text.index('python3 manage.py check_screenshot_sandbox ||')  # a failed check never stops the workers from starting
+        self.assertLess(check, text.index('eval "$commands"'))
+
 
 WEB_SCRIPT = Path(__file__).resolve().parent.parent / 'entrypoint.sh'
 BEAT_SCRIPT = Path(__file__).resolve().parent.parent / 'beat-entrypoint.sh'
