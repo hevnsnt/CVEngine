@@ -10,8 +10,13 @@ evidence fields, a tightened proof) can never change what this migration did or 
    of the backlog. Matches still waiting for their page are left to it: those of a scan that has not finished, and those made in the last six
    hours. Under legacy the workers baseline at start (``cveFeed.notify.baseline_heat_policy``).
 
-Cost: one UPDATE over the matches joined to their CVE (about 4 s at 400k matches; it holds row locks on the rows it marks only). No schema
-change but the new nullable column with a constant default (no table rewrite).
+Cost and locking: the column is added with a constant default (``''``, NOT NULL), which PostgreSQL 11 and later record in the catalog
+without rewriting the table. But AddField takes an ACCESS EXCLUSIVE lock on ``cveFeed_cvematch``, and the whole migration runs in one
+transaction, so that lock is held until the baseline UPDATE below has finished too (about 4 s at 400k matches): reads and writes of CVE
+matches wait for that long. Rolling deploys: Django drops the column's database default once it is added, so until every process runs
+the new code, a process on the old code that creates a CVE match (correlation, a feed sync) fails on the NOT NULL column, and a page
+it sends records no rule (the new code can page it again). Stop the workers for the migration, as the upgrade does, and start them on
+the new code.
 """
 import os
 

@@ -919,7 +919,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             if stats['stopped']:
                 break
     if hits:
-        notify.template_hits(hits)  # one message per run, however many hosts
+        notify.template_hits(hits, project=project_id)  # one message per run, however many hosts
     return stats
 
 

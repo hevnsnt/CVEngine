@@ -386,32 +386,38 @@ def _version_only_pairs(hits):
     return version - hard
 
 
-def _closed_pairs(hits):
-    """The (CVE id, host) pairs of ``hits`` whose stored matches are all closed (``counts.CLOSED``: fixed, an accepted risk or a false
-    positive): a person decided about the finding, so a template hit on it is not paged again. A pair with no stored match, or with one
-    open match, is not one of them."""
+def _closed_pairs(hits, project=None):
+    """The (CVE id, host) pairs of ``hits`` whose current matches are all closed (``counts.CLOSED``: fixed, an accepted risk or a false
+    positive): a person decided about the finding, so a template hit on it is not paged again. Only the current inventory's copy is read
+    (``correlation.latest_scan_q``): closing updates that row, and an earlier scan's copy keeps its old status. With ``project`` (the project
+    that ran the test) only its matches count: the same host name in another project is another finding. A pair with no current match, or
+    with one open, is not one of them."""
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.counts import CLOSED
     from cveFeed.models import CVEMatch
     rows = (CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
-            .values_list('cve_entry__cve_id', 'subdomain__name', 'remediation_status'))
+            .filter(latest_scan_q('subdomain__')))
+    if project is not None:
+        rows = rows.filter(subdomain__target_domain__project_id=project)
     closed, open_ = set(), set()
-    for cve, host, status in rows:
+    for cve, host, status in rows.values_list('cve_entry__cve_id', 'subdomain__name', 'remediation_status'):
         (closed if status in CLOSED else open_).add((cve, host))
     return closed - open_
 
 
-def template_hits(hits, scan=None):
+def template_hits(hits, scan=None, project=None):
     """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
     version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): it read a version, it did not
-    confirm the flaw (the callers already leave those hits out; this is the last check before a page). So is a pair whose matches are all
-    closed (``_closed_pairs``: fixed, an accepted risk or a false positive never pages). Under the KEV heat policy only a CVE on
-    the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit is recorded and shown all
-    the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
+    confirm the flaw (the callers already leave those hits out; this is the last check before a page). So is a pair whose current matches
+    are all closed (``_closed_pairs``: fixed, an accepted risk or a false positive never pages), read in ``project`` (or the scan's). Under
+    the KEV heat policy only a CVE on the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never
+    pages (the hit is recorded and shown all the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
     (``templategen.record_outcomes``)."""
     hits = list(dict.fromkeys(hits))
     if hits:
         try:
-            capped = _version_only_pairs(hits) | _closed_pairs(hits)
+            capped = _version_only_pairs(hits) | _closed_pairs(
+                hits, project if project is not None else (scan.domain.project_id if scan is not None else None))
         except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
             logger.warning('template hit heat check failed (%s)', type(exc).__name__)
             capped = set()
