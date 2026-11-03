@@ -185,6 +185,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     {% if f.confirm %}<h4>How to confirm it</h4>
     <ul class="tight">{% for w in f.confirm.where %}<li>{{ w }}</li>{% endfor %}{% for x in f.confirm.look_for %}<li>{{ x }}</li>{% endfor %}</ul>
     {% for st in f.confirm.steps %}<div class="proof"><b>{{ st.title }}</b><div class="cmd">{{ st.command }}</div></div>{% endfor %}
+    {% if f.confirm.omitted %}<p class="small mute">{{ f.confirm.omitted }}</p>{% endif %}
     {% if f.confirm.affected %}<p class="small">{{ f.confirm.affected }} {{ f.confirm.not_affected }}</p>{% endif %}
     {% if f.confirm.needs %}<p class="small">{{ f.confirm.needs }}</p>{% endif %}{% endif %}
     <h4>Remediation</h4>

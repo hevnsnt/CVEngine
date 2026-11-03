@@ -17,18 +17,22 @@ import shlex
 from urllib.parse import urlsplit, urlunsplit
 
 GUIDE_VERSION = 1
-NOTICE = ('Commands are built by cvENGINE from this match\'s own host, port and URL and only read. Anything marked "seen on the host" or '
-          '"advisory text" is data from the scanned host or a feed: compare it, never run it.')
-_DNS = re.compile(r'^(?=.{1,253}$)[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)*\.?$')
+NOTICE = ('Commands are built by cvENGINE from this match\'s own host, port and URL. The steps to check it only read; an active check is '
+          'labelled as one. Anything marked "seen on the host" or "advisory text" is data from the scanned host or a feed: compare it, never run it.')
+_DNS = re.compile(r'^(?=.{1,253}\Z)[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?)*\.?\Z')
 # the URL characters a script or page address uses. Quotes, ``$``, ``;``, parentheses, ``!`` and ``*`` are legal in a URL but never needed
 # there unencoded: a URL that carries one is refused, so even a shell-quoted copy of it never reads like a command
-_URL_CHARS = re.compile(r"^[A-Za-z0-9\-._~:/?#\[\]@&+,=%]{1,2000}$")
-_VERSION = re.compile(r'^[0-9][0-9A-Za-z.+~:_-]{0,63}$')
-_SLUG = re.compile(r'^[a-z0-9][a-z0-9_.-]{0,99}$')
-_TEMPLATE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
-_CVE = re.compile(r'^CVE-\d{4}-\d{4,12}$')
-_OID = re.compile(r'^[0-9]+(\.[0-9]+){3,40}$')
-_PURL = re.compile(r'^pkg:([a-z0-9.+-]{1,20})/([A-Za-z0-9._~%@/+-]{1,200})@([A-Za-z0-9._~%+:-]{1,80})(?:[?#].*)?$')
+_URL_CHARS = re.compile(r"^[A-Za-z0-9\-._~:/?#\[\]@&+,=%]{1,2000}\Z")
+# every validator is anchored with \Z: "$" would accept a trailing newline
+_VERSION = re.compile(r'^[0-9][0-9A-Za-z.+~:_-]{0,63}\Z')
+_SLUG = re.compile(r'^[a-z0-9][a-z0-9_.-]{0,99}\Z')
+_TEMPLATE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
+_CVE = re.compile(r'^CVE-\d{4}-\d{4,12}\Z')
+_OID = re.compile(r'^[0-9]+(\.[0-9]+){3,40}\Z')
+_PURL = re.compile(r'^pkg:([a-z0-9.+-]{1,20})/([A-Za-z0-9._~%@/+-]{1,200})@([A-Za-z0-9._~%+:-]{1,80})(?:[?#][^\n]*)?\Z')
+# the template id prefix of a result another tester recorded on a match (OpenVAS, testssl.sh): not a nuclei template. Our own constant, so a
+# change in templategen cannot break this module
+OTHER_TESTERS = re.compile(r'^(?:openvas|testssl):')
 
 # testssl.sh test id -> its own option for running only that test (testssl.sh 3.x)
 TESTSSL_FLAGS = {'heartbleed': '--heartbleed', 'CCS': '--ccs-injection', 'ticketbleed': '--ticketbleed', 'ROBOT': '--robot',
@@ -78,10 +82,14 @@ CURATED = {
                       'with whitespace before ">" is not stripped)', 'review': r'\.load\('},
     'CVE-2020-11022': {'library': 'jquery', 'needs': 'the page passes HTML from an untrusted source, even sanitized, to .html(), .append() or '
                        'another DOM manipulation method', 'review': _DOM_SINKS,
-                       'self_test': {'expression': 'typeof jQuery.htmlPrefilter === "function" ? jQuery.htmlPrefilter("<div/><span/>") : '
-                                                   '"no htmlPrefilter: jQuery older than 1.12.0 / 2.2.0"',
-                                     'reads': 'Prints "<div></div><span></span>" when this jQuery still expands self-closing tags (the behaviour '
-                                              'the 3.5.0 fix removed), "<div/><span/>" on 3.5.0 or later. Only a string is processed.'}},
+                       'self_test': {'expression': '(function () { if (typeof jQuery.htmlPrefilter !== "function") return "affected: jQuery older '
+                                                   'than 1.12.0 / 2.2.0 (no htmlPrefilter; these releases always expand self-closing tags)"; '
+                                                   'var out = jQuery.htmlPrefilter("<div/><span/>"); return out === "<div/><span/>" ? "not affected: '
+                                                   'self-closing tags are left alone (3.5.0 or later)" : "affected: self-closing tags are expanded to " '
+                                                   '+ out; })()',
+                                     'reads': 'Prints "affected" when this jQuery still expands self-closing tags (every release before 3.5.0, '
+                                              'including those older than 1.12.0 and 2.2.0, which have no htmlPrefilter at all) and "not affected" '
+                                              'on 3.5.0 or later. Only a string is processed.'}},
     'CVE-2020-11023': {'library': 'jquery', 'needs': 'the page passes HTML containing <option> elements from an untrusted source, even '
                        'sanitized, to .html(), .append() or another DOM manipulation method', 'review': _DOM_SINKS},
     'CVE-2021-41182': {'library': 'jquery-ui', 'needs': 'the page sets the Datepicker altField option from an untrusted source',
@@ -141,6 +149,37 @@ def _url(value):
     return urlunsplit((parts.scheme, netloc, parts.path or '/', parts.query, ''))
 
 
+def _list(value):
+    """``value`` when it is a list, else []: evidence is data a scanner wrote, and a wrong shape must not cost the guide."""
+    return value if isinstance(value, list) else []
+
+
+def _is_ip(host):
+    try:
+        ipaddress.ip_address(str(host or ''))
+        return True
+    except ValueError:
+        return False
+
+
+def _elsewhere(url, host):
+    """A note when a script URL points somewhere other than the scanned site: a private, loopback or link-local address (opening it reaches
+    the reader's own network, not the site), or another host (a CDN, or a host the page names)."""
+    if not url:
+        return ''
+    target = (urlsplit(url).hostname or '').lower().strip('[]')
+    try:
+        address = ipaddress.ip_address(target)
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+            return (f'The script URL points to {target}, a private, loopback or link-local address, not to the scanned site: opening it from '
+                    'your machine reaches your own network. Read the file from the page as the site serves it.')
+    except ValueError:
+        pass
+    if host and target and target != host:
+        return f'The script is served from {target}, not from the scanned host {host}: the link opens that host\'s copy.'
+    return ''
+
+
 def _version(value):
     """The version a match recorded, validated: its first word (``8.9p1`` of ``8.9p1 Ubuntu 3ubuntu0.10``, whose distribution part is shown
     as quoted banner text instead), or ''."""
@@ -178,15 +217,61 @@ def _step(title, detail='', command='', run_in='shell', url=''):
     return out
 
 
-def _range_of(match):
-    rng = (match.evidence or {}).get('range') if isinstance(match.evidence, dict) else None
-    rng = rng if isinstance(rng, dict) else {}
+def _clean_range(rng):
     out = {}
+    if not isinstance(rng, dict):
+        return out
     for src, dst in (('introduced', 'introduced'), ('fixed', 'fixed'), ('lastAffected', 'last_affected'), ('last_affected', 'last_affected')):
         version = _version(rng.get(src))
         if version and version not in ('0', '0.0', '0.0.0'):
             out[dst] = version
     return out
+
+
+def _range_of(match):
+    """The affected range the match was made on (``evidence['range']``), validated."""
+    return _clean_range((match.evidence or {}).get('range') if isinstance(match.evidence, dict) else None)
+
+
+def _token(name):
+    return re.sub(r'[^a-z0-9]', '', str(name or '').lower())
+
+
+def _ranges_of(match):
+    """``(own, every)``: the range the match was made on, and every affected range the advisory gives for the matched product (the entry the
+    match was made on, else every entry naming the product), each once. A version outside ``own`` may still be inside another release
+    line's range: the verdict and the fix read ``every``."""
+    from cveFeed.correlation import clean_affected, prepared_ranges
+    own = _range_of(match)
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    entries = clean_affected(getattr(match.cve_entry, 'affected', None))
+    index = ev.get('affected_index')
+    picked = [entries[index]] if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(entries) else []
+    if not picked:
+        token = _token(match.matched_product)
+        picked = [e for e in entries if token and token in {_token(e.get('product')), _token(e.get('package'))}]
+    every = []
+    for entry in picked:
+        for rng in prepared_ranges(entry.get('ranges'))[:20]:
+            clean = _clean_range(rng)
+            if clean and clean not in every:
+                every.append(clean)
+    if own and own not in every:
+        every.insert(0, own)
+    if not own and len(every) == 1:
+        own = every[0]
+    if not own and every:
+        version = _version(match.matched_version)
+        try:
+            from cveFeed.correlation import parse_version, range_verdict
+            parsed = parse_version(version) if version else None
+            for rng in every:
+                if parsed is not None and range_verdict(parsed, [rng])[0] is True:
+                    own = rng
+                    break
+        except Exception:  # noqa: BLE001 - a version the comparator cannot read leaves the own range unknown
+            pass
+    return own, every[:20]
 
 
 def _range_words(rng):
@@ -201,16 +286,45 @@ def _range_words(rng):
     return 'in the range the advisory names'
 
 
-def _verdict(product, version, rng, where, cant_tell, extra_not=''):
-    fixed = rng.get('fixed')
-    affected = (f'{where} states {product} {version or "a version"} {_range_words(rng)}: the version is affected.')
-    if fixed:
-        not_affected = f'{where} states {fixed} or later' + (f', or {extra_not}' if extra_not else '') + ': not affected.'
-    elif rng.get('last_affected'):
-        not_affected = f"{where} states a version after {rng['last_affected']}" + (f', or {extra_not}' if extra_not else '') + ': not affected.'
+def _other_fixes(ranges, own):
+    return list(dict.fromkeys(r['fixed'] for r in ranges if r.get('fixed') and r != own and r.get('fixed') != own.get('fixed')))
+
+
+def _verdict(product, version, ranges, where, cant_tell, extra_not=''):
+    """How to read the answer against EVERY affected range (``ranges`` is ``(own, every)``): a version is not affected only outside all of
+    them, so a later release of one line is never cleared while another line's range still holds it."""
+    own, every = ranges if isinstance(ranges, tuple) else (ranges, [ranges] if ranges else [])
+    every = every or ([own] if own else [])
+    fixed = own.get('fixed', '')
+    words = '; '.join(_range_words(r) for r in every) or _range_words(own)
+    if len(every) > 1:
+        affected = (f'{where} states {product} {version or "a version"} inside one of the affected ranges ({words}): the version is affected.')
+        not_affected = (f'{where} states a version outside every affected range' + (f', or {extra_not}' if extra_not else '') + ': not affected.'
+                        + (f' On this release line that means {fixed} or later' + (f'; the other lines are fixed in {", ".join(_other_fixes(every, own))}'
+                                                                                  if _other_fixes(every, own) else '') + '.' if fixed else ''))
     else:
-        not_affected = (extra_not[0].upper() + extra_not[1:] + ': not affected.') if extra_not else 'The version is outside the advisory range: not affected.'
-    return {'fixed': fixed or '', 'affected_range': _range_words(rng), 'affected': affected, 'not_affected': not_affected, 'cant_tell': cant_tell}
+        affected = f'{where} states {product} {version or "a version"} {_range_words(own)}: the version is affected.'
+        if fixed:
+            not_affected = f'{where} states {fixed} or later' + (f', or {extra_not}' if extra_not else '') + ': not affected.'
+        elif own.get('last_affected'):
+            not_affected = f"{where} states a version after {own['last_affected']}" + (f', or {extra_not}' if extra_not else '') + ': not affected.'
+        else:
+            not_affected = (extra_not[0].upper() + extra_not[1:] + ': not affected.') if extra_not else 'The version is outside the advisory range: not affected.'
+    return {'fixed': fixed, 'fixed_releases': list(dict.fromkeys(r['fixed'] for r in every if r.get('fixed'))), 'affected_range': _range_words(own),
+            'affected_ranges': [_range_words(r) for r in every], 'affected': affected, 'not_affected': not_affected, 'cant_tell': cant_tell}
+
+
+def _upgrade(product, ranges):
+    """The fix: the fixed release of the match's own release line, and the other lines' fixed releases."""
+    own, every = ranges
+    fixed = own.get('fixed')
+    others = _other_fixes(every, own)
+    if fixed:
+        return f'{product} {fixed} or later' + (' on this release line' if others else '') + (
+            f' (the other affected lines are fixed in {", ".join(others)})' if others else '')
+    if others or any(r.get('fixed') for r in every):
+        return f'a fixed {product} release ({", ".join(dict.fromkeys(r["fixed"] for r in every if r.get("fixed")))} on their lines)'
+    return f'a {product} release the vendor lists as fixed'
 
 
 def _strategy(cve):
@@ -280,11 +394,23 @@ def _review_step(cve_id):
                        'library\'s own files are skipped). Each one fed with untrusted input is what makes the page exploitable.'}
 
 
+_SECRET_HEADER = re.compile(r'(?im)^((?:authorization|proxy-authorization|cookie|x-api-key|x-auth-token)[ \t]*:[ \t]*).*$')
+
+
+def _redact_request(text):
+    """A nuclei request excerpt with its credentials masked: an authenticated scan's Authorization or Cookie header is never shown."""
+    from cveFeed.secret_redaction import redact_text
+    return redact_text(_SECRET_HEADER.sub(lambda m: m.group(1) + '[redacted]', str(text)))
+
+
+def _bracket(host):
+    return f'[{host}]' if ':' in str(host) else str(host)
+
+
 def _template_section(match, host, bases):
     """What a nuclei template that ran on this match did: its id and a link to it, the request and what matched (quoted)."""
-    from cveFeed.templategen import OTHER_TESTERS
     template_id = str(match.template_id or '')
-    if not match.template_result or not template_id or re.match(OTHER_TESTERS, template_id) or not _TEMPLATE.match(template_id):
+    if not match.template_result or not template_id or OTHER_TESTERS.match(template_id) or not _TEMPLATE.match(template_id):
         return None
     out = {'template_id': template_id, 'result': match.template_result}
     try:
@@ -296,22 +422,29 @@ def _template_section(match, host, bases):
                 continue
             if path.startswith(TEMPLATES_ROOT.rstrip('/') + '/'):
                 rel = path[len(TEMPLATES_ROOT.rstrip('/')) + 1:]
-                if re.match(r'^[A-Za-z0-9._/-]{1,300}$', rel) and '..' not in rel:
+                if re.match(r'^[A-Za-z0-9._/-]{1,300}\Z', rel) and '..' not in rel:
                     out['template_url'] = f'https://github.com/projectdiscovery/nuclei-templates/blob/main/{rel}'
             elif path.startswith(GENERATED_DIR.rstrip('/') + '/'):
-                out['generated'] = True
+                out['generated'] = True  # on the cvENGINE server only: ``nuclei -id`` elsewhere cannot find it
             break
     except Exception:  # noqa: BLE001 - a missing templates directory only costs the link
         pass
     if 'template_url' not in out and not out.get('generated'):
         out['template_search_url'] = f'https://github.com/projectdiscovery/nuclei-templates/search?q={template_id}'
-    target = bases[0] if bases else (f'https://{host}' if host else '')
-    if target:
-        out['command'] = f'nuclei -duc -id {_q(template_id)} -u {_q(target)}'
+    target = bases[0] if bases else (f'https://{_bracket(host)}' if host else '')
+    if target and not out.get('generated'):
+        # not read-only: a CVE template may send its exploit-check requests; -ni keeps it from reaching out-of-band callback servers
+        out['command'] = f'nuclei -duc -ni -id {_q(template_id)} -u {_q(target)}'
+        out['active'] = ('Active check: sends the template\'s own requests to this host (a CVE template may send exploit-check payloads). '
+                         'Run it only where you are allowed to test.')
     try:
         from startScan.models import Vulnerability
-        vuln = (Vulnerability.objects.filter(subdomain__name=match.subdomain.name, cve_ids__name__iexact=match.cve_entry.cve_id,
-                                             template_id=template_id).order_by('-discovered_date').first() if match.subdomain_id else None)
+        sub = match.subdomain
+        # this match's own target (and so its own project) only: another organisation's finding on a host of the same name is never read
+        vuln = (Vulnerability.objects.filter(subdomain__name=sub.name, subdomain__target_domain_id=sub.target_domain_id,
+                                             target_domain_id=sub.target_domain_id, cve_ids__name__iexact=match.cve_entry.cve_id,
+                                             template_id=template_id).order_by('-discovered_date', '-id').first()
+                if sub is not None and sub.target_domain_id else None)
     except Exception:  # noqa: BLE001
         vuln = None
     if vuln is not None:
@@ -320,7 +453,7 @@ def _template_section(match, host, bases):
         if vuln.matcher_name:
             out['matcher'] = _quote(vuln.matcher_name, 120)
         if vuln.request:
-            out['request'] = _quote(vuln.request, 800)
+            out['request'] = _quote(_redact_request(vuln.request), 800)
         extracted = [_quote(x, 120) for x in (vuln.extracted_results or [])[:5] if x]
         if extracted:
             out['extracted'] = extracted
@@ -368,10 +501,13 @@ def _client_library(match, cve, strategy, host, bases, key):
     product = _libraries()[key][0]
     ev = match.evidence if isinstance(match.evidence, dict) else {}
     version = _version(match.matched_version)
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
+    rng = ranges[0]
     script_url = _url(ev.get('script_url'))
-    copies = [c for c in ev.get('copies') or [] if isinstance(c, dict)][:8]
+    copies = [c for c in _list(ev.get('copies')) if isinstance(c, dict)][:8]
     body_read = ev.get('version_source') == 'body'
+    state = str(ev.get('copy_state') or '')
+    runs = state in ('', 'effective')  # the console and a self-test speak for the copy that runs, not for a shadowed or fallback one
     pages = _library_pages(match, host, ev.get('script_url')) if script_url else []
     page = pages[0] if pages else (bases[0] + '/' if bases else '')
     where = []
@@ -386,16 +522,18 @@ def _client_library(match, cve, strategy, host, bases, key):
         url = _url(copy.get('url'))
         if not url or url == script_url:
             continue
-        state = str(copy.get('state') or '')
-        label = f"Another {product} copy on the page: {_version(copy.get('version')) or 'version not stated'}" + (f' ({state})' if state in (
+        its_state = str(copy.get('state') or '')
+        label = f"Another {product} copy on the page: {_version(copy.get('version')) or 'version not stated'}" + (f' ({its_state})' if its_state in (
             'effective', 'shadowed', 'fallback', 'unresolved') else '')
         others.append({'label': label, 'url': url})
     where += others[:6]
+    away = _elsewhere(script_url, host)
+    if away:
+        where.append({'label': 'Note', 'text': away})
     banner = LIBRARY_FACTS.get(key, {}).get('banner', '').format(version=version or 'x.y.z')
     look_for = []
     if banner:
         look_for.append({'label': f"The file's first comment line (what cvENGINE {'read' if body_read else 'looks for'})", 'text': banner})
-    state = str(ev.get('copy_state') or '')
     if state:
         look_for.append({'label': 'Which copy runs', 'text': {
             'effective': 'This copy loads last, so it is the one that runs (effective).',
@@ -414,10 +552,14 @@ def _client_library(match, cve, strategy, host, bases, key):
         steps.append(_step(f'List the {product} scripts the page loads', 'Each src that names the library is a copy to open.',
                            f"curl -sS --max-time 20 {_q(page)} | grep -oiE '<script[^>]+src=[^>]+>' | grep -i {_q(key.split('-')[0])}"))
     console = console_expression(key, version)
-    if console and page:
+    if console and page and runs:
         steps.append(_step('Ask the page which version runs', f'Open the page, open the browser\'s developer console (F12) and run the '
                            f'expression: it prints the {product} version of the copy that actually runs.', console, run_in='browser_console', url=page))
-    self_test = CURATED.get(cve.cve_id, {}).get('self_test') if CURATED.get(cve.cve_id, {}).get('library') == key else None
+    elif console and not runs:
+        steps.append(_step('Do not use the browser console for this copy', f'This copy is {state}: the console (and any self-test) reports the '
+                           f'{product} that runs last, which is another copy. Read this copy\'s own file' + (f' ({script_url})' if script_url else '')
+                           + ' instead.', run_in='browser', url=script_url))
+    self_test = CURATED.get(cve.cve_id, {}).get('self_test') if CURATED.get(cve.cve_id, {}).get('library') == key and runs else None
     if self_test and page:
         steps.append(_step('Optional: a harmless self-test in your own browser', self_test['reads'] + ' It runs only in your browser tab, '
                            'changes nothing on the server and executes no script.', self_test['expression'], run_in='browser_console', url=page))
@@ -444,13 +586,14 @@ def _client_library(match, cve, strategy, host, bases, key):
     local.append({'title': "Find which packaging the application uses (run in its source or deployment directory)", 'commands': deps[:10]})
     cdn = bool(script_url) and any(h in (urlsplit(script_url).hostname or '') for h in ('googleapis.com', 'jsdelivr.net', 'cdnjs.cloudflare.com',
                                                                                          'unpkg.com', 'code.jquery.com', 'bootstrapcdn.com', 'aspnetcdn.com'))
-    fix = (f"Load {product} {fixed} or later" if fixed else f'Load a fixed {product}') + (
+    fix = f'Load {_upgrade(product, ranges)}' + (
         ': the file comes from a public CDN, so change the version in the script URL in the page\'s template (and its integrity hash)' if cdn
         else ': replace the bundled file, or update the packaging the application uses (above) and rebuild') + \
         '; then run Validate now to read the page again.' + (f" {FIX_NOTES[key]}" if key in FIX_NOTES else '')
-    verdict = _verdict(product, version, rng, 'The file (or the console)',
-                       'The file has no banner (minified with it stripped) and the console expression is undefined: the library may be '
-                       'bundled under another name; search the file for its version string, or check the application\'s dependency tree.',
+    verdict = _verdict(product, version, ranges, 'The file (or the console)' if runs else 'This copy\'s own file',
+                       ('The file has no banner (minified with it stripped) and the console expression is undefined: the library may be '
+                        'bundled under another name; search the file for its version string, or check the application\'s dependency tree.')
+                       if runs else 'The file has no banner (minified with it stripped): search it for its version string.',
                        extra_not='the page no longer loads this copy')
     return {'class': 'client_library', 'class_label': f'Client-side JavaScript library ({product})',
             'headline': f'Confirm {product} {version} on {host}'.replace('  ', ' '), 'where': where, 'look_for': look_for, 'steps': steps,
@@ -485,7 +628,7 @@ def _web_product(match, cve, strategy, host, bases):
     it, and the host package that decides when a distribution backports fixes."""
     product = str(match.matched_product or '')
     version = _version(match.matched_version)
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
     source, port, path, page = _probe_source(match, host, product, version)
     base = next((b for b in bases if port and (b.endswith(f':{port}') or (port == 443 and b.startswith('https://') and b.count(':') == 1)
                                                 or (port == 80 and b.startswith('http://') and b.count(':') == 1))), bases[0] if bases else '')
@@ -517,21 +660,21 @@ def _web_product(match, cve, strategy, host, bases):
     packages = _os_package_commands(product)
     if packages:
         local.append({'title': 'On the host: the installed package release (a backported fix keeps the old upstream version)', 'commands': packages})
-    verdict = _verdict(product, version, rng, 'The header (or the page)',
+    verdict = _verdict(product, version, ranges, 'The header (or the page)',
                        'The header hides the version or a CDN, proxy or load balancer answers instead: check the version on the host itself.',
                        extra_not="the host's package is listed as fixed by its distribution (a backport)")
     return {'class': 'web_server', 'class_label': f'Web server or runtime banner ({product})', 'headline': f'Confirm {product} {version} on {host}',
             'where': where, 'look_for': look_for, 'steps': steps, 'verdict': verdict, 'precondition': _precondition(cve, strategy),
             'local': local, 'links': _tracker_links(cve.cve_id),
-            'fix': f"Upgrade {product} to {rng['fixed']} or later" + ' (or install the distribution\'s fixed package), then run Validate now.'
-            if rng.get('fixed') else f'Upgrade {product} to a release the vendor lists as fixed, then run Validate now.'}
+            'fix': f'Upgrade to {_upgrade(product, ranges)}, or install the distribution\'s fixed package; then run Validate now.'}
 
 
 def _network_service(match, cve, strategy, host):
     ev = match.evidence if isinstance(match.evidence, dict) else {}
     product = str(match.matched_product or '')
     version = _version(match.matched_version) or ''
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
+    rng = ranges[0]
     ip = ''
     try:
         ip = str(ipaddress.ip_address(str(ev.get('ip') or ''))) if '%' not in str(ev.get('ip') or '') else ''
@@ -554,7 +697,7 @@ def _network_service(match, cve, strategy, host):
     if port and (ip or host):
         addr = ip or host
         steps.append(_step('Read the service banner with nmap', f'The {product} line in the VERSION column is what cvENGINE matched.',
-                           f"nmap -Pn {'-sU ' if udp else ''}-sV --version-intensity 5 -p {port} {_q(addr)}"))
+                           f"nmap -Pn {'-6 ' if ':' in addr else ''}{'-sU ' if udp else ''}-sV --version-intensity 5 -p {port} {_q(addr)}"))
         if not udp and re.search(r'ssh', product + ' ' + str(ev.get('service_extra') or ''), re.I):
             steps.append(_step('Or read the SSH greeting directly', 'The first line the server sends, for example SSH-2.0-OpenSSH_8.2p1 '
                                'Ubuntu-4ubuntu0.13, states the version and, after it, the distribution build.',
@@ -582,7 +725,7 @@ def _network_service(match, cve, strategy, host):
     if tracker:
         notes.append(f'The banner names {tracker[1]}: a {tracker[1]} package can carry a backported fix while the banner keeps the upstream '
                      'version. Its security tracker decides.')
-    verdict = _verdict(product, version, rng, 'The banner',
+    verdict = _verdict(product, version, ranges, 'The banner',
                        'The banner states no version, or a distribution build whose fix status the tracker must decide.',
                        extra_not="the host's package release is listed as fixed by its distribution (a backport)")
     if notes:
@@ -590,8 +733,8 @@ def _network_service(match, cve, strategy, host):
     return {'class': 'network_service', 'class_label': f'Network service banner ({product})', 'headline': f'Confirm {product} {version} on {target}:{port}',
             'where': where, 'look_for': look_for, 'steps': steps, 'verdict': verdict, 'precondition': _precondition(cve, strategy),
             'local': local, 'links': _tracker_links(cve.cve_id, banner_hint),
-            'fix': (f'Install the distribution\'s fixed {product} package (its tracker names the build), or upgrade to {fixed} or later where '
-                    'it is built from source; restart the service and run Validate now.' if fixed and not distro_fix else
+            'fix': (f'Install the distribution\'s fixed {product} package (its tracker names the build), or upgrade to {_upgrade(product, ranges)} '
+                    'where it is built from source; restart the service and run Validate now.' if fixed and not distro_fix else
                     f'Install the fixed {product} package your distribution\'s tracker names for this CVE, restart the service and run Validate now.')}
 
 
@@ -601,7 +744,7 @@ def _cms(match, cve, strategy, host, bases):
     slug = slug if _SLUG.match(slug) and '..' not in slug else ''
     kind = 'theme' if ev.get('kind') == 'wp-theme' else 'plugin'
     version = _version(match.matched_version)
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
     base = bases[0] if bases else (f'https://{host}' if host else '')
     path = (f'/wp-content/themes/{slug}/style.css' if kind == 'theme' else f'/wp-content/plugins/{slug}/readme.txt') if slug else ''
     url = _url(base + path) if base and path else ''
@@ -618,18 +761,19 @@ def _cms(match, cve, strategy, host, bases):
         local.append({'title': 'On the WordPress server (WP-CLI, read-only)', 'commands': [
             {'platform': 'app', 'command': f'wp {kind} get {_q(slug)} --fields=name,status,version',
              'explain': f'Prints whether the {kind} is installed and active, and its version (run in the WordPress directory).'}]})
-    verdict = _verdict(slug or str(match.matched_product), version, rng, f'The {kind}\'s {field} line',
+    verdict = _verdict(slug or str(match.matched_product), version, ranges, f'The {kind}\'s {field} line',
                        f'The readme is missing or its {field} is "trunk": check the version in the WordPress admin ({kind.title()}s page).',
                        extra_not=f'the {kind} is not active')
     return {'class': 'cms_component', 'class_label': f'WordPress {kind}', 'headline': f'Confirm the {slug or "WordPress"} {kind} {version} on {host}',
             'where': where, 'look_for': look_for, 'steps': steps, 'verdict': verdict, 'precondition': _precondition(cve, strategy),
-            'local': local, 'fix': (f'Update the {kind} to {rng["fixed"]} or later in the WordPress admin (or with wp {kind} update), then run '
-                                    'Validate now.' if rng.get('fixed') else f'Update or remove the {kind}, then run Validate now.')}
+            'local': local, 'fix': (f'Update the {kind} to {_upgrade(slug or "the " + kind, ranges)} in the WordPress admin (or with wp {kind} '
+                                    'update), then run Validate now.' if any(r.get('fixed') for r in ranges[1]) else
+                                    f'Update or remove the {kind}, then run Validate now.')}
 
 
 def _wordpress_core(match, cve, strategy, host, bases):
     version = _version(match.matched_version)
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
     base = bases[0] if bases else (f'https://{host}' if host else '')
     feed = _url(base + '/feed/') if base else ''
     front = _url(base + '/') if base else ''
@@ -643,12 +787,12 @@ def _wordpress_core(match, cve, strategy, host, bases):
             'where': [{'label': 'The site', 'url': front}] if front else [],
             'look_for': [{'label': 'What states the version', 'text': f'<meta name="generator" content="WordPress {version or "x.y.z"}" /> '
                                                                       f'or https://wordpress.org/?v={version or "x.y.z"}'}],
-            'steps': steps, 'verdict': _verdict('WordPress', version, rng, 'The generator tag', 'The generator tag is removed: check '
+            'steps': steps, 'verdict': _verdict('WordPress', version, ranges, 'The generator tag', 'The generator tag is removed: check '
                                                 'Dashboard > Updates, or wp-includes/version.php on the server.'),
             'precondition': _precondition(cve, strategy),
             'local': [{'title': 'On the WordPress server (WP-CLI, read-only)', 'commands': [
                 {'platform': 'app', 'command': 'wp core version', 'explain': 'Prints the installed WordPress version (run in the WordPress directory).'}]}],
-            'fix': f"Update WordPress to {rng['fixed']} or later, then run Validate now." if rng.get('fixed') else 'Update WordPress, then run Validate now.'}
+            'fix': f'Update WordPress to {_upgrade("WordPress", ranges)}, then run Validate now.'}
 
 
 def _tls(match, cve, strategy, host):
@@ -657,7 +801,7 @@ def _tls(match, cve, strategy, host):
     port = _port(ev.get('port')) or 443
     flag = TESTSSL_FLAGS.get(test)
     starttls = STARTTLS.get(port)
-    target = f'{host}:{port}' if host else ''
+    target = (f'[{host}]:{port}' if ':' in host else f'{host}:{port}') if host else ''  # an IPv6 address needs brackets before the port
     steps = []
     if target:
         steps.append(_step(f'Run only this testssl.sh test against {target}', 'Read the line for this test: VULNERABLE confirms it, '
@@ -666,7 +810,7 @@ def _tls(match, cve, strategy, host):
             steps.append(_step('Or ask the server to renegotiate with openssl', 'After the handshake, type R and press Enter: a new handshake '
                                '(the certificate chain printed again) means client-initiated renegotiation is accepted; '
                                '"renegotiation failed" or a closed connection means it is refused. Nothing but a handshake is sent.',
-                               f'openssl s_client -connect {_q(target)} -servername {_q(host)} -tls1_2'))
+                               f'openssl s_client -connect {_q(target)}' + ('' if _is_ip(host) else f' -servername {_q(host)}') + ' -tls1_2'))
     look_for = [{'label': 'The test', 'text': test or 'a testssl.sh vulnerability test'}]
     if ev.get('result'):
         look_for.append({'label': 'What testssl.sh reported (seen on the host)', 'quote': _quote(ev.get('result'), 300)})
@@ -709,7 +853,7 @@ def _host_reported(match, cve, strategy, host):
     commands = []
     if found:
         kind, name = found.group(1), found.group(2).split('/')[-1]
-        if re.match(r'^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$', name):
+        if re.match(r'^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}\Z', name):
             if kind == 'deb':
                 commands.append({'platform': 'debian', 'command': f"dpkg-query -W -f='${{Package}} ${{Version}}\\n' {_q(name)}",
                                  'explain': 'Prints the installed package release.'})
@@ -725,15 +869,14 @@ def _host_reported(match, cve, strategy, host):
     look_for = [{'label': 'What the host reported', 'quote': _quote(f'{match.matched_product} {match.matched_version}', 160)}]
     if found:
         look_for.append({'label': 'Package URL', 'quote': _quote(purl, 200)})
-    rng = _range_of(match)
+    ranges = _ranges_of(match)
     return {'class': 'host_inventory', 'class_label': 'Reported by the host\'s own inventory', 'headline': f'Confirm {match.matched_product} '
             f'{_version(match.matched_version)} on {host}', 'where': [{'label': 'Host', 'text': host}] if host else [], 'look_for': look_for,
-            'steps': [], 'verdict': _verdict(str(match.matched_product), _version(match.matched_version), rng, 'The installed package',
+            'steps': [], 'verdict': _verdict(str(match.matched_product), _version(match.matched_version), ranges, 'The installed package',
                                              'The package manager does not list it: the inventory may be stale; run the reporter again.'),
             'precondition': _precondition(cve, strategy),
             'local': [{'title': 'On the host', 'commands': commands}] if commands else [],
-            'fix': f"Update the package to {rng['fixed']} or later, then let the host report again." if rng.get('fixed') else
-                   'Update the package to a fixed release, then let the host report again.'}
+            'fix': f'Update the package to {_upgrade("the package", ranges)}, then let the host report again.'}
 
 
 def match_guide(match):
@@ -774,7 +917,8 @@ def match_guide(match):
     if not port and bases:
         parts = urlsplit(bases[0])
         port = parts.port or (443 if parts.scheme == 'https' else 80)
-    guide['fill'] = {k: v for k, v in (('TARGET', host), ('PORT', str(port) if port else '')) if v}
+    # an IPv6 address is left as <TARGET>: the general steps put it in a URL and a host:port, which need brackets, and in nmap, which does not
+    guide['fill'] = {k: v for k, v in (('TARGET', host if ':' not in host else ''), ('PORT', str(port) if port else '')) if v}
     guide['version'] = GUIDE_VERSION
     guide['notice'] = NOTICE
     guide['cve_id'] = cve.cve_id

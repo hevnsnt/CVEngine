@@ -361,7 +361,7 @@ class MatchGuideTests(TestCase):
 		guide = self.site.detail(match)['confirm']
 		template = guide['template']
 		self.assertEqual(template['template_id'], 'CVE-2099-505')
-		self.assertEqual(template['command'], 'nuclei -duc -id CVE-2099-505 -u https://portal.example.com')
+		self.assertEqual(template['command'], 'nuclei -duc -ni -id CVE-2099-505 -u https://portal.example.com')
 		self.assertEqual(template['matched_at'], 'https://portal.example.com/api/info')
 		self.assertEqual(template['matcher'], 'status-and-body')
 		self.assertIn('GET /api/info', template['request'])
@@ -462,3 +462,227 @@ class SeedTests(TestCase):
 		self.assertEqual(stale.schema_version, 2)  # an old record keeps its schema, so the regeneration picks it up
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			self.assertEqual(detection_author.regenerate_rules_records(), 1)
+
+
+class ReviewFixTests(TestCase):
+	"""What the review of the first version of this guide found, each held by a test."""
+
+	def setUp(self):
+		self.site = Site()
+
+	def other_org_host(self, name):
+		now = timezone.now()
+		org = Org.objects.create(name='other', slug='other')
+		project = Project.objects.create(name='q', slug='other-proj', insert_date=now, org=org)
+		domain = Domain.objects.create(name='example.com', project=project, insert_date=now)
+		scan = ScanHistory.objects.create(domain=domain, scan_type=self.site.scan.scan_type, scan_status=2, start_scan_date=now)
+		sub = Subdomain.objects.create(name=name, target_domain=domain, scan_history=scan, http_url=f'https://{name}')
+		return domain, scan, sub
+
+	def template_match(self, name='shared.example.com', ip='192.0.2.40'):
+		cve = self.site.cve('CVE-2099-905', [{'vendor': 'Acme', 'product': 'Acme Portal', 'ranges': [{'fixed': '2.0'}]}])
+		sub = self.site.host(name, ip)
+		return cve, sub, CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='Acme Portal', matched_version='1.0',
+												 version_in_range=True, template_result='vulnerable', template_id='CVE-2099-905',
+												 evidence={'range': {'fixed': '2.0'}})
+
+	def test_another_organisations_nuclei_hit_on_a_host_of_the_same_name_is_never_read(self):
+		cve, sub, match = self.template_match()
+		domain, scan, other = self.other_org_host('shared.example.com')
+		vuln = Vulnerability.objects.create(subdomain=other, target_domain=domain, scan_history=scan, name='x', severity=3,
+											template_id='CVE-2099-905', matcher_name='OTHER-ORG-MATCHER',
+											http_url='https://shared.example.com/other-org-secret-path',
+											request='GET /other HTTP/1.1\nAuthorization: Bearer OTHER-ORG-TOKEN', extracted_results=['OTHER-ORG-EXTRACT'],
+											source='nuclei-cve')
+		vuln.cve_ids.add(CveId.objects.create(name='CVE-2099-905'))
+		guide = self.site.detail(match)['confirm']
+		self.assertNotIn('OTHER-ORG', json.dumps(guide))
+		self.assertNotIn('matched_at', guide['template'])
+
+	def test_the_projects_own_hit_is_shown_with_its_credentials_masked(self):
+		cve, sub, match = self.template_match()
+		vuln = Vulnerability.objects.create(subdomain=sub, target_domain=self.site.domain, scan_history=self.site.scan, name='x', severity=3,
+											template_id='CVE-2099-905', matcher_name='mine', http_url='https://shared.example.com/api',
+											request='GET /api HTTP/1.1\nAuthorization: Bearer SECRET-TOKEN-123\nCookie: sid=SECRET-COOKIE', source='nuclei-cve')
+		vuln.cve_ids.add(CveId.objects.create(name='CVE-2099-905'))
+		template = self.site.detail(match)['confirm']['template']
+		self.assertEqual((template['matcher'], template['matched_at']), ('mine', 'https://shared.example.com/api'))
+		self.assertNotIn('SECRET', template['request'])
+		self.assertIn('Authorization: [redacted]', template['request'])
+
+	def test_the_nuclei_step_is_an_active_check_and_never_runs_interactsh(self):
+		cve, sub, match = self.template_match()
+		template = confirm_guide.match_guide(match)['template']
+		self.assertEqual(template['command'], 'nuclei -duc -ni -id CVE-2099-905 -u https://shared.example.com')
+		self.assertTrue(template['active'].startswith('Active check'))
+		self.assertFalse([s for s in confirm_guide.match_guide(match)['steps'] if 'nuclei' in s.get('command', '')])  # not a read-only step
+		with mock.patch('cveFeed.templategen.find_existing_template', return_value=['/root/cvengine-generated-templates/cve-2099-905.yaml']), \
+				mock.patch('cveFeed.templategen.GENERATED_DIR', '/root/cvengine-generated-templates'):
+			match.template_id = 'cve-2099-905'
+			generated = confirm_guide.match_guide(match)['template']
+		self.assertTrue(generated['generated'])
+		self.assertNotIn('command', generated)  # -id cannot find a template only this server has
+
+	def test_the_guide_does_not_depend_on_templategen_exporting_its_tester_pattern(self):
+		cve, sub, match = self.template_match()
+		import cveFeed.templategen as templategen
+		with mock.patch.object(templategen, 'OTHER_TESTERS', None, create=True):
+			del templategen.OTHER_TESTERS
+			self.assertIsNotNone(confirm_guide.match_guide(match))
+		match.template_id = 'testssl:heartbleed'
+		self.assertNotIn('template', confirm_guide.match_guide(match))
+
+	def test_the_verdict_and_the_fix_read_every_affected_release_line(self):
+		affected = [{'vendor': 'Apache', 'product': 'Apache Tomcat', 'ranges': [
+			{'introduced': '9.0.0', 'fixed': '9.0.109'}, {'introduced': '10.1.0', 'fixed': '10.1.45'}, {'introduced': '11.0.0', 'fixed': '11.0.11'}]}]
+		cve = self.site.cve('CVE-2025-55752', affected)
+		sub = self.site.host('tc.example.com', '192.0.2.41')
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='Apache Tomcat', matched_version='9.0.50',
+										version_in_range=True, evidence={'range': {'introduced': '9.0.0', 'fixed': '9.0.109'}, 'source': 'tech'})
+		guide = self.site.detail(match)['confirm']
+		verdict = guide['verdict']
+		self.assertEqual(verdict['fixed_releases'], ['9.0.109', '10.1.45', '11.0.11'])
+		self.assertIn('outside every affected range', verdict['not_affected'])
+		self.assertNotIn('9.0.109 or later: not affected', verdict['not_affected'])  # 10.1.0 is later than 9.0.109 and still affected
+		self.assertIn('10.1.45, 11.0.11', verdict['not_affected'])
+		self.assertIn('9.0.109 or later on this release line', guide['fix'])
+		self.assertIn('10.1.45, 11.0.11', guide['fix'])
+		# the match's own range is found from the version when the evidence did not record one
+		match.evidence = {'source': 'tech'}
+		match.matched_version = '10.1.20'
+		self.assertEqual(confirm_guide.match_guide(match)['verdict']['fixed'], '10.1.45')
+
+	def test_identify_names_every_range_or_says_how_many_more(self):
+		ranges = [{'introduced': f'{i}.0', 'fixed': f'{i}.9'} for i in range(1, 10)]
+		strategy = record('CVE-2099-910', [{'vendor': 'Acme', 'product': 'Acme Server', 'ranges': ranges}])
+		self.assertIn('from 6.0 before 6.9', strategy['identify'])
+		self.assertIn('and 3 more', strategy['identify'])
+
+	def shadowed(self, cve_id='CVE-2019-11358', state='shadowed'):
+		cve = self.site.cve(cve_id, [{'vendor': 'jquery', 'product': 'jQuery', 'ranges': [{'fixed': '3.4.0'}]}],
+							'jQuery before 3.4.0 mishandles jQuery.extend(true, {}, ...) because of Object.prototype pollution.')
+		sub = self.site.host('blog.example.com', '192.0.2.10')
+		old = 'https://blog.example.com/old/jquery-1.12.4.min.js'
+		copies = [{'url': old, 'order': 3, 'state': state, 'source': 'body', 'version': '1.12.4'},
+				  {'url': 'https://code.jquery.com/jquery-3.7.1.min.js', 'order': 30, 'state': 'effective', 'source': 'body', 'version': '3.7.1'}]
+		RouteAuth.objects.create(project=self.site.project, domain=self.site.domain, host='blog.example.com', url='https://blog.example.com/',
+								 path='/', auth_state='open', http_status=200,
+								 evidence={'libraries': {'jquery': {'product': 'jQuery', 'version': '3.7.1', 'copies': copies}}})
+		return old, CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='jQuery', matched_version='1.12.4',
+											version_in_range=True, evidence={'range': {'fixed': '3.4.0'}, 'copies': copies, 'copy_state': state,
+																			 'script_url': old, 'version_source': 'body'})
+
+	def test_a_shadowed_or_fallback_copy_is_never_cleared_by_the_console_of_the_copy_that_runs(self):
+		for state in ('shadowed', 'fallback', 'unresolved'):
+			CVEMatch.objects.all().delete(); RouteAuth.objects.all().delete(); Subdomain.objects.all().delete(); IpAddress.objects.all().delete()
+			CVEDetection.objects.all().delete(); CVEEntry.objects.all().delete()
+			old, match = self.shadowed(state=state)
+			guide = confirm_guide.match_guide(match)
+			self.assertFalse([s for s in guide['steps'] if s['run_in'] == 'browser_console'], state)  # neither the console nor the self-test
+			warning = next(s for s in guide['steps'] if s['title'].startswith('Do not use the browser console'))
+			self.assertIn(state, warning['detail'])
+			self.assertEqual(warning['url'], old)
+			self.assertNotIn('console', guide['verdict']['affected'] + guide['verdict']['not_affected'])
+			self.assertIn("This copy's own file", guide['verdict']['affected'])
+			self.assertIn({'shadowed': 'shadowed', 'fallback': 'fallback', 'unresolved': 'could not tell'}[state], guide['look_for'][1]['text'])
+			self.assertEqual(guide['where'][0]['url'], old)
+
+	def test_the_11022_self_test_says_affected_on_a_jquery_without_htmlprefilter(self):
+		import shutil
+		import subprocess
+		if not shutil.which('node'):
+			self.skipTest('node is not installed here')
+		expression = confirm_guide.CURATED['CVE-2020-11022']['self_test']['expression']
+		# the three behaviours of the real releases (verified in jsdom against jQuery 1.8.3, 1.11.3, 1.12.4, 2.1.3, 2.2.4, 3.4.0, 3.5.0, 3.7.1):
+		# no htmlPrefilter before 1.12.0 / 2.2.0, an expanding one up to 3.4.1, the identity from 3.5.0
+		for setup, want in (('var jQuery = {};', 'affected: jQuery older than 1.12.0'),
+							('var jQuery = {htmlPrefilter: function (h) { return h.replace(/<(\\w+)\\/>/g, "<$1></$1>"); }};', 'affected: self-closing'),
+							('var jQuery = {htmlPrefilter: function (h) { return h; }};', 'not affected')):
+			out = subprocess.run(['node', '-e', f'{setup} console.log({expression});'], capture_output=True, text=True, timeout=30).stdout.strip()
+			self.assertTrue(out.startswith(want), (setup, out))
+
+	def test_validators_refuse_a_trailing_newline(self):
+		from cveFeed.detection import _PACKAGE, _PRODUCT
+		for pattern, value in ((confirm_guide._SLUG, 'example-forms\n'), (confirm_guide._TEMPLATE, 'CVE-2099-1\n'), (confirm_guide._OID, '1.3.6.1.4\n'),
+							   (_PACKAGE, 'jquery\n'), (_PRODUCT, 'jQuery\n'), (confirm_guide._VERSION, '2.1.3\n')):
+			self.assertIsNone(pattern.match(value), (pattern.pattern, value))
+		cve = self.site.cve('CVE-2099-907', [{'vendor': 'Example', 'product': 'Example Forms', 'package': 'example-forms', 'ranges': [{'fixed': '2.4.1'}]}])
+		sub = self.site.host('wp.example.com', '192.0.2.43')
+		match = CVEMatch(cve_entry=cve, subdomain=sub, source='wp-plugin', matched_product='Example Forms', matched_version='2.3.0',
+						 evidence={'source': 'wpscan', 'plugin': 'example-forms\n', 'kind': 'wp-plugin', 'range': {'fixed': '2.4.1'}})
+		self.assertEqual(all_commands(confirm_guide.match_guide(match)), [])
+
+	def test_an_ipv6_service_is_bracketed_for_testssl_and_openssl(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2011-1473', title='t', affected=[], published_at=timezone.now())
+		sub = Subdomain.objects.create(name='2001:db8::1', target_domain=self.site.domain, scan_history=self.site.scan)
+		match = CVEMatch(cve_entry=cve, subdomain=sub, source='testssl', matched_product='TLS service on port 443',
+						 evidence={'test': 'secure_client_renego', 'port': 443})
+		commands = all_commands(confirm_guide.match_guide(match))
+		self.assertIn("testssl.sh --renegotiation '[2001:db8::1]:443'", commands)
+		self.assertIn("openssl s_client -connect '[2001:db8::1]:443' -tls1_2", commands)  # no SNI for an address
+		self.assertNotIn('TARGET', confirm_guide.match_guide(match)['fill'])  # left as <TARGET>: the general steps need brackets in places
+
+	def test_a_script_url_away_from_the_scanned_site_is_flagged(self):
+		for script, words in (('https://10.0.0.5/js/jquery.min.js', 'private, loopback or link-local'),
+							  ('https://127.0.0.1/jquery.js', 'private, loopback or link-local'), (SCRIPT, 'served from ajax.googleapis.com')):
+			CVEMatch.objects.all().delete(); RouteAuth.objects.all().delete(); Subdomain.objects.all().delete(); IpAddress.objects.all().delete()
+			CVEDetection.objects.all().delete(); CVEEntry.objects.all().delete()
+			cve = self.site.cve('CVE-2020-11023', JQUERY, JQUERY_TEXT)
+			sub = self.site.host('blog.example.com', '192.0.2.10')
+			match = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='jQuery', matched_version='2.1.3',
+											evidence={'range': {'fixed': '3.5.0'}, 'script_url': script, 'version_source': 'body', 'copy_state': 'effective'})
+			notes = [w.get('text', '') for w in confirm_guide.match_guide(match)['where'] if w['label'] == 'Note']
+			self.assertTrue(notes and words in notes[0], (script, notes))
+		match.evidence = {**match.evidence, 'script_url': 'https://blog.example.com/js/jquery.min.js'}
+		self.assertFalse([w for w in confirm_guide.match_guide(match)['where'] if w['label'] == 'Note'])
+
+	def test_evidence_of_the_wrong_shape_never_costs_the_guide(self):
+		cve = self.site.cve('CVE-2020-11023', JQUERY, JQUERY_TEXT)
+		sub = self.site.host('fz.example.com', '192.0.2.42')
+		for copies in (5, 'x', {'a': 1}, [None, 3, {'url': None}]):
+			match = CVEMatch(cve_entry=cve, subdomain=sub, source='tech', matched_product='jQuery', matched_version='2.1.3',
+							 evidence={'copies': copies, 'range': {'fixed': '3.5.0'}, 'affected_index': 'x'})
+			self.assertEqual(confirm_guide.match_guide(match)['class'], 'client_library', copies)
+
+	def test_the_report_never_cuts_a_command(self):
+		from cveFeed.report_data import _match_entry
+		cve = self.site.cve('CVE-2020-11023', JQUERY, JQUERY_TEXT)
+		sub = self.site.host('blog.example.com', '192.0.2.10')
+		long_url = 'https://cdn.example.com/' + 'a' * 600 + '/jquery.min.js'
+		match = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, source='tech', matched_product='jQuery', matched_version='2.1.3',
+										evidence={'range': {'fixed': '3.5.0'}, 'script_url': long_url, 'version_source': 'body', 'copy_state': 'effective'})
+		match = CVEMatch.objects.select_related('cve_entry', 'subdomain').get(pk=match.pk)
+		match.sev = 2
+		steps = _match_entry(match, 'smoke')['confirm']['steps']
+		shell = next(s['command'] for s in steps if s['command'].startswith('curl'))
+		self.assertIn(long_url, shell)
+		self.assertEqual(shlex.split(shell)[4], long_url)  # whole, its quotes balanced
+
+	def test_old_records_get_the_class_rules_when_rendered(self):
+		strategy, _ = detection.validate_strategy({'remote_checks': [
+			{'id': 'ai-rails', 'kind': 'version_banner', 'description': 'd', 'params': {'product': 'jquery-rails', 'ranges': [{'fixed': '4.4.0'}], 'source': 'any'}},
+			{'id': 'ai-ui', 'kind': 'version_banner', 'description': 'd', 'params': {'product': 'jQuery.UI.Combined', 'ranges': [{'fixed': '1.13.0'}]}},
+			{'id': 'ai-rhel', 'kind': 'version_banner', 'description': 'd', 'params': {'product': 'Red Hat Enterprise Linux 9', 'ranges': [{'fixed': '1'}]}}]})
+		final = detection.finalize(strategy)
+		self.assertEqual([c['how']['tool'] for c in final['remote_checks']], ['html-libraries probe', 'html-libraries probe', 'host package'])
+		self.assertNotIn('nmap', json.dumps(final).lower())
+
+	def test_cargo_never_updates_the_lockfile_and_maven_says_it_downloads(self):
+		from cveFeed.detection_commands import render_local
+		cargo = render_local({'kind': 'package_version', 'params': {'ecosystem': 'cargo', 'package': 'hyper', 'affected_below': '1.0.0'}})
+		self.assertEqual(cargo[0]['command'], 'cargo tree --locked -i hyper')
+		maven = render_local({'kind': 'package_version', 'params': {'ecosystem': 'maven', 'package': 'org.webjars.npm:jquery', 'affected_below': '3.5.0'}})
+		self.assertIn('downloads', maven[0]['explain'])
+
+	def test_a_record_taken_over_during_regeneration_is_left_alone_and_not_counted(self):
+		cve = CVEEntry.objects.create(cve_id='CVE-2020-11023', title='t', affected=JQUERY, original_description=JQUERY_TEXT, published_at=timezone.now())
+		row = CVEDetection.objects.create(cve_entry=cve, source='rules', schema_version=1, strategy={'summary': 's', 'identify': 'x'})
+		real = detection_author._rules_for
+
+		def flip(c):
+			CVEDetection.objects.filter(pk=row.pk).update(source='manual', strategy={'summary': 'HUMAN'})
+			return real(c)
+		with mock.patch.object(detection, 'installed_template_ids', return_value=[]), mock.patch.object(detection_author, '_rules_for', side_effect=flip):
+			self.assertEqual(detection_author.regenerate_rules_records(), 0)
+		row.refresh_from_db()
+		self.assertEqual((row.source, row.strategy), ('manual', {'summary': 'HUMAN'}))

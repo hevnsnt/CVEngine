@@ -191,6 +191,9 @@ def _heat_policy():
     return heat_policy()
 
 
+COMMAND_LIMIT = 2400
+
+
 def _confirm(m):
     """A short "how to confirm it" for a version-based match in the report (cveFeed.confirm_guide): where to look, what to look for, the
     first commands and how to read the answer. Every command is the guide's own, built from the match's validated host, port and URL."""
@@ -200,11 +203,19 @@ def _confirm(m):
         return None
     where = [clean(f"{w['label']}: {w.get('url') or w.get('text') or w.get('quote') or ''}", 300) for w in guide.get('where', [])[:3]]
     look = [clean(f"{x['label']}: {x.get('text') or x.get('quote') or ''}", 300) for x in guide.get('look_for', [])[:2]]
-    steps = [{'title': clean(st['title'], 120), 'command': clean(st.get('command', ''), 400)} for st in guide.get('steps', [])
-             if st.get('command')][:3]
+    # a command is printed whole (the guide built it from validated values, at most a 2,000-character URL in it): a cut command could leave a
+    # quote open. One that is longer still is left out, and the reader is sent to the page
+    steps, omitted = [], 0
+    for st in [st for st in guide.get('steps', []) if st.get('command') and st.get('run_in') != 'active'][:3]:
+        command = str(st['command'])
+        if len(command) > COMMAND_LIMIT or '\n' in command:
+            omitted += 1
+            continue
+        steps.append({'title': clean(st['title'], 120), 'command': command})
     verdict = guide.get('verdict') or {}
     precondition = guide.get('precondition') or {}
-    return {'where': where, 'look_for': look, 'steps': steps, 'affected': clean(verdict.get('affected', ''), 300),
+    return {'where': where, 'look_for': look, 'steps': steps,
+            'omitted': 'A longer command is on the finding\'s page in cvENGINE (Confirm it yourself).' if omitted else '', 'affected': clean(verdict.get('affected', ''), 300),
             'not_affected': clean(verdict.get('not_affected', ''), 300),
             'needs': clean(precondition.get('needs') or (f"The advisory says: {precondition['quote']}" if precondition.get('quote') else ''), 400)}
 
