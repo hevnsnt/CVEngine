@@ -187,7 +187,7 @@ def _claim(ids):
     return CVEMatch.objects.filter(pk__in=ids, fire_notified_at=now)
 
 
-def _version_only_pairs(hits):
+def _version_only_pairs(hits, project=None):
     """The (CVE id, host) pairs of ``hits`` that a version-class template matched: a stored match of the pair was recorded as
     ``templategen.VERSION_ONLY_RESULT`` and none of its matches has hard evidence (``match_policy.hard_evidence_q``). Such a match is
     version-only, capped below fire (``threat.version_only_max_heat``), so the "hit" is not announced as a confirmed vulnerability. A pair
@@ -197,7 +197,10 @@ def _version_only_pairs(hits):
     from cveFeed.match_policy import hard_evidence_q
     from cveFeed.models import CVEMatch
     from cveFeed.templategen import VERSION_ONLY_RESULT
-    rows = (CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+    rows = CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+    if project is not None:  # the hits of one project's test: another project's host of the same name says nothing about them
+        rows = rows.filter(subdomain__target_domain__project_id=project)
+    rows = (rows
             .annotate(hard=Case(When(hard_evidence_q(), then=Value(True)), default=Value(False), output_field=BooleanField()))
             .values_list('cve_entry__cve_id', 'subdomain__name', 'template_result', 'hard'))
     version, hard = set(), set()
@@ -209,14 +212,14 @@ def _version_only_pairs(hits):
     return version - hard
 
 
-def template_hits(hits, scan=None):
+def template_hits(hits, scan=None, project=None):
     """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
     version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): the version-only heat cap
     holds for it here as everywhere else. The callers already leave those hits out; this is the last check before a page."""
     hits = list(dict.fromkeys(hits))
     if hits:
         try:
-            capped = _version_only_pairs(hits)
+            capped = _version_only_pairs(hits, project if project is not None else (scan.domain.project_id if scan is not None else None))
         except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
             logger.warning('template hit heat check failed (%s)', type(exc).__name__)
             capped = set()

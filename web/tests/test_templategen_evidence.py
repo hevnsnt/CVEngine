@@ -372,11 +372,14 @@ def fixture(name):
         return handle.read()
 
 
-VERSION = {'jquery version regex': JQUERY_VERSION_REGEX, 'wp plugin compare_versions': WP_PLUGIN_COMPARE_VERSIONS,
-           'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER,
-           # real community templates (nuclei-templates @ eddca90) that only compare a version they read
-           'zimbra ZmSettings.js (CVE-2022-27924)': fixture('CVE-2022-27924.yaml'), 'teleport ping (CVE-2025-49825)': fixture('CVE-2025-49825.yaml'),
-           'ivanti welcome.cgi (CVE-2025-0282)': fixture('CVE-2025-0282.yaml'), 'n-central login (CVE-2026-86218)': fixture('CVE-2026-86218.yaml')}
+VERSION = {'jquery version regex': JQUERY_VERSION_REGEX, 'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER,
+           # real community templates (nuclei-templates @ eddca90) that only compare a version they read: 4 of its 4,510 CVE templates
+           'elementor readme (CVE-2022-29455)': fixture('CVE-2022-29455.yaml'), 'pega login page (CVE-2021-27651)': fixture('CVE-2021-27651.yaml')}
+# version checks too, but each has something the allowlist does not positively recognise (an extracted value that is not digits and dots,
+# an identity word the template's own name lacks, a JSON field, two requests): they stay confirmed hits, the safe direction
+CONSERVATIVE = {'wp plugin readme with a word extractor': WP_PLUGIN_COMPARE_VERSIONS, 'zimbra ZmSettings.js (CVE-2022-27924)': fixture('CVE-2022-27924.yaml'),
+                'teleport ping (CVE-2025-49825)': fixture('CVE-2025-49825.yaml'), 'ivanti welcome.cgi (CVE-2025-0282)': fixture('CVE-2025-0282.yaml'),
+                'n-central login (CVE-2026-86218)': fixture('CVE-2026-86218.yaml')}
 BEHAVIOR = {'apache traversal': APACHE_TRAVERSAL, 'exposed git config': GIT_CONFIG_EXPOSED, 'header payload with a version guard': HEADER_BYPASS_WITH_VERSION,
             'version or marker': VERSION_OR_MARKER, 'ip disclosure': IP_DISCLOSURE, 'ssl': SSL_WEAK,
             'user-agent xss (CVE-2017-4011, real)': fixture('CVE-2017-4011.yaml'), 'shellshock user-agent': SHELLSHOCK_UA,
@@ -392,7 +395,7 @@ class ClassificationTests(SimpleTestCase):
             self.assertEqual(templategen.template_evidence(text), templategen.VERSION_EVIDENCE, name)
 
     def test_templates_that_show_the_flaw_stay_behaviour_class(self):
-        for name, text in BEHAVIOR.items():
+        for name, text in {**BEHAVIOR, **CONSERVATIVE}.items():
             self.assertEqual(templategen.template_evidence(text), templategen.BEHAVIOR_EVIDENCE, name)
 
     def test_one_ordinary_change_turns_a_version_template_into_behaviour(self):
@@ -404,12 +407,13 @@ class ClassificationTests(SimpleTestCase):
                        ('"{{BaseURL}}/js/jquery.min.js"', '"{{BaseURL}}/js/jquery.min.js?debug=1"'),
                        ('      - type: status\n        status:\n          - 200', '      - type: status\n        status:\n          - 500'),
                        ('      - type: status\n', '      - type: status\n        negative: true\n'),
-                       ('http:\n', 'flow: http(1)\nhttp:\n')):
+                       ('http:\n', 'flow: http(1)\nhttp:\n'),
+                       ('  - method: GET\n', '  - method: GET\n    headers:\n      User-Agent: Mozilla/5.0 (X11; Linux x86_64)\n')):
             self.assertIn(change[0], base)
             self.assertEqual(templategen.template_evidence(base.replace(change[0], change[1], 1)), templategen.BEHAVIOR_EVIDENCE, change)
         self.assertEqual(templategen.template_evidence(base.replace('  - method: GET\n', '  - method: GET\n    headers:\n'
-                                                                    '      User-Agent: Mozilla/5.0 (X11; Linux x86_64)\n', 1)),
-                         templategen.VERSION_EVIDENCE)  # an ordinary browser header is still a plain read
+                                                                    '      Host: "{{Hostname}}"\n', 1)),
+                         templategen.VERSION_EVIDENCE)  # Host naming the host itself is the one header a plain read sends
 
     def test_anything_unreadable_is_behaviour_so_a_genuine_hit_is_never_downgraded(self):
         for text in ('', 'not: [yaml', 'id: x', '- a list', None):

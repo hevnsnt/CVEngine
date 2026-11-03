@@ -720,7 +720,7 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
         if batch:
             hit_batch.record(batch, pairs)
         else:
-            notify.template_hits(pairs)  # one message per CVE test, never per host
+            notify.template_hits(pairs, project=project_id)  # one message per CVE test, never per host
         return {"cve": cve.cve_id, "source": outcome["source"], "vulnerable": vulnerable}
     finally:
         if batch:
