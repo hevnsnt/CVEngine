@@ -453,6 +453,15 @@ def sweep(project_id, runner=None, resolve=None):
                                         f'{local_egress.held_text(port, local_egress.SKIPPED)}; the target stays due')
                         continue
 
+                    # a run on a budgeted port that needs its 15 minutes alone (port 25) waits here for them, outside the memory gate, with
+                    # priority after an hour (cveFeed.local_egress.wait_alone); not in time: not run, the target stays due
+                    if not local_egress.wait_alone(port, local_egress.TESTSSL_CONNECTIONS):
+                        local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.EXACT, outcome=local_egress.PACED,
+                                                     project=project_id, scan_id=sub.scan_history_id)
+                        activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
+                                        f'{local_egress.held_text(port, local_egress.PACED)}; the target stays due')
+                        continue
+
                     def started(ip=ip, port=port, scan_id=sub.scan_history_id):
                         # once testssl.sh is let start (after its memory wait): the egress governor charges the run, whole and alone, now; no
                         # room raises PortHeld and nothing is sent. testssl.sh opens 159 to 231 sockets to this one host and port (measured):

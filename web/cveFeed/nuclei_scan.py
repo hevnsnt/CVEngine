@@ -337,9 +337,16 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
         rules = set(local_egress.budgets())
         if rules:
             explicit = lambda t: _target_ports(t) if _has_port(t) else []  # noqa: E731 - a bare host is a web target (80, 443)
-            run = [t for t in kept if not any(local_egress.admit_one(p, 'nuclei', _target_host(t), weight=local_egress.NUCLEI_TARGET_CONNECTIONS,
-                                                                     now=local_egress.launch_now())
-                                              for p in set(explicit(t)) & rules)]
+            governed = [t for t in kept if set(explicit(t)) & rules]
+            # oldest-admitted first, so every host:25 target gets its turn within a bounded number of runs (cveFeed.local_egress.rotation)
+            last = local_egress.last_admitted('nuclei', governed)
+            admitted = set()
+            for target in sorted(governed, key=lambda t: (last.get(t, 0), kept.index(t))):
+                if not any(local_egress.admit_one(p, 'nuclei', _target_host(target), weight=local_egress.NUCLEI_TARGET_CONNECTIONS,
+                                                  now=local_egress.launch_now()) for p in set(explicit(target)) & rules):
+                    admitted.add(target)
+            local_egress.note_admitted('nuclei', admitted)
+            run = [t for t in kept if t not in governed or t in admitted]
         if not run:
             return None
         per_port = {}

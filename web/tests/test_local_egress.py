@@ -44,6 +44,9 @@ class Clean:
         from reNgine.test_runner import EGRESS_TEST_ENV
         for name in EGRESS_TEST_ENV:
             os.environ.pop(name, None)
+        sleeper = mock.patch.object(local_egress, '_sleep')  # a testssl.sh run waiting for its quiet 15 minutes never sleeps in a test
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         _clear()
         self.addCleanup(_clear)
 
@@ -1552,6 +1555,15 @@ class TestsslLaunchTests(Clean, TestCase):
         self.assertEqual([r['outcome'] for r in local_egress.connection_log(port=25)['records']], ['paced'])
         self.assertEqual(local_egress.used_this_hour(25), 50)
 
+    def test_room_gone_between_the_wait_and_the_start_means_no_run(self):
+        local_egress.take(25, 50)  # something took port 25 after the wait said yes
+        with mock.patch.object(local_egress, 'wait_alone', return_value=True):
+            out = testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out['failed'], 0)
+        self.assertFalse(ServiceRun.objects.filter(asset='mx.rt.test:25').exists())
+        self.assertEqual(local_egress.used_this_hour(25), 50)
+
     def test_a_run_with_room_is_charged_once_when_it_starts(self):
         testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
         self.assertEqual(len(self.calls), 1)
@@ -1614,3 +1626,127 @@ class ChunkHeldAtStartTests(SimpleTestCase):
             out = nmap_scan.scan_in_chunks(runner, ['198.51.100.1', '198.51.100.2'], ['-sV', '-p', '25'], '8m', size=1)
         self.assertEqual(seen, [['198.51.100.1'], ['198.51.100.2']])
         self.assertEqual(out['ports'], 1)
+
+
+# --- round 3 of the review (#393): no in-scope port 25 is dropped for good ------------------------------------------------------------
+
+@mock.patch.dict(os.environ, R2)
+class NucleiHost25RotationTests(Clean, TestCase):
+    """Only four host:25 targets (25 each) fit in a quiet 15 minutes. They are admitted oldest-admitted first, so every target runs within
+    ceil(N / 4) runs that each start in an empty window (the round-3 probe NucleiHost25Starvation, inverted)."""
+
+    def run_nuclei(self, hosts, at):
+        import tempfile
+
+        from cveFeed import nuclei_scan
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('\n'.join(nuclei_scan.build_targets([], [], [(h, 25) for h in hosts])) + '\n')
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        ran = []
+
+        def fake(path, *a, on_start=None, **k):
+            got = on_start()
+            ran.extend(open(got).read().split() if got else [])
+            return iter(())
+        with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake), mock.patch.object(local_egress, 'launch_now', return_value=at):
+            list(nuclei_scan.stream_nuclei(handle.name))
+        return ran
+
+    def test_every_target_runs_within_ceil_n_over_4_empty_windows(self):
+        import math
+        hosts = [f'198.51.100.{i}' for i in range(10, 22)]
+        per_window = 100 // local_egress.NUCLEI_TARGET_CONNECTIONS
+        seen = {}
+        for run in range(math.ceil(len(hosts) / per_window)):
+            for target in self.run_nuclei(hosts, T0 + run * 7200):  # each run starts in an empty window
+                seen[target] = seen.get(target, 0) + 1
+        self.assertEqual(sorted(seen), sorted(f'{h}:25' for h in hosts))
+        self.assertEqual(set(seen.values()), {1})
+
+    def test_rotation_over_six_runs_is_even(self):
+        hosts = [f'198.51.100.{i}' for i in range(10, 22)]
+        seen = {}
+        for run in range(6):
+            for target in self.run_nuclei(hosts, T0 + run * 7200):
+                seen[target] = seen.get(target, 0) + 1
+        self.assertEqual(set(seen.values()), {2})  # 6 runs x 4 = 24 = 12 targets x 2
+
+
+@mock.patch.dict(os.environ, R2)
+class TestsslPriorityTests(Clean, TestCase):
+    """A testssl.sh run on port 25 needs a quiet 15 minutes. One that has waited ALONE_PRIORITY_AFTER (60 minutes) gets priority: ordinary
+    port-25 grants are held (paced) until it starts, so it starts within the bound under any steady trickle (the round-3 probe
+    TestsslAloneStarvation, inverted), and the 60- and 15-minute limits still hold."""
+
+    def test_a_trickle_no_longer_starves_testssl_and_the_limits_hold(self):
+        clock = {'now': T0}
+        grants = []  # (minute, connections, alone)
+
+        def sleep(seconds):  # the trickle: one ordinary connection every 10 minutes, asked while testssl.sh waits
+            for _ in range(int(seconds // 60)):
+                clock['now'] += 60
+                if int(clock['now'] - T0) % 600 == 0 and local_egress.admit_one(25, 'nmap', '198.51.100.3', now=clock['now']) is None:
+                    grants.append((int(clock['now'] // 60), 1, False))
+        for second in range(0, 1200, 600):  # the trickle before the run asks
+            clock['now'] = T0 + second
+            if local_egress.admit_one(25, 'nmap', '198.51.100.3', now=clock['now']) is None:
+                grants.append((int(clock['now'] // 60), 1, False))
+        asked = clock['now']
+        with mock.patch.object(local_egress, 'launch_now', side_effect=lambda: clock['now']), \
+                mock.patch.object(local_egress, '_sleep', side_effect=sleep):
+            ready = local_egress.wait_alone(25, local_egress.TESTSSL_CONNECTIONS)
+            self.assertTrue(ready)
+            self.assertIsNone(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, burst=False,
+                                                     now=clock['now']))
+        grants.append((int(clock['now'] // 60), local_egress.TESTSSL_CONNECTIONS, True))
+        self.assertEqual(local_egress.take(25, 1, now=clock['now'] + 17 * 60), 1)  # it started: ordinary grants go again after its 15 minutes
+        grants.append((int((clock['now'] + 17 * 60) // 60), 1, False))
+        self.assertLessEqual(clock['now'] - asked, local_egress.ALONE_PRIORITY_AFTER + 62 * 60)  # the bound
+        held = [g for g in grants if not g[2] and asked + local_egress.ALONE_PRIORITY_AFTER <= g[0] * 60 < clock['now']]
+        self.assertEqual(held, [])  # ordinary grants were held once the run had priority
+        by = {}
+        for minute, n, alone in grants:
+            by.setdefault(minute, []).append((n, alone))
+        for start in range(min(by) - 60, max(by) + 1):
+            self.assertLessEqual(sum(n for m in range(start, start + 61) for n, _a in by.get(m, ())), 400)
+            quarter = [g for m in range(start, start + 16) for g in by.get(m, ())]
+            if any(a for _n, a in quarter):
+                self.assertEqual(len(quarter), 1)
+            else:
+                self.assertLessEqual(sum(n for n, _a in quarter), 100)
+
+    def test_priority_lapses_when_the_run_stops_waiting(self):
+        local_egress.take(25, 1, now=T0)
+        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=240, burst=False, now=T0), 'paced')
+        self.assertEqual(local_egress.take(25, 1, now=T0 + 2400), 1)  # ordinary grants still go while the run has waited under an hour
+        self.assertEqual(local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=240, burst=False, now=T0 + 3600 - 60 * 15), 'paced')
+        self.assertEqual(local_egress.take(25, 1, now=T0 + 3600), 0)  # waited 60 minutes: ordinary grants are held
+        local_egress._client().delete(f'{local_egress.PREFIX}:alone-waiting:25')  # the run gave up (its marker expired)
+        self.assertEqual(local_egress.take(25, 1, now=T0 + 3660), 1)
+
+    def test_no_wait_when_the_budget_cannot_hold_a_run(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_PORT_BUDGETS': '25:200/hour'}), mock.patch.object(local_egress, '_sleep') as sleep:
+            self.assertFalse(local_egress.wait_alone(25, 240))
+        sleep.assert_not_called()
+
+    def test_the_sweep_waits_for_its_turn_and_then_runs(self):
+        from tests.test_route_auth import RouteFixture
+        fixture = RouteFixture()
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        fixture.scan(names=('mx.rt.test',), ports=((25, 'smtp'),))
+        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        local_egress.take(25, 5)  # something else used port 25 a moment ago
+        calls = []
+
+        def runner(args, env, timeout):
+            calls.append(args)
+            from tests.test_testssl_scan import CLEAN
+            with open(args[args.index('--jsonfile') + 1], 'w') as out:
+                json.dump(CLEAN, out)
+        with mock.patch.object(local_egress, 'wait_alone', return_value=True) as wait, \
+                mock.patch.object(local_egress, 'admit_one', return_value=None):
+            testssl_scan.sweep(fixture.project.id, runner=runner, resolve=lambda host, port, project: '203.0.113.5')
+        wait.assert_called_once_with(25, local_egress.TESTSSL_CONNECTIONS)
+        self.assertEqual(len(calls), 1)

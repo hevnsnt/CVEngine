@@ -22,7 +22,8 @@ Five parts, all state in Redis (no table, no migration):
   default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, and
   never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
   which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
-  after it). A nuclei ``host:25`` target is charged NUCLEI_TARGET_CONNECTIONS, an estimate. One window on the Redis server's clock, shared by
+  after it; one that has waited ALONE_PRIORITY_AFTER gets priority over ordinary grants, see ``wait_alone``). A nuclei ``host:25`` target is
+  charged NUCLEI_TARGET_CONNECTIONS, an estimate, least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared by
   every worker. A local pass asks it when it is planned (``plan``), and every process of the pass asks again when it starts, after its memory
   wait (``launch``: the planned grant is given back and the tokens taken in the minute the process starts; no room, and that process runs
   without the port, which is owed): the window counts what STARTED. Addresses it grants are scanned as before.
@@ -69,6 +70,13 @@ TESTSSL_CONNECTIONS = 240
 # A nuclei target host:25: an estimate, not a measurement. nuclei's HTTP probe of a host:port (http and https), plus the ssl and tcp templates
 # that run against the port the input names, about ten here, each retried at most once (-retries 1): about 24, rounded up to 25.
 NUCLEI_TARGET_CONNECTIONS = 25
+# A testssl.sh run on port 25 (more than the 15-minute quarter) needs 15 minutes with no other port-25 start. One that has waited this long
+# for them gets priority: ordinary port-25 grants are held (paced: owed or due) until it starts, which the window then allows within another
+# 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked (it asks every ALONE_ASK_EVERY while it waits).
+ALONE_PRIORITY_AFTER = 60 * 60
+ALONE_WAIT_TTL = 10 * 60
+ALONE_ASK_EVERY = 60
+ALONE_WAIT_MAX = ALONE_PRIORITY_AFTER + 62 * 60  # the longest a run waits before it gives up for this sweep (stays due)
 ALERT_STEPS = (50, 80, 100)  # percent of a port's hourly budget at which the activity log says so, once per hour
 FALLBACK_WARN_AT = 5  # Sentinel tasks falling back to local execution in one hour before the warning and the system problem
 CATCH_UP_BATCH = 64  # owed addresses one catch-up pass takes per port (one nmap chunk)
@@ -541,12 +549,14 @@ local cap_burst = tonumber(ARGV[4])
 local whole = tonumber(ARGV[5])
 local use_burst = tonumber(ARGV[7])
 local m = math.floor(now / 60)
--- refunds (ARGV[9] pairs of minute, count from ARGV[10]): grants made when a pass was planned, moved now to the minute its process starts
-local nref = tonumber(ARGV[9] or '0')
+local wait_key = ARGV[9]  -- a testssl.sh run waiting for its quiet 15 minutes: the time it first asked (see ALONE_PRIORITY_AFTER)
+local dry = tonumber(ARGV[12])  -- 1: only say whether it would be granted (and keep the waiting mark), take nothing
+-- refunds (ARGV[13] pairs of minute, count from ARGV[14]): grants made when a pass was planned, moved now to the minute its process starts
+local nref = tonumber(ARGV[13] or '0')
 for j = 0, nref - 1 do
-  local rm = ARGV[10 + 2 * j]
+  local rm = ARGV[14 + 2 * j]
   local cur = tonumber(redis.call('HGET', KEYS[1], rm) or '0')
-  local back = math.min(cur, tonumber(ARGV[11 + 2 * j]))
+  local back = math.min(cur, tonumber(ARGV[15 + 2 * j]))
   if back > 0 then
     if back == cur then redis.call('HDEL', KEYS[1], rm) else redis.call('HINCRBY', KEYS[1], rm, -back) end
     local uk = ARGV[8] .. tostring(math.floor(tonumber(rm) / 60))
@@ -566,15 +576,29 @@ for i = 1, #rows, 2 do
     if k > m - 16 then burst = burst + v end
   end
 end
+local alone = use_burst == 0 and want > cap_burst
 local grant = math.min(want, cap_hour - hour)
-if use_burst == 1 or want <= cap_burst then
+if not alone then
   grant = math.min(grant, cap_burst - burst)
+  local since = redis.call('GET', wait_key)
+  if since and now - tonumber(since) >= tonumber(ARGV[10]) then grant = 0 end  -- a run waiting that long has priority: held
 elseif burst > 0 then
   grant = 0
 end
 if grant < 0 then grant = 0 end
 if whole == 1 and grant < want then grant = 0 end
+if alone then
+  if grant > 0 then
+    if dry == 0 then redis.call('DEL', wait_key) end
+  else
+    redis.call('SET', wait_key, tostring(now), 'NX')
+    redis.call('EXPIRE', wait_key, tonumber(ARGV[11]))  -- lapses unless the run keeps asking
+  end
+end
 local used_key = ARGV[8] .. tostring(math.floor(now / 3600))
+if dry == 1 then
+  return {grant, tonumber(redis.call('GET', used_key) or '0'), m}
+end
 if grant > 0 then
   redis.call('HINCRBY', KEYS[1], tostring(m), grant)
   redis.call('INCRBY', used_key, grant)
@@ -594,7 +618,7 @@ def take(port, want, now=None, whole=False, burst=True):
     return _take(port, want, now=now, whole=whole, burst=burst)[0]
 
 
-def _take(port, want, now=None, whole=False, burst=True, refund=None):
+def _take(port, want, now=None, whole=False, burst=True, refund=None, dry=False):
     """Up to ``want`` new connections to ``port`` (all or none with ``whole``): never more than the port's hourly budget in any 60 minutes, and
     never more than a quarter of it in any 15. ``burst=False`` (one testssl.sh run, with ``whole``) lets a run larger than the quarter go, but
     only alone: when nothing was granted in its 15 minutes, and nothing else is then granted in the 15 after it. The window runs on the Redis
@@ -614,11 +638,13 @@ def _take(port, want, now=None, whole=False, burst=True, refund=None):
     try:
         grant, used, minute = client.eval(_TAKE, 1, f'{PREFIX}:window:{int(port)}', -1 if now is None else now, want, per_hour,
                                           bucket_size(per_hour), 1 if whole else 0, BUCKET_TTL, 1 if burst else 0,
-                                          f'{PREFIX}:used:{int(port)}:', len(pairs) // 2, *pairs)
+                                          f'{PREFIX}:used:{int(port)}:', f'{PREFIX}:alone-waiting:{int(port)}', ALONE_PRIORITY_AFTER,
+                                          ALONE_WAIT_TTL, 1 if dry else 0, len(pairs) // 2, *pairs)
     except Exception:  # noqa: BLE001 - a governor that cannot be read must not stop a scan: the run goes ahead as before
         logger.warning('egress governor: Redis could not be read; port %s is not paced for this run', port)
         return want, None
-    _alert(int(port), int(used), per_hour, int(grant), time.time() if now is None else now)
+    if not dry:
+        _alert(int(port), int(used), per_hour, int(grant), time.time() if now is None else now)
     return int(grant), int(minute)
 
 
@@ -716,6 +742,66 @@ def _unreserve(port, addresses):
                 if not minutes:
                     del _RESERVED[(int(port), address)]
     return refund
+
+
+ROTATION_DAYS = 30
+
+
+def last_admitted(kind, targets):
+    """``{target: time it was last admitted}`` for ``targets`` of ``kind`` (absent: never). Single targets that share a run (nuclei's
+    ``host:25`` targets) are admitted oldest first by it, so none waits behind the same others run after run."""
+    client = _client()
+    targets = list(targets or ())
+    if client is None or not targets:
+        return {}
+    try:
+        values = client.hmget(f'{PREFIX}:rotation:{kind}', targets)
+    except Exception:  # noqa: BLE001
+        return {}
+    return {t: float(v) for t, v in zip(targets, values) if v is not None}
+
+
+def note_admitted(kind, targets):
+    client = _client()
+    targets = list(targets or ())
+    if client is None or not targets:
+        return
+    at = launch_now()
+    try:
+        if at is None:
+            seconds, micro = client.time()
+            at = seconds + micro / 1e6
+        key = f'{PREFIX}:rotation:{kind}'
+        client.hset(key, mapping={t: at for t in targets})
+        client.expire(key, ROTATION_DAYS * 86400)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _sleep(seconds):
+    time.sleep(seconds)
+
+
+def wait_alone(port, weight):
+    """Wait, without holding a memory slot, until a whole run of ``weight`` larger than the 15-minute quarter (one testssl.sh run) would be
+    granted on ``port``: asked every ALONE_ASK_EVERY seconds, with priority over ordinary grants after ALONE_PRIORITY_AFTER, for at most
+    ALONE_WAIT_MAX. True when it would be granted now (the run then takes its tokens when it starts); False when the budget cannot hold it,
+    scanning was paused, or the wait ran out (the target stays due)."""
+    per_hour = budgets().get(int(port))
+    if not per_hour or int(weight) <= bucket_size(per_hour):
+        return True
+    if int(weight) > per_hour:
+        return False
+    from reNgine import resources
+    waited = 0
+    while True:
+        granted, _minute = _take(port, weight, now=launch_now(), whole=True, burst=False, dry=True)
+        if granted:
+            return True
+        if waited >= ALONE_WAIT_MAX or resources.global_pause_requested(fail_closed=True):
+            return False
+        _sleep(ALONE_ASK_EVERY)
+        waited += ALONE_ASK_EVERY
 
 
 def launch_now():
