@@ -64,7 +64,7 @@ class TestsslTests(SimpleTestCase):
 	def test_the_default_runner_is_the_gated_one(self):
 		with mock.patch('cveFeed.heavy_process.run') as run:
 			testssl_scan._run(['testssl.sh', 'rt.test:443'], {'PATH': '/usr/bin'}, 120)
-		run.assert_called_once_with('testssl', ['testssl.sh', 'rt.test:443'], 120, label='rt.test:443', env={'PATH': '/usr/bin'})
+		run.assert_called_once_with('testssl', ['testssl.sh', 'rt.test:443'], 120, label='rt.test:443', env={'PATH': '/usr/bin'}, on_start=None)
 
 
 class WafTests(SimpleTestCase):
