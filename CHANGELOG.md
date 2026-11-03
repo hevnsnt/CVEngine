@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Thanks
+
+- **[camstork](https://github.com/camstork)**, our most thorough beta tester. Since 1.3.0 they have filed sixteen reports, each with a reproduction, the root cause traced to the line, and a suggested fix: cve.now branch ranges (#205), rescans revalidating every match (#206), the seed-import feed gap (#207), the Nuclei tag prompt (#208), local and OpenAI-compatible AI providers (#209), the triage ceiling for version-only evidence (#210), the update banner on forks (#211), private addresses scored as public (#212), catch-all web servers (#213), Docker Desktop OS guesses (#214), gzip pages from embedded devices (#281), cleartext administration services (#282), aliases and notes (#283), discovery modes (#284), KEV revalidation after rescans (#338) and the OpenVAS import on gvmd 22.7 (#394). Much of what 1.3.1, 1.3.2 and 1.3.3 fix, they found first. Thank you.
+
 ### Upgrade notes
 
 - **Migration `cveFeed` 0140 reads every stored triage answer once.** It records where each was reached (task 256) and takes the model's words off the shared correlation table and the matches it seeded. Allow about 38 seconds per 100,000 stored answers; it adds an index to the provider-call ledger first. The first correlation after it then reviews, once, what earlier versions shared across organizations (see Fixed).
