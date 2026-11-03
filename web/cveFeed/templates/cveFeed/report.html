@@ -182,6 +182,11 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     {% if f.evidence or f.proof %}<h4>Evidence</h4>{% endif %}
     {% if f.evidence %}<dl class="kv">{% for e in f.evidence %}<dt>{{ e.label }}</dt><dd>{{ e.value }}</dd>{% endfor %}</dl>{% endif %}
     {% for p in f.proof %}<div class="proof"><b>{{ p.label }}</b> <span class="mute">{{ p.result }}{% if p.when %} &middot; {{ p.when }}{% endif %}{% if p.proved %} &middot; showed the finding{% endif %}</span>{% if p.summary %}<br>{{ p.summary }}{% endif %}{% if p.command %}<div class="cmd">{{ p.command }}</div>{% endif %}</div>{% endfor %}
+    {% if f.confirm %}<h4>How to confirm it</h4>
+    <ul class="tight">{% for w in f.confirm.where %}<li>{{ w }}</li>{% endfor %}{% for x in f.confirm.look_for %}<li>{{ x }}</li>{% endfor %}</ul>
+    {% for st in f.confirm.steps %}<div class="proof"><b>{{ st.title }}</b><div class="cmd">{{ st.command }}</div></div>{% endfor %}
+    {% if f.confirm.affected %}<p class="small">{{ f.confirm.affected }} {{ f.confirm.not_affected }}</p>{% endif %}
+    {% if f.confirm.needs %}<p class="small">{{ f.confirm.needs }}</p>{% endif %}{% endif %}
     <h4>Remediation</h4>
     {% if f.fixed_in %}<p>Fixed in {{ f.fixed_in|join:", " }}.</p>{% endif %}
     {% if f.remediation %}<p class="pre">{{ f.remediation }}</p>{% elif not f.fixed_in %}<p class="mute">No remediation text is recorded for this finding.</p>{% endif %}

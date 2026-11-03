@@ -191,6 +191,24 @@ def _heat_policy():
     return heat_policy()
 
 
+def _confirm(m):
+    """A short "how to confirm it" for a version-based match in the report (cveFeed.confirm_guide): where to look, what to look for, the
+    first commands and how to read the answer. Every command is the guide's own, built from the match's validated host, port and URL."""
+    from agentapi import services as svc
+    guide = svc._confirm_guide(m)
+    if not guide:
+        return None
+    where = [clean(f"{w['label']}: {w.get('url') or w.get('text') or w.get('quote') or ''}", 300) for w in guide.get('where', [])[:3]]
+    look = [clean(f"{x['label']}: {x.get('text') or x.get('quote') or ''}", 300) for x in guide.get('look_for', [])[:2]]
+    steps = [{'title': clean(st['title'], 120), 'command': clean(st.get('command', ''), 400)} for st in guide.get('steps', [])
+             if st.get('command')][:3]
+    verdict = guide.get('verdict') or {}
+    precondition = guide.get('precondition') or {}
+    return {'where': where, 'look_for': look, 'steps': steps, 'affected': clean(verdict.get('affected', ''), 300),
+            'not_affected': clean(verdict.get('not_affected', ''), 300),
+            'needs': clean(precondition.get('needs') or (f"The advisory says: {precondition['quote']}" if precondition.get('quote') else ''), 400)}
+
+
 def _match_entry(m, heat):
     from agentapi import services as svc
     from cveFeed.triage import verdict_text
@@ -211,7 +229,7 @@ def _match_entry(m, heat):
             'cves': [clean(cve.cve_id, 40)], 'cvss': cve.cvss, 'signals': flags, 'basis': basis, 'confirmed': confirmed,
             'heat_reason': clean(heat_reason(m, heat) if heat else '', 200),
             'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(text['impact'], 600),
-            'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t),
+            'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t), 'confirm': None if confirmed else _confirm(m),
             'remediation': clean(text['remediation'], 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
             'tracking': _tracking(m), 'first_seen': _date(svc._seen(m, 'first_seen', m.created_at)),
             'last_seen': _date(svc._seen(m, 'last_seen', m.updated_at))}
