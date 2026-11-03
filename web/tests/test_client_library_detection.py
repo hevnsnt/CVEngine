@@ -2,6 +2,7 @@
 script files a page loads (the html-libraries read), never by nmap, and only system-wide packages are checked on the host."""
 import json
 import os
+import re
 from unittest import mock
 
 from django.test import TestCase
@@ -63,7 +64,7 @@ class ClientLibraryRecordTests(TestCase):
 			self.assertIn(words, decide)
 		self.assertNotIn('head -c', decide)
 		profile = strategy['validation']
-		self.assertEqual(profile['recommended_tools'], ['html-libraries probe', 'package manager'])
+		self.assertEqual(profile['recommended_tools'], ['html-libraries probe', 'package manager', 'dependency tree', 'grep'])
 		self.assertEqual((profile['remote_determinable'], profile['max_remote_state']), ('partial', 'likely'))
 		self.assertIn('not that the page is exploitable', profile['remote_note'])
 		self.assertTrue(any('jQuery version a script file' in t for t in profile['needs_validation_when']))
@@ -71,15 +72,21 @@ class ClientLibraryRecordTests(TestCase):
 
 	def test_only_system_wide_packages_with_their_real_names_are_checked_on_the_host(self):
 		strategy = record(jquery_cve())
-		packages = [(c['params']['ecosystem'], c['params']['package'], c['params']['affected_below']) for c in strategy['local_checks']]
-		self.assertEqual(packages, [('dpkg', 'libjs-jquery', '3.5.0'), ('dpkg', 'node-jquery', '3.5.0'), ('rpm', 'js-jquery', '3.5.0')])
+		# the system-wide packages with their real names are checked with the OS package manager; every packaging the advisory names
+		# (npm, RubyGems, Maven/WebJars, Composer) in the application's dependency tree, never with dpkg, rpm or apk
+		os_packages = [(c['params']['ecosystem'], c['params']['package'], c['params']['affected_below']) for c in strategy['local_checks']
+					   if c['kind'] == 'package_version' and c['params']['ecosystem'] in ('dpkg', 'rpm', 'apk')]
+		self.assertEqual(os_packages, [('dpkg', 'libjs-jquery', '3.5.0'), ('dpkg', 'node-jquery', '3.5.0'), ('rpm', 'js-jquery', '3.5.0')])
 		commands = [cmd['command'] for c in strategy['local_checks'] for cmd in c['commands']]
 		self.assertTrue(any("dpkg-query -W -f='${Version}' libjs-jquery" in cmd for cmd in commands))
 		self.assertFalse(any('apk ' in cmd for cmd in commands))
-		text = json.dumps(strategy)
-		for packaging in ('components/jquery', 'jquery-rails', 'webjars'):
-			self.assertNotIn(packaging, text)
-		self.assertTrue(all('a copy a website bundles is not a package' in t for t in strategy['validation']['validated_when']))
+		for check in strategy['local_checks']:
+			if check['params'].get('package') in ('components/jquery', 'jquery-rails', 'org.webjars.npm:jquery'):
+				self.assertTrue(all(cmd['platform'] == 'app' and not re.search(r'\b(dpkg|rpm|apk)\b', cmd['command']) for cmd in check['commands']))
+		self.assertEqual({c['params'].get('package') for c in strategy['local_checks'] if c['params'].get('ecosystem') in ('gem', 'maven', 'composer')},
+						 {'jquery-rails', 'org.webjars.npm:jquery', 'components/jquery'})
+		self.assertTrue(all('a copy a website bundles is not a package' in t for t in strategy['validation']['validated_when']
+							if t.startswith('on the host, the system-wide')))
 
 	def test_the_guidance_says_how_the_version_is_read_and_what_makes_a_match_false(self):
 		strategy = record(jquery_cve())
@@ -127,14 +134,15 @@ class ClientLibraryRecordTests(TestCase):
 	def test_a_package_of_one_bootstrap_line_is_checked_only_for_a_range_of_that_line(self):
 		def packages(ranges):
 			cve = CVEEntry(cve_id='CVE-2099-11', title='Bootstrap XSS', affected=[{'product': 'Bootstrap', 'ranges': ranges}])
-			return {c['params']['package']: c['params']['affected_below'] for c in record(cve)['local_checks']}
+			return {c['params']['package']: c['params']['affected_below'] for c in record(cve)['local_checks']
+					if c['kind'] == 'package_version' and c['params']['ecosystem'] in ('dpkg', 'rpm', 'apk')}
 		self.assertEqual(packages([{'introduced': '4.0.0', 'fixed': '4.3.1'}]), {'libjs-bootstrap4': '4.3.1'})
 		self.assertEqual(packages([{'fixed': '3.4.1'}]), {'libjs-bootstrap': '3.4.1'})
 		self.assertEqual(packages([{'introduced': '3.0.0', 'fixed': '3.4.1'}, {'introduced': '4.0.0', 'fixed': '4.3.1'}]),
 						 {'libjs-bootstrap': '3.4.1', 'libjs-bootstrap4': '4.3.1'})
 		self.assertEqual(packages([{'introduced': '5.0.0', 'fixed': '5.3.0'}]), {'libjs-bootstrap5': '5.3.0', 'node-bootstrap': '5.3.0'})
 		ui = record(CVEEntry(cve_id='CVE-2099-12', title='x', affected=[{'product': 'jQuery UI', 'ranges': [{'fixed': '1.13.0'}]}]))
-		self.assertEqual([(c['params']['ecosystem'], c['params']['package']) for c in ui['local_checks']],
+		self.assertEqual([(c['params']['ecosystem'], c['params']['package']) for c in ui['local_checks'] if c['kind'] == 'package_version'],
 						 [('dpkg', 'libjs-jquery-ui'), ('rpm', 'js-jquery-ui')])
 
 	def test_a_separate_package_named_after_the_library_keeps_its_own_checks(self):
@@ -143,7 +151,7 @@ class ClientLibraryRecordTests(TestCase):
 					{'package': 'lodash.defaultsdeep', 'ranges': [{'fixed': '4.6.1'}]}]
 		strategy = record(CVEEntry(cve_id='CVE-2019-10744', title='lodash prototype pollution', affected=affected))
 		self.assertEqual([c['kind'] for c in strategy['remote_checks']], ['script_version', 'version_banner', 'version_banner'])
-		self.assertEqual({c['params']['package'] for c in strategy['local_checks']} & {'lodash.merge', 'lodash.defaultsdeep'},
+		self.assertEqual({c['params'].get('package') for c in strategy['local_checks']} & {'lodash.merge', 'lodash.defaultsdeep'},
 						 {'lodash.merge', 'lodash.defaultsdeep'})
 		self.assertIn('lodash.merge', strategy['identify'])
 
@@ -152,7 +160,7 @@ class ClientLibraryRecordTests(TestCase):
 		strategy = record(CVEEntry(cve_id='CVE-2099-10', title='x', affected=affected))
 		self.assertEqual([c['kind'] for c in strategy['remote_checks']], ['script_version', 'version_banner'])
 		self.assertEqual(strategy['remote_checks'][1]['params']['product'], 'WebLogic Server')
-		self.assertIn('weblogic', [c['params']['package'] for c in strategy['local_checks']])
+		self.assertIn('weblogic', [c['params'].get('package') for c in strategy['local_checks']])
 		self.assertIn('WebLogic Server', strategy['identify'])
 		self.assertTrue(any('WebLogic Server' in step for step in strategy['confirm_steps']))
 
@@ -199,10 +207,10 @@ class ClientLibraryBackfillTests(TestCase):
 	def test_an_existing_rules_record_is_rewritten_once_without_a_manual_step(self):
 		row = self.stale(self.cve())
 		nginx = self.cve('CVE-2099-1', [{'product': 'nginx', 'package': 'nginx', 'ranges': [{'fixed': '1.20.0'}]}])
-		nginx_row = self.stale(nginx, strategy=record(nginx))
+		nginx_row = self.stale(nginx, strategy=record(nginx), schema_version=detection.SCHEMA_VERSION)  # a current record
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			out = detection_author.author_pending(None)
-		self.assertEqual(out['libraries'], 1)
+		self.assertEqual(out['regenerated'] + out['libraries'], 1)  # the old rules record is rewritten once, by whichever lane comes first
 		row.refresh_from_db()
 		self.assertNotIn('nmap', json.dumps(row.strategy).lower())
 		self.assertEqual([c['kind'] for c in row.strategy['remote_checks']], ['script_version'])
