@@ -171,5 +171,6 @@ jobs:
           probe() { docker run --rm --user nobody -e HOME=/tmp "$@" --entrypoint python3 "$IMAGE" /usr/src/app/cveFeed/shot_worker.py --probe; }
           probe --security-opt seccomp=config/seccomp/playwright-chromium.json | tee "$RUNNER_TEMP/sandbox-on.json"
           grep -q '"engaged":true' "$RUNNER_TEMP/sandbox-on.json" || { echo "::error::Chromium's sandbox did not engage with the seccomp profile"; exit 1; }
-          status=0; probe | tee "$RUNNER_TEMP/sandbox-off.json" || status=$?
+          status=0; probe > "$RUNNER_TEMP/sandbox-off.json" || status=$?  # no pipe: the probe's own exit status is what counts
+          cat "$RUNNER_TEMP/sandbox-off.json"
           [ "$status" = 1 ] && grep -q '"engaged":false' "$RUNNER_TEMP/sandbox-off.json" || { echo "::error::without the profile the browser did not fail closed (status $status)"; exit 1; }
