@@ -23,7 +23,8 @@ class Command(BaseCommand):
         counts = verdict_tenancy.release_shared_closures(apply=opts["apply"])
         verb = "released" if opts["apply"] else "would release"
         self.stdout.write(self.style.SUCCESS(
-            f"{verb}: {counts['triage_rows']} finding(s) closed by another organization's stored answer, {counts['seeded_matches']} CVE "
+            f"{verb}: {counts['triage_rows']} finding(s) closed by another organization's stored answer, {counts['requeued']} held at "
+            f"needs validation by one (queued for their own review), {counts['seeded_matches']} CVE "
             f"match(es) seeded closed at correlation, {counts['shared_text']} finding(s) showing another project's notes; "
             f"{counts['kept_own']} own identity closure(s) kept; {counts['shared_rows']} shared closing row(s) "
             f"{'deleted' if opts['apply'] else 'to delete'}"))

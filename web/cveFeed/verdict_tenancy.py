@@ -6,7 +6,8 @@ organization, whose finding had the same key: correlation seeded a new CVE match
 asking. Any shared answer also carried the model's words about the host it was reached on onto the other findings. The code no longer does
 any of that (``correlation._seedable``, ``triage.closure_reusable``, ``triage.verdict_text``), and migration 0140 records the origin of the
 answers it can prove. This module puts the findings already closed that way back where their own evidence leaves them (held for validation
-while their own review is asked, ``triage.own_signature``), replaces the shared words on other projects' findings with a fixed sentence, and
+while their own review is asked, ``triage.own_candidates``), queues the findings another organization's model answer left at needs
+validation for their own review (keeping their classification meanwhile), replaces the shared words on other projects' findings with a fixed sentence, and
 deletes the shared not_affected rows nothing reads any more.
 
 It only reopens across organizations: on an instance with one organization (or none) nothing was shared with another tenant, and it only
@@ -28,7 +29,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 CHUNK = 500
-COUNTS = ('triage_rows', 'kept_own', 'shared_text', 'seeded_matches', 'shared_rows')
+COUNTS = ('triage_rows', 'requeued', 'kept_own', 'shared_text', 'seeded_matches', 'shared_rows')
 
 
 def tenants():
@@ -89,6 +90,22 @@ def _decide(row, owner, holders):
     return 'release'
 
 
+def _other_tenant(verdict, row, owner, holders):
+    """Whether the stored answer ``verdict`` held by ``row`` was reached in another organization: known when it has an origin; with none,
+    when its findings are in more than one organization."""
+    if verdict.project_id is not None:
+        return owner.get(verdict.project_id) != owner.get(row.project_id)
+    return len({owner.get(p) for p in _holders(verdict.pk, holders)}) > 1
+
+
+def _lowering(verdict):
+    """A model's answer below the ones that raise attention and not closing (needs validation): another organization's may have lowered a
+    finding its own question would rate higher (``triage.answer_reusable``)."""
+    from cveFeed import triage
+    return (verdict.classification not in triage.CLOSING and verdict.classification not in triage.RAISING
+            and not (verdict.model or '').startswith('deterministic'))
+
+
 def _foreign_words(verdict, row, owner, holders):
     """Whether ``row`` shows words of an answer reached in another project: known when the answer has an origin; with none, only when
     its findings are in more than one organization (in one organization they may be its own, and are left)."""
@@ -109,6 +126,9 @@ def release_shared_closures(apply=False):
     * ``triage_rows``: Triage rows closed by a stored answer reached in another organization (or of unknown origin): held at needs
       validation, detached from the answer and queued for their own review (``triage.own_signature``); their CVE match's legacy verdict
       becomes uncertain when it is still the one that answer wrote.
+    * ``requeued``: Triage rows holding another organization's model answer at needs validation (it may have lowered them: a row's own
+      question could rate it higher): detached and queued, with their classification and legacy verdict kept until run_triage applies
+      the same answer where ``triage.answer_reusable`` allows it, or the row's own.
     * ``kept_own``: CVE matches whose own sighting still supports the identity or operating-system closure they hold: kept closed, detached.
     * ``shared_text``: Triage rows (and their CVE match) showing the model's words of an answer reached in another project: given the fixed
       ``triage.SHARED_REASON``.
@@ -132,7 +152,7 @@ def release_shared_closures(apply=False):
         if not rows:
             break
         last = rows[-1].pk
-        release, own, text = [], [], []
+        release, requeue, own, text = [], [], [], []
         for row in rows:
             if row.match is not None:
                 row.match.triage = row  # is_version_only reads the validation status here, not with a query per row
@@ -145,14 +165,17 @@ def release_shared_closures(apply=False):
                 if decision == 'own':
                     own.append(row)
                     continue
+            elif not single and _lowering(verdict) and _other_tenant(verdict, row, owner, holders):
+                requeue.append(row)  # its own question, or the same answer where answer_reusable allows it, decides; nothing is lowered meanwhile
+                continue
             if row.reason and row.reason != triage.SHARED_REASON and verdict.reason and verdict.reason in row.reason \
                     and _foreign_words(verdict, row, owner, holders):
                 text.append(row)
-        for key, found in (('triage_rows', release), ('kept_own', own), ('shared_text', text)):
+        for key, found in (('triage_rows', release), ('requeued', requeue), ('kept_own', own), ('shared_text', text)):
             counts[key] += len(found)
             for row in found:
                 _note(per_project, row.project_id, key)
-        if not apply or not (release or own or text):
+        if not apply or not (release or requeue or own or text):
             continue
         with transaction.atomic():
             for row in release:
@@ -161,6 +184,11 @@ def release_shared_closures(apply=False):
                 if row.match_id and CVEMatch.objects.filter(pk=row.match_id, ai_verdict='not_affected', ai_reason=row.reason[:2000]).update(
                         ai_verdict=triage.verdict_for('needs_validation'), ai_reason=triage.HELD_REASON, ai_model='', updated_at=now):
                     touched.add(row.match_id)
+            for row in requeue:  # detached and queued; the classification and the match's legacy verdict stay until its own answer lands
+                Triage.objects.filter(pk=row.pk, verdict_id=row.verdict_id).update(verdict=None, status='pending', reason=triage.HELD_REASON,
+                                                                                   updated_at=now)
+                if row.match_id:
+                    CVEMatch.objects.filter(pk=row.match_id, ai_reason=row.reason[:2000]).update(ai_reason=triage.HELD_REASON)
             for row in own:
                 Triage.objects.filter(pk=row.pk, verdict_id=row.verdict_id).update(verdict=None, updated_at=now)
             for row in text:
@@ -233,6 +261,7 @@ def release_once():
         return None
     for project_id, mine in per_project.items():
         parts = [f'{mine["triage_rows"]} reopened for their own review' if mine['triage_rows'] else '',
+                 f'{mine["requeued"]} queued for their own review' if mine['requeued'] else '',
                  f'{mine["seeded_matches"]} CVE match(es) set back to unjudged' if mine['seeded_matches'] else '',
                  f'{mine["shared_text"]} note(s) from another organization\'s finding removed' if mine['shared_text'] else '']
         parts = [p for p in parts if p]
