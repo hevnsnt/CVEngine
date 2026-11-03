@@ -30,6 +30,9 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
+# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: the
+# screenshot browser runs as nobody in this container and has no business with scan output, PDF reports or log archives. Applied at every start.
+chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
 # test the scanners the pipeline runs, required for configuration
 naabu -version
