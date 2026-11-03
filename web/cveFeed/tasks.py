@@ -636,6 +636,8 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     from cveFeed import activity, match_policy
 
     close_rejected()  # a CVE rejected since the last run stops being a finding
+    from cveFeed import verdict_tenancy
+    verdict_tenancy.release_once()  # once after the upgrade: findings closed by another tenant's stored verdict are reopened (task 256)
     from cveFeed import locality
     locality.refresh()  # new or changed CVEs: which are only usable from the host itself
     locality.close_local_matches()  # ...never a finding, so any open match on one is closed

@@ -193,8 +193,9 @@ def _heat_policy():
 
 def _match_entry(m, heat):
     from agentapi import services as svc
+    from cveFeed.triage import verdict_text
     cve, t = m.cve_entry, svc._triage_of(m)
-    verdict = t.verdict if t else None
+    text = verdict_text(t.verdict if t else None, t)  # the model's words only in the project the answer was reached in (task 256)
     confirmed = m.template_result == 'vulnerable' or bool(t and t.validation_status == 'hit')
     basis = ('Confirmed: a check on the host reproduced it' if confirmed else
              'Reported by the host itself (its own inventory)' if m.source == 'host' else
@@ -209,17 +210,18 @@ def _match_entry(m, heat):
             'host': clean(sub.name if sub else '', 200), 'heat': heat, 'severity': svc.SEVERITY_NAMES.get(m.sev, ''),
             'cves': [clean(cve.cve_id, 40)], 'cvss': cve.cvss, 'signals': flags, 'basis': basis, 'confirmed': confirmed,
             'heat_reason': clean(heat_reason(m, heat) if heat else '', 200),
-            'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(verdict.impact if verdict else '', 600),
+            'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(text['impact'], 600),
             'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t),
-            'remediation': clean(verdict.remediation if verdict else '', 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
+            'remediation': clean(text['remediation'], 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
             'tracking': _tracking(m), 'first_seen': _date(svc._seen(m, 'first_seen', m.created_at)),
             'last_seen': _date(svc._seen(m, 'last_seen', m.updated_at))}
 
 
 def _vulnerability_entry(v, heat):
     from agentapi import services as svc
+    from cveFeed.triage import verdict_text
     t = svc._triage_of(v)
-    verdict = t.verdict if t else None
+    text = verdict_text(t.verdict if t else None, t)
     confirmed = bool(t and t.validation_status == 'hit')
     proof = _proof(t)
     if v.curl_command:
@@ -230,9 +232,9 @@ def _vulnerability_entry(v, heat):
             'severity': svc.SEVERITY_NAMES.get(v.severity, ''), 'cves': [clean(c.name, 40) for c in v.cve_ids.all()][:8],
             'cvss': v.cvss_score, 'signals': [],
             'basis': 'Confirmed: a check on the host reproduced it' if confirmed else 'Detected by the scanner template (a response matched); not independently reproduced',
-            'confirmed': confirmed, 'description': clean(v.description, 500), 'impact': clean((verdict.impact if verdict else '') or v.impact, 600),
+            'confirmed': confirmed, 'description': clean(v.description, 500), 'impact': clean(text['impact'] or v.impact, 600),
             'evidence': _steps(svc._how_found_vulnerability(v)), 'proof': proof[:5],
-            'remediation': clean((verdict.remediation if verdict else '') or v.remediation, 1200), 'fixed_in': [],
+            'remediation': clean(text['remediation'] or v.remediation, 1200), 'fixed_in': [],
             'tracking': {**_tracking(v), **({'status': 'No longer detected'} if not v.open_status and v.remediation_status == 'open' else {})},
             'first_seen': _date(svc._seen(v, 'first_seen', v.discovered_date)), 'last_seen': _date(svc._seen(v, 'last_seen', v.discovered_date))}
 
@@ -258,15 +260,16 @@ def _hygiene_group(check):
 def _hygiene(qs, cap):
     """Hygiene findings (TLS, certificates, email, cleartext services) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
     from agentapi import services as svc
+    from cveFeed.triage import verdict_text
     groups = {}
     for f in qs[:cap]:
         t = svc._triage_of(f)
-        verdict = t.verdict if t else None
+        text = verdict_text(t.verdict if t else None, t)
         groups.setdefault(_hygiene_group(f.check_name), []).append({
             'title': clean(f.title, 200), 'host': clean(f.host, 200), 'severity': svc.SEVERITY_NAMES.get(f.sev, ''),
             'heat': HEAT_NAMES.get(f.heat_rank, ''), 'check': clean(f.check_name, 40), 'detail': clean(f.detail, 600),
             'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]],
-            'remediation': clean(verdict.remediation if verdict else '', 800), 'tracking': _tracking(f),
+            'remediation': clean(text['remediation'], 800), 'tracking': _tracking(f),
             'first_seen': _date(f.first_seen)})
     return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Cleartext services', 'Other configuration') if name in groups]
 

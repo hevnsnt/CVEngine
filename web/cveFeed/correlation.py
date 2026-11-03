@@ -1036,12 +1036,11 @@ def invalid_identity_reason(match):
 
 
 def close_invalid_correlation(match, reason=None, host_only=False):
-    """Persist a scoped, auditable closure and a reusable deterministic verdict for bad product links. ``host_only`` keeps the verdict on
-    this row: a closure reached from what this host showed (a fresh script read) says nothing about another host with the same product
-    and version."""
+    """Persist a scoped, auditable closure for bad product links, on this row only. ``host_only`` (a closure reached from what this host
+    showed, a fresh script read) is kept for the callers; no closure is shared with another host since task 256."""
     from django.utils import timezone
     from cveFeed import activity, scoring, triage
-    from cveFeed.models import CVEMatch, MatchVerdict, TriageVerdict
+    from cveFeed.models import CVEMatch
 
     reason = reason or invalid_identity_reason(match)
     if not reason:
@@ -1052,24 +1051,15 @@ def close_invalid_correlation(match, reason=None, host_only=False):
     if not pairs:
         return False
     row, _ = pairs[0]
-    # A verdict is shared by every host with the same evidence. One reached by comparing names is only about this sighting, and a
-    # version inside the affected range is the evidence another host with the same product and version stands on: it never leaves this row.
-    # ... and a reason about this host's own page (cveFeed.js_libraries, or a validation's fresh script read) is never anyone else's
-    shared = match.version_in_range is not True and not host_only and not reason.startswith(js_libraries.LIBRARY_CLOSED)
-    verdict = None
-    if shared:
-        verdict, _ = TriageVerdict.objects.update_or_create(kind='cve_match', signature=row.signature, defaults={
-            'classification': 'not_applicable', 'reason': reason, 'model_classification': '', 'model_reason': '',
-            'overridden': False, 'model': 'deterministic-correlation', 'invalid_output': False})
-    row.verdict, row.status, row.classification, row.reason = verdict, 'triaged', 'not_applicable', reason
+    # Never shared (no MatchVerdict, no TriageVerdict), whether or not ``host_only`` says so: the reason is about this host's own sighting
+    # (the port's product, its CPE, a technology name) or its own page (cveFeed.js_libraries, or a validation's fresh script read), which the
+    # host's owner controls, while the shared keys hold only the advisory's product and the version. Another host with the same key is judged
+    # on its own evidence by the same check, at no cost (task 256).
+    row.verdict, row.status, row.classification, row.reason = None, 'triaged', 'not_applicable', reason
     row.save(update_fields=['verdict', 'status', 'classification', 'reason', 'updated_at'])
     CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='not_affected', ai_reason=reason, ai_model='deterministic-correlation',
                                                confidence=0.0, updated_at=timezone.now())
     match.ai_verdict, match.ai_reason, match.ai_model, match.confidence = 'not_affected', reason, 'deterministic-correlation', 0.0
-    if shared:
-        MatchVerdict.objects.update_or_create(cve_entry=match.cve_entry, matched_product=match.matched_product,
-            matched_version=match.matched_version, version_in_range=match.version_in_range, source=match.source,
-            defaults={'ai_verdict': 'not_affected', 'ai_reason': reason, 'ai_model': 'deterministic-correlation'})
     activity.log('confirm', f'{match.cve_entry.cve_id}: closed for this asset ({closure_summary(reason)})',
                  project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
                  finding_id=row.pk, decision='closed_not_applicable', reason=reason)
@@ -1081,8 +1071,8 @@ def close_invalid_correlation(match, reason=None, host_only=False):
 
 
 def _seedable(verdict, row):
-    """The stored verdict a new or moved match may start from: never a clearing one (not_affected) for a version in the affected range
-    that no distribution has patched, whose evidence the verdict was not reached on (the signature does not carry the distro result),
+    """The stored verdict a new or moved match may start from: never a clearing one (not_affected), which may have been reached on another
+    tenant's host from what that host said; never an "uncertain" one for a match with hard evidence, which it would keep off the fire page;
     and never an "affected" one for a match that stands on its version string alone (``match_policy.version_only``): the verdict may
     have been earned on a host with a template hit or a distribution listing, which this match does not have, and the ceiling
     (``triage.ceiling``) holds such a match at needs_validation. It starts unjudged instead and is triaged under the ceiling."""
@@ -1092,13 +1082,15 @@ def _seedable(verdict, row):
             row.get("source"), row.get("evidence"), row.get("version_in_range"), row.get("template_result", ""), row.get("distro_status", "")):
         return None
     if verdict and verdict.ai_verdict == "not_affected":
-        if row["evidence"].get("unbounded") and (verdict.ai_reason or '').startswith(match_policy.NO_EVIDENCE):
-            return None  # closed for lack of a version bound before the KEV exception: the candidate is wanted now
-        if row["version_in_range"] is True and row["distro_status"] != distro_lib.PATCHED:
-            return None
-        if (row["version_in_range"] is not False and row["distro_status"] != distro_lib.PATCHED
-                and not (verdict.ai_reason or '').startswith(AUTO_CLOSED)):
-            return None
+        # Never a closing one, whatever its reason (task 256): the stored row has no tenant and its key is only the CVE, product, version, range
+        # result and source, so it may have been reached on another organization's host from what that host said (a banner, a CPE, a page, an
+        # AI reading of them). A shared answer may raise attention, never close. The same host's own answer is carried by triage (its twin).
+        return None
+    if verdict and verdict.ai_verdict == "uncertain" and match_policy.has_hard_evidence(
+            row.get("source"), row.get("evidence"), row.get("template_result", ""), row.get("distro_status", "")):
+        # nor lower one: "uncertain" keeps a match with hard evidence out of the fire page (notify.fire_matches), and the stored answer may
+        # rest on what another tenant's host showed. Its own triage decides; a version-only match is held there anyway (triage.ceiling)
+        return None
     return verdict
 
 
@@ -1183,6 +1175,7 @@ def save_matches(rows, covered=None):
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch, MatchVerdict
+    from cveFeed.triage import SHARED_REASON
 
     unique = {}
     for r in rows:  # two sightings of one product on one host (two ports, two banners): keep the strongest evidence, not the last
@@ -1237,7 +1230,8 @@ def save_matches(rows, covered=None):
         signature = (row["cve_entry_id"], row["matched_product"], row["matched_version"], row["version_in_range"], row["source"])
         if match is None:
             verdict = _seedable(verdicts.get(signature), row)
-            extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": verdict.ai_reason, "ai_model": verdict.ai_model}
+            # never the stored row's words: it has no tenant, so only the fixed note goes with a seeded verdict (task 256)
+            extra = ({"ai_verdict": verdict.ai_verdict, "ai_reason": SHARED_REASON, "ai_model": verdict.ai_model}
                      if verdict else {})
             fresh.append(CVEMatch(**row, **extra))
         elif key in moved or any(getattr(match, f) != row[f] for f in _MATCH_FIELDS):
@@ -1254,7 +1248,7 @@ def save_matches(rows, covered=None):
             if key in moved:
                 verdict = _seedable(verdicts.get(signature), row)
                 match.ai_verdict = verdict.ai_verdict if verdict else ""
-                match.ai_reason = verdict.ai_reason if verdict else ""
+                match.ai_reason = SHARED_REASON if verdict else ""
                 match.ai_model = verdict.ai_model if verdict else ""
             match.updated_at = now
             changed.append(match)

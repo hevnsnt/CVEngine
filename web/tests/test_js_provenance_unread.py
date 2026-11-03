@@ -200,7 +200,13 @@ class ParseAndSeedTests(SimpleTestCase):
     def test_seeding_refuses_a_library_closure_where_every_other_rule_would_seed_it(self):
         from types import SimpleNamespace
         row = {'source': 'tech', 'evidence': {'source': 'tech'}, 'version_in_range': False, 'distro_status': 'no_data'}
-        other = SimpleNamespace(ai_verdict='not_affected', ai_reason='Closed automatically: different product', ai_model='x')
-        self.assertIs(correlation._seedable(other, row), other)  # the same verdict with another reason is seeded
+        # no shared closing verdict is seeded at all since task 256 (it may rest on another tenant's host); the library guard also refuses
+        # a verdict that is not a closure when its reason is a library closure, where every other rule would seed it
+        other = SimpleNamespace(ai_verdict='uncertain', ai_reason='needs a check', ai_model='x')
+        self.assertIs(correlation._seedable(other, row), other)
+        closed = SimpleNamespace(ai_verdict='not_affected', ai_reason='Closed automatically: different product', ai_model='x')
+        self.assertIsNone(correlation._seedable(closed, row))
         library = SimpleNamespace(ai_verdict='not_affected', ai_reason=js_libraries.closed_reason('the front page loads no jQuery'), ai_model='x')
+        self.assertIsNone(correlation._seedable(library, row))
+        library.ai_verdict = 'uncertain'
         self.assertIsNone(correlation._seedable(library, row))

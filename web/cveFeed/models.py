@@ -347,6 +347,9 @@ class MatchVerdict(models.Model):
     Fifty hosts running the same nginx 1.18 for one CVE are one question, not fifty: the verdict is asked once per
     (CVE, product, version, in-range, source), applied to every CVEMatch with that signature, and reused by later
     correlations so a re-run never asks again.
+
+    It has no tenant, so it only ever holds and seeds answers that raise attention (affected, uncertain): a closing answer may rest on
+    what one organization's host said and is never stored here or seeded from here (``correlation._seedable``, task 256).
     """
 
     cve_entry = models.ForeignKey(CVEEntry, on_delete=models.CASCADE, related_name="+")
@@ -1011,8 +1014,16 @@ class TriageVerdict(models.Model):
 
     ``signature`` is the sha1 of the evidence the answer depends on (see cveFeed.triage.signature_for), never a hostname: fifty hosts
     with the same evidence are one question. ``model_classification`` / ``model_reason`` are what the model said; ``classification`` /
-    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). Holds only text
-    derived from cleaned fingerprints and feed data, so it is not tenant data and has no project (like ServiceRun)."""
+    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). The model's words may
+    quote what the host it was asked about showed (a page title, a certificate, a banner, a path).
+
+    ``project`` and ``host`` record where the answer was reached (the finding the model was asked about). An answer that raises attention is
+    reused by every host with the same signature, and so is a needs-validation one where the finding's own question could not do better
+    (``triage.answer_reusable``), but only its classification and severity step up: its words are shown only in that project
+    (``triage.verdict_text``). A closing one (likely_false_positive, not_applicable) is reused only
+    within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE match) only on
+    that host; elsewhere the finding asks its own question, stored under ``triage.own_candidates`` (task 256). An answer whose origin could not
+    be proven (stored before it was recorded: migration 0140) has none: it closes no other finding and its words are shown nowhere."""
 
     CLASSIFICATIONS = ("confirmed", "likely", "needs_validation", "likely_false_positive", "not_applicable")
     kind = models.CharField(max_length=16)
@@ -1029,6 +1040,8 @@ class TriageVerdict(models.Model):
     validation_notes = models.JSONField(default=list, blank=True)  # advisory [{kind, note}] from the model, text only
     model = models.CharField(max_length=128, blank=True, default="")
     invalid_output = models.BooleanField(default=False)  # the reply failed validation: stored as needs_validation
+    project = models.ForeignKey("dashboard.Project", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # where it was reached
+    host = models.CharField(max_length=500, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = models.Manager()
@@ -1069,7 +1082,9 @@ class TriageCall(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx")]
+        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx"),
+                   # who asked for a signature: the origin of a stored answer (migration 0140, cveFeed.verdict_tenancy)
+                   models.Index(fields=["signature", "status"], name="triagecall_signature_idx")]
         constraints = [models.UniqueConstraint(fields=["kind", "signature"],
                                                condition=models.Q(status="running"), name="one_running_triage_signature")]
 
