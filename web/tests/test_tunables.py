@@ -608,15 +608,14 @@ class DocumentationTests(unittest.TestCase):
         for g in tunables.GROUPS:
             self.assertIn(f'**{g.title}**', text, g.id)
 
-    def test_the_changelog_mentions_it_in_its_newest_section(self):
+    def test_a_released_changelog_section_mentions_it(self):
         # The newest released section ('## vX.Y.Z (date)'): an '## Unreleased' section above it (the fixes collected for the next release) is
         # skipped, so a fix noted there does not hide the release that shipped this.
         changelog = (ROOT / 'CHANGELOG.md').read_text()
         sections = changelog.split('\n## ')[1:]
-        newest = next(s for s in sections if not s.startswith('Unreleased')).split('\n## ', 1)[0]
-        self.assertRegex(newest, r'^v\d')
-        self.assertIn('configMaxxing', newest)
-        self.assertIn('AI spend', newest)
+        released = [s for s in sections if re.match(r'v\d', s)]
+        # the release that shipped auto-tuning (1.3.2) names it; a later release section need not repeat it
+        self.assertTrue(any('configMaxxing' in s and 'AI spend' in s for s in released))
 
 
 if __name__ == '__main__':
