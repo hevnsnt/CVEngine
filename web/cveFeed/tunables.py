@@ -46,9 +46,10 @@ Group = namedtuple('Group', 'id title intro')
 # ``low``..``high`` where that is safer) by ``auto_step``. ``auto_sense``: ``more`` (a higher number does more work at once) or ``gap`` (a
 # higher number waits longer between runs, so does less). ``auto_optimistic``: the tuner's target when the facts it sizes from are not reported yet
 # (cveFeed.autotune_policy.size_for).
+# ``env_choices``: words the environment variable may hold instead of a number (``{'kev': 1, 'legacy': 0}``), each read as its number.
 Tunable = namedtuple('Tunable', 'key label help group env default low high unit applies env_float caution window note '
-                     'auto_tunable auto_min auto_max auto_step auto_sense auto_optimistic',
-                     defaults=(LIVE, False, None, None, None, None, None, None, 1, 'more', None))
+                     'auto_tunable auto_min auto_max auto_step auto_sense auto_optimistic env_choices',
+                     defaults=(LIVE, False, None, None, None, None, None, None, 1, 'more', None, None))
 HOURS_CEILING = 24 * 365 * 10  # an environment value in hours is held to ten years before it reaches a timedelta
 USED_SINCE = {'utc_day': 'since UTC midnight', 'rolling_day': 'in the last 24 hours', 'utc_hour': 'this hour'}
 WINDOW_TEXT = {'run': 'at the next run', 'utc_day': 'at the next UTC midnight', 'rolling_day': 'as the oldest of the last 24 hours ages out',
@@ -69,6 +70,10 @@ GROUPS = [
           'What this server\'s own scanners may send when a stage runs here instead of on a Sentinel. Hosting providers watch outbound port 25 '
           'and may block it after a burst; these numbers pace it (nothing is dropped: a port over budget is probed later) and cap how often a stage '
           'falls back to local execution. Sentinels are never paced by these. The counts per port are in get_system_status (egress).'),
+    Group('heat', 'Heat policy',
+          'What makes a CVE finding fire, smoke or ice. The KEV rule (1, the default): on the KEV or with a known exploit and the version proven on '
+          'the host is fire; on the KEV or with a known exploit and the version only inferred is smoke; anything else is ice, whatever its CVSS '
+          'or EPSS. 0 brings back the legacy rule (CVSS and EPSS raise heat too). CVSS and EPSS stay visible either way.'),
 ]
 
 TUNABLES = [
@@ -154,6 +159,14 @@ TUNABLES = [
             'How many naabu port sweeps may run on this server in an hour because no Sentinel took them in time. Over it, the addresses wait for '
             'the next run instead. 0 is unlimited.',
             'egress', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR', 10, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
+    Tunable('heat_policy', 'Heat policy (1 KEV rule, 0 legacy)',
+            'Which rule rates CVE findings. 1, the KEV rule: on the KEV (or with a known exploit) and the version proven on the host is fire, the '
+            'version only inferred is smoke, not on the KEV and no known exploit is ice. 0, legacy: KEV, exploits, CVSS 9+ and EPSS make fire, '
+            'CVSS 7+ or EPSS smoke. Every list, count, alert and API follows within seconds; stored host scores within a few minutes. In .env it is '
+            'CVENGINE_HEAT_POLICY=kev or legacy.',
+            'heat', 'CVENGINE_HEAT_POLICY', 1, 0, 1, '1 KEV rule, 0 legacy',
+            note='Applies within a few seconds to every list, count, alert and API; stored host scores are recomputed within a few minutes',
+            auto_tunable=False, env_choices={'kev': 1, 'legacy': 0}),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}
 GROUP_BY_ID = {g.id: g for g in GROUPS}
@@ -175,6 +188,12 @@ def env_value(tunable, environ=None):
     raw = (environ if environ is not None else os.environ).get(tunable.env)
     if raw is None or not str(raw).strip():
         return None
+    if tunable.env_choices:  # a word (kev, legacy) or one of the numbers the words stand for; anything else is the default
+        word = str(raw).strip().lower()
+        if word in tunable.env_choices:
+            return tunable.env_choices[word]
+        numbers = set(tunable.env_choices.values())
+        return int(word) if word.lstrip('-').isdigit() and int(word) in numbers else None
     try:
         if tunable.env_float:
             number = float(str(raw).strip())

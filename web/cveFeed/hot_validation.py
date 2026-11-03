@@ -5,8 +5,9 @@ evidence before any check runs. Broker priority 0 (Fire) precedes 3 (manual), 6 
 9 (Ice, every other CVE match) on the reserved validation worker; a duplicate delivery after
 promotion is harmless. A CVE match of any confidence is queued by itself, hottest first; the
 per-sweep, per-project and per-day caps bound the work, and Ice only uses what Fire and Smoke leave. A CVE match's lane is its
-``threat.validation_heat``, the heat without the version-only cap: a known-exploited match that rests on its version alone shows Smoke
-but is still validated in the Fire lane, because a validation hit is the evidence that makes it Fire.
+``threat.validation_heat``, the heat it would have once proven: a known-exploited match whose version is not proven shows Smoke but is
+still validated in the Fire lane, because a validation hit is the evidence that makes it Fire. Under the KEV heat policy a CVE that is
+neither on the KEV nor exploited is Ice here too, whatever its CVSS: proving it would not change its heat.
 """
 import os
 from datetime import timedelta
@@ -18,7 +19,7 @@ from django.utils import timezone
 from cveFeed import activity, match_policy, triage
 from cveFeed.correlation import latest_scan_q
 from cveFeed.models import AutomaticValidation, HotValidationCursor, OnDemandValidation, Triage
-from cveFeed.threat import FIRE, ICE, SMOKE, validation_heat
+from cveFeed.threat import FIRE, HEAT_RANK, ICE, LEGACY_POLICY, SMOKE, finding_heat, finding_heat_rank_expr, heat_policy, hot_q, validation_heat
 
 PAGE = 100
 MAX_ENQUEUE = 20
@@ -67,19 +68,22 @@ def next_attempt_number(previous, signature, signature_of):
 
 def tier_for(row):
     """The validation lane of a finding (fire, smoke or ice), or None when this finding is no longer current/open. For a CVE match it is
-    ``threat.validation_heat``: the heat the match would have without the version-only cap, so KEV still decides how soon it is checked."""
+    ``threat.validation_heat``: the heat the match would have once proven, so KEV still decides how soon it is checked."""
     if row.kind == 'cve_match' and row.match_id:
         match = row.match
         if match.ai_verdict == 'not_affected' or match.distro_status == 'patched' or not match.subdomain_id:
             return None
-        # the validation lane, not the heat shown: a known-exploited match that rests on its version alone shows smoke
-        # (threat.version_only_max_heat) but is validated in the fire lane, first, because a validation hit is how it earns fire
+        # the validation lane, not the heat shown: a known-exploited match whose version is not proven shows smoke but is validated in the
+        # fire lane, first, because a validation hit is how it earns fire
         return validation_heat(match)
     if row.vulnerability_id:
         vuln = row.vulnerability
         if not vuln.open_status:
             return None
-        return FIRE if vuln.severity >= 3 else SMOKE if vuln.severity == 2 else None
+        # its heat once confirmed (threat.finding_heat): its severity, or under the KEV policy, for a finding that names CVEs, the CVE rule
+        # (hot is the fire lane; not hot is ice, and a scanner finding is never an ice job)
+        heat = finding_heat(vuln, capped=False)
+        return heat if heat in (FIRE, SMOKE) else None
     if row.hygiene_id:
         finding = row.hygiene
         if finding.status != 'open':
@@ -108,11 +112,18 @@ def _candidate_rows(lane):
     from targetApp.models import in_target_scope_q
     # a finding on a name kept under a target that is now exactly one host (=example.com) is never validated automatically through it
     match_scope, vuln_scope = in_target_scope_q('match__subdomain__'), in_target_scope_q('vulnerability__subdomain__')
-    cve_fire = (Q(match__cve_entry__kev=True) | Q(match__cve_entry__exploit_db=True)
-                | Q(match__cve_entry__cvss__gte=9)
-                | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
-                | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
-    cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+    if heat_policy() == LEGACY_POLICY:
+        cve_fire = (Q(match__cve_entry__kev=True) | Q(match__cve_entry__exploit_db=True)
+                    | Q(match__cve_entry__cvss__gte=9)
+                    | (Q(match__cve_entry__epss_reached=True) & Q(match__cve_entry__cvss__gte=7))
+                    | (Q(match__ai_verdict='affected') & Q(match__cve_entry__cvss__gte=7)))
+        cve_hot = cve_fire | Q(match__cve_entry__cvss__gte=7) | Q(match__cve_entry__epss_reached=True)
+        cve_smoke = cve_hot
+    else:
+        # the KEV rule: a match's lane is its validation heat (tier_for), fire for a CVE on the KEV or with a known exploit and ice otherwise,
+        # whatever its CVSS or EPSS; no CVE match is in the smoke lane (smoke is "hot, not proven", and proof is what validation adds)
+        cve_fire = cve_hot = hot_q('match__cve_entry__')
+        cve_smoke = Q(pk__in=[])
     unknown = match_policy.version_unknown_q('match__')  # waits for a person or a published range: never validated automatically
     if lane == ICE:
         # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
@@ -121,14 +132,15 @@ def _candidate_rows(lane):
                 & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__') & match_scope)
         return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
-    candidate = ((cve_fire if lane == FIRE else cve_hot) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
+    candidate = ((cve_fire if lane == FIRE else cve_smoke) & Q(match__isnull=False) & ~unknown & ~Q(match__source=HOST_REPORTED)
                  & latest_scan_q('match__subdomain__') & match_scope)
-    candidate |= Q(vulnerability__open_status=True, vulnerability__severity__gte=severity) & vuln_scope
+    # a scanner finding by its heat once confirmed (finding_heat_rank_expr, the form of tier_for): severity, or the CVE rule for one naming CVEs
+    candidate |= Q(vulnerability__open_status=True, finding_rank__gte=HEAT_RANK[lane]) & vuln_scope
     candidate |= Q(hygiene__status='open', hygiene__severity__gte=severity)
     if lane == SMOKE:
         candidate |= Q(route__auth_state='open') & (Q(route__sensitive_score__gt=0)
                       | Q(route__path__iregex=triage.ADMIN_PATH.pattern))
-    return Triage.objects.filter(candidate).select_related(
+    return Triage.objects.annotate(finding_rank=finding_heat_rank_expr(capped=False, prefix='vulnerability__')).filter(candidate).select_related(
         'match__cve_entry', 'match__subdomain__target_domain', 'vulnerability__subdomain',
         'vulnerability__target_domain', 'route__domain', 'hygiene__domain').order_by('pk')
 

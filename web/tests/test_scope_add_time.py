@@ -537,8 +537,9 @@ class ValidationScopeTests(ValidationBase):
 		own = self.match(name='v.test')
 		triage.track(triage.with_cves([narrowed, own]) + [vuln])
 		for lane in ('fire', 'smoke'):
-			picked = {r.host for r in hot_validation._candidate_rows(lane)}
-			self.assertEqual(picked, {'v.test'}, lane)
+			self.assertNotIn('old.v.test', {r.host for r in hot_validation._candidate_rows(lane)}, lane)
+		# the KEV match on the target's own name is a fire-lane candidate (under the KEV heat policy no CVE match is a smoke-lane one)
+		self.assertEqual({r.host for r in hot_validation._candidate_rows('fire')}, {'v.test'})
 		other = self.dual_held()
 		triage.track(triage.with_cves([other]))
 		picked = {(r.host, r.match_id) for r in hot_validation._candidate_rows('fire')}

@@ -23,6 +23,18 @@ from tests.test_match_policy import Cve, Fixture
 
 ENV = threat.VERSION_ONLY_MAX_HEAT_ENV
 
+# These are the rules of the version-only cap, which is the LEGACY heat policy since the KEV rule became the default (tests.test_heat_policy
+# holds the KEV rule): the whole module runs with CVENGINE_HEAT_POLICY=legacy, so it keeps pinning the rollback exactly.
+_LEGACY = mock.patch.dict(os.environ, {threat.HEAT_POLICY_ENV: 'legacy'})
+
+
+def setUpModule():
+	_LEGACY.start()
+
+
+def tearDownModule():
+	_LEGACY.stop()
+
 # evidence kind -> (match fields, the Triage row's validation_status, hard evidence?)
 EVIDENCE = {
 	'tech version in range': ({'source': 'tech', 'version_in_range': True, 'evidence': {'source': 'tech'}}, '', False),
@@ -516,13 +528,18 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async') as queue:
 			# first sight (the upgrade, or a Redis with no volume after docker compose down/up): recorded, no forced full rescore
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
-			self.assertEqual(Redis.value, SMOKE)
+			self.assertEqual(Redis.value, 'legacy:' + SMOKE)  # the heat signature: the policy (legacy here) and its cap
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())  # a second worker starting
 			with mock.patch.dict(os.environ, {ENV: 'fire'}):
 				self.assertTrue(scoring.rescore_if_heat_cap_changed())  # the owner changed it
 				self.assertFalse(scoring.rescore_if_heat_cap_changed())
 			self.assertTrue(scoring.rescore_if_heat_cap_changed())  # back to smoke
-		self.assertEqual(queue.call_count, 2)
+			with mock.patch.dict(os.environ, {threat.HEAT_POLICY_ENV: 'kev'}):
+				self.assertTrue(scoring.rescore_if_heat_cap_changed())  # the KEV rule: one more full rescore
+				self.assertEqual(Redis.value, 'kev')
+				with mock.patch.dict(os.environ, {ENV: 'ice'}):
+					self.assertFalse(scoring.rescore_if_heat_cap_changed())  # the cap is not read under the KEV rule
+		self.assertEqual(queue.call_count, 3)
 		self.assertEqual(queue.call_args.kwargs['kwargs'], {'force': True})  # past another rescore's hour-long claim
 
 	def test_a_refused_task_leaves_the_change_for_the_next_worker(self):

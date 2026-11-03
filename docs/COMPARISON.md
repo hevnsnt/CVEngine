@@ -57,7 +57,7 @@
 
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
-| Exploitation ranking | Fire, smoke, or ice from CISA KEV, ENISA EUVD, VulnCheck KEV, EPSS, Exploit-DB, Metasploit, and CVSS ([how it works](FIRE-SMOKE-ICE.md)) | Severity and a score. EPSS and KEV are not mentioned on the page read. | cvENGINE |
+| Exploitation ranking | Fire, smoke, or ice from CISA KEV, ENISA EUVD, VulnCheck KEV, Exploit-DB and Metasploit, and whether the version is proven on the host; EPSS and CVSS shown alongside ([how it works](FIRE-SMOKE-ICE.md)) | Severity and a score. EPSS and KEV are not mentioned on the page read. | cvENGINE |
 | Host score | A 0 to 100 score per host, with reasons | Not stated | cvENGINE |
 | AI triage | Every finding is classified, with fixed rules so the model cannot dismiss hard evidence | Neo triages and validates | Even |
 | Validation | Read-only reproduction, with the exact command recorded | Findings replay against the live target and arrive with proof | Even |
