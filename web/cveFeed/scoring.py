@@ -159,7 +159,7 @@ def _cve_inputs(sub):
     from cveFeed.threat import match_heat
     out = []
     for m in sub.cve_matches.all():
-        if not match_is_live(m):  # ruled out, fixed or an accepted risk
+        if not match_is_live(m):  # ruled out, or closed: fixed, accepted risk or false positive
             continue
         # the heat the host card shows: a version-only match is held to CVENGINE_VERSION_ONLY_MAX_HEAT (smoke), KEV or not
         out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})

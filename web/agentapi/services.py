@@ -205,6 +205,15 @@ def _user_brief(user):
     return {'id': user.id, 'username': user.username, 'name': user.get_full_name() or user.username} if user else None
 
 
+def _closure_fields(kind, obj):
+    """``closure_note``, ``closed_by``, ``closed_at`` and ``closed_automatically`` of a finding (cveFeed.closure.closure_of): the note a
+    person wrote when closing it (fixed, accepted_risk or false_positive) with who and when, or the reason the engine stored when it
+    closed it on its own (``closed_by`` null, ``closed_automatically`` true); all null for a finding that is still open."""
+    from cveFeed import closure
+    note, user, when, automatic = closure.closure_of(kind, obj)
+    return {'closure_note': note, 'closed_by': _user_brief(user), 'closed_at': _iso(when), 'closed_automatically': automatic}
+
+
 def _comment_count(obj, kind):
     """``obj.comment_count`` when the queryset annotated it (every list and detail path does, in one query for the page), else a
     count for this one row, so a serializer handed a plain, unannotated row still answers instead of raising."""
@@ -1391,7 +1400,7 @@ def _heat_reasons(sub, capped=True):
     from cveFeed.threat import SEVERITY_HEAT, match_heat, validation_heat
     reasons = []
     for m in sub.cve_matches.all():
-        if not match_is_live(m):  # ruled out by the AI, fixed or an accepted risk: not a reason for the host's colour
+        if not match_is_live(m):  # ruled out by the AI, or closed (fixed, accepted risk, false positive): not a reason for the host's colour
             continue
         c = m.cve_entry
         uncapped = validation_heat(m)
@@ -2550,7 +2559,7 @@ def _vuln(v):
             'remediation_status': v.remediation_status, 'remediation_note': v.remediation_note,
             'remediation_updated': _iso(v.remediation_updated_at),
             'status_changed_at': _iso(v.remediation_updated_at), 'status_changed_by': _user_brief(v.remediation_by),
-            'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'),
+            'assignee': _user_brief(v.assignee), 'comment_count': _comment_count(v, 'vulnerability'), **_closure_fields('vulnerability', v),
             'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'internal': _internal_row(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else ''),
@@ -2614,7 +2623,7 @@ def _hygiene(f):
             'remediation_status': f.remediation_status, 'remediation_note': f.remediation_note,
             'remediation_updated': _iso(f.remediation_updated_at),
             'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
-            'assignee': _user_brief(f.assignee), 'comment_count': _comment_count(f, 'hygiene'),
+            'assignee': _user_brief(f.assignee), 'comment_count': _comment_count(f, 'hygiene'), **_closure_fields('hygiene', f),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
             'triage': _triage_brief(_triage_of(f))}
 
@@ -3131,6 +3140,7 @@ def _match(m):
             'remediation_updated': _iso(m.remediation_updated_at),
             'status_changed_at': _iso(m.remediation_updated_at), 'status_changed_by': _user_brief(m.remediation_by),
             'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'), 'agent_task': _agent_task_of(m),
+            **_closure_fields('match', m),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m))}
 
@@ -3164,7 +3174,10 @@ def _matches_qs(project):
 def list_matches(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     qs = _matches_qs(project)
-    if params.get('status'):
+    if params.get('status') == 'closed':  # any closing status: fixed, accepted_risk or false_positive
+        from cveFeed.counts import CLOSED
+        qs = qs.filter(remediation_status__in=CLOSED)
+    elif params.get('status'):
         qs = qs.filter(remediation_status=params['status'])
     if params.get('verdict') == 'active':  # not ruled out by the AI: the dashboard's CVE matches count
         from cveFeed.counts import RULED_OUT
@@ -3185,6 +3198,8 @@ def list_matches(ctx, slug, params):
 # --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
 
 FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
+# the Findings list's status facet: actionable (the default), closed (any closing status), one closing status on its own, or all
+FINDING_STATUS_FACETS = ('actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'all')
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
 
@@ -3201,8 +3216,10 @@ def _finding_sources(project, params):
     an unscored one as low), and filtered by heat, severity, status and host.
 
     "Actionable" (the default) is what heats a host on its card: a CVE match the AI did not rule out, an open scanner finding
-    above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out)."""
-    from django.db.models import Case, F, IntegerField, Value, When
+    above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out). ``status=closed``
+    is the findings a person closed (fixed, accepted_risk or false_positive), and one of those three exactly that one, whatever the scan
+    or the AI says about them."""
+    from django.db.models import Case, F, IntegerField, Q, Value, When
 
     from cveFeed.models import HygieneFinding
     from cveFeed.threat import CRITICAL_CVSS, HIGH_CVSS, match_heat_rank_expr, severity_heat_rank_expr
@@ -3213,9 +3230,12 @@ def _finding_sources(project, params):
     kev = _kev_only(params)
     if kev:
         wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
+    from cveFeed.closure import CLOSED
     status = params.get('status') or 'actionable'
-    if status not in ('actionable', 'all'):
-        raise ApiError(400, 'status must be actionable or all')
+    if status not in FINDING_STATUS_FACETS:
+        raise ApiError(400, f'status must be {", ".join(FINDING_STATUS_FACETS[:-1])} or {FINDING_STATUS_FACETS[-1]}')
+    # closed: any closing remediation status; fixed, accepted_risk or false_positive: exactly that one
+    by_status = Q(remediation_status__in=CLOSED) if status == 'closed' else Q(remediation_status=status) if status in CLOSED else None
     heat, severity = params.get('heat') or 'all', params.get('severity') or 'all'
     inverse = {v: k for k, v in SEVERITY_NAMES.items() if k >= 0}
     if heat != 'all' and heat not in HEAT_FACETS:
@@ -3231,7 +3251,9 @@ def _finding_sources(project, params):
         if kev:
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
-            qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk'))
+            qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
+        elif by_status is not None:
+            qs = qs.filter(by_status)
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['cve'] = qs
@@ -3241,7 +3263,9 @@ def _finding_sources(project, params):
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
                       comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
-            qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
+            qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+        elif by_status is not None:
+            qs = qs.filter(by_status)
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['scanner'] = qs
@@ -3251,7 +3275,9 @@ def _finding_sources(project, params):
             .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'),
                       comment_count=_comment_count_annotation('hygiene'))
         if status == 'actionable':
-            qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=('fixed', 'accepted_risk'))
+            qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=CLOSED)
+        elif by_status is not None:
+            qs = qs.filter(by_status)
         if params.get('host'):
             qs = qs.filter(host__icontains=params['host'])
         sources['hygiene'] = qs
@@ -3300,7 +3326,7 @@ def _finding_row(kind, obj):
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
             'remediation_note': getattr(obj, 'remediation_note', ''),
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
-            'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)),
+            'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)), **_closure_fields(FINDING_TYPES[kind], obj),
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
             'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
 
@@ -3433,19 +3459,37 @@ def _rescore_hosts(hosts):
         scoring.rescore_quietly(project_id, sorted(names)[:scoring.CHUNK])
 
 
+def _check_status(status):
+    from cveFeed.closure import STATUSES
+    if status not in STATUSES:
+        raise ApiError(400, f'status must be one of {", ".join(STATUSES)}')
+
+
+def _clean_note(note):
+    """The note of a status change as stored (cveFeed.closure.clean_note: stripped, control characters removed, at most 2000 characters),
+    ``None`` when the caller left it out. A 400 for one that is not text or too long, raised before anything is written."""
+    from cveFeed import closure
+    try:
+        return closure.clean_note(note)
+    except closure.NoteError as exc:
+        raise ApiError(400, str(exc))
+
+
 def _apply_remediation(obj, status, note, user, rescore=True):
     """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
-    statuses, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's body left
-    it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Raises on an
-    unrecognized status; never touches whatever auto-managed liveness field (open_status, HygieneFinding.status,
-    ai_verdict) the model also carries, which stays under the scan/check pipeline."""
-    from cveFeed.models import CVEMatch
-    if status not in CVEMatch.REMEDIATION_STATUSES:
-        raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    statuses, cveFeed.closure.STATUSES, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's
+    body left it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Closing with fixed,
+    accepted_risk or false_positive makes it the closure note, with who (remediation_by) and when (remediation_updated_at). The note is
+    cleaned and cut to 2000 characters here (the request paths refuse a longer one with a 400 first, via _clean_note; an agent's own
+    report is cut, as before). Raises on an unrecognized status; never touches whatever auto-managed liveness field (open_status,
+    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline."""
+    from cveFeed import closure
+    _check_status(status)
+    note = closure.clip_note(note)
     fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
     obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
     if note is not None:
-        obj.remediation_note = note[:2000]
+        obj.remediation_note = note
         fields.append('remediation_note')
     obj.save(update_fields=fields)
     host = _host_of(obj) if rescore else None
@@ -3456,10 +3500,20 @@ def _apply_remediation(obj, status, note, user, rescore=True):
 UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
 
 
-def _record_status_change(project, kind, finding_id, before, after, actor):
+def _record_status_change(project, kind, finding_id, before, after, actor, note=None):
+    """The audit event of one status change: who, the status before and after, and the note sent with it (left out when none was)."""
     from cveFeed.models import FindingAuditEvent
     FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=finding_id, event='status',
-                                      actor=actor, before={'status': before}, after={'status': after})
+                                      actor=actor, before={'status': before},
+                                      after={'status': after, **({'note': note} if note is not None else {})})
+
+
+def _log_status(project, message, before, status, note, **detail):
+    """The activity feed's line for a status change, with the statuses before and after and the note (clipped) in its detail, so the feed
+    and the audit trail agree."""
+    from cveFeed import activity
+    extra = {'note': note[:500]} if note else {}
+    activity.log('remediation', message, project=project, before=before, after=status, **detail, **extra)
 
 
 def _resolve_assignee(project, assignee):
@@ -3492,10 +3546,12 @@ def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
     """At least one of ``status``/``assignee`` is required; either can be sent alone, the same true-partial-update
     semantics ``note`` already has. A status change and an assignee change are logged as separate audit events even
     when sent in the same call, since they are independent facts a reader may want separately."""
-    from cveFeed import activity
     project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before body validation
     if status is None and assignee is UNSET:
         raise ApiError(400, 'missing field(s): status or assignee')
+    if status is not None:
+        _check_status(status)
+    note = _clean_note(note)
     m = _matches_qs(project).filter(id=match_id).first()
     if not m:
         raise ApiError(404, 'match not found')
@@ -3503,9 +3559,9 @@ def update_match(ctx, slug, match_id, status=None, note=None, assignee=UNSET):
     if status is not None:
         before = m.remediation_status
         _apply_remediation(m, status, note, ctx.user)
-        _record_status_change(project, 'match', m.id, before, status, ctx.user)
-        activity.log('remediation', f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
-                     project=project, finding_kind='match', finding_id=m.id)
+        _record_status_change(project, 'match', m.id, before, status, ctx.user, note)
+        _log_status(project, f'{m.cve_entry.cve_id} on {m.subdomain.name if m.subdomain else "?"} marked {status}',
+                    before, status, note, finding_kind='match', finding_id=m.id)
     if assignee is not UNSET:
         _apply_assignee(project, 'match', m, new_user, ctx.user)
     return _match(m)
@@ -3516,12 +3572,11 @@ MAX_BULK_STATUS = 200
 
 
 def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, assignee=UNSET):
-    """Set the remediation status (open/in_progress/fixed/accepted_risk), note and/or assignee of one finding: a CVE
+    """Set the remediation status (open/in_progress/fixed/accepted_risk/false_positive), note and/or assignee of one finding: a CVE
     match, scanner finding or hygiene finding; at least one of status/assignee is required. Same permissions and
     project-scoped 404 as update_match, which this delegates to for kind='match' so the two routes agree exactly. A
     web route has no remediation workflow (its auth_state already says what it needs), so 'route' 400s here the same
     as any other unrecognized kind."""
-    from cveFeed import activity
     if kind == 'match':
         return update_match(ctx, slug, finding_id, status, note=note, assignee=assignee)
     project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before kind/status validation
@@ -3529,28 +3584,32 @@ def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, a
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
     if status is None and assignee is UNSET:
         raise ApiError(400, 'missing field(s): status or assignee')
+    if status is not None:
+        _check_status(status)
+    note = _clean_note(note)
     obj = _finding_obj(project, kind, finding_id)
     new_user = _resolve_assignee(project, assignee) if assignee is not UNSET else None  # before the first write
     if status is not None:
         before = obj.remediation_status
         _apply_remediation(obj, status, note, ctx.user)
-        _record_status_change(project, kind, finding_id, before, status, ctx.user)
-        activity.log('remediation', f'{kind} finding #{finding_id} marked {status}', project=project,
-                     finding_kind=kind, finding_id=finding_id)
+        _record_status_change(project, kind, finding_id, before, status, ctx.user, note)
+        _log_status(project, f'{kind} finding #{finding_id} marked {status}', before, status, note,
+                    finding_kind=kind, finding_id=finding_id)
     if assignee is not UNSET:
         _apply_assignee(project, kind, obj, new_user, ctx.user)
     return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
 
 
 def bulk_update_finding_status(ctx, slug, items, status, note=None):
-    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once. Each item is independent
+    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once (closing them as fixed, accepted_risk or
+    false_positive puts the one note on every one, each audited on its own). Each item is independent
     (one bad kind or id never blocks the rest, and a finding belonging to another project 404s exactly like a missing
-    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures."""
+    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures. A bad status or note fails the
+    whole call before anything is written."""
     from cveFeed import activity
-    from cveFeed.models import CVEMatch
     project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
-    if status not in CVEMatch.REMEDIATION_STATUSES:
-        raise ApiError(400, f'status must be one of {", ".join(CVEMatch.REMEDIATION_STATUSES)}')
+    _check_status(status)
+    note = _clean_note(note)
     if not isinstance(items, list) or not items:
         raise ApiError(400, 'items must be a non-empty list')
     if len(items) > MAX_BULK_STATUS:
@@ -3567,7 +3626,7 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
             obj = _finding_obj(project, kind, finding_id)
             before = obj.remediation_status
             _apply_remediation(obj, status, note, ctx.user, rescore=False)
-            _record_status_change(project, kind, finding_id, before, status, ctx.user)
+            _record_status_change(project, kind, finding_id, before, status, ctx.user, note)
             host = _host_of(obj)
             if host:
                 hosts.add(host)
@@ -3580,7 +3639,7 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
     _rescore_hosts(hosts)  # once per host, not once per finding
     # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
     activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
-                 hosts=len(hosts), failed=len(failed))
+                 hosts=len(hosts), failed=len(failed), after=status, **({'note': note[:500]} if note else {}))
     return {'updated': updated, 'failed': failed}
 
 
@@ -3652,9 +3711,11 @@ def work_items(ctx, slug, params):
     # Closed asset correlations do not belong in remediation work. An unresolved candidate with a low-confidence
     # triage classification remains reviewable unless the caller requests ?include_fp=0.
     from django.db.models import Q
+
+    from cveFeed.counts import CLOSED
     qs = _matches_qs(project).exclude(ai_verdict='not_affected') \
         .exclude(version_in_range=False) \
-        .exclude(remediation_status__in=('fixed', 'accepted_risk')) \
+        .exclude(remediation_status__in=CLOSED) \
         .prefetch_related('subdomain__ip_addresses')
     if params.get('include_fp') == '0':
         qs = qs.exclude(triage__classification__in=FALSE_POSITIVES)
@@ -3864,8 +3925,9 @@ def finding_detail(ctx, slug, kind, finding_id):
     remediation = {'text': v.remediation if v else '', 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
     if kind == 'match':
         remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), local_checks=(t.local_checks if t else None) or None)
+    closed = _closure_fields(kind, obj) if kind in STATUS_KINDS else {}
     if kind in STATUS_KINDS:  # match, vulnerability, hygiene: a web route has no remediation workflow
-        remediation.update(status=obj.remediation_status, note=obj.remediation_note)
+        remediation.update(status=obj.remediation_status, note=obj.remediation_note, **closed)
     assessment_status = ('closed_not_applicable' if kind == 'match' and obj.ai_verdict == 'not_affected' and
                          (obj.ai_reason or '').startswith('Closed automatically:')
                          else 'candidate' if kind == 'match' else None)
@@ -3926,6 +3988,8 @@ def finding_detail(ctx, slug, kind, finding_id):
         'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
         'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
         'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
+        'closure_note': closed.get('closure_note'), 'closed_by': closed.get('closed_by'), 'closed_at': closed.get('closed_at'),
+        'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
