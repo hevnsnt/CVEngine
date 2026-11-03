@@ -27,6 +27,7 @@ anonymous GET as every route check, and only for scripts the page itself referen
 the project itself holds (not for a host-scoped, passive or manual only target), or a public library CDN, on port 80, 443 or the page's own.
 Budgets per page host, per script host and per scan (``Reader``); what was read is cached by URL, per project, with its ETag or length.
 ``CVENGINE_SCRIPT_BODY_READ=0`` turns reading off. Everything here except ``read_page`` (and its cache and budget) is pure."""
+import bisect
 import hashlib
 import itertools
 import logging
@@ -636,20 +637,23 @@ def _order_to_read(entries, page_url):
     return named + other + fallback
 
 
-def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None, coverage=None):
+def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None, reader=None, project=None, coverage=None, report=None):
     """Read the scripts of a parsed page (``parse_page``) through ``fetch(url)`` (the caller's pinned, bounded GET returning the route probe
     dict; called as ``fetch(url, headers={'If-None-Match': etag})`` to revalidate a cached reading) and return ``resolve``'s records. ``vet``
     is ``vetter``'s; ``budget`` is ``{'left': n}``, shared by every page of one host; ``reader`` is the scan's ``Reader`` (one is made when
     none is given); ``before_each()`` runs before each request, ``stop()`` ends the reading (a scan stop). ``coverage`` (a dict, when given)
     receives how many scripts with a source the page loads (``scripts``) and how many of them were read whole (``read``): only a page whose
-    every script was read whole can show that a library is absent."""
+    every script was read whole can show that a library is absent. ``report`` (a dict, when given) is filled with ``read`` (the script URLs
+    whose file was read or revalidated), ``skipped`` (``[(url, reason)]`` of those it wanted to read and did not) and ``truncated`` (those
+    read only up to MAX_SCRIPT_BYTES), for a validation's script read."""
     reader = reader if reader is not None else Reader(project)
     project = project if project is not None else reader.project
     entries = [dict(e) for e in entries or []]
     for entry in entries:
         if entry.get('url'):
             entry.update(identify(entry['url']))
-    for entry in _order_to_read(entries, page_url):
+    wanted = _order_to_read(entries, page_url)
+    for entry in wanted:
         url = entry['url']
         if stop is not None and stop():
             entry['skipped'] = 'scan stopped'
@@ -684,13 +688,19 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             read, why = _read_one(url, fetch, cached)
         except Exception as exc:  # noqa: BLE001 - a script that cannot be read is skipped; its name stays a hint
             logger.info('script read failed: %s', type(exc).__name__)
-            read, why = None, 'unreachable'
+            from cveFeed.local_egress import PortHeld
+            # this server's egress governor or skip list held the port: nothing was sent, which says nothing about the host
+            read, why = None, 'held' if isinstance(exc, PortHeld) else 'unreachable'
         reader.keep(url, (read, why))
         if read is None:
             entry['skipped'] = why
             continue
         entry['read'] = read
         _remember(url, read, project)
+    if report is not None:
+        report['read'] = [e['url'] for e in wanted if e.get('read') is not None]
+        report['skipped'] = [(e['url'], e['skipped']) for e in wanted if e.get('read') is None and e.get('skipped')]
+        report['truncated'] = [e['url'] for e in wanted if (e.get('read') or {}).get('truncated')]
     if coverage is not None:
         sourced = [e for e in entries if e.get('url')]
         coverage.update(scripts=len(sourced), read=sum(1 for e in sourced if isinstance(e.get('read'), dict) and e['read'].get('sha256')))
@@ -732,6 +742,8 @@ def _copies(entries):
                 copy['filename_version'] = entry['filename_version']  # the name said otherwise: the file wins
             if source == 'body' and read.get('sha256'):
                 copy['sha256'] = read['sha256']
+            if read is not None and read.get('truncated'):
+                copy['truncated'] = True  # only the first MAX_SCRIPT_BYTES were read: a second copy later in the file was not seen
             if source != 'body':
                 copy['not_read'] = entry.get('skipped') or ('no version in the file' if read is not None else 'not read')
             out.setdefault(key, []).append(copy)
@@ -1150,3 +1162,116 @@ def legacy_roots(evidence):
     if isinstance(evidence.get('libraries'), dict):
         return False
     return any(isinstance(f, dict) and f.get('source') == 'script:name' and is_library(f.get('name')) for f in evidence.get('fingerprints') or [])
+
+
+# ------------------------------------------------------------------ a whole file, searched end to end (a validation's script read)
+
+WHOLE_HITS = 50       # matches of one pattern kept from one file: a file with more is not known (``overflow``)
+WHOLE_BLOCKS = 400    # licence blocks looked at in one file
+SIGNED = ('jquery', 'jquery-ui', 'jquery-migrate')  # libraries whose own code names their version: a copy with its banner stripped is still seen
+_LICENSE_MARK = re.compile(r'/\*!|@license', re.IGNORECASE)
+# code that loads a script by its path at run time: a module loader's configuration or call, a dynamic import, a script element made in code
+# that is given a source, a loader call, a consent manager, an import map, a module script or a static ``import``/``export ... from`` (the
+# files it imports are never read), a service worker. Whatever such code loads is never read, so it can hold any library.
+# (A library's own UMD wrapper, ``define.amd``, and jQuery's DOMEval, a script element given code and no source, load nothing.)
+_LOADERS = (
+    ('requirejs', re.compile(r'\brequire(?:js)?\.config\s{0,4}\(|\brequirejs\s{0,4}\(|\bdata-main\s{0,4}=')),
+    ('systemjs', re.compile(r'\bSystem(?:JS)?\.(?:config|import)\s{0,4}\(')),
+    ('paths', re.compile(r'''(?<![\w$.])["']?paths["']?\s{0,4}:\s{0,4}\{''')),
+    ('import()', re.compile(r'(?<![\w$.])import\s{0,4}\(')),
+    ('getScript', re.compile(r'\.getScript\s{0,4}\(|\bloadScript\s{0,4}\(|\$script\s{0,4}\(|\bheadjs\b|\bLazyLoad\.js\b')),
+    ('consent manager', re.compile(r'data-cookieconsent|\bCookiebot\b|\bOneTrust\b|\bOptanon\b|\bklaro\b|\bUsercentrics\b|\bdidomi\b|'
+                                   r'type\s{0,4}=\s{0,4}["\']?text/plain', re.IGNORECASE)),
+    ('import map', re.compile(r'''type\s{0,4}=\s{0,4}["']?importmap''', re.IGNORECASE)),
+    # an ES module: it runs after every classic script and loads the files it imports, which the read never fetches (Vite, Rollup output)
+    ('module script', re.compile(r'''type\s{0,4}=\s{0,4}["']?module\b''', re.IGNORECASE)),
+    # (the keyword, not the word in a string: ``e==="import"`` is a token name)
+    ('static import', re.compile(r'''(?<![\w$."'`])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
+    ('re-export', re.compile(r'''(?<![\w$."'`])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
+    ('service worker', re.compile(r'serviceWorker\s{0,4}\.\s{0,4}register\s{0,4}\(')),
+    # an SVG script given by href or xlink:href: a browser loads it, the page parse (``src`` only) never reads it
+    ('SVG script href', re.compile(r'''<script\b[^<>]{0,2000}?\s(?:xlink:)?href\s{0,4}=''', re.IGNORECASE)),
+)
+
+
+_SCRIPT_ELEMENT = re.compile(r'''createElement\(\s{0,4}(?:["']script["']|[A-Za-z_$][\w$]{0,30}\s{0,4}\))''')
+_GIVEN_SOURCE = re.compile(r'''\.src\s{0,4}=(?!=)|setAttribute\(\s{0,4}["']src["']''')
+
+
+def whole_body(text):
+    """What ONE whole file (a script, or a page with its inline code) says about libraries, searched from its first byte to its last (``read_body``
+    looks for a banner in the first HEAD bytes and for code in the first SCAN: a bundle puts each library where that library starts, so a
+    second copy deep in a file is only seen here). Linear in the text, which the caller has already bounded to the read limit.
+
+    ``{'versions': [[key, version, how]], 'unplaceable': [key], 'blocks': [text], 'loaders': [name], 'overflow': bool}``: every library
+    version a banner or the library's own code states anywhere in it; ``unplaceable`` the libraries whose code is there but whose version
+    cannot be told; ``blocks`` the opening of every ``/*!`` or ``@license`` comment that is no library's banner (third-party code no rule
+    names, or a pointer to an extracted licence file: what it carries is unknown), with ``blocks_more`` when there were more than are kept;
+    ``loaders`` the kinds of run-time loading by path the text does (``_LOADERS``, a script element given a source); ``overflow`` when a
+    pattern matched more often than is kept, so the list is not all of it."""
+    text = text or ''
+    versions, unplaceable, starts, overflow = [], [], [], False
+
+    def add(key, version, how):
+        if not any(v[:2] == [key, version] for v in versions):
+            versions.append([key, version, how])
+    for key, pattern in _BANNERS:
+        hits = list(itertools.islice(pattern.finditer(text), WHOLE_HITS + 1))
+        overflow = overflow or len(hits) > WHOLE_HITS
+        for found in hits[:WHOLE_HITS]:
+            add(key, found.group(1), 'banner')
+            starts.append(found.start())
+    protos = list(itertools.islice(_JQ_PROTO.finditer(text), WHOLE_HITS + 1))
+    overflow = overflow or len(protos) > WHOLE_HITS
+    for proto in protos[:WHOLE_HITS]:
+        key = _JQ_KEY.search(text, proto.end(), proto.end() + 6000)
+        if not key:
+            continue  # another library's prototype (Zepto, Cash): not jQuery
+        if key.group(1):
+            add('jquery', key.group(1), 'signature')
+            continue
+        name = re.escape(key.group(2))
+        assigned = list(re.finditer(r'(?<![\w$.])' + name + r'\s{0,8}=\s{0,8}["\']' + _VERSION + r'["\']',
+                                    text[max(0, proto.start() - 4000):proto.start()]))
+        if assigned:
+            add('jquery', assigned[-1].group(1), 'signature')
+        elif 'jquery' not in unplaceable:
+            unplaceable.append('jquery')  # jQuery's own prototype, with a version the read cannot tell
+    for key, pattern in _SIGNATURES:
+        hits = list(itertools.islice(pattern.finditer(text), WHOLE_HITS + 1))
+        overflow = overflow or len(hits) > WHOLE_HITS
+        for found in hits[:WHOLE_HITS]:
+            add(key, found.group(1), 'signature')
+    blocks = []
+    marks = list(itertools.islice(_LICENSE_MARK.finditer(text), WHOLE_BLOCKS + 1))
+    overflow = overflow or len(marks) > WHOLE_BLOCKS
+    starts.sort()
+    for mark in marks[:WHOLE_BLOCKS]:
+        snippet = text[mark.start():mark.start() + 400]
+        end = snippet.find('*/')
+        # a banner inside this comment (from the start of the comment's line to its end): the block is that library's
+        line = text.rfind('\n', 0, mark.start()) + 1
+        last = mark.start() + (end if end != -1 else len(snippet))
+        at = bisect.bisect_left(starts, line)
+        if at < len(starts) and starts[at] <= last:
+            continue
+        blocks.append(' '.join((snippet[:end] if end != -1 else snippet).split())[:200])
+    loaders = [name for name, pattern in _LOADERS if pattern.search(text)]
+    for made in itertools.islice(_SCRIPT_ELEMENT.finditer(text), WHOLE_HITS):
+        if _GIVEN_SOURCE.search(text, made.end(), made.end() + 1500):
+            loaders.append('createElement(script)')  # a script element given a source: it loads a file the read never sees
+            break
+    distinct = list(dict.fromkeys(blocks))
+    return {'versions': versions[:40], 'unplaceable': unplaceable, 'blocks': distinct[:20], 'blocks_more': len(distinct) > 20,
+            'loaders': loaders, 'overflow': overflow or len(versions) > 40}
+
+
+def rules_out(key, block):
+    """Whether an unidentified licence block (``whole_body`` ``blocks``) cannot be a copy of library ``key``: only for a library whose own code
+    names its version (SIGNED: a copy is then found by its code wherever it is, banner or not), and only when the block does not name the
+    library. For any other library a block no rule names may be its copy with another banner, and is never ruled out."""
+    if key not in SIGNED:
+        return False
+    words = {re.sub(r'[^a-z0-9]', '', n.lower()) for n in (key, LIBRARIES[key][0], *LIBRARIES[key][1])}
+    flat = re.sub(r'[^a-z0-9]', '', (block or '').lower())
+    return not any(word and word in flat for word in words)
