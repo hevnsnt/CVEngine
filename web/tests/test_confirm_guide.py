@@ -526,8 +526,8 @@ class ReviewFixTests(TestCase):
 	def test_the_guide_does_not_depend_on_templategen_exporting_its_tester_pattern(self):
 		cve, sub, match = self.template_match()
 		import cveFeed.templategen as templategen
-		with mock.patch.object(templategen, 'OTHER_TESTERS', None, create=True):
-			del templategen.OTHER_TESTERS
+		with mock.patch.dict(templategen.__dict__):  # restored as it was on exit, whether or not templategen exports the name
+			templategen.__dict__.pop('OTHER_TESTERS', None)
 			self.assertIsNotNone(confirm_guide.match_guide(match))
 		match.template_id = 'testssl:heartbleed'
 		self.assertNotIn('template', confirm_guide.match_guide(match))
