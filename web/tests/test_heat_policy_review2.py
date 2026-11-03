@@ -309,6 +309,43 @@ class TurnedHotTests(Base):
 		self.assertIn('CVE-2099-7202', self.sends[0])
 
 
+class ClosedNeverPagesTests(Base):
+	"""#390: a match a person closed (fixed, an accepted risk or a false positive: counts.CLOSED) is never paged, on any path the heat
+	policy pages from: a CVE that turned hot, proof that arrived, a template hit."""
+
+	def closed_match(self, status):
+		cve = self.entry(f'CVE-2099-73{len(status):02d}', [], kev=False, exploit_db=False, cvss=9.8)
+		m = self.match_for(cve, version='1', in_range=True, distro_status='vulnerable', ai_verdict='uncertain', remediation_status=status)
+		CVEEntry.objects.filter(pk=cve.pk).update(kev=True)
+		return cve, m
+
+	def test_a_cve_that_turned_hot_pages_no_closed_match(self):
+		for status in ('fixed', 'accepted_risk', 'false_positive'):
+			with self.subTest(status=status):
+				cve, m = self.closed_match(status)
+				self.assertFalse(notify.cves_turned_hot([cve.pk]))
+				self.assertEqual(self.sends, [])
+				self.assertIsNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
+				CVEMatch.objects.filter(pk=m.pk).update(remediation_status='open')  # reopened: paged then
+				self.assertTrue(notify.cves_turned_hot([cve.pk]))
+				self.assertEqual(len(self.sends), 1)
+				self.sends.clear()
+
+	def test_proof_that_arrives_pages_no_false_positive(self):
+		_cve, m = self.closed_match('false_positive')
+		self.assertFalse(notify.fire_confirmed([m.pk]))
+		self.assertEqual(self.sends, [])
+
+	def test_a_template_hit_on_a_false_positive_is_not_paged(self):
+		cve, m = self.closed_match('false_positive')
+		pair = [(cve.cve_id, self.sub.name)]
+		self.assertFalse(notify.template_hits(pair))
+		self.assertEqual(self.sends, [])
+		CVEMatch.objects.filter(pk=m.pk).update(remediation_status='open')
+		self.assertTrue(notify.template_hits(pair))
+		self.assertEqual(len(self.sends), 1)
+
+
 class NucleiCveTests(Base):
 	"""Item 4: nuclei writes ``classification.cve-id``; a finding of a real nuclei line carries its CVE ids and follows the CVE rule."""
 
