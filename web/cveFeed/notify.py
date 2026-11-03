@@ -364,7 +364,7 @@ def _hot_only(hits):
         return hits
 
 
-def _version_only_pairs(hits):
+def _version_only_pairs(hits, project=None):
     """The (CVE id, host) pairs of ``hits`` that a version-class template matched: a stored match of the pair was recorded as
     ``templategen.VERSION_ONLY_RESULT`` and none of its matches has hard evidence (``match_policy.hard_evidence_q``). Such a match is
     version-only (it read a version, not the flaw), so the "hit" is not announced as a confirmed vulnerability. A pair
@@ -374,7 +374,10 @@ def _version_only_pairs(hits):
     from cveFeed.match_policy import hard_evidence_q
     from cveFeed.models import CVEMatch
     from cveFeed.templategen import VERSION_ONLY_RESULT
-    rows = (CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+    rows = CVEMatch.objects.filter(cve_entry__cve_id__in={c for c, _ in hits}, subdomain__name__in={h for _, h in hits})
+    if project is not None:  # the hits of one project's test: another project's host of the same name says nothing about them
+        rows = rows.filter(subdomain__target_domain__project_id=project)
+    rows = (rows
             .annotate(hard=Case(When(hard_evidence_q(), then=Value(True)), default=Value(False), output_field=BooleanField()))
             .values_list('cve_entry__cve_id', 'subdomain__name', 'template_result', 'hard'))
     version, hard = set(), set()
@@ -406,23 +409,28 @@ def _closed_pairs(hits, project=None):
 
 
 def template_hits(hits, scan=None, project=None):
-    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A pair a
-    version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): it read a version, it did not
-    confirm the flaw (the callers already leave those hits out; this is the last check before a page). So is a pair whose current matches
-    are all closed (``_closed_pairs``: fixed, an accepted risk or a false positive never pages), read in ``project`` (or the scan's). Under
-    the KEV heat policy only a CVE on the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never
-    pages (the hit is recorded and shown all the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
+    """One message for the (CVE id, host) pairs a template test confirmed vulnerable (in one scan, or by one CVE's test). A hit may also be
+    a (CVE id, host, project id) triple: an auto-fire run's batch (``hit_batch``) gathers the tests of several projects, each hit with the
+    project it was tested for; a pair is of ``project`` (or ``scan``'s). Each hit is checked against its own project's matches only. A pair
+    a version-class template matched, whose matches are still version-only, is left out (``_version_only_pairs``): it read a version, it did
+    not confirm the flaw (the callers already leave those hits out; this is the last check before a page). So is a pair whose current
+    matches are all closed (``_closed_pairs``: fixed, an accepted risk or a false positive never pages). Under the KEV heat policy only a
+    CVE on the KEV or with a known exploit is announced: a confirmed CVE that is neither is ice, and ice never pages (the hit is recorded and
+    shown all the same). A version-class hit that proves the version of a KEV match turns it fire and is paged by ``fire_confirmed`` instead
     (``templategen.record_outcomes``)."""
-    hits = list(dict.fromkeys(hits))
-    if hits:
+    default = project if project is not None else (scan.domain.project_id if scan is not None else None)
+    keyed = list(dict.fromkeys((hit[0], hit[1], hit[2] if len(hit) > 2 and hit[2] is not None else default) for hit in hits))
+    if keyed:
         try:
-            capped = _version_only_pairs(hits) | _closed_pairs(
-                hits, project if project is not None else (scan.domain.project_id if scan is not None else None))
+            capped = set()
+            for one in dict.fromkeys(owner for _c, _h, owner in keyed):  # each project's hits against that project's matches only
+                pairs = [(c, h) for c, h, owner in keyed if owner == one]
+                capped |= {(cve, host, one) for cve, host in _version_only_pairs(pairs, one) | _closed_pairs(pairs, one)}
         except Exception as exc:  # noqa: BLE001 - the guard never stops a genuine hit's message
             logger.warning('template hit heat check failed (%s)', type(exc).__name__)
             capped = set()
-        hits = [pair for pair in hits if pair not in capped]
-    hits = _hot_only(hits)
+        keyed = [hit for hit in keyed if hit not in capped]
+    hits = _hot_only(list(dict.fromkeys((cve, host) for cve, host, _owner in keyed)))
     if not hits:
         return False
     cves = len({cve for cve, _ in hits})

@@ -770,7 +770,7 @@ def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep, unat
                         capped=bool(getattr(entries, 'capped', False)), inline_unread=int(getattr(entries, 'inline_unread', 0)),
                         inline=[list(pair) for pair in getattr(entries, 'inline', ())][:20],
                         lazy=lazy_libraries(body, final, entries), entries=_entry_kinds(entries, final)[:js_libraries.MAX_ENTRIES],
-                        page_truncated=bool(first.get('truncated')), page_scan=js_libraries.whole_body(body))
+                        page_truncated=bool(first.get('truncated')), page_scan=js_libraries.whole_body(body, page=True))
         pages.append(page)
     return {'pages': pages, 'scanned': scanned, 'budget_left': budget['left']}
 

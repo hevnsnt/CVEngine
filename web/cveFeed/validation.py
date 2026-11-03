@@ -746,19 +746,15 @@ def library_outcome(params, reading):
 
     - ``reaffirmed``: the copy that runs on a page states, in its own file, a version inside the range (never a hit: the version is on the page,
       the page is not shown to be exploitable);
-    - closed (``version_changed`` with a ``close_reason``) in two cases only. (1) A redirect alias: every current root of the host answers 301
+    - closed (``version_changed`` with a ``close_reason``) in one case only, a redirect alias: every current root of the host answers 301
       or 308 to another host that is one of the project's inventoried hosts (``reading['inventoried_hosts']``), for a match made from a
       script of the front page (``version_source`` body or filename, with its ``script_url``); a version another tool named never closes
-      this way (it may be on a deeper route the host still serves). (2) A fixed version, only for a match made from a file's body (``version_source`` body with its ``script_url``:
-      a version another tool, a file name or a ``?ver=`` string gave is never closed here, whatever the front page shows), when every one of
-      these holds: every web base was read; that file was fetched in this read, read whole, and now states one version, outside the range; every script with a source
-      on every page (same-host, same-site, CDN, third-party and analytics alike: a host the vetter never reads, such as a third-party widget,
-      therefore always keeps the match) and every file the host was seen to load the library from was fetched in this read and read whole,
-      within the budget; each of those files and each page, searched from end to end
-      (``js_libraries.whole_body``), states at most one version of the library, no code of it with an unknown version, and no licence
-      block that may be a copy; no page and no file loads scripts at run time (a module script or a static import included); and the copy
-      that runs states a fixed version, with no copy inside the range or unplaceable;
-    - ``observed`` otherwise: the library gone or moved, a temporary redirect, an older copy that is shadowed, an unread or cut-short file, a
+      this way (it may be on a deeper route the host still serves). A fixed version the page's files state never closes the match (1.3.3,
+      final review): even when the match's own file states one fixed version, every script with a source on every page and every file the
+      library was seen in was read whole, searched end to end (``js_libraries.whole_body``) and shows no loader, a page can still load
+      another copy at run time that no static read sees (a ``document.write``, an appended script tag, a fetch and eval). Such a read is
+      ``observed``, with what the file states;
+    - ``observed`` otherwise too: the library gone or moved, a temporary redirect, an older copy that is shadowed, an unread or cut-short file, a
       spent budget, a run-time loader, an error page;
     - ``blocked``: every base was refused or challenged; ``failed``: no base answered, a port this server held, or a server error."""
     from cveFeed.correlation import SCRIPT_READ
@@ -881,15 +877,16 @@ def library_outcome(params, reading):
     if blockers:
         return result('observed', f'the copy that runs states {product} {versions or "no version"}, but ' + '; '.join(dict.fromkeys(blockers))[:400])
     where = f" (read from the file {effective[0].get('url')})" if effective and effective[0] and effective[0].get('url') else ''
-    return result('version_changed', f'the page now loads {product} {versions}{where}, outside the affected range',
-                  f"A fresh read of every web base shows the copy of {product} that runs is {versions}{where}, at or above the fixed release; "
-                  'every script on the page that could hold it, and every file it was seen in, was read whole and searched end to end, and none '
-                  f"holds another copy or loads one at run time: the version the match was made on ({params.get('matched_version') or 'unknown'}) "
-                  'is not what the page runs.')
+    # every script was read whole and none shows a loader, but static reading cannot prove a page loads nothing else at run time (a
+    # document.write, an appended script tag, a fetch and eval): the fixed version informs the match, it never closes it (only a redirect
+    # alias closes)
+    return result('observed', f'the copy that runs states {product} {versions}{where}, outside the affected range, and every script of the '
+                              'page was read whole; a page can still load another copy at run time that no static read sees, so the match '
+                              f"made on {params.get('matched_version') or 'its version'} stays open")
 
 
 def _whole_read_blockers(params, reading, read, key, product, entries):
-    """Why the fresh read is not whole enough to close on a fixed version (``library_outcome`` case 2): the match's own file, every script with
+    """Why the fresh read is not whole enough to weigh a fixed version (``library_outcome``; it never closes on one): the match's own file, every script with
     a source on every page (same-host, same-site, CDN, third-party and analytics alike: any of them may carry a copy) and every file the
     library was seen in, each fetched in this read, read whole and free of doubt (``_file_doubt``), every page's own text free of doubt, and
     no run-time loader anywhere."""

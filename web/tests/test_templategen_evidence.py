@@ -376,11 +376,14 @@ def fixture(name):
         return handle.read()
 
 
-VERSION = {'jquery version regex': JQUERY_VERSION_REGEX, 'wp plugin compare_versions': WP_PLUGIN_COMPARE_VERSIONS,
-           'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER,
-           # real community templates (nuclei-templates @ eddca90) that only compare a version they read
-           'zimbra ZmSettings.js (CVE-2022-27924)': fixture('CVE-2022-27924.yaml'), 'teleport ping (CVE-2025-49825)': fixture('CVE-2025-49825.yaml'),
-           'ivanti welcome.cgi (CVE-2025-0282)': fixture('CVE-2025-0282.yaml'), 'n-central login (CVE-2026-86218)': fixture('CVE-2026-86218.yaml')}
+VERSION = {'jquery version regex': JQUERY_VERSION_REGEX, 'apache server header': APACHE_HEADER_BANNER, 'openssh banner': OPENSSH_BANNER,
+           # real community templates (nuclei-templates @ eddca90) that only compare a version they read: 4 of its 4,510 CVE templates
+           'elementor readme (CVE-2022-29455)': fixture('CVE-2022-29455.yaml'), 'pega login page (CVE-2021-27651)': fixture('CVE-2021-27651.yaml')}
+# version checks too, but each has something the allowlist does not positively recognise (an extracted value that is not digits and dots,
+# an identity word the template's own name lacks, a JSON field, two requests): they stay confirmed hits, the safe direction
+CONSERVATIVE = {'wp plugin readme with a word extractor': WP_PLUGIN_COMPARE_VERSIONS, 'zimbra ZmSettings.js (CVE-2022-27924)': fixture('CVE-2022-27924.yaml'),
+                'teleport ping (CVE-2025-49825)': fixture('CVE-2025-49825.yaml'), 'ivanti welcome.cgi (CVE-2025-0282)': fixture('CVE-2025-0282.yaml'),
+                'n-central login (CVE-2026-86218)': fixture('CVE-2026-86218.yaml')}
 BEHAVIOR = {'apache traversal': APACHE_TRAVERSAL, 'exposed git config': GIT_CONFIG_EXPOSED, 'header payload with a version guard': HEADER_BYPASS_WITH_VERSION,
             'version or marker': VERSION_OR_MARKER, 'ip disclosure': IP_DISCLOSURE, 'ssl': SSL_WEAK,
             'user-agent xss (CVE-2017-4011, real)': fixture('CVE-2017-4011.yaml'), 'shellshock user-agent': SHELLSHOCK_UA,
@@ -396,7 +399,7 @@ class ClassificationTests(SimpleTestCase):
             self.assertEqual(templategen.template_evidence(text), templategen.VERSION_EVIDENCE, name)
 
     def test_templates_that_show_the_flaw_stay_behaviour_class(self):
-        for name, text in BEHAVIOR.items():
+        for name, text in {**BEHAVIOR, **CONSERVATIVE}.items():
             self.assertEqual(templategen.template_evidence(text), templategen.BEHAVIOR_EVIDENCE, name)
 
     def test_one_ordinary_change_turns_a_version_template_into_behaviour(self):
@@ -408,12 +411,13 @@ class ClassificationTests(SimpleTestCase):
                        ('"{{BaseURL}}/js/jquery.min.js"', '"{{BaseURL}}/js/jquery.min.js?debug=1"'),
                        ('      - type: status\n        status:\n          - 200', '      - type: status\n        status:\n          - 500'),
                        ('      - type: status\n', '      - type: status\n        negative: true\n'),
-                       ('http:\n', 'flow: http(1)\nhttp:\n')):
+                       ('http:\n', 'flow: http(1)\nhttp:\n'),
+                       ('  - method: GET\n', '  - method: GET\n    headers:\n      User-Agent: Mozilla/5.0 (X11; Linux x86_64)\n')):
             self.assertIn(change[0], base)
             self.assertEqual(templategen.template_evidence(base.replace(change[0], change[1], 1)), templategen.BEHAVIOR_EVIDENCE, change)
         self.assertEqual(templategen.template_evidence(base.replace('  - method: GET\n', '  - method: GET\n    headers:\n'
-                                                                    '      User-Agent: Mozilla/5.0 (X11; Linux x86_64)\n', 1)),
-                         templategen.VERSION_EVIDENCE)  # an ordinary browser header is still a plain read
+                                                                    '      Host: "{{Hostname}}"\n', 1)),
+                         templategen.VERSION_EVIDENCE)  # Host naming the host itself is the one header a plain read sends
 
     def test_anything_unreadable_is_behaviour_so_a_genuine_hit_is_never_downgraded(self):
         for text in ('', 'not: [yaml', 'id: x', '- a list', None):
@@ -554,6 +558,43 @@ class TemplateHitTests(Fixture):
             CVEMatch.objects.filter(pk=self.match.pk).update(template_result='')
             self.assertTrue(notify.template_hits(pair))  # nor is a genuine hit held back because its result is not recorded yet
         self.assertEqual(send.call_count, 3)
+
+    def test_template_hits_checks_each_hit_against_its_own_projects_matches(self):
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        from cveFeed import hit_batch
+        from dashboard.models import Org, Project
+        from startScan.models import ScanHistory, Subdomain
+        from targetApp.models import Domain
+        org = Org.objects.create(name='Other', slug='other-org')
+        other = Project.objects.create(name='O', slug='other-p', insert_date=timezone.now(), org=org)
+        domain = Domain.objects.create(name='example.test', project=other, insert_date=timezone.now())
+        scan = ScanHistory.objects.create(domain=domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+        sub = Subdomain.objects.create(name=HOST, target_domain=domain, scan_history=scan)  # the same host name in another project
+        CVEMatch.objects.create(cve_entry=self.entry, subdomain=sub, source='tech', matched_product='jquery', matched_version='3.4.1',
+                                version_in_range=True, confidence=0.5, evidence={'source': 'tech'},
+                                template_result=templategen.VERSION_ONLY_RESULT)
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+        pair = [('CVE-2020-11023', HOST)]
+        with mock.patch('cveFeed.notify._send', return_value=True) as send:
+            self.assertTrue(notify.template_hits(pair, project=self.project.pk))  # its own project's match is a genuine hit
+            self.assertFalse(notify.template_hits(pair, project=other.pk))  # the other project's is version-only
+            self.assertTrue(notify.template_hits([('CVE-2020-11023', HOST, self.project.pk)]))
+            self.assertFalse(notify.template_hits([('CVE-2020-11023', HOST, other.pk)]))
+            # an auto-fire run's batch gathers several projects' tests: each hit is checked against its own project
+            for project, sent in ((self.project.pk, True), (other.pk, False)):
+                cache.clear()
+                batch = hit_batch.start()
+                hit_batch.record(batch, pair, project=project)
+                self.assertEqual(hit_batch.leave(batch), sent, project)
+            cache.clear()
+            batch = hit_batch.start()
+            hit_batch.record(batch, pair, project=self.project.pk)
+            hit_batch.record(batch, pair, project=other.pk)
+            self.assertTrue(hit_batch.leave(batch))
+        self.assertEqual(send.call_count, 4)
+        self.assertEqual(send.call_args_list[-1].args[0].count(HOST), 1)  # one host, named once
 
     @mock.patch.dict(os.environ, LEGACY)
     def test_fire_confirmed_never_pages_a_version_class_hit(self):
