@@ -126,9 +126,9 @@ def regenerate_rules_records(batch=RULES_BATCH, seconds=60):
                                                                                              if c['id'].startswith(AI_ID_PREFIX)]}),
                                            row.cve_entry.cvss_vector)
             strategy = {**fresh, 'revision_note': RULES_NOTE} if fresh else {}
-            CVEDetection.objects.filter(pk=row.pk, source='rules').update(strategy=strategy, rules_at=now, updated_at=now,
-                                                                         schema_version=detection.SCHEMA_VERSION)
-            done += 1
+            # a record a person or the model took over meanwhile is left alone (and not counted)
+            done += CVEDetection.objects.filter(pk=row.pk, source='rules').update(strategy=strategy, rules_at=now, updated_at=now,
+                                                                                 schema_version=detection.SCHEMA_VERSION)
     return done
 
 

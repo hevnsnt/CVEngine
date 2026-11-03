@@ -29,16 +29,16 @@ GUIDANCE_TEXT = {'identify': 320, 'scope_reason': 200, 'revision_note': 200, 'ex
 SCOPES = ('external', 'local_only', 'unclear')  # can an outside scan decide this CVE, only the host itself, or cannot tell
 CONFIDENCE = ('high', 'medium', 'low')
 
-_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,39}$')
-_PRODUCT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._+/@-]{0,99}$')
-_VERSION = re.compile(r'^[0-9][0-9A-Za-z._+~:-]{0,63}$')
-_PACKAGE = re.compile(r'^[A-Za-z0-9@][A-Za-z0-9._+@/:-]{0,99}$')  # ':' for a Maven group:artifact, a leading '@' for an npm scope
-_HTTP_PATH = re.compile(r'^/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]{0,199}$')
-_FILE_PATH = re.compile(r'^(?:/|[A-Za-z]:\\)[A-Za-z0-9._ @+()\\/-]{1,199}$')
-_TEMPLATE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
-_MARKER = re.compile(r'^[\x20-\x7e]{1,100}$')
-_SERVICE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$')
-_KEY = re.compile(r'^[A-Za-z0-9._:/-]{1,80}$')
+_ID = re.compile(r'^[a-z0-9][a-z0-9_-]{0,39}\Z')
+_PRODUCT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._+/@-]{0,99}\Z')
+_VERSION = re.compile(r'^[0-9][0-9A-Za-z._+~:-]{0,63}\Z')
+_PACKAGE = re.compile(r'^[A-Za-z0-9@][A-Za-z0-9._+@/:-]{0,99}\Z')  # ':' for a Maven group:artifact, a leading '@' for an npm scope
+_HTTP_PATH = re.compile(r'^/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]{0,199}\Z')
+_FILE_PATH = re.compile(r'^(?:/|[A-Za-z]:\\)[A-Za-z0-9._ @+()\\/-]{1,199}\Z')
+_TEMPLATE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
+_MARKER = re.compile(r'^[\x20-\x7e]{1,100}\Z')
+_SERVICE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}\Z')
+_KEY = re.compile(r'^[A-Za-z0-9._:/-]{1,80}\Z')
 _DOTS = re.compile(r'\.\.')  # a path that climbs out of where it starts
 
 ECOSYSTEMS = ('any', 'dpkg', 'rpm', 'apk', 'pip', 'npm', 'gem', 'maven', 'nuget', 'go', 'composer', 'cargo')
@@ -685,10 +685,17 @@ def _primary(components, remote, local):
     return 'network_product'
 
 
+IDENTIFY_RANGES = 6
+
+
 def _ranges_text(ranges):
-    """Every affected range in words (at most three): a host on another release line must see its own (nginx 1.18 is in 0.5.13 to 1.28.3,
-    not in the first range 1.29.0 to 1.29.7)."""
-    return ' or '.join(dict.fromkeys(_range_text(r) for r in (ranges or [])[:3])) or 'every version'
+    """Every affected range in words: a host on another release line must see its own (nginx 1.18 is in 0.5.13 to 1.28.3, not in the first
+    range 1.29.0 to 1.29.7). Past IDENTIFY_RANGES the rest are counted ("and 4 more"), never dropped silently."""
+    words = list(dict.fromkeys(_range_text(r) for r in (ranges or [])))
+    if not words:
+        return 'every version'
+    shown = ' or '.join(words[:IDENTIFY_RANGES])
+    return shown + (f' and {len(words) - IDENTIFY_RANGES} more' if len(words) > IDENTIFY_RANGES else '')
 
 
 def rules_guidance(remote, local, has_template, components=None):
@@ -953,7 +960,9 @@ def validation_profile(strategy, cvss_vector=''):
             product = _script_product(check)
             needs.append(f"only the {product} version a script file on the page states is in an affected range: whether the page can be "
                          f"exploited depends on how it uses {product}")
-        elif check['kind'] == 'version_banner' and p.get('source') == 'technology':
+        elif check['kind'] == 'version_banner' and banner_reading(check) == 'platform':
+            needs.append(f"{p['product']} is a distribution release, not a banner: only the installed package on such a host decides")
+        elif check['kind'] == 'version_banner' and banner_reading(check) == 'technology':
             needs.append(f"only a technology fingerprint names {p['product']} at a version in an affected range: the application's own "
                          'dependency tree or files decide')
         elif check['kind'] == 'version_banner':
@@ -1014,13 +1023,35 @@ def validation_profile(strategy, cvss_vector=''):
     return out
 
 
+def banner_reading(check):
+    """How a ``version_banner`` check is read, from the class of its product, whoever wrote it (an older rules record or a model's check is
+    rendered by the same class rules as a new one): ``script`` (a client-side library, its packaging such as ``components/jquery`` or
+    ``jQuery.UI.Combined``, or a package that vendors one such as ``jquery-rails``), ``technology`` (a language package coordinate, or the
+    check says so), ``header`` (a web server's response header), ``platform`` (a distribution release such as Red Hat Enterprise Linux 9: no
+    banner states it) or ``banner`` (nmap)."""
+    from cveFeed import detection_classes as classes
+    p = check['params']
+    source = p.get('source')
+    if source == 'technology':
+        return 'technology'
+    if script_library(check):
+        return 'script'
+    product = str(p.get('product') or '')
+    if classes.language_ecosystem_of(product):
+        return 'technology'
+    if classes._PLATFORM.match(product.strip()):
+        return 'platform'
+    return 'header' if source == 'http_header' else 'banner'
+
+
 def _remote_kind(check):
     """The kind a remote check is read as, for the tools it needs: a library read, a version from a response header or a technology
-    fingerprint (no nmap for either), else its own kind."""
-    if is_script_read(check):
+    fingerprint (no nmap for any of them), a distribution release (no tool), else its own kind."""
+    if check['kind'] == 'script_version':
         return 'script_version'
     if check['kind'] == 'version_banner':
-        return {'http_header': 'version_header', 'technology': 'version_fingerprint'}.get(check['params'].get('source'), 'version_banner')
+        return {'script': 'script_version', 'technology': 'version_fingerprint', 'header': 'version_header', 'platform': 'platform',
+                'banner': 'version_banner'}[banner_reading(check)]
     return check['kind']
 
 
@@ -1042,14 +1073,28 @@ def is_script_read(check):
     cannot be told which one it is, so it stays as it was written."""
     if check['kind'] == 'script_version':
         return True
-    if check['kind'] == 'version_banner' and check['params'].get('source') == 'technology':
-        return False  # a CMS extension or a language package that shares a library's name (Drupal's "Bootstrap" theme): never a script read
-    key = library_key(check['params'].get('product')) if check['kind'] == 'version_banner' else ''
-    return bool(key) and key not in SERVER_SIDE
+    return bool(script_library(check))
+
+
+def script_library(check):
+    """The library key a remote check reads from a page's script files, or ''. A ``version_banner`` (an older or model-written record) counts
+    when its product is such a library, one of its packagings (``components/jquery``, NuGet ``jQuery.UI.Combined``) or a package that vendors
+    it (``jquery-rails``): nmap reads none of them. A banner check with source ``technology`` (a CMS extension or a language package that
+    shares a library's name, such as Drupal's "Bootstrap" theme) never is, and neither is a library whose name is also server-side code
+    (SERVER_SIDE: React, Vue): without the advisory it cannot be told which one it is, so it stays as it was written."""
+    if check['kind'] == 'script_version':
+        return check['params'].get('library', '')
+    if check['kind'] != 'version_banner' or check['params'].get('source') == 'technology':
+        return ''
+    from cveFeed.detection_classes import PACKAGING_ALIASES
+    product = str(check['params'].get('product') or '')
+    key = library_key(product) or PACKAGING_ALIASES.get(product.strip().lower(), '') or next(
+        (k for k, names in BUNDLED_BY.items() if product.strip().lower() in names), '')
+    return key if key and key not in SERVER_SIDE else ''
 
 
 def _script_product(check):
-    key = check['params'].get('library') or library_key(check['params'].get('product'))
+    key = check['params'].get('library') or script_library(check)
     return _libraries()[key][0] if key in _libraries() else check['params'].get('product', '')
 
 

@@ -43,15 +43,20 @@ def _range_text(ranges):
 def render_remote(check):
     """``{'tool', 'invocation', 'decide'}`` for one remote check, or None for a kind with no rendering."""
     kind, p = check['kind'], check['params']
-    from cveFeed.detection import is_script_read
+    from cveFeed.detection import banner_reading, is_script_read, script_library
     if is_script_read(check):
-        return _render_script_read(p)
-    if kind == 'version_banner' and p.get('source') == 'http_header':
+        return _render_script_read({**p, 'library': p.get('library') or script_library(check)})
+    reading = banner_reading(check) if kind == 'version_banner' else ''
+    if reading == 'platform':
+        return {'tool': 'host package', 'invocation': '',
+                'decide': f"{p['product']} is a distribution release, not a product a banner states: on a host of that release, check the "
+                          "installed package the advisory names against the distribution's own fixed build."}
+    if kind == 'version_banner' and reading == 'header':
         return {'tool': 'curl', 'invocation': f'curl -sS -I --max-time 15 https://{TARGET}/',
                 'decide': f"Read the Server header (X-Powered-By for a runtime such as PHP or ASP.NET): the reported {p['product']} version is "
                           f"inside {_range_text(p['ranges'])}. A Linux distribution keeps the upstream version in the header after a backported "
                           'fix, and a proxy or CDN in front may answer with its own: the host\'s package release decides.'}
-    if kind == 'version_banner' and p.get('source') == 'technology':
+    if kind == 'version_banner' and reading == 'technology':
         return {'tool': 'technology fingerprint', 'invocation': f'curl -sS -i --max-time 15 https://{TARGET}/',
                 'decide': f"cvENGINE's technology fingerprint (headers, page markers, a generator tag, a readme) names {p['product']} at a "
                           f"version inside {_range_text(p['ranges'])}. That names the product, rarely the exact version of a dependency: the "
@@ -130,7 +135,8 @@ _LANGUAGE_COMMANDS = {
     'gem': (("grep -n -E {gemlock} Gemfile.lock", 'The version in parentheses is the locked {name} gem (run where the Gemfile is).'),
             ("gem list -e {q}", 'Prints the installed versions of the {name} gem.')),
     'maven': (("mvn -q dependency:tree -Dincludes={q}", 'Prints {name} in the resolved dependency tree with its version (run where '
-               'pom.xml is; Maven may download its plugins).'),
+               'pom.xml is). Note: Maven downloads the dependency plugin and any missing artifacts from its repositories the first time; the '
+               'grep below only reads the build files.'),
               ("grep -rn -F -e {q} --include='*.gradle' --include='*.gradle.kts' --include='*.lockfile' .", 'A Gradle build declares {name} '
                'with its version on that line.')),
     'nuget': (("dotnet list package --include-transitive", 'Read the version of {name} in the list (run where the project or solution '
@@ -142,7 +148,8 @@ _LANGUAGE_COMMANDS = {
              'of {name}.')),
     'go': (("go list -m all", 'Read the version printed next to {name} (run where go.mod is).'),
            ("grep -n -F -e {q} go.mod", 'The version on that line is the required version of {name}.')),
-    'cargo': (("cargo tree -i {q}", 'Prints {name} with its version and what pulls it in (run where Cargo.toml is).'),
+    'cargo': (("cargo tree --locked -i {q}", 'Prints {name} with its version and what pulls it in, from Cargo.lock as it is (run where '
+               'Cargo.toml is; --locked never updates the lockfile).'),
               ("grep -n -A 1 -F -e {cratelock} Cargo.lock", 'The version line under it is the locked version of {name}.')),
 }
 

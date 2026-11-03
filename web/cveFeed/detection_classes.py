@@ -67,7 +67,7 @@ OS_PACKAGE_NAMES = {
     'exim': {'dpkg': 'exim4-daemon-light', 'rpm': 'exim', 'apk': 'exim'},
     'openssl': {'dpkg': 'openssl', 'rpm': 'openssl', 'apk': 'openssl'},
 }
-_PLAIN_PACKAGE = re.compile(r'^[a-z0-9][a-z0-9.+_-]{0,99}$')  # what an OS package name looks like: lowercase, no scope, no group, no path
+_PLAIN_PACKAGE = re.compile(r'^[a-z0-9][a-z0-9.+_-]{0,99}\Z')  # what an OS package name looks like: lowercase, no scope, no group, no path
 
 
 def _lower(value):
@@ -114,7 +114,7 @@ def inferred_ecosystem(item, library=''):
     low = package.lower()
     if not package:
         return ''
-    if re.match(r'^[a-z0-9_.-]+\.[a-z0-9_.-]+:[a-z0-9_.-]+$', low):
+    if re.match(r'^[a-z0-9_.-]+\.[a-z0-9_.-]+:[a-z0-9_.-]+\Z', low):
         return 'maven'
     if low.startswith('@') and '/' in low:
         return 'npm'
@@ -299,12 +299,12 @@ def language_ecosystem_of(package):
     ``path/name``), or ''. For a check written with ecosystem ``any``: such a name is never an OS package, so dpkg, rpm and apk are never
     run for it."""
     low = str(package or '').strip().lower()
-    if re.match(r'^[a-z0-9_.-]+\.[a-z0-9_.-]+:[a-z0-9_.-]+$', low):
+    if re.match(r'^[a-z0-9_.-]+\.[a-z0-9_.-]+:[a-z0-9_.-]+\Z', low):
         return 'maven'
     if low.startswith('@') and '/' in low:
         return 'npm'
     if re.match(r'^(?:github\.com|gitlab\.com|golang\.org|go\.[a-z0-9.-]+|gopkg\.in|k8s\.io|sigs\.k8s\.io)/', low):
         return 'go'
-    if re.match(r'^[a-z0-9_.-]+/[a-z0-9_.-]+$', low):
+    if re.match(r'^[a-z0-9_.-]+/[a-z0-9_.-]+\Z', low):
         return 'composer'
     return ''
