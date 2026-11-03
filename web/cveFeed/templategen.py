@@ -1080,8 +1080,13 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
     tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
     the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
-    testssl): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without one nothing is guessed.
-    Returns the number of findings saved."""
+    testssl): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
+    one nothing is guessed.
+
+    A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or
+    exploited match it turns from smoke to fire is rescored and paged once (``scoring.evidence_arrived``, ``notify.fire_confirmed``: once per
+    heat rule), the state read before the write (``threat.unproven``) so a match that was already fire is not paged again. It is still no
+    confirmed finding (no Vulnerability, no "template test confirmed" message). Returns the number of findings saved."""
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
@@ -1096,7 +1101,8 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     for sub in Subdomain.objects.filter(name__in=list(by_host), target_domain__project_id=project) \
             .select_related("target_domain", "scan_history").order_by("-id"):
         latest.setdefault((sub.name, sub.target_domain_id), sub)
-    now, saved = timezone.now(), 0
+    from cveFeed import threat
+    now, saved, proved = timezone.now(), 0, []
     for name, outcome in by_host.items():
         # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
         result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
@@ -1106,7 +1112,12 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
             # a confirmation stands until a person or a confirming check says otherwise: a version read again, a miss or an error of a later
             # run (a timeout, a WAF that answered this time, a template that changed) never lowers it, whichever tester made it
             rows = rows.exclude(template_result="vulnerable")
+        unproven = ({m.pk for m in rows.select_related("cve_entry", "triage") if threat.unproven(m)}
+                    if result == VERSION_ONLY_RESULT and threat.heat_policy() != threat.LEGACY_POLICY else set())
         rows.update(template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        if unproven:  # read before the write: only a real smoke-to-fire change is rescored and paged
+            proved += [m.pk for m in CVEMatch.objects.filter(pk__in=unproven).select_related("cve_entry", "triage")
+                       if not threat.unproven(m) and threat.match_heat(m) == threat.FIRE]
     for (name, _domain_id), sub in latest.items():
         outcome = by_host[name]
         hit = outcome.get("hit")
@@ -1128,6 +1139,9 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
         save_vulnerability(target_domain=sub.target_domain, scan_history=sub.scan_history, subdomain=sub,
                            http_url=hit.get("matched-at") or hit.get("host") or name, **data)
         saved += 1
+    if proved:
+        from cveFeed import scoring
+        scoring.evidence_arrived(proved, confirmed=proved)
     return saved
 
 

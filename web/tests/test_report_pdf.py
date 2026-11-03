@@ -217,8 +217,10 @@ class ReportContentTests(ReportBase):
 
     def test_executive_summary_counts_by_heat_and_severity_and_lists_top_risks(self):
         summary = self.text[self.text.index('Executive summary'):self.text.index('Hosts Highest score first')]
-        # open and not ruled out: the KEV match (fire), the critical scanner finding (fire), the 7.5 match (smoke)
-        self.assertIn('This report lists 3 open findings across 2 hosts: 2 fire, 1 smoke and 0 ice', summary)
+        # open and not ruled out: the KEV match (fire), the critical scanner finding (fire), the 7.5 match (ice under the KEV heat rule: it is
+        # neither on the KEV nor exploited; the legacy rule made it smoke), and the legend says which rule the counts follow
+        self.assertIn('This report lists 3 open findings across 2 hosts: 2 fire, 0 smoke and 1 ice', summary)
+        self.assertIn('Ice: not on the KEV and no public exploit', summary)
         self.assertIn('A further 2 TLS, certificate or email hygiene findings are listed separately', summary)
         for severity in ('Critical 2', 'High 1', 'Medium 0', 'Low 0'):  # the bars: one critical match, one critical finding, one 7.5 match
             self.assertIn(severity, summary)
@@ -726,6 +728,7 @@ class CapTests(ReportBase):
         self.assertEqual(names[0], 'www.acme.test')
         self.assertEqual([h['score'] for h in data['hosts']], sorted((h['score'] for h in data['hosts']), reverse=True))
 
+    @mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})  # the counts rest on a CVSS-rated smoke: the legacy rule
     def test_findings_beyond_the_cap_are_counted_but_not_detailed(self):
         with mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_FINDINGS': '2', 'CVENGINE_REPORT_MAX_HYGIENE': '1'}):
             data = report_data.collect(self.pa)

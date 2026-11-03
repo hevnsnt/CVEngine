@@ -1,6 +1,7 @@
 """Third review of the template classifier (templategen.template_evidence): a payload in an allowed header value, a data-exposure marker
 beside a version, an HTTP status line read as a version, malformed fields; and the results a later run may not lower. Every template here
 also passes static_check, so an AI-written template could take each shape."""
+import os
 from unittest import mock
 
 from django.test import SimpleTestCase
@@ -8,8 +9,8 @@ from django.test import SimpleTestCase
 from cveFeed import templategen
 from cveFeed.models import CVEMatch
 from startScan.models import Vulnerability
-from tests.test_templategen_evidence import (ADMIN_LIST_WITH_VERSION, APACHE_TRAVERSAL, FIRE, HOST, JQUERY_VERSION_REGEX, TRAVERSAL_HIT,
-                                             VERSION_HIT, TemplateHitTests)
+from tests.test_templategen_evidence import (ADMIN_LIST_WITH_VERSION, APACHE_TRAVERSAL, FIRE, HOST, JQUERY_VERSION_REGEX, LEGACY,
+                                             TRAVERSAL_HIT, VERSION_HIT, TemplateHitTests)
 
 B = templategen.BEHAVIOR_EVIDENCE
 
@@ -96,6 +97,7 @@ class AllowlistTests(SimpleTestCase):
 
 
 class LaterResultsTests(TemplateHitTests):
+    @mock.patch.dict(os.environ, LEGACY)  # under the KEV rule the version hit itself turns the KEV match fire and is paged once (#386)
     def test_a_behavioural_hit_upgrades_version_only(self):
         _r, send1 = self.run_test(JQUERY_VERSION_REGEX, VERSION_HIT)
         self.assertEqual(CVEMatch.objects.get(pk=self.match.pk).template_result, templategen.VERSION_ONLY_RESULT)

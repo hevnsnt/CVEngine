@@ -138,7 +138,7 @@ def _store(ip, block):
 def _corroborate_matches(project, ips):
     """Raise the confidence of the project's existing port-based CVE matches that runZero also reports, once each. Matches the AI
     ruled out or the distribution patched are left alone, and ``ai_verdict`` is never touched: this is evidence, not a verdict."""
-    from cveFeed import match_policy, scoring
+    from cveFeed import scoring, threat
     from cveFeed.models import CVEMatch
     gained, turned = [], []
     for ip in ips:
@@ -151,14 +151,14 @@ def _corroborate_matches(project, ips):
             evidence = dict(match.evidence or {})
             if evidence.get('runzero') or match.cve_entry.cve_id not in runzero.reported_cves(ip, evidence.get('port')):
                 continue
-            was_version_only = match_policy.is_version_only(match)  # read before the write: only a real smoke-to-fire change is paged
+            was_version_only = threat.unproven(match)  # read before the write: only a real smoke-to-fire change is paged
             match.confidence, match.evidence = runzero.boosted(match.confidence), {**evidence, 'runzero': True, 'confidence_before': match.confidence}
             match.save(update_fields=['confidence', 'evidence', 'updated_at'])
             gained.append(match.pk)
             if was_version_only:
                 turned.append(match.pk)
     # a runZero report is hard evidence (match_policy.has_hard_evidence): the hosts are rescored, the snapshots re-read, and a match that
-    # was version-only and is fire now is paged once
+    # was not proven (threat.unproven) and is fire now is paged once
     scoring.evidence_arrived(gained, confirmed=turned)
     return len(gained)
 

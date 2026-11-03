@@ -639,7 +639,7 @@ def _finding_to_nuclei_line(finding):
             'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': None,
             'response': None, 'extracted-results': finding.get('extracted_results') or [],
             'info': {'name': finding.get('name') or '', 'severity': finding.get('severity') or 'unknown',
-                     'description': finding.get('description') or '', 'classification': {}, 'reference': [],
+                     'description': finding.get('description') or '', 'classification': {'cve-id': list(finding.get('cve_ids') or [])}, 'reference': [],
                      'tags': finding.get('tags') or []}}
 
 

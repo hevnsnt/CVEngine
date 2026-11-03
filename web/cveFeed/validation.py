@@ -597,12 +597,31 @@ def apply_validation(row, check, result, now=None, save=True):
             # a validation hit is hard evidence: the score and snapshots follow, and a match that was version-only before this hit (read
             # with the row's earlier status) and is fire now is paged once. A template hit rescored in _record_template_hit and is
             # announced by notify.template_hits.
-            from cveFeed import match_policy, scoring
+            from cveFeed import scoring, threat
             match = row.match
-            was_version_only = not hit_before and not match_policy.has_hard_evidence(
-                match.source, match.evidence, match.template_result or '', match.distro_status or '')
+            was_version_only = not hit_before and threat.unproven(match, validation_status='')
             scoring.evidence_arrived([row.match_id], confirmed=[row.match_id] if was_version_only else ())
+        elif status == 'reaffirmed' and row.match_id and check['kind'] == 'nuclei_template':
+            _record_version_hit(row, check, result)
     return row
+
+
+def _record_version_hit(row, check, result):
+    """A version-class template's hit from a validation check (``reaffirmed``, ``_result_from_outcome``) is recorded on the match like the
+    same hit from the template pass (``templategen.record_outcomes``: ``VERSION_ONLY_RESULT``, no finding, never replacing a confirmation),
+    so the version it proved is proof on either path: under the KEV heat policy a KEV or exploited match it turns fire is rescored and paged
+    once. A result the template pass recorded already (``recorded``) is not written again. Never raises."""
+    from cveFeed import templategen
+    from cveFeed.models import CVEEntry, CVEMatch
+    outcome = result.get('outcome')
+    if result.get('recorded') or not outcome or not templategen.is_version_hit(outcome):
+        return
+    try:
+        cve = CVEEntry.objects.get(pk=CVEMatch.objects.filter(pk=row.match_id).values_list('cve_entry_id', flat=True)[0])
+        templategen.record_outcomes(cve, [outcome], project=row.project_id,
+                                    template_id=os.path.basename(check['params']['template']).rsplit('.', 1)[0])
+    except Exception as exc:  # noqa: BLE001 - the validation step is recorded either way
+        logger.warning('version-class template hit not recorded on match %s (%s)', row.match_id, type(exc).__name__)
 
 
 def _record_template_hit(row, check, result):
@@ -673,7 +692,8 @@ def record_template_outcomes(cve, outcomes, project, template_path):
 def _result_from_outcome(outcome):
     """A template outcome as a validation step result. A hit of a version-class template (``templategen.template_evidence``) read the
     version again and showed nothing more: it is ``reaffirmed`` (the live version is inside the affected range), never a ``hit``, so it is
-    not hard evidence, lifts no heat, confirms no row and pages nothing."""
+    not hard evidence and confirms no row. It proves the version all the same (``apply_validation`` records it on the match): under the KEV
+    heat policy a KEV or exploited match turns fire and is paged once; under legacy it lifts no heat and pages nothing."""
     from cveFeed import templategen
     if outcome.get('error'):
         return {'status': 'failed', 'error': outcome['error'], 'summary': outcome['error'], 'outcome': outcome}

@@ -132,7 +132,8 @@ class RunTests(TestCase):
 		self.feed_entry.refresh_from_db()
 		self.assertEqual((self.feed_entry.epss_reached, self.feed_entry.kev), (True, False))  # EPSS 0.5 today
 		self.assertEqual(self.feed_entry.intel['epss'], {'score': 0.5, 'percentile': 0.98})
-		self.assertEqual(self.feed_entry.threat_tier, 'fire')  # EPSS reached with CVSS 7.5
+		self.assertEqual(self.feed_entry.attention_tier, 'fire')  # EPSS reached with CVSS 7.5 (the legacy rating auto-fire acts on)
+		self.assertEqual(self.feed_entry.threat_tier, 'ice')  # neither on the KEV nor exploited: ice by the KEV heat rule
 
 	def test_cve_now_rewriting_an_entry_keeps_the_other_sources_evidence(self):
 		self.run_intel()

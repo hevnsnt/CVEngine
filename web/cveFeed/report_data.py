@@ -185,6 +185,12 @@ def _steps(how, cap=8):
     return [{'label': clean(s['label'], 60), 'value': _ISO.sub(r'\1 \2', clean(s['value'], 240))} for s in how['steps'] if s.get('value')][:cap]
 
 
+def _heat_policy():
+    """``kev`` or ``legacy``: which rule the report's fire, smoke and ice counts follow (``threat.heat_policy``), for its legend."""
+    from cveFeed.threat import heat_policy
+    return heat_policy()
+
+
 def _match_entry(m, heat):
     from agentapi import services as svc
     cve, t = m.cve_entry, svc._triage_of(m)
@@ -198,9 +204,11 @@ def _match_entry(m, heat):
     product = ' '.join(x for x in (m.matched_product, m.matched_version) if x)
     fixed = svc._fixed_versions(cve, m.matched_product)
     sub = m.subdomain
+    from cveFeed.threat import heat_reason
     return {'kind': 'CVE match', 'title': clean(f'{cve.cve_id} in {product}' if product else cve.cve_id, 200), 'subtitle': clean(cve.title, 200),
             'host': clean(sub.name if sub else '', 200), 'heat': heat, 'severity': svc.SEVERITY_NAMES.get(m.sev, ''),
             'cves': [clean(cve.cve_id, 40)], 'cvss': cve.cvss, 'signals': flags, 'basis': basis, 'confirmed': confirmed,
+            'heat_reason': clean(heat_reason(m, heat) if heat else '', 200),
             'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(verdict.impact if verdict else '', 600),
             'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t),
             'remediation': clean(verdict.remediation if verdict else '', 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
@@ -296,7 +304,7 @@ def _hosts(project, host, findings_by_host, cap):
     if host:
         qs = qs.filter(name__iexact=host)
     qs = svc._one_per_host(qs).select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage',
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
         'technologies').order_by('-score', 'name')
     total, rows, page = qs.count(), [], 1
     while len(rows) < min(cap, total):
@@ -396,7 +404,8 @@ def collect(project, host=None, include_closed=False, now=None):
         'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
         'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': include_closed, 'branding': _branding(),
         'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
-        'summary': {'findings': total, 'heat': heat, 'severity': severity, 'hygiene': hygiene_total, 'hygiene_severity': hygiene_severity,
+        'summary': {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
+                    'hygiene_severity': hygiene_severity,
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
                     'status_counts': _status_counts(sources),
                     'top': detailed[:TOP_RISKS]},
