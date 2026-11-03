@@ -53,5 +53,12 @@ if [ "${free:-0}" -lt "$floor" ]; then
   report failed "only $free MB of memory is free and OpenVAS needs $floor MB; free some and switch it on again"
   exit 1
 fi
+# the first start needs about 60 GB of Docker's disk (the gvmd database, the feeds and the images): refuse before a feed load fills it up
+if ! disk=$(bash scripts/openvas-disk-check.sh); then
+  echo "$disk"
+  report failed "$disk"
+  exit 1
+fi
+[ -z "$disk" ] || echo "$disk"
 report applying
 if "${COMPOSE[@]}" --profile openvas up -d "${SERVICES[@]}"; then report ok; else report failed "starting the containers failed, see web/.openvas-log"; fi
