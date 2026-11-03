@@ -1171,7 +1171,8 @@ WHOLE_BLOCKS = 400    # licence blocks looked at in one file
 SIGNED = ('jquery', 'jquery-ui', 'jquery-migrate')  # libraries whose own code names their version: a copy with its banner stripped is still seen
 _LICENSE_MARK = re.compile(r'/\*!|@license', re.IGNORECASE)
 # code that loads a script by its path at run time: a module loader's configuration or call, a dynamic import, a script element made in code
-# that is given a source, a loader call, a consent manager, an import map. Whatever such code loads is never read, so it can hold any library.
+# that is given a source, a loader call, a consent manager, an import map, a module script or a static ``import``/``export ... from`` (the
+# files it imports are never read), a service worker. Whatever such code loads is never read, so it can hold any library.
 # (A library's own UMD wrapper, ``define.amd``, and jQuery's DOMEval, a script element given code and no source, load nothing.)
 _LOADERS = (
     ('requirejs', re.compile(r'\brequire(?:js)?\.config\s{0,4}\(|\brequirejs\s{0,4}\(|\bdata-main\s{0,4}=')),
@@ -1182,6 +1183,11 @@ _LOADERS = (
     ('consent manager', re.compile(r'data-cookieconsent|\bCookiebot\b|\bOneTrust\b|\bOptanon\b|\bklaro\b|\bUsercentrics\b|\bdidomi\b|'
                                    r'type\s{0,4}=\s{0,4}["\']?text/plain', re.IGNORECASE)),
     ('import map', re.compile(r'''type\s{0,4}=\s{0,4}["']?importmap''', re.IGNORECASE)),
+    # an ES module: it runs after every classic script and loads the files it imports, which the read never fetches (Vite, Rollup output)
+    ('module script', re.compile(r'''type\s{0,4}=\s{0,4}["']?module\b''', re.IGNORECASE)),
+    ('static import', re.compile(r'''(?<![\w$.])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
+    ('re-export', re.compile(r'''(?<![\w$.])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
+    ('service worker', re.compile(r'serviceWorker\s{0,4}\.\s{0,4}register\s{0,4}\(')),
 )
 
 

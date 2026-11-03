@@ -20,8 +20,8 @@ check exist.
   match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page), and
   reopens a match an earlier script read closed. Only what is truly false closes the match, through the guarded closure
   (``correlation.close_invalid_correlation``, this host only), never one a person worked: every root permanently redirecting to another
-  host, or a fixed running copy where the match's own file and every script that could hold the library were read whole in this read and
-  searched end to end (``library_outcome``). An absence (the library or its script gone from the page) is left to the next scan. A host the
+  host, or, for a match made from a file's own body, a fixed running copy where that file and every script that could hold the library
+  were read whole in this read and searched end to end, with no loader or module import (``library_outcome``). An absence (the library or its script gone from the page) is left to the next scan. A host the
   server may not read (internal, passive, manual only, a one-host target, the bug bounty gate, script reading off) is left as it is, and
   says why.
 
@@ -733,13 +733,14 @@ def library_outcome(params, reading):
     - ``reaffirmed``: the copy that runs on a page states, in its own file, a version inside the range (never a hit: the version is on the page,
       the page is not shown to be exploitable);
     - closed (``version_changed`` with a ``close_reason``) in two cases only. (1) A redirect alias: every current root of the host answers 301
-      or 308 to another host. (2) A fixed version, when every one of these holds: every web base was read; the match's own file (a match made
-      from a file's body) was fetched in this read, read whole, and now states one version, outside the range; every script of every page
+      or 308 to another host. (2) A fixed version, only for a match made from a file's body (``version_source`` body with its ``script_url``:
+      a version another tool, a file name or a ``?ver=`` string gave is never closed here, whatever the front page shows), when every one of
+      these holds: every web base was read; that file was fetched in this read, read whole, and now states one version, outside the range; every script of every page
       that could hold the library (same-host and same-site scripts, every copy named after it, every file the host was seen to load it from)
       was fetched in this read and read whole, within the budget; each of those files and each page, searched from end to end
       (``js_libraries.whole_body``), states at most one version of the library, no code of it with an unknown version, and no licence
-      block that may be a copy; no page and no file loads scripts at run time; and the copy that runs states a fixed version, with no copy
-      inside the range or unplaceable;
+      block that may be a copy; no page and no file loads scripts at run time (a module script or a static import included); and the copy
+      that runs states a fixed version, with no copy inside the range or unplaceable;
     - ``observed`` otherwise: the library gone or moved, a temporary redirect, an older copy that is shadowed, an unread or cut-short file, a
       spent budget, a run-time loader, an error page;
     - ``blocked``: every base was refused or challenged; ``failed``: no base answered, a port this server held, or a server error."""
@@ -806,13 +807,21 @@ def library_outcome(params, reading):
     inside = [c for _p, c in copies if c.get('source') == 'body' and _in_ranges(c.get('version'), entries) is True]
     if inside:
         states = ', '.join(dict.fromkeys(c.get('state') or 'unresolved' for c in inside))
-        return result('observed', f'{product} {inside[0].get("version")} inside the affected range is still on the page, as a {states} copy; '
-                                  'whether it runs needs a person to look')
+        return {**result('observed', f'{product} {inside[0].get("version")} inside the affected range is still on the page, as a {states} copy; '
+                                     'whether it runs needs a person to look'), 'in_range': True}
     deep_inside = [(url, v) for url, v in deep if _in_ranges(v, entries) is True]
     if deep_inside:
-        return result('observed', f'{product} {deep_inside[0][1]} inside the affected range is still in {deep_inside[0][0]} (found by searching '
-                                  'the whole file); whether it runs needs a person to look')
+        return {**result('observed', f'{product} {deep_inside[0][1]} inside the affected range is still in {deep_inside[0][0]} (found by '
+                                     'searching the whole file); whether it runs needs a person to look'), 'in_range': True}
     blockers = []
+    if not (params.get('version_source') == 'body' and params.get('script_url')):
+        # the version came from somewhere this read cannot re-read (another tool on another route or in an iframe, a widget bundle the
+        # vetter never fetches, a file name or a ?ver= string): what the front page's readable scripts show does not contradict it
+        blockers.append(f"the {params.get('matched_version') or 'matched'} version came from "
+                        + ('another tool, not from a file this read re-reads' if params.get('version_source') not in ('body', 'filename')
+                           else 'a script\'s name, not from a file this read re-reads' if params.get('version_source') == 'filename'
+                           else 'a file the match does not name')
+                        + ', and a script read closes only a match made from a file it reads again whole')
     capped = [p['base'] for p in read if p.get('capped')]
     if capped:
         blockers.append('the page has more scripts than the read can see, so another copy may be among them')
@@ -996,8 +1005,8 @@ def apply_validation(row, check, result, now=None, save=True):
             result = {**result, 'status': 'observed', 'summary': f"{result.get('summary')}; not closed: {refusal}"}
             close_reason = ''
     status = result['status']
-    if check['kind'] == 'script_read' and status == 'reaffirmed' and save and row.match_id:
-        _reopen_on_script_read(row, result, now)  # an earlier script read closed it; this one reads an affected copy that runs: open again
+    if check['kind'] == 'script_read' and (status == 'reaffirmed' or result.get('in_range')) and save and row.match_id:
+        _reopen_on_script_read(row, result, now)  # an earlier script read closed it; this one reads an affected copy again: open again
     hit_before = row.validation_status == 'hit'
     step = {'kind': check['kind'], 'label': check['label'], 'display': check['display'], 'target': check['target'],
             'ran_at': now.isoformat(), 'result': status, 'summary': _trim(result.get('summary'), 300),
@@ -1089,24 +1098,37 @@ def _close_on_script_read(row, reason):
 
 
 def _reopen_on_script_read(row, result, now):
-    """Reopen the row's match when an earlier script read closed it (``closed_by_script_read``) and this read finds the copy that runs inside
-    the affected range: the closure no longer holds. The match takes the fresh read's confidence, its verdict and the row's classification
-    are cleared, so triage judges it again; the next scan's correlation recomputes the rest. Returns whether it reopened."""
+    """Reopen the row's match when an earlier script read closed it (``closed_by_script_read``) and this read finds the library inside the
+    affected range again: the copy that runs (``reaffirmed``), or any copy or file of the page (``observed`` with ``in_range``): the closure
+    no longer holds. The match takes the fresh read's confidence (an affected copy that may not run no more than SHADOWED_CAP), its verdict
+    and the row's classification are cleared, so triage judges it again; the next scan's correlation recomputes the rest. Returns whether it
+    reopened."""
     from cveFeed import activity, scoring
     from cveFeed.models import CVEMatch
     match = CVEMatch.objects.filter(pk=row.match_id).select_related('cve_entry').first()
     if match is None or not closed_by_script_read(match):
         return False
+    from cveFeed.js_libraries import SHADOWED_CAP
     library = result.get('library') or {}
     confidence = float(library.get('version_confidence') or 0.0)
+    if result.get('status') != 'reaffirmed':
+        confidence = min(confidence or SHADOWED_CAP, SHADOWED_CAP)
     CVEMatch.objects.filter(pk=match.pk).update(ai_verdict='', ai_reason='', ai_model='', confidence=confidence, updated_at=now)
     match.ai_verdict, match.ai_reason, match.ai_model, match.confidence = '', '', '', confidence
     row.verdict, row.status, row.classification, row.reason = None, 'pending', '', ''
-    activity.log('confirm', f'{match.cve_entry.cve_id}: reopened for this asset (a fresh script read finds {library.get("version") or "an affected"} '
-                 'version that runs, inside the affected range)', project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
+    activity.log('confirm', f'{match.cve_entry.cve_id}: reopened for this asset (a fresh script read finds {product_version(result, library)} '
+                 'inside the affected range on the page)', project=row.project_id, cve_id=match.cve_entry.cve_id, match_id=match.pk,
                  finding_id=row.pk, decision='reopened')
     scoring.rescore_for_matches([match])
     return True
+
+
+def product_version(result, library):
+    """The affected version a reopening script read found, for the activity line."""
+    if result.get('status') == 'reaffirmed' and library.get('version'):
+        return f"{library['version']}, the copy that runs,"
+    found = re.search(r'(\d+(?:\.\d+)+) inside the affected range', result.get('summary') or '')
+    return f'{found.group(1)}' if found else 'an affected copy'
 
 
 def closed_by_script_read(match):

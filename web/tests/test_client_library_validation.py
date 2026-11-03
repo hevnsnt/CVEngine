@@ -136,9 +136,12 @@ class LibraryOutcomeTests(unittest.TestCase):
 		widget = self.outcome(read_page(record(copy('3.6.0')), entries=[
 			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]))
 		self.assertEqual(widget['status'], 'version_changed')
-		# a version another tool named closes on the running copy read in full too (a technology scan's "jQuery 1.0.4" from a theme's ?ver=)
-		other = self.outcome(read_page(record(copy('3.7.1'))), params={'version_source': 'other', 'script_url': ''})
-		self.assertEqual(other['status'], 'version_changed')
+		# a version another tool named (bbot or httpx on another route, an iframe, a widget the read never fetches) never closes on what the
+		# front page's readable scripts show: only a match made from a file's body, that file re-read whole, closes on a fixed version
+		for params in ({'version_source': 'other', 'script_url': ''}, {'version_source': 'filename'}, {'version_source': 'body', 'script_url': ''}):
+			other = self.outcome(read_page(record(copy('3.7.1'))), params=params)
+			self.assertEqual(other['status'], 'observed', params)
+			self.assertNotIn('close_reason', other)
 		permanent = {'base': 'https://www.v.test', 'outcome': 'redirect', 'status': 301, 'location': 'https://www.other.test/'}
 		alias = self.outcome(permanent, {**permanent, 'base': 'http://www.v.test', 'status': 308})
 		self.assertEqual(alias['status'], 'version_changed')
@@ -190,6 +193,19 @@ class LibraryOutcomeTests(unittest.TestCase):
 			'a loader on the page': self.outcome(read_page(record(copy('3.6.0')), page_scan={**NOTHING, 'loaders': ['createElement(script)']})),
 			'the page cut at the read limit': self.outcome(read_page(record(copy('3.6.0')), page_truncated=True)),
 			'inline code no rule reads': self.outcome(read_page(record(copy('3.6.0')), inline_unread=1)),
+			'more matches in the running file than are kept': self.outcome(read_page(record(copy('3.6.0'))), scanned={JQ: whole('3.6.0', overflow=True)}),
+			'a version another file states that cannot be placed': self.outcome(read_page(record(copy('3.6.0')), entries=[
+				{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://www.v.test/app.js', 'kind': 'same-host', 'library': ''}]),
+				scanned={JQ: whole('3.6.0'), 'https://www.v.test/app.js': whole('next')}),
+			'a copy whose file states no version': self.outcome(read_page(record(
+				copy('3.6.0'), copy('', state='shadowed', source='', url='https://www.v.test/old/jquery.js', not_read='no version in the file'))),
+				scanned={JQ: whole('3.6.0'), 'https://www.v.test/old/jquery.js': whole()}),
+			'copies whose order is unknown': self.outcome(read_page(record(copy('3.6.0', state='unresolved'), unresolved=True))),
+			'the match\'s own file now states no version': self.outcome(read_page(record(copy('3.6.0', url='https://www.v.test/js/jq2.js')), entries=[
+				{'url': JQ, 'kind': 'same-host', 'library': ''}, {'url': 'https://www.v.test/js/jq2.js', 'kind': 'same-host', 'library': 'jquery'}]),
+				scanned={JQ: whole(), 'https://www.v.test/js/jq2.js': whole('3.6.0')}),
+			'a library-named copy on a CDN not read': self.outcome(read_page(record(copy('3.6.0')), entries=[
+				{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://code.jquery.com/jquery.min.js', 'kind': 'cdn', 'library': 'jquery'}])),
 			'a read that does not list the page\'s scripts': self.outcome(read_page(record(copy('3.6.0')), entries=None) | {'entries': None}),
 			'error page': self.outcome({'base': 'https://www.v.test', 'outcome': 'error_page', 'status': 403}),
 			'a page the parse could not see whole': self.outcome(read_page(record(copy('3.6.0')), capped=True)),
@@ -208,6 +224,13 @@ class LibraryOutcomeTests(unittest.TestCase):
 		self.assertIn('more than one jQuery version', cases['the running file holds two fixed copies']['summary'])
 		self.assertIn('1.12.4 inside the affected range', cases['an older copy deep in another same-host bundle']['summary'])
 		self.assertIn('run time', cases['a loader inside a read script']['summary'])
+		for name, words in (('more matches in the running file than are kept', 'more library banners'),
+							('a version another file states that cannot be placed', 'cannot be placed'),
+							('a copy whose file states no version', 'was not read (no version in the file)'),
+							('copies whose order is unknown', 'does not show which copy runs'),
+							('the match\'s own file now states no version', 'no longer states jQuery'),
+							('a library-named copy on a CDN not read', 'code.jquery.com')):
+			self.assertIn(words, cases[name]['summary'], name)
 		self.assertEqual(self.outcome({'base': 'https://www.v.test', 'outcome': 'challenged', 'challenge': 'Cloudflare'})['status'], 'blocked')
 		self.assertEqual(self.outcome({'base': 'https://www.v.test', 'outcome': 'error_page', 'status': 503})['status'], 'failed')
 
