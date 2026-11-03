@@ -188,11 +188,13 @@ def meminfo(path=MEMINFO):
     return values
 
 
-def memory_state(root=CGROUP_ROOT, meminfo_path=MEMINFO):
-    """{'total_mb', 'limit_mb' (None = unlimited), 'used_mb', 'available_mb'} for this container."""
+def memory_state(root=CGROUP_ROOT, meminfo_path=MEMINFO, host=False):
+    """{'total_mb', 'limit_mb' (None = unlimited), 'used_mb', 'available_mb'} for this container. ``host`` leaves this container's own cgroup
+    limit out: the machine's memory as ``/proc/meminfo`` gives it, which inside a container is the Docker host's (on Docker Desktop, its VM's).
+    That is the memory a sidecar in containers of its own (OpenVAS) draws on, not this container's budget."""
     info = meminfo(meminfo_path)
     host_total, host_available = info.get('MemTotal', 0), info.get('MemAvailable', info.get('MemFree', 0))
-    limit, used = cgroup_memory(root)
+    limit, used = (None, None) if host else cgroup_memory(root)
     if limit is not None and used is not None:
         limit_mb, used_mb = limit // (1 << 20), used // (1 << 20)
         total = min(limit_mb, host_total) if host_total else limit_mb
