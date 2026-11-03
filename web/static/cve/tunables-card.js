@@ -123,3 +123,4 @@ registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
 registerTunableGroup("egress", "Outbound connections");
+registerTunableGroup("heat", "Heat policy");

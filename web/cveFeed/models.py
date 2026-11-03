@@ -85,8 +85,16 @@ class CVEEntry(models.Model):
         return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
 
     @property
+    def attention_tier(self):
+        """The legacy fire / smoke / ice rating (KEV, exploit, CVSS, EPSS): what decides which CVEs are looked for and tested, under either
+        heat policy (cveFeed.threat.attention_tier)."""
+        from cveFeed.threat import attention_tier
+
+        return attention_tier(kev=self.kev, epss_reached=self.epss_reached, exploit_db=self.exploit_db, cvss=self.cvss)
+
+    @property
     def threat_tier(self):
-        """CVEngine fire / smoke / ice tier (see cveFeed.threat)."""
+        """CVEngine fire / smoke / ice tier of the CVE in general, under the heat policy (see cveFeed.threat.classify_threat_tier)."""
         from cveFeed.threat import classify_threat_tier
 
         return classify_threat_tier(
@@ -209,12 +217,16 @@ class CVEMatch(models.Model):
     # What the match rests on, so a reviewer need not redo the correlation: {source: "port"|"tech", source_id, raw_version,
     # service_extra, cpe, method, affected_index, range, distro}. Written by correlation.
     evidence = models.JSONField(default=dict, blank=True)
-    # When this match was announced as fire on the host (cveFeed.notify.fire_matches when it was made fire, or fire_confirmed when hard
-    # evidence turned a version-only match fire later): each match is paged as fire at most once.
+    # When this match was announced as fire on the host (cveFeed.notify: fire_matches when it was made fire, fire_confirmed when evidence turned
+    # it fire later, cves_turned_hot when its CVE joined the KEV), or marked as announced without a message (notify.baseline_heat_policy), and
+    # under which heat rule (threat.heat_signature: "kev", "legacy:smoke", ...). A match is paged as fire at most once PER RULE: a mark made under
+    # one rule never holds back a page that is new under another (notify.unannounced_q).
     fire_notified_at = models.DateTimeField(null=True, blank=True)
+    fire_notified_rule = models.CharField(max_length=24, blank=True, default="")
 
-    # Remediation workflow, driven by people or agents through the API / MCP.
-    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk")
+    # Remediation workflow, driven by people or agents through the API / MCP. fixed, accepted_risk and false_positive close a finding
+    # (cveFeed.closure.CLOSED); remediation_note is the note on why, with who (remediation_by) and when (remediation_updated_at).
+    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk", "false_positive")
     remediation_status = models.CharField(max_length=16, default="open")
     remediation_note = models.TextField(blank=True, default="")
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
@@ -2096,10 +2108,12 @@ class SupplierHostCard(models.Model):
 class SupplierFinding(models.Model):
     """One thing a supplier's public face got wrong, as seen from outside: a "supplier posture" item. One row per (supplier, domain,
     check). ``status`` is ``open`` while the check still finds it, ``resolved`` (by the sweep) when a later check no longer does, and
-    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence). ``ask`` says what to ask the supplier.
-    Never validated by exploitation: nothing here is ever tested beyond what the supplier's service announces."""
+    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence), or ``false_positive`` when an admin found
+    the check got it wrong (the sweep leaves it as it is: never resolved, so never reopened). ``status_note`` says why, ``status_by`` and
+    ``status_at`` who and when. ``ask`` says what to ask the supplier. Never validated by exploitation: nothing here is ever tested beyond
+    what the supplier's service announces."""
 
-    STATUSES = ("open", "accepted", "resolved")
+    STATUSES = ("open", "accepted", "false_positive", "resolved")  # cveFeed.closure.SUPPLIER_STATUSES
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="findings")
     domain = models.CharField(max_length=255)
     check_name = models.CharField(max_length=60)
@@ -2109,12 +2123,13 @@ class SupplierFinding(models.Model):
     detail = models.TextField(blank=True, default="")
     ask = models.TextField(blank=True, default="")  # plain text: what to ask the supplier to do or confirm
     evidence = models.JSONField(default=dict, blank=True)
-    status = models.CharField(max_length=10, default="open")
+    status = models.CharField(max_length=16, default="open")
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     resolved_at = models.DateTimeField(null=True, blank=True)
     status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
-    status_note = models.CharField(max_length=500, blank=True, default="")
+    status_note = models.CharField(max_length=2000, blank=True, default="")
+    status_at = models.DateTimeField(null=True, blank=True)  # when a person last set the status (None before 1.3.3, or never set)
 
     class Meta:
         ordering = ["-severity", "domain", "check_name"]

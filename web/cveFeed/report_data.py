@@ -17,11 +17,12 @@ from datetime import datetime, timezone as dt_timezone
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
+from cveFeed import closure
 from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 
 HEAT_NAMES = {3: 'fire', 2: 'smoke', 1: 'ice'}
 SEVERITY_ORDER = ('critical', 'high', 'medium', 'low')
-STATUS_LABELS = {'open': 'Open', 'in_progress': 'In progress', 'fixed': 'Fixed', 'accepted_risk': 'Accepted risk'}
+STATUS_LABELS = closure.LABELS  # Open, In progress, Fixed, Accepted risk, False positive
 PROVING = ('hit', 'observed', 'reaffirmed')  # the validation results that show the finding on the host
 FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')  # triage classes a client report leaves out
 HOST_PAGE = 100
@@ -133,6 +134,16 @@ def _tally(sources):
     return total, {k: heat[k] for k in ('fire', 'smoke', 'ice')}, {k: severity[k] for k in SEVERITY_ORDER}
 
 
+def _status_counts(sources):
+    """``{status label: count}`` over the whole set (CVE matches, scanner and hygiene findings), in the order of closure.STATUSES: the
+    report's status legend when it includes closed findings."""
+    tally = Counter()
+    for qs in sources.values():
+        for row in qs.order_by().values('remediation_status').annotate(n=Count('id')):
+            tally[row['remediation_status']] += row['n']
+    return {STATUS_LABELS.get(k, clean(k, 24)): tally[k] for k in (*closure.STATUSES, *sorted(set(tally) - set(closure.STATUSES))) if tally[k]}
+
+
 def _per_host(sources):
     """``{lowercase host: how many findings it has}`` over the whole set, for the host table."""
     out = Counter()
@@ -159,8 +170,9 @@ def _proof(triage):
 
 
 def _tracking(obj):
-    """The remediation state a person or agent recorded: status, assignee, note and when it last changed."""
-    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)),
+    """The remediation state a person or agent recorded: status, assignee, note and when it last changed. ``closed``: the status closes the
+    finding (fixed, accepted risk, false positive), so the note is printed as why it was closed."""
+    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)), 'closed': closure.is_closed(obj.remediation_status),
             'assignee': _person(getattr(obj, 'assignee', None)), 'note': clean(obj.remediation_note, 800),
             'changed': _stamp(obj.remediation_updated_at), 'changed_by': _person(getattr(obj, 'remediation_by', None))}
 
@@ -171,6 +183,12 @@ _ISO = re.compile(r'(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})[\d:.]*(?:\+00:00|Z)?')
 def _steps(how, cap=8):
     """The evidence lines of a finding's "how it was found", with ISO timestamps shortened to a date and a time."""
     return [{'label': clean(s['label'], 60), 'value': _ISO.sub(r'\1 \2', clean(s['value'], 240))} for s in how['steps'] if s.get('value')][:cap]
+
+
+def _heat_policy():
+    """``kev`` or ``legacy``: which rule the report's fire, smoke and ice counts follow (``threat.heat_policy``), for its legend."""
+    from cveFeed.threat import heat_policy
+    return heat_policy()
 
 
 def _match_entry(m, heat):
@@ -186,9 +204,11 @@ def _match_entry(m, heat):
     product = ' '.join(x for x in (m.matched_product, m.matched_version) if x)
     fixed = svc._fixed_versions(cve, m.matched_product)
     sub = m.subdomain
+    from cveFeed.threat import heat_reason
     return {'kind': 'CVE match', 'title': clean(f'{cve.cve_id} in {product}' if product else cve.cve_id, 200), 'subtitle': clean(cve.title, 200),
             'host': clean(sub.name if sub else '', 200), 'heat': heat, 'severity': svc.SEVERITY_NAMES.get(m.sev, ''),
             'cves': [clean(cve.cve_id, 40)], 'cvss': cve.cvss, 'signals': flags, 'basis': basis, 'confirmed': confirmed,
+            'heat_reason': clean(heat_reason(m, heat) if heat else '', 200),
             'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(verdict.impact if verdict else '', 600),
             'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t),
             'remediation': clean(verdict.remediation if verdict else '', 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
@@ -284,7 +304,7 @@ def _hosts(project, host, findings_by_host, cap):
     if host:
         qs = qs.filter(name__iexact=host)
     qs = svc._one_per_host(qs).select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage',
+        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
         'technologies').order_by('-score', 'name')
     total, rows, page = qs.count(), [], 1
     while len(rows) < min(cap, total):
@@ -384,8 +404,10 @@ def collect(project, host=None, include_closed=False, now=None):
         'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
         'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': include_closed, 'branding': _branding(),
         'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
-        'summary': {'findings': total, 'heat': heat, 'severity': severity, 'hygiene': hygiene_total, 'hygiene_severity': hygiene_severity,
+        'summary': {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
+                    'hygiene_severity': hygiene_severity,
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
+                    'status_counts': _status_counts(sources),
                     'top': detailed[:TOP_RISKS]},
         'hosts': hosts, 'findings': detailed, 'hygiene': hygiene,
         'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),

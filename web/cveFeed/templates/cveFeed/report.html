@@ -88,7 +88,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <tr><td>Generated</td><td>{{ r.generated }}</td></tr>
     <tr><td>Scope</td><td>{% if r.host %}One host of the project&rsquo;s current inventory{% else %}{{ r.scope.targets }} target{{ r.scope.targets|pluralize }}, {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory{% endif %}</td></tr>
     {% if r.scope.target_names and not r.host %}<tr><td>Targets</td><td>{% for n in r.scope.target_names %}{{ n }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if r.scope.targets_more %} and {{ r.scope.targets_more }} more{% endif %}</td></tr>{% endif %}
-    <tr><td>Findings in this report</td><td>{% if r.include_closed %}Open, fixed and accepted-risk findings{% else %}Open findings only (fixed and accepted-risk findings are left out){% endif %}</td></tr>
+    <tr><td>Findings in this report</td><td>{% if r.include_closed %}Open, fixed, accepted-risk and false-positive findings{% else %}Open findings only (fixed, accepted-risk and false-positive findings are left out){% endif %}</td></tr>
     <tr><td>Last completed scan</td><td>{{ r.method.last_scan|default:"none recorded" }}</td></tr>
   </table>
   <p class="note">This is a point-in-time, outside-in view produced by cvENGINE. Read the method and validity notes at the end before acting on a finding.</p>
@@ -109,13 +109,21 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <div class="tile t-ice"><b>{{ r.summary.heat.ice }}</b><span>Ice: low priority</span></div>
     {% if not r.host %}<div class="tile t-ok"><b>{{ r.summary.hosts_exposed }}</b><span>Hosts on fire or smoke{% if r.caps.hosts_omitted %} (of those listed){% endif %}</span></div>{% endif %}
   </div>
-  <p class="small mute">Fire: known to be exploited, has a public exploit, CVSS 9.0 or higher, or likely to be exploited and CVSS 7.0 or higher; for a scanner finding, critical or high. Smoke: CVSS 7.0 or higher or a raised exploitation probability; scanner medium. Ice: everything else.</p>
+  {% if r.summary.heat_policy == 'legacy' %}<p class="small mute">Fire: known to be exploited, has a public exploit, CVSS 9.0 or higher, or likely to be exploited and CVSS 7.0 or higher; for a scanner finding, critical or high. Smoke: CVSS 7.0 or higher or a raised exploitation probability; scanner medium. Ice: everything else.</p>
+  {% else %}<p class="small mute">Fire: a CVE on the KEV (known to be exploited) or with a public exploit, and its version proven on the host (a check reproduced it, the host or its distribution reported it, or the version was read from the component itself). Smoke: on the KEV or with a public exploit, and the version only inferred. Ice: not on the KEV and no public exploit, whatever its CVSS or exploitation probability; also a fix the distribution backported. A scanner finding that names a CVE follows the same rule (on the KEV or with a public exploit: fire when the scanner confirmed it, smoke when it only inferred it; else ice); any other scanner finding: critical or high is fire, medium smoke.</p>{% endif %}
 
   <h3>By severity</h3>
   <table class="bars" style="width:100%">
     {% for name, n in r.summary.severity.items %}<tr><td class="lbl">{{ name }}</td>
       <td><div class="bar"><i class="s-{{ name }}" style="width: {% widthratio n r.summary.findings 100 %}%"></i></div></td><td class="cnt">{{ n }}</td></tr>{% endfor %}
   </table>
+  {% if r.include_closed and r.summary.status_counts %}
+  <h3>By status</h3>
+  <table class="bars" style="width:100%">
+    {% for name, n in r.summary.status_counts.items %}<tr><td class="lbl">{{ name }}</td><td class="cnt">{{ n }}</td></tr>{% endfor %}
+  </table>
+  <p class="small mute">Fixed, accepted risk and false positive close a finding; each closed finding below says who closed it, when and why.</p>
+  {% endif %}
 
   <h3>Top risks</h3>
   {% if r.summary.top %}
@@ -166,6 +174,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <dl class="kv">
       {% if f.cves %}<dt>CVE</dt><dd>{{ f.cves|join:", " }}{% if f.cvss %} &middot; CVSS {{ f.cvss }}{% endif %}{% if f.signals %} &middot; {{ f.signals|join:", " }}{% endif %}</dd>{% endif %}
       <dt>Basis</dt><dd><span class="{% if f.confirmed %}basis-confirmed{% else %}basis-version{% endif %}">{{ f.basis }}</span></dd>
+      {% if f.heat_reason %}<dt>Heat</dt><dd>{{ f.heat }}: {{ f.heat_reason }}</dd>{% endif %}
       {% if f.first_seen %}<dt>Seen</dt><dd>first {{ f.first_seen }}{% if f.last_seen %}, last {{ f.last_seen }}{% endif %}</dd>{% endif %}
     </dl>
     {% if f.description %}<h4>What it is</h4><p class="pre">{{ f.description }}</p>{% endif %}
@@ -177,7 +186,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     {% if f.fixed_in %}<p>Fixed in {{ f.fixed_in|join:", " }}.</p>{% endif %}
     {% if f.remediation %}<p class="pre">{{ f.remediation }}</p>{% elif not f.fixed_in %}<p class="mute">No remediation text is recorded for this finding.</p>{% endif %}
     <div class="track"><dl class="kv"><dt>Status</dt><dd><b>{{ f.tracking.status }}</b>{% if f.tracking.changed %} (changed {{ f.tracking.changed }}{% if f.tracking.changed_by %} by {{ f.tracking.changed_by }}{% endif %}){% endif %}</dd>
-      <dt>Assignee</dt><dd>{{ f.tracking.assignee|default:"unassigned" }}</dd>{% if f.tracking.note %}<dt>Notes</dt><dd class="pre">{{ f.tracking.note }}</dd>{% endif %}</dl></div>
+      <dt>Assignee</dt><dd>{{ f.tracking.assignee|default:"unassigned" }}</dd>{% if f.tracking.note %}<dt>{% if f.tracking.closed %}Why it was closed{% else %}Notes{% endif %}</dt><dd class="pre">{{ f.tracking.note }}</dd>{% endif %}</dl></div>
   </div>
   {% empty %}<p class="mute">No findings to list.</p>{% endfor %}
 </section>
@@ -194,7 +203,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
       <tr><td><span class="chip c-{{ f.severity }}">{{ f.severity }}</span></td>
         <td>{{ f.title }}{% if f.detail %}<br><span class="mute small pre">{{ f.detail }}</span>{% endif %}{% if f.remediation %}<br><span class="small pre"><b>Fix:</b> {{ f.remediation }}</span>{% endif %}</td>
         <td>{{ f.host }}{% if f.host_alias %}<br><span class="mute small">{{ f.host_alias }}</span>{% endif %}</td>
-        <td>{{ f.tracking.status }}{% if f.tracking.assignee %}<br><span class="mute small">{{ f.tracking.assignee }}</span>{% endif %}{% if f.tracking.note %}<br><span class="mute small pre">{{ f.tracking.note }}</span>{% endif %}</td></tr>{% endfor %}
+        <td>{{ f.tracking.status }}{% if f.tracking.assignee %}<br><span class="mute small">{{ f.tracking.assignee }}</span>{% endif %}{% if f.tracking.note %}<br><span class="mute small pre">{% if f.tracking.closed %}Why it was closed: {% endif %}{{ f.tracking.note }}</span>{% endif %}</td></tr>{% endfor %}
     </tbody>
   </table>
   {% empty %}<p class="mute">No {% if not r.include_closed %}open {% endif %}hygiene findings.</p>{% endfor %}
@@ -221,7 +230,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <li><b>Point in time.</b> Results are as of the scan dates above. Findings can appear after a fix or disappear after a change that was not a fix; a status of fixed is what a person recorded, until a later scan agrees.</li>
     <li><b>Checks are read-only.</b> Template checks and probes do not exploit, change or damage anything. A check that could not run, or that the scanner&rsquo;s limits skipped, leaves a finding as version-based.</li>
     <li><b>AI assistance.</b> An AI model helps triage findings and write explanations. It never sets severity, CVSS or exploitation data, and its remediation text is guidance to be reviewed by the owner of the host.</li>
-    <li><b>Left out.</b> Candidates the triage classed as a likely false positive or not applicable, CVE matches the AI ruled out, and informational detections are not listed{% if not r.include_closed %}, nor are findings marked fixed or accepted risk{% endif %}.</li>
+    <li><b>Left out.</b> Candidates the triage classed as a likely false positive or not applicable, CVE matches the AI ruled out, and informational detections are not listed{% if not r.include_closed %}, nor are findings marked fixed, accepted risk or false positive{% endif %}.</li>
   </ul>
 
   <h3>Limits of this report</h3>

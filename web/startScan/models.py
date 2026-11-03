@@ -465,7 +465,7 @@ class Vulnerability(models.Model):
 	# Remediation workflow, driven by people or agents through the API / MCP. Independent of open_status above, which
 	# the scan pipeline alone manages: a finding a human marks accepted_risk stays open_status=True if the scanner still
 	# sees it, but drops out of the actionable view regardless. Same fields and choices as cveFeed.models.CVEMatch's.
-	REMEDIATION_STATUSES = ('open', 'in_progress', 'fixed', 'accepted_risk')
+	REMEDIATION_STATUSES = ('open', 'in_progress', 'fixed', 'accepted_risk', 'false_positive')  # cveFeed.closure.STATUSES
 	remediation_status = models.CharField(max_length=16, default='open')
 	remediation_note = models.TextField(blank=True, default='')
 	remediation_updated_at = models.DateTimeField(null=True, blank=True)

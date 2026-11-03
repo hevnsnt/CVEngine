@@ -501,8 +501,9 @@ def _names(items):
 
 
 HOT = ('fire', 'smoke')  # the heats OpenVAS is spent on: a run is slow (hours per host), so it goes where it matters
-# OpenVAS is a confirmer: it selects and orders hosts by the validation heat (threat.validation_heat, no version-only cap), as hot_validation
-# does, so a known-exploited match that rests on its version alone keeps its Fire priority here, whatever CVENGINE_VERSION_ONLY_MAX_HEAT says
+# OpenVAS is a confirmer: it selects and orders hosts by the validation heat (threat.validation_heat, the heat once proven), as hot_validation
+# does, so a known-exploited match whose version is not proven keeps its Fire priority here. Under the KEV heat policy a host whose only CVE
+# matches are ice (not on the KEV, no known exploit, whatever their CVSS) does not qualify.
 HOT_WINDOW = 500  # hot-looking names looked at in one step, per project
 EPOCH_DAYS = 36500
 
@@ -517,7 +518,7 @@ def hot_names(project_id, limit=HOT_WINDOW):
     from cveFeed.threat import match_heat_rank_expr
     from startScan.models import Vulnerability
     from targetApp.models import in_target_scope_q
-    closed = ('fixed', 'accepted_risk')
+    from cveFeed.counts import CLOSED as closed  # fixed, accepted_risk, false_positive
     scope = in_target_scope_q('subdomain__')  # a name kept under a target that is now exactly one host is never OpenVAS's to scan through it
     # The current inventory only (not every scan's copy of a name), hottest first, so a large project's fire hosts fall inside the window.
     names = set(CVEMatch.objects.filter(latest_scan_q('subdomain__'), scope, subdomain__target_domain__project_id=project_id).exclude(ai_verdict='not_affected')
@@ -532,14 +533,14 @@ def hot_names(project_id, limit=HOT_WINDOW):
 def host_heat(project_id, names):
     """``{name: (heat, (fire reasons, smoke reasons))}`` for each of ``names`` that is a host of the project: the host card's rules (its CVE matches
     as they apply to it and its open findings, hottest first), read from the latest stored row of the name, with each CVE match rated by its
-    validation heat (no version-only cap: OpenVAS is how such a match is confirmed, see ``HOT``)."""
+    validation heat (the heat once proven: OpenVAS is how such a match is confirmed, see ``HOT``)."""
     from agentapi import services
     from startScan.models import Subdomain
     wanted = sorted(_names(names))
     if not wanted:
         return {}
     rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
-            .prefetch_related('cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage'))
+            .prefetch_related('cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
     out = {}
     for sub in rows:
         reasons = services._heat_reasons(sub, capped=False)

@@ -15,6 +15,8 @@ const CVE_COLORS = {
 // A subdomain's fill tracks how far along it is, not just what kind of node it is: hollow (no fill, just
 // the usual blue outline) means CVEngine knows about it but nothing has scanned it yet; filled green means
 // scanned and clean; filled red means it has an open, non-informational finding or an unresolved CVE match.
+// remediation statuses that close a finding (closure-logic.js CLOSED; this file imports nothing, so node can load it from source)
+const CLOSED_STATUSES = ["fixed", "accepted_risk", "false_positive"];
 const STATUS_FILL = {
   unscanned: "none",
   get scanned() { return css("--clean"); },
@@ -1824,7 +1826,7 @@ async function hygieneDetails(box, data, slug) {
   if (page) {
     const kinds = new Map(); // the same finding on many hosts reads once, with its hosts under it
     for (const f of page.results) {
-      if (f.severity === "info" || ["fixed", "accepted_risk"].includes(f.remediation_status)) continue;
+      if (f.severity === "info" || CLOSED_STATUSES.includes(f.remediation_status)) continue;
       const kind = kinds.get(f.title) || { title: f.title, severity: f.severity, detail: f.detail, check: f.check, items: [] };
       kind.items.push(f);
       kinds.set(f.title, kind);
