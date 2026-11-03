@@ -1195,8 +1195,17 @@ class FloodInvariantTests(Clean, _ScanFixture, TestCase):
             else:
                 answer[ip] = sorted({80, 443, self.rng.randint(1, 9000)} - {25})
         ServiceRun.objects.all().delete()
-        before = local_egress.used_this_hour(25) or 0
-        patches = [mock.patch.object(nmap_scan, 'fast_flags', return_value=list(nmap_scan.FAST_FLAGS))] if flags_fallback else []
+        charged = []
+        real_take = local_egress.take
+
+        def counting_take(port, want, *args, **kwargs):  # what the governor granted, independent of the clock hour the test runs across
+            got = real_take(port, want, *args, **kwargs)
+            if int(port) == 25:
+                charged.append(got)
+            return got
+        patches = [mock.patch.object(local_egress, 'take', side_effect=counting_take)]
+        if flags_fallback:
+            patches.append(mock.patch.object(nmap_scan, 'fast_flags', return_value=list(nmap_scan.FAST_FLAGS)))
         for p in patches:
             p.start()
         try:
@@ -1205,7 +1214,7 @@ class FloodInvariantTests(Clean, _ScanFixture, TestCase):
         finally:
             for p in patches:
                 p.stop()
-        return port25_targets(calls), (local_egress.used_this_hour(25) or 0) - before, calls
+        return port25_targets(calls), sum(charged), calls
 
     def test_flood(self):
         for budget in (4, 37, 120, 400, 2000):
