@@ -61,13 +61,18 @@ def clear_untrusted_os_guesses(*args, **kwargs):
 @worker_ready.connect()
 def recap_version_only_answers(*args, **kwargs):
     """Answers stored before the ceiling that says a match on a version string alone is needs_validation at most (cveFeed.triage.ceiling)
-    are brought in line with it, with no model call. Idempotent. Never stops the worker from starting."""
+    are brought in line with it, with no model call; then the matches whose library version the served file proves are given the rules'
+    classification and their body read recorded as a check (cveFeed.triage.settle_library_proven: no page, no rescore). Idempotent. Never
+    stops the worker from starting."""
     import logging
     try:
         from cveFeed import triage
         changed = triage.recap_version_only()
         if changed:
             logging.getLogger(__name__).info('%d version-only CVE match answers kept as needs validation', changed)
+        settled = triage.settle_library_proven()
+        if settled:
+            logging.getLogger(__name__).info('%d CVE matches proven by the served library file confirmed by the rules', settled)
     except Exception:  # noqa: BLE001 - the database may not be reachable yet; the next worker start tries again
         logging.getLogger(__name__).exception('could not recap the version-only answers')
 

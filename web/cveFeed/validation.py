@@ -1323,6 +1323,87 @@ def _reserve_validation_check(project_id):
     return True
 
 
+LIBRARY_READ = 'library_read'  # the step kind of cvENGINE's own read of a library's served file (``record_library_read``); never a runnable check
+
+
+def library_reading(match):
+    """``{'page_url', 'read_at', 'how'}`` of the newest reading of the host's front page in which the match's ``script_url`` stated the match's
+    version in its own body (a route check's ``libraries`` record, else the html-libraries probe's), or ``{}`` when no such reading is kept.
+    ``how`` is ``banner`` (the file's comment banner) or ``signature`` (the library's own code). Read only."""
+    from cveFeed import js_libraries
+    from cveFeed.models import ProbeObservation, RouteAuth
+    evidence = match.evidence if isinstance(match.evidence, dict) else {}
+    url, version = evidence.get('script_url') or '', match.matched_version or ''
+    key = js_libraries.PRODUCTS.get((match.matched_product or '').strip().lower())
+    sub = getattr(match, 'subdomain', None)
+    if not url or not version or not key or sub is None or not sub.target_domain_id:
+        return {}
+    project, host = sub.target_domain.project_id, sub.name.lower()
+
+    def stated(record):
+        for copy in (record or {}).get('copies') or [] if isinstance(record, dict) else []:
+            if isinstance(copy, dict) and copy.get('url') == url and copy.get('version') == version and copy.get('source') == 'body':
+                return copy
+        return None
+    for row in (RouteAuth.objects.filter(project_id=project, host=host, path='/', checked_at__isnull=False)
+                .only('url', 'checked_at', 'evidence').order_by('-checked_at')[:20]):
+        copy = stated(((row.evidence or {}).get('libraries') or {}).get(key))
+        if copy:
+            return {'page_url': row.url or '', 'read_at': row.checked_at, 'how': copy.get('how') or ''}
+    for row in (ProbeObservation.objects.filter(project_id=project, host=host, kind='version', probe='html-libraries')
+                .only('url', 'observed_at', 'evidence').order_by('-observed_at')[:20]):
+        record = (row.evidence or {}).get('library')
+        copy = stated(record) if isinstance(record, dict) and js_libraries.PRODUCTS.get(str(record.get('product', '')).lower()) == key else None
+        if copy:
+            return {'page_url': row.url if str(row.url or '').startswith('http') else '', 'read_at': row.observed_at, 'how': copy.get('how') or ''}
+    return {}
+
+
+def library_read_step(steps):
+    """The ``LIBRARY_READ`` step among a row's validation steps, or None."""
+    return next((s for s in steps or [] if isinstance(s, dict) and s.get('kind') == LIBRARY_READ), None)
+
+
+def record_library_read(row, match, now=None, save=True):
+    """Record, on the Triage ``row`` of ``match``, the read of the library's served file that proved its version (``triage.library_body_proven``)
+    as cvENGINE's own completed check: what was fetched (the script URL), what it stated (the file's banner or the library's own code, and the
+    version), which page runs it and when it was read. Its result is ``reaffirmed`` ("still holds"), never a hit: the file proves the version,
+    not a check of the flaw, so ``match_policy.has_hard_evidence`` and the heat do not move. A match the file does not prove gets nothing, and
+    an earlier such step is dropped. Returns whether the row changed (and was saved, with ``save``)."""
+    from shlex import quote
+
+    from cveFeed import js_libraries
+    evidence = match.evidence if isinstance(match.evidence, dict) else {}
+    steps = [s for s in (row.validation_steps or []) if not (isinstance(s, dict) and s.get('kind') == LIBRARY_READ)]
+    if triage.library_body_proven(match.source, evidence, match.version_in_range, match.distro_status):
+        reading = library_reading(match)
+        url, version, product = evidence['script_url'], match.matched_version, match.matched_product
+        how = reading.get('how') or ('banner' if evidence['version_confidence'] >= js_libraries.CONFIDENCE['banner'] else 'signature')
+        stated = (f"the file's own banner states {product} v{version}" if how == 'banner'
+                  else f"the library's own code in the file names version {version}")
+        page = reading.get('page_url') or ''
+        span = triage.range_text(evidence.get('range'))
+        read_at = reading.get('read_at') or match.created_at
+        step = {'kind': LIBRARY_READ, 'label': f'Library body read: the {product} version its served file states', 'target': url,
+                'display': f'curl -s {quote(url)} | head -c {js_libraries.HEAD}', 'ran_at': read_at.isoformat() if read_at else '',
+                'result': 'reaffirmed', 'error': '', 'output_excerpt': '',
+                'summary': _trim(f'Fetched {url}: {stated}; it is the copy {"the page " + page if page else "the page"} runs. {version} is '
+                                 f'inside the affected range{" " + span if span else ""}.', 300),
+                'library': {'version': version, 'version_source': 'body', 'how': how, 'script_url': url, 'page_url': page,
+                            'version_confidence': evidence['version_confidence'], 'copy_state': 'effective'}}
+        steps.append(step)
+    if steps == (row.validation_steps or []):
+        return False
+    row.validation_steps = steps
+    row.validation_status = rollup(steps) if steps else 'none'
+    if row.validation_status != 'failed':
+        row.attempts, row.next_attempt_at = 0, None
+    row.validated_at = now or timezone.now()
+    if save:
+        row.save(update_fields=['validation_steps', 'validation_status', 'validated_at', 'attempts', 'next_attempt_at', 'updated_at'])
+    return True
+
+
 def _blocked_step(row, check, why, now):
     return {'kind': check['kind'], 'label': check['label'], 'display': check['display'], 'target': check['target'],
             'ran_at': now.isoformat(), 'result': 'blocked', 'summary': why, 'output_excerpt': '', 'error': ''}
@@ -1405,6 +1486,14 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             checks = [c for c in checks if c]
             if selected_kinds is not None:
                 checks = [c for c in checks if c['kind'] in selected_kinds]
+            if row.kind == 'cve_match':
+                # the read of a library's served file that proved its version is cvENGINE's own check: recorded, never run again here
+                if not record_library_read(row, finding, now) and not checks and library_read_step(row.validation_steps):
+                    row.validated_at = now  # the same read stands: not due again until the TTL has passed
+                    row.save(update_fields=['validated_at', 'updated_at'])
+                if not checks and library_read_step(row.validation_steps):
+                    stats['reused'] += 1
+                    continue
             if not checks:
                 row.validation_status = 'no_check'
                 row.validation_steps = [{'kind': 'none', 'label': n, 'display': '', 'target': row.host, 'ran_at': now.isoformat(),

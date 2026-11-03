@@ -1433,8 +1433,12 @@ function renderFinding(d, cfg, row) {
   };
   const excerpts = Object.entries(d.how_found.excerpts || {}).filter(([, v]) => v);
   if (excerpts.length) {
-    requestFold = fold("Request and response", "The exact exchange the scanner matched (excerpts)");
-    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(k === "request" ? "Request (excerpt)" : "Response (excerpt)", v)));
+    const scriptOnly = excerpts.every(([k]) => k === "script_url" || k === "banner");
+    requestFold = scriptOnly
+      ? fold("Script read", "The library file cvENGINE fetched and read itself")
+      : fold("Request and response", "The exact exchange the scanner matched (excerpts)");
+    const EXCERPT_LABEL = { request: "Request (excerpt)", response: "Response (excerpt)", script_url: "Script fetched", banner: "Banner (excerpt)" };
+    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(EXCERPT_LABEL[k] || k, v)));
   }
 
   const seenFold = fold("Seen and history", `First seen ${shortDate(d.first_seen)}, last seen ${shortDate(d.last_seen)}${d.history.length ? `, ${d.history.length} change${d.history.length === 1 ? "" : "s"} on this host` : ""}`);

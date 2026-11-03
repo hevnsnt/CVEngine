@@ -970,8 +970,10 @@ def validate_match_on_demand(request_id):
                     'deferred' if ai_result.get('queued') or row.status == 'pending' else 'completed')
         activity.settle(ai_progress, 'failed' if ai_state == 'failed' else 'done',
                         f'Validation request #{job.pk}: AI review {ai_state} for {cve_id}', ai_status=row.status)
+        # the read of a library's served file that proved its version is a completed check, not metadata (validation.record_library_read)
         check_state = ('no_check' if no_check else 'not_run' if no_execution else
-                       'observed' if row.validation_status == 'observed' else 'checked')
+                       'observed' if row.validation_status == 'observed' and not validation.library_read_step(row.validation_steps)
+                       else 'checked')
         if check_state == 'observed':
             plan_notes.append('The external checks observed service metadata only. They cannot identify software behind a frontend '
                               'or verify the affected product without specific evidence.')

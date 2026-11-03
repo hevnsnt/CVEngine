@@ -3840,7 +3840,7 @@ def _kv(label, value):
 def _how_found_match(m):
     from cveFeed.distro import label_for
     ev = m.evidence or {}
-    steps = []
+    steps, excerpts = [], {}
     found = ' '.join(x for x in (m.matched_product, m.matched_version or '(no version)') if x)
     if m.source == 'host':
         steps.append(_kv('Observed', f'{found}, reported by the host itself' + (f' ({ev["component"]})' if ev.get('component') and ev['component'] != m.matched_product else '')))
@@ -3854,6 +3854,18 @@ def _how_found_match(m):
         steps.append(_kv('Found by', 'nmap service detection of an open port'
                          + (f', method {ev["method"]}' + (' (guessed from the port number, not probed)' if ev['method'] == 'table' else '')
                             if ev.get('method') else '')))
+    elif ev.get('version_source') == 'body' and ev.get('script_url'):
+        # cvENGINE read the library's served file itself (cveFeed.js_libraries): where the version came from, which page loads it, and when
+        from cveFeed import validation
+        reading = validation.library_reading(m)
+        how = reading.get('how') or ('banner' if (ev.get('version_confidence') or 0) >= 0.9 else 'signature')
+        steps.append(_kv('Observed', f'{found}, read from the file\'s own {"banner" if how == "banner" else "code"} at {ev["script_url"]}'))
+        steps.append(_kv('Loaded by', (reading.get('page_url') or 'the host\'s front page')
+                         + {'effective': ' (the copy the page runs)', 'shadowed': ' (a later copy replaces it)',
+                            'fallback': ' (a fallback, loaded only when another script fails)',
+                            'unresolved': ' (the page does not show which copy runs)'}.get(ev.get('copy_state'), '')))
+        steps.append(_kv('Found by', 'library body read' + (f', {_iso(reading["read_at"])}' if reading.get('read_at') else '')))
+        excerpts['script_url'] = _cap_text(ev['script_url'])
     else:
         steps.append(_kv('Observed', f'{found} (technology fingerprint of the web server)'))
         steps.append(_kv('Found by', 'technology detection'))
@@ -3872,7 +3884,7 @@ def _how_found_match(m):
                          + (f', tested {_iso(m.template_tested_at)}' if m.template_tested_at else '')))
     else:
         steps.append(_kv('Template check', 'not tested'))
-    return {'steps': steps, 'excerpts': {}}
+    return {'steps': steps, 'excerpts': excerpts}
 
 
 def _how_found_vulnerability(v):
