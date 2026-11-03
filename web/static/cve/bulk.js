@@ -77,8 +77,10 @@ export async function runBulk(items, worker, onProgress) {
  * @param {(item) => string} cfg.labelOf
  * @param {(item) => boolean} [cfg.selectable]
  * @param {string} [cfg.hint]           shown while selecting (what can and cannot be selected)
- * @param {Array} cfg.actions           {label, verb, done, run(item, value), confirm?(n, items, value) (null: do not ask), confirmTitle?(items, value),
- *                                      danger?, select?: {label, options}, prompt?: {...}}; runBatch may return {ok, failed, summary}
+ * @param {Array} cfg.actions           {label, verb, done, run(item, value, detail), confirm?(n, items, value) (null: do not ask), confirmTitle?(items, value),
+ *                                      danger?, select?: {label, options}, prompt?: {...}, detail?(value, items) (async: what else the action
+ *                                      needs, such as the note on why a finding is closed; null cancels)}; runBatch(items, value, detail) may
+ *                                      return {ok, failed, summary}
  * @param {() => void} cfg.afterRun     refresh the list
  */
 export function createBulk({
@@ -154,7 +156,7 @@ export function createBulk({
     paint();
   };
 
-  async function perform(action, value) {
+  async function perform(action, value, detail) {
     const items = [...selected.values()];
     if (!items.length) return;
     // confirm(n, items, value) may answer null: nothing to ask about this selection
@@ -167,6 +169,11 @@ export function createBulk({
       });
       if (!sure) return;
     }
+    // asked once per action, after the confirmation; "Try the failed again" passes the same answer back
+    if (detail === undefined && action.detail) {
+      detail = await action.detail(value, items);
+      if (detail === null) return;
+    }
     bar.classList.add("busy");
     [...controls.querySelectorAll("button,select"), all, clear].forEach(
       (c) => (c.disabled = true),
@@ -174,10 +181,10 @@ export function createBulk({
     status.textContent = `${action.verb} ${items.length}`;
     const priors = new Map(items.map((i) => [keyOf(i), action.prior ? action.prior(i) : undefined]));
     const result = action.runBatch
-      ? await action.runBatch(items, value)
+      ? await action.runBatch(items, value, detail)
       : await runBulk(
           items,
-          (item) => action.run(item, value),
+          (item) => action.run(item, value, detail),
           (done, total) => {
             status.textContent = `${action.verb} ${done} of ${total}`;
           },
@@ -205,13 +212,13 @@ export function createBulk({
         toast(doneText);
       }
     } else {
-      reportFailures(action, value, result);
+      reportFailures(action, value, result, detail);
     }
     afterRun();
     paint();
   }
 
-  function reportFailures(action, value, result) {
+  function reportFailures(action, value, result, detail) {
     dialog(
       `${result.failed.length} of ${result.ok.length + result.failed.length} could not be updated`,
       (body, close) => {
@@ -242,7 +249,7 @@ export function createBulk({
           button("Close", close, "btn ghost"),
           button("Try the failed again", () => {
             close();
-            perform({ ...action, confirm: null }, value);
+            perform({ ...action, confirm: null }, value, detail);
           }),
         );
         body.append(actionsRow);

@@ -107,6 +107,7 @@ def fire_matches(since, scan=None, cve_ids=None):
         from django.db.models import Q
 
         from cveFeed import match_policy
+        from cveFeed.counts import CLOSED
         from cveFeed.models import CVEEntry, CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
@@ -114,7 +115,8 @@ def fire_matches(since, scan=None, cve_ids=None):
         if cve_ids is not None:
             rows = rows.filter(cve_entry_id__in=list(cve_ids))
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
-        rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').filter(
+        rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').exclude(
+            remediation_status__in=CLOSED).filter(  # a closed decision carried onto the next scan's row is not news
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
             cve_entry_id__in=CVEEntry.objects.filter(fire_tier_q()).values('id'))
         # and fire on the host: a version-only match shows smoke by default (threat.version_only_max_heat), so it is not paged as fire;
@@ -147,13 +149,14 @@ def fire_confirmed(match_ids):
     inventory's rows (``latest_scan_q``) are counted and named, and hosts are counted by name. Never raises."""
     try:
         from cveFeed.correlation import latest_scan_q
+        from cveFeed.counts import CLOSED
         from cveFeed.models import CVEMatch
         from cveFeed.threat import FIRE, HEAT_RANK, match_heat_rank_expr
         ids = sorted({int(i) for i in match_ids if i})[:MAX_MARK]
         if not ids:
             return False
         fire = list(CVEMatch.objects.filter(pk__in=ids, fire_notified_at__isnull=True).exclude(template_result='vulnerable')
-                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=('fixed', 'accepted_risk')).exclude(distro_status='patched')
+                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).exclude(distro_status='patched')
                     .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True))
         claimed = _claim(fire)
         if claimed is None:
