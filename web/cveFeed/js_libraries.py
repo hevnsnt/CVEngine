@@ -1185,8 +1185,9 @@ _LOADERS = (
     ('import map', re.compile(r'''type\s{0,4}=\s{0,4}["']?importmap''', re.IGNORECASE)),
     # an ES module: it runs after every classic script and loads the files it imports, which the read never fetches (Vite, Rollup output)
     ('module script', re.compile(r'''type\s{0,4}=\s{0,4}["']?module\b''', re.IGNORECASE)),
-    ('static import', re.compile(r'''(?<![\w$.])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
-    ('re-export', re.compile(r'''(?<![\w$.])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
+    # (the keyword, not the word in a string: ``e==="import"`` is a token name)
+    ('static import', re.compile(r'''(?<![\w$."'`])import\s{0,4}(?:[\w$*{},\s]{1,200}?from\s{0,4})?["'`]''')),
+    ('re-export', re.compile(r'''(?<![\w$."'`])export\s{0,4}[\w$*{},\s]{1,200}?from\s{0,4}["'`]''')),
     ('service worker', re.compile(r'serviceWorker\s{0,4}\.\s{0,4}register\s{0,4}\(')),
 )
 

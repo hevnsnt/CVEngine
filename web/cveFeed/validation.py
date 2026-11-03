@@ -735,9 +735,10 @@ def library_outcome(params, reading):
     - closed (``version_changed`` with a ``close_reason``) in two cases only. (1) A redirect alias: every current root of the host answers 301
       or 308 to another host. (2) A fixed version, only for a match made from a file's body (``version_source`` body with its ``script_url``:
       a version another tool, a file name or a ``?ver=`` string gave is never closed here, whatever the front page shows), when every one of
-      these holds: every web base was read; that file was fetched in this read, read whole, and now states one version, outside the range; every script of every page
-      that could hold the library (same-host and same-site scripts, every copy named after it, every file the host was seen to load it from)
-      was fetched in this read and read whole, within the budget; each of those files and each page, searched from end to end
+      these holds: every web base was read; that file was fetched in this read, read whole, and now states one version, outside the range; every script with a source
+      on every page (same-host, same-site, CDN, third-party and analytics alike: a host the vetter never reads, such as a third-party widget,
+      therefore always keeps the match) and every file the host was seen to load the library from was fetched in this read and read whole,
+      within the budget; each of those files and each page, searched from end to end
       (``js_libraries.whole_body``), states at most one version of the library, no code of it with an unknown version, and no licence
       block that may be a copy; no page and no file loads scripts at run time (a module script or a static import included); and the copy
       that runs states a fixed version, with no copy inside the range or unplaceable;
@@ -864,9 +865,10 @@ def library_outcome(params, reading):
 
 
 def _whole_read_blockers(params, reading, read, key, product, entries):
-    """Why the fresh read is not whole enough to close on a fixed version (``library_outcome`` case 2): the match's own file, every script that
-    could hold the library and every file it was seen in, each fetched in this read, read whole and free of doubt (``_file_doubt``), every
-    page's own text free of doubt, and no run-time loader anywhere."""
+    """Why the fresh read is not whole enough to close on a fixed version (``library_outcome`` case 2): the match's own file, every script with
+    a source on every page (same-host, same-site, CDN, third-party and analytics alike: any of them may carry a copy) and every file the
+    library was seen in, each fetched in this read, read whole and free of doubt (``_file_doubt``), every page's own text free of doubt, and
+    no run-time loader anywhere."""
     out = []
     own = params.get('script_url') or ''
     if own and params.get('version_source') == 'body':
@@ -885,7 +887,9 @@ def _whole_read_blockers(params, reading, read, key, product, entries):
         if listed is None:
             out.append(f"the read of {page.get('base')} does not list its scripts")
             continue
-        wanted += [e['url'] for e in listed if e.get('url') and (e.get('kind') in ('same-host', 'same-site') or e.get('library') == key)]
+        # EVERY script with a source, whatever its host: a third-party widget the vetter never reads, an analytics tag or a CDN bundle the
+        # budget skipped may carry an older copy that runs after the fixed one (the strict whole-page rule of the library provenance)
+        wanted += [e['url'] for e in listed if e.get('url')]
     wanted += [u for u in params.get('seen_urls') or [] if u]
     for url in dict.fromkeys(wanted):
         scan = _scan_of(reading, url)

@@ -132,10 +132,15 @@ class LibraryOutcomeTests(unittest.TestCase):
 		fixed = self.outcome(read_page(record(copy('3.6.0'))))
 		self.assertEqual(fixed['status'], 'version_changed')
 		self.assertTrue(fixed['close_reason'].startswith(correlation.SCRIPT_READ))
-		# scripts no rule could hold the library in (a third-party widget the vetter never reads) do not stand in the way
+		# every script with a source on the page must be read whole: a third-party widget the vetter never reads may bundle an old copy
 		widget = self.outcome(read_page(record(copy('3.6.0')), entries=[
 			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]))
-		self.assertEqual(widget['status'], 'version_changed')
+		self.assertEqual(widget['status'], 'observed')
+		self.assertIn('https://widget.example/w.js', widget['summary'])
+		read = self.outcome(read_page(record(copy('3.6.0')), entries=[
+			{'url': JQ, 'kind': 'same-host', 'library': 'jquery'}, {'url': 'https://widget.example/w.js', 'kind': 'third-party', 'library': ''}]),
+			scanned={JQ: whole('3.6.0'), 'https://widget.example/w.js': whole()})
+		self.assertEqual(read['status'], 'version_changed')
 		# a version another tool named (bbot or httpx on another route, an iframe, a widget the read never fetches) never closes on what the
 		# front page's readable scripts show: only a match made from a file's body, that file re-read whole, closes on a fixed version
 		for params in ({'version_source': 'other', 'script_url': ''}, {'version_source': 'filename'}, {'version_source': 'body', 'script_url': ''}):

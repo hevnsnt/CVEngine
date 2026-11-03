@@ -183,6 +183,51 @@ class ModuleAndOtherSourceTests(Base):
 		row, _s, _c = self.validate(jquery_site('3.6.0'))
 		self.assert_closed(m, row, 'at or above the fixed release')
 
+	def test_N7_an_unread_third_party_bundle_that_may_run_an_old_copy_keeps_a_body_match(self):
+		# the match's own file now states 3.7.1; a widget loaded after it (a third-party host the vetter never reads) may bundle 1.12.4
+		m = self.match('1.12.4')
+		widget = 'https://widget.partner.example/embed.js'
+		site = Site({PAGE: page('/js/jquery.min.js', widget), JQ: {'status': 200, 'body': script('3.7.1')},
+					 widget: {'status': 200, 'body': JQ_1124_BODY + 'window.jQuery=window.$=n;'}})
+		row, _s, _c = self.validate(site)
+		self.assertNotIn(widget, site.calls)
+		self.assertIn(widget, self.kept(m, row)['summary'])
+
+	def test_N8_a_cdn_bundle_the_budget_left_unread_keeps_a_body_match(self):
+		m = self.match('1.12.4')
+		own = ['/js/a.js', '/js/b.js', '/js/c.js', '/js/d.js', '/js/e.js']
+		cdn = 'https://cdn.jsdelivr.net/gh/acme/plugin@1/dist/plugin.bundle.js'
+		pages = {PAGE: page('/js/jquery.min.js', *own, cdn), JQ: {'status': 200, 'body': script('3.7.1')}, cdn: {'status': 200, 'body': JQ_1124_BODY}}
+		pages.update({'https://www.v.test' + n: {'status': 200, 'body': '!function(){}();'} for n in own})
+		site = Site(pages)
+		row, _s, _c = self.validate(site)
+		self.assertNotIn(cdn, site.calls)
+		self.kept(m, row)
+
+	def test_N9_a_match_made_on_a_cdn_file_is_weighed_against_that_file(self):
+		old, new = 'https://code.jquery.com/jquery-1.12.4.min.js', 'https://code.jquery.com/jquery-3.7.1.min.js'
+		m = self.body_match(old)
+		site = Site({PAGE: page(new), new: {'status': 200, 'body': script('3.7.1')}, old: {'status': 200, 'body': script('1.12.4')}})
+		row, _s, _c = self.validate(site)
+		self.assertIn(old, site.calls)  # the match's own file, re-read: it still states 1.12.4
+		self.kept(m, row)
+
+	def test_a_later_read_finding_an_affected_copy_deep_in_a_file_reopens_a_closed_match(self):
+		m = self.match('1.12.4')
+		self.validate(jquery_site('3.6.0'))
+		m.refresh_from_db()
+		self.assertTrue(validation.closed_by_script_read(m))
+		cache_clear()
+		ServiceRun.objects.all().delete()
+		app = FILLER + '\n' + JQ_1124_BODY  # past both read_body windows: only the whole-file search sees it
+		site = Site({PAGE: page('/js/jquery.min.js', '/js/app.js'), JQ: {'status': 200, 'body': script('3.6.0')},
+					 'https://www.v.test/js/app.js': {'status': 200, 'body': app}})
+		row, _s, _c = self.validate(site, rows=[Triage.objects.get(match=m)])
+		self.assertIn('found by searching the whole file', self.step(row)['summary'])
+		m.refresh_from_db()
+		self.assertFalse(validation.closed_by_script_read(m))
+		self.assertLessEqual(m.confidence, js_libraries.SHADOWED_CAP)
+
 	def test_a_later_read_finding_an_affected_copy_anywhere_reopens_a_closed_match(self):
 		# F3: closed on a fixed read; the next read finds 1.12.4 again, only as a shadowed copy (observed, not reaffirmed): it reopens
 		m = self.match('1.12.4')
@@ -365,6 +410,9 @@ class WholeBodyTests(TestCase):
 		self.assertIn('requirejs', js_libraries.whole_body('require.config({baseUrl:"/js"})')['loaders'])
 		self.assertIn('import()', js_libraries.whole_body('import("./chunk-"+n+".js")')['loaders'])
 		self.assertEqual(js_libraries.whole_body('"function"==typeof define&&define.amd&&define("jquery",[],f)')['loaders'], [])
+		# the word in a string is not an import: e==="import" (a token name), {type:"export"}
+		self.assertEqual(js_libraries.whole_body('if(e==="import"||t===\'export\')return;var k={kind:"import"};')['loaders'], [])
+		self.assertEqual(js_libraries.whole_body('}import"./x.js";')['loaders'], ['static import'])
 
 	def test_a_hostile_file_costs_linear_time(self):
 		for hostile in (' ' * js_libraries.MAX_SCRIPT_BYTES, ('a' * 31 + '.fn = ') * 8000, '/*!' * 100000,
