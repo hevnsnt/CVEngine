@@ -45,7 +45,9 @@ case " $* " in
     else printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; fi
     if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi; exit 0;;
   *" pull "*) test ! -e "$STUB_DIR/pull_fails"; exit $?;;
-  *" cancel_consumer "*) touch "$STUB_DIR/paused";
+  *" cancel_consumer "*) if [ -e "$STUB_DIR/cancel_never_answers" ]; then exit 69; fi
+    if [ -e "$STUB_DIR/cancel_slow_once" ]; then rm "$STUB_DIR/cancel_slow_once"; exit 69; fi
+    touch "$STUB_DIR/paused";
     if [ -e "$STUB_DIR/warn_on_control" ]; then echo 'SyntaxWarning: old scanner regex' >&2; fi
     echo '{}'; exit 0;;
   *" add_consumer "*) echo '{}'; exit 0;;
@@ -234,6 +236,24 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         cancels = [c for c in self.calls() if ' cancel_consumer ' in c]
         self.assertEqual(len(cancels), 8)  # four queues, then the same four once more
+
+    def test_a_busy_worker_that_misses_the_first_pause_reply_is_asked_again(self):
+        # a worker just started runs its correlation and template passes and can miss the first five-second reply window
+        (self.stub / 'cancel_slow_once').touch()
+        result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='60')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        cancels = [c for c in self.calls() if ' cancel_consumer ' in c]
+        self.assertEqual(len(cancels), 5)  # four queues, the first asked twice
+        self.assertIn(' -t 5 ', cancels[0])
+        self.assertIn(' -t 15 ', cancels[1])
+
+    def test_a_worker_that_never_answers_the_pause_stops_the_update(self):
+        (self.stub / 'cancel_never_answers').touch()
+        result = self.run_update(CVENGINE_UPDATE_DRAIN_SECONDS='60')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not pause', result.stderr + result.stdout)
+        self.assertEqual(len([c for c in self.calls() if ' cancel_consumer ' in c]), 3)
+        self.assertFalse(any(' stop -t 60 celery' in c for c in self.calls()))
 
     def test_force_stops_the_workers_without_a_drain_and_requeues_scans(self):
         (self.stub / 'web_up').touch()
