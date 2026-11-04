@@ -112,7 +112,7 @@ class OpenvasStateTests(unittest.TestCase):
         self.assertNotIn('mv -f', sync)
 
 
-@unittest.skipUnless(HAVE_SCRIPTS and os.geteuid() == 0 and shutil.which('git'), 'needs root and git')
+@unittest.skipUnless(HAVE_SCRIPTS, 'needs the repository scripts directory')
 class RedisPasswordTests(unittest.TestCase):
     """scripts/redis-password.sh: an installation without a broker password gets one from `make up` and every update, headless (security
     review 1.3.4: the host network overlay publishes the broker on the host's loopback, where an open one runs anything as root)."""
@@ -164,6 +164,7 @@ class RedisPasswordTests(unittest.TestCase):
         self.assertNotIn('${REDIS_PASSWORD:?', (SCRIPTS.parent / 'docker-compose.hostnet.yml').read_text())
 
 
+@unittest.skipUnless(HAVE_SCRIPTS and os.geteuid() == 0 and shutil.which('git'), 'needs root and git')
 class RootOwnershipTests(unittest.TestCase):
     """cron and systemd start the updater as root with no SUDO_UID; git refuses another user's repository ("dubious ownership") unless told."""
 
