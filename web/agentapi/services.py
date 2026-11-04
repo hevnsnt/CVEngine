@@ -3816,7 +3816,7 @@ def _triage_brief(t):
     if validation_status in ('none', 'no_check') and _library_read_step(t.validation_steps):
         validation_status = 'observed'  # shown as a check that ran: cvENGINE read the library's served file (validation.library_step)
     return {'classification': t.classification, 'status': t.status, 'validation_status': validation_status,
-            'overridden': bool(v and (v.overridden or t.classification != v.classification)),
+            'overridden': triage_lib.overridden(v, t),
             'severity_adjust': triage_lib.shown_severity_adjust(v, t),
             'first_seen': _iso(t.first_seen), 'last_seen': _iso(t.last_seen)}
 
@@ -4018,7 +4018,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'ai': {'classification': t.classification if t else '', 'status': t.status if t else 'untracked',
                'reason': f'AI review failed ({diagnostic["category"]}); retry scheduled.' if diagnostic else t.reason if t else '',
                'diagnostic': diagnostic,
-               'overridden': bool(v and (v.overridden or (t and t.classification != v.classification))),
+               'overridden': triage_lib.overridden(v, t),
                'model_classification': v.model_classification if v else '',
                'model_reason': text['model_reason'], 'model': v.model if v else '', 'invalid_output': bool(v and v.invalid_output),
                'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': text['severity_reason'] if adjust else '',

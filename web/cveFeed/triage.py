@@ -130,6 +130,33 @@ def ceiling(kind, facts):
     return '', ''
 
 
+def remote_limit(kind, facts):
+    """``(level, text)``: the highest classification the CVE's own detection strategy lets a check from outside give a CVE match
+    (``facts['max_remote_state']``, ``detection.max_remote_state``), or ``('', '')`` when it sets none. A JavaScript library read from the page,
+    a banner or a fingerprint cannot show whether the page or service is exploitable, and the strategy says so (``remote_determinable``
+    partial: likely at most); the rules never lift a match above it on such evidence (1.3.5). Evidence from the host itself is not a remote
+    check and is not held: the host's inventory report and the distribution's tracker listing the installed package release (``host_side``),
+    and a validation hit (the caller's test). A template hit or a runZero report that matched the flaw is held to likely at least, never down to
+    needs validation by this limit."""
+    state = facts.get('max_remote_state') if kind == 'cve_match' else ''
+    if state not in RANK or facts.get('host_side'):
+        return '', ''
+    if facts.get('remote_flaw_check') and rank(state) < rank('likely'):
+        state = 'likely'
+    return state, f"the CVE's detection strategy says a check from outside decides it {state.replace('_', ' ')} at most"
+
+
+def remote_facts(m):
+    """What ``remote_limit`` reads of a CVEMatch (``m.cve_entry`` loaded; its ``detection`` too, to save a query)."""
+    from cveFeed import detection
+    evidence = getattr(m, 'evidence', None) or {}
+    return {'max_remote_state': detection.max_remote_state(m.cve_entry),
+            'host_side': (getattr(m, 'source', '') == 'host' or match_policy.evidence_flag(evidence, 'host_reported')
+                          or (getattr(m, 'distro_status', '') or '') == 'vulnerable'),
+            'remote_flaw_check': ((getattr(m, 'template_result', '') or '') == 'vulnerable'
+                                  or match_policy.evidence_flag(evidence, 'runzero'))}
+
+
 def library_body_proven(source, evidence, version_in_range, distro_status=''):
     """Whether a CVE match's version was read by cvENGINE from the JavaScript library's own served file, for the copy the page runs, and is
     inside the affected range. The predicate is the library clause of ``match_policy.version_read_from_component``, the one the heat policy
@@ -225,6 +252,9 @@ def apply_rules(kind, facts, parsed):
     if facts.get('version_unknown') and rank(floor) <= rank('needs_validation') and final != 'needs_validation':
         # nothing to test the version against: only a person, or a published range, moves it (the model cannot raise it either)
         prefix, final = f'AI said {said.replace("_", " ")} but the advisory gives no affected version range; kept as needs validation: ', 'needs_validation'
+    remote, remote_text = remote_limit(kind, facts)
+    if remote and rank(final) > rank(remote):
+        prefix, final = f'AI said {said.replace("_", " ")} but {remote_text}; kept as {remote.replace("_", " ")}: ', remote
     text = prefix + reason
     adjust = 0 if invalid else parsed['severity_adjust']
     return {
@@ -234,6 +264,16 @@ def apply_rules(kind, facts, parsed):
         'severity_reason': '' if invalid else parsed['severity_reason'],
         'remediation': '' if invalid else parsed['remediation'],
         'validation_notes': [] if invalid else parsed['validation_steps'], 'invalid_output': invalid, 'hard_evidence': evidence}
+
+
+def overridden(verdict, row):
+    """Whether the rules changed what the model said for this row: its classification is not the model's own (or, for an unusable reply,
+    not the stored answer's). Read the same way everywhere a finding's "overridden" is shown, so a row the rules first lifted and the CVE's
+    ``remote_limit`` brought back to what the model said is not reported as overridden."""
+    if verdict is None or row is None:
+        return False
+    said = getattr(verdict, 'model_classification', '') or getattr(verdict, 'classification', '')
+    return bool(said) and (getattr(row, 'classification', '') or '') != said
 
 
 def version_unknown_outcome():
@@ -387,6 +427,7 @@ def describe_cve_match(m):
     proof = library_proof_of(m, evidence, facts['distro_status'])
     if proof:
         facts['library_proof'] = proof
+    facts.update(remote_facts(m))
     payload = {
         'product': _s(m.matched_product, 120, names), 'version': _s(m.matched_version, 120, names),
         'version_in_range': m.version_in_range, 'source': _s(m.source, 20),
@@ -1275,13 +1316,32 @@ def shown_severity_adjust(verdict, row):
     return adjust if row.kind == 'cve_match' or same_project(verdict, row) else 0
 
 
-def _apply(verdict, group):
+def _remote_clamp(kind, facts, classification, reason, validation_status):
+    """``(classification, reason)`` held to ``remote_limit`` (a validation hit is not held)."""
+    limit, text = remote_limit(kind, facts)
+    if limit and validation_status != 'hit' and rank(classification) > rank(limit):
+        return limit, (f'{text[0].upper()}{text[1:]}; kept as {limit.replace("_", " ")}. ' + reason)[:700]
+    return classification, reason
+
+
+def _released(row, classification, held):
+    """Whether a CVE match's Triage row leaves a state that holds its heat at smoke (pending, or needs_validation: ``threat.triage_cap``)
+    for one that does not: its heat may turn fire now, so ``run_triage`` offers it to ``notify.fire_confirmed`` (which pages only a match
+    that is fire now and was never paged under the heat rule in force)."""
+    if not row.match_id or held or row.validation_status == 'hit':
+        return False
+    was_held = row.status == 'pending' or row.classification == 'needs_validation'
+    return was_held and classification not in ('needs_validation', *CLOSING)
+
+
+def _apply(verdict, group, released=None):
     """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A row of another project
     than the one the answer was reached in gets its classification with ``SHARED_REASON``, never the model's words. A closing verdict
     reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached and pending,
     and run_triage asks its own answer (``own_signature``). A row whose state does not change is not written. The legacy ``ai_verdict`` of
     a CVE match follows, and a verdict that does not close is stored (MatchVerdict, with ``SHARED_REASON``) for later correlations to
-    reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
+    reuse. No row is classified above the CVE's ``remote_limit`` without a validation hit. Returns the ids of the CVE matches whose legacy
+    verdict was written; ``released`` (a list) gathers those whose triage stopped holding their heat (``_released``)."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
@@ -1328,11 +1388,15 @@ def _apply(verdict, group):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.REASON_VERSION_UNKNOWN
+        classification, reason = _remote_clamp(d['kind'], d['facts'], classification, reason, row.validation_status)
         legacy[row.pk] = classification  # what the legacy verdict is made from: never the library rule's confirmation below
         rule, rule_text = library_rule(d['kind'], d['facts'])
         if rule and not held and row.validation_status != 'hit' and classification not in CLOSING:
-            # the served library file proves the version: the rules' classification and reason, with this row's own script URL
-            classification, reason = rule, rule_text
+            # the served library file proves the version: the rules' classification and reason, with this row's own script URL, held to
+            # what the CVE's detection strategy lets a check from outside decide (a page's jQuery is likely at most, 1.3.5)
+            classification, reason = _remote_clamp(d['kind'], d['facts'], rule, rule_text, row.validation_status)
+        if released is not None and _released(row, classification, held):
+            released.append(row.match_id)
         target = (None if held else verdict.pk, 'pending' if held else 'triaged', classification, reason,
                   hard_evidence(d['kind'], d['facts'])[1])
         if (row.verdict_id, row.status, row.classification, row.reason, row.hard_evidence) == target:
@@ -1445,7 +1509,8 @@ def settle_library_proven(after=0, batch=SETTLE_BATCH):
     from cveFeed.models import CVEMatch, Triage
     rows = list(Triage.objects.filter(kind='cve_match', pk__gt=after).filter(library_body_proven_q('match__'))
                 .exclude(match__remediation_status__in=CLOSED).exclude(match__ai_verdict='not_affected')
-                .filter(latest_scan_q('match__subdomain__')).select_related('match__subdomain__target_domain').order_by('pk')[:batch])
+                .filter(latest_scan_q('match__subdomain__'))
+                .select_related('match__subdomain__target_domain', 'match__cve_entry__detection').order_by('pk')[:batch])
     if not rows:
         return 0, after, True
     readings = validation.library_readings([row.match for row in rows])
@@ -1455,11 +1520,13 @@ def settle_library_proven(after=0, batch=SETTLE_BATCH):
         proof = library_proof_of(m, m.evidence, m.distro_status)
         if not proof:
             continue
-        _rule, text = library_rule('cve_match', {'library_proof': proof})
+        rule, text = library_rule('cve_match', {'library_proof': proof})
+        # held to what the CVE's detection strategy lets a check from outside decide (1.3.5)
+        rule, text = _remote_clamp('cve_match', remote_facts(m), rule, text, row.validation_status)
         changed = False
         if (row.status == 'triaged' and row.verdict_id and row.validation_status != 'hit' and row.classification not in CLOSING
-                and (row.classification, row.reason) != ('confirmed', text)):
-            row.classification, row.reason = 'confirmed', text
+                and (row.classification, row.reason) != (rule, text)):
+            row.classification, row.reason = rule, text
             m.ai_reason, m.updated_at = text[:2000], now
             match_rows.append(m)
             changed = True
@@ -1553,6 +1620,7 @@ def run_triage(pairs, provider=False, scan_id=None):
     # waiting on it: it gets its own question (own_candidates: the project's own for a CVE match, else the host's), asked and budgeted like
     # any other, and is held at needs validation only until that answer is there (task 256).
     applied = []
+    released = []  # CVE matches whose triage stopped holding their heat at smoke (_released)
     refused = []
     for key in list(groups):
         verdict = known.get(key)
@@ -1592,7 +1660,7 @@ def run_triage(pairs, provider=False, scan_id=None):
                                                   (group[0][0].project_id, group[0][0].host))
         if verdict is not None:
             stats['cached'] += len(group)
-            applied += _apply(verdict, group)
+            applied += _apply(verdict, group, released)
             continue
         if scan_id is not None and resources.abort_requested(scan_id):
             stats['stopped'] = True
@@ -1617,7 +1685,7 @@ def run_triage(pairs, provider=False, scan_id=None):
             continue
         if admission == 'cached':
             stats['cached'] += len(group)
-            applied += _apply(claim, group)
+            applied += _apply(claim, group, released)
             continue
         if admission != 'reserved':
             stats['queued'] += len(group)
@@ -1654,7 +1722,7 @@ def run_triage(pairs, provider=False, scan_id=None):
                 continue
             known[key] = verdict
             stats['asked'] += 1
-            applied += _apply(verdict, group)
+            applied += _apply(verdict, group, released)
         except Exception:
             _finish_call(claim, 'failed')
             logger.exception('triage: could not save provider verdict')
@@ -1665,6 +1733,11 @@ def run_triage(pairs, provider=False, scan_id=None):
         from cveFeed.models import CVEMatch
         scoring.rescore_for_matches(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')
                                     .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
+    if released:
+        # triage no longer holds these at smoke (threat.triage_cap): one that is fire now and was never paged under the rule in force is
+        # paged once, as a confirmation (a template hit was paged when it landed and is left out there)
+        from cveFeed import notify
+        notify.fire_confirmed(released)
     return stats
 
 

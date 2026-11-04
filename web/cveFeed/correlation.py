@@ -1163,7 +1163,7 @@ def _carry_remediation(fresh):
                     from cveFeed.models import CVEEntry
                     hot = set(CVEEntry.objects.filter(threat.hot_q(), pk__in={m.cve_entry_id for m in fresh}).values_list("pk", flat=True))
                 if (match.cve_entry_id in hot and match.distro_status != distro_lib.PATCHED and not match_policy.version_unknown(match)
-                        and match_policy.version_proven(match, validation_status="")):
+                        and not threat.unproven(match, validation_status="")):
                     match.fire_notified_at, match.fire_notified_rule = now, rule
 
 

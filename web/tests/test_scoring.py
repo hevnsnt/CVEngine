@@ -201,14 +201,14 @@ class RescoreTests(ChangeFixture, TestCase):
 			target_domain=self.domain, open_status=True)
 		match = CVEMatch.objects.get(subdomain=self.rows[1])
 		_, labels_before = self._fire_score()
-		self.assertIn('Critical finding Admin panel', labels_before)
+		self.assertIn('Critical finding Admin panel (smoke: held until a validation confirms it)', labels_before)  # 1.3.5
 		with mock.patch('cveFeed.scoring.rescore_quietly', wraps=scoring.rescore_quietly) as spy:
 			result = bulk_update_finding_status(ctx, self.project.slug, [{'kind': 'vulnerability', 'id': vuln.id}, {'kind': 'match', 'id': match.id}], 'fixed')
 		self.assertEqual(result['updated'], 2)
 		self.assertEqual(spy.call_count, 1)
 		self.rows[1].refresh_from_db()
 		labels_after = [d['label'] for d in self.rows[1].score_detail]
-		self.assertNotIn('Critical finding Admin panel', labels_after)
+		self.assertFalse([label for label in labels_after if label.startswith('Critical finding Admin panel')])
 		self.assertNotIn('Fire CVE match CVE-2099-5', labels_after)
 
 	def test_inputs_are_gathered_scored_and_stored_on_every_copy_of_the_host(self):
@@ -284,7 +284,7 @@ class RescoreTests(ChangeFixture, TestCase):
 			open_status=False, http_url='https://www.ct.test/x', discovered_date=timezone.now())
 		scoring.rescore_hosts(self.project.id, ['www.ct.test'])
 		self.rows[1].refresh_from_db()
-		self.assertIn('High finding Exposed panel', [d['label'] for d in self.rows[1].score_detail])
+		self.assertIn('High finding Exposed panel (smoke: held until a validation confirms it)', [d['label'] for d in self.rows[1].score_detail])
 		self.assertNotIn('Critical finding Old', [d['label'] for d in self.rows[1].score_detail])
 
 	def test_record_scan_changes_rescores_the_scans_hosts(self):

@@ -2,6 +2,23 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Upgrade notes
+
+- **Heat is re-rated as soon as this version runs** (heat is computed when it is read, nothing is migrated). To preview what changes, run `python3 manage.py rerate_findings` (a dry run: per project and overall, the open CVE matches and scanner findings whose heat changes, from -> to). `python3 manage.py rerate_findings --apply` then rescores the affected hosts at once (the daily pass does it anyway), clears the fire page mark of matches that are no longer fire (so real proof later pages them; nothing is sent) and holds stored classifications to their CVE's `max_remote_state`.
+
+### Changed
+
+- **A version-only CVE match is smoke at most, even when its version is proven.** A version read from the component itself (a jQuery file's own banner, a vendor banner nmap probed, a version-class template) proves the version is there, not that the flaw is exploitable. Fire now needs proof of the flaw: a template hit, a validation hit, the host's own inventory, the distribution's tracker or a runZero report. The heat reason says "version proven ..., but no check has shown the flaw".
+- **Exploit-DB alone never lifts a version-only match above smoke**, under the KEV policy and under the legacy policy (even with `CVENGINE_VERSION_ONLY_MAX_HEAT=fire`).
+- **Heat follows the finding's triage.** A CVE match or scanner finding whose triage is still pending, or classified needs validation, is smoke at most; one whose validation came back clean is ice at most. A validation hit, or a template hit that showed the flaw, lifts both. When triage stops holding a match that has proof, it is paged once as "confirmed, now fire-tier".
+- **A scanner finding rated by its template's severity alone is smoke until a validation reproduces it** (nuclei, OpenVAS and other template scanners; a critical or high finding without a CVE, or any finding under the legacy policy). cvENGINE's own checks (a database that answered without credentials, the node2shell test), bbot findings and manual findings keep their severity heat. The host score counts such a finding at its held heat.
+
+### Fixed
+
+- **Triage no longer classifies a CVE match above what its detection strategy allows from outside.** The library rule confirmed a page's jQuery although the CVE's strategy says a check from outside decides it likely at most (`validation.max_remote_state`); the rules now hold every remote classification to that limit (a validation hit, the host's own inventory and the distribution's tracker are not held, and a template hit is kept at likely at least). "Overridden" now means the shown classification differs from what the model said.
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes
