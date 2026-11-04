@@ -1881,6 +1881,22 @@ def ensure_builtin_scanner():
     return builtin_scanner.ensure()
 
 
+@app.task(name="ensure_reviewer_token", bind=False, queue="cve_feed_queue")
+def ensure_reviewer_token():
+    """Every few minutes: keep the AI reviewer container's token written and current (``agentapi.builtin_reviewer``; CVENGINE_REVIEWER=0
+    revokes it)."""
+    from agentapi import builtin_reviewer
+    return builtin_reviewer.ensure()
+
+
+@app.task(name="reviewer_ops_checks", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
+def reviewer_ops_checks():
+    """Every half hour: the operations checks of docs/AI-REVIEWER.md, raising and resolving the admin alerts (``cveFeed.reviewer``). No AI is
+    involved; the reviewer container adds its diagnosis a few times a day."""
+    from cveFeed import reviewer
+    return reviewer.run_ops_checks()
+
+
 @app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")
 def refresh_sentinel_version():
     """A few times a day (and once when a page finds nothing cached): ask GitHub for the latest Sentinel client version and how far behind each

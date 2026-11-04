@@ -483,6 +483,11 @@ if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
     "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
 fi
 "${compose[@]}" build web celery celery-beat
+# The AI reviewer has its own small image (docs/AI-REVIEWER.md); an install whose compose file has it builds it here too. A failed build
+# never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+    "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
+fi
 
 # Freeze consumers, not producers: requests arriving during maintenance stay in Redis for
 # the restarted workers. Each worker's original queues are captured so a failed update can
@@ -814,6 +819,10 @@ if [[ -f scripts/renew-certs.sh ]]; then
 fi
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
+# The AI reviewer is recreated after the application (it waits for the server's token on its own); its failing to start never fails the update.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+    "${compose[@]}" up -d --no-deps --force-recreate reviewer || echo 'Could not start the AI reviewer: docker compose up -d reviewer; scanning is not affected.' >&2
+fi
 # The Tailscale sidecar joins the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route for
 # scans) once celery is recreated. Only present when the tailscale profile is on.
 if "${compose[@]}" config --services 2>/dev/null | grep -qx tailscale; then

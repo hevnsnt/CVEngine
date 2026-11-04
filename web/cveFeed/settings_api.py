@@ -931,11 +931,86 @@ def factory_reset_post(request):
     return {'ok': True, 'removed': removed, 'redirect': '/cve/welcome/'}
 
 
+# --- AI reviewer and admin alerts (docs/AI-REVIEWER.md) ---------------------------
+
+MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+-]{0,100}$')
+
+
+def reviewer_get(request):
+    from agentapi import builtin_reviewer
+    from cveFeed import reviewer
+    row, provider = reviewer.settings_row(), reviewer.provider_row()
+    out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
+           'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
+           'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
+           'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
+           'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
+    if provider is not None:
+        out['models_in_force'] = {'review': reviewer.model_for('review', row, provider), 'ops': reviewer.model_for('ops', row, provider)}
+    return out
+
+
+def reviewer_put(request):
+    from cveFeed import reviewer
+    data = _body(request)
+    row = reviewer.settings_row()
+    fields = []
+    for name in ('enabled', 'auto_close'):
+        if name in data:
+            if not isinstance(data[name], bool):
+                raise SettingsError(400, f'{name} must be true or false')
+            setattr(row, name, data[name])
+            fields.append(name)
+    for name in ('review_model', 'ops_model'):
+        if name in data:
+            value = str(data[name] or '').strip()
+            if not MODEL_NAME.match(value):
+                raise SettingsError(400, 'a model name is letters, digits and . _ : / @ + - (at most 100), or empty for the default')
+            setattr(row, name, value)
+            fields.append(name)
+    if 'review_daily_max' in data:
+        try:
+            value = int(data['review_daily_max'])
+        except (TypeError, ValueError):
+            raise SettingsError(400, 'reviews per day must be a whole number')
+        if not 0 <= value <= 20000:
+            raise SettingsError(400, 'reviews per day must be between 0 and 20000')
+        row.review_daily_max = value
+        fields.append('review_daily_max')
+    if 'ops_hours' in data:
+        hours = data['ops_hours']
+        if not isinstance(hours, list) or len(hours) > 24 or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in hours):
+            raise SettingsError(400, 'operations hours are a list of UTC hours from 0 to 23')
+        row.ops_hours = sorted(set(hours))
+        fields.append('ops_hours')
+    if fields:
+        row.updated_by = request.user
+        row.save(update_fields=fields + ['updated_by', 'updated_at'])
+        from cveFeed.admin_api import audit
+        audit(request.user, 'settings.reviewer', 'AI reviewer settings', fields=fields)
+    return reviewer_get(request)
+
+
+def alerts_get(request):
+    from cveFeed import reviewer
+    return {'alerts': reviewer.open_alerts(request.user)}
+
+
+def alert_dismiss(request, alert_id):
+    from cveFeed import reviewer
+    if not reviewer.dismiss_alert(int(alert_id), request.user):
+        raise SettingsError(404, 'no such open alert')
+    return {'ok': True}
+
+
 # --- routing -----------------------------------------------------------------------
 
 ROUTES = [
     ('GET', r'ai', lambda r, **k: ai_get(r)), ('PUT', r'ai', lambda r, **k: ai_put(r)),
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
+    ('GET', r'reviewer', lambda r, **k: reviewer_get(r)), ('PUT', r'reviewer', lambda r, **k: reviewer_put(r)),
+    ('GET', r'alerts', lambda r, **k: alerts_get(r)),
+    ('POST', r'alerts/(?P<alert_id>\d{1,12})/dismiss', lambda r, alert_id, **k: alert_dismiss(r, alert_id)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),

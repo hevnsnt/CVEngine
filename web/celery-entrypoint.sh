@@ -9,6 +9,8 @@ done
 # The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). A no-op when CVENGINE_BUILTIN_SCANNER is not set,
 # and never a reason for the container not to start.
 python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
+# The same for the AI reviewer container's token (docs/AI-REVIEWER.md); CVENGINE_REVIEWER=0 revokes it instead.
+python3 manage.py ensure_reviewer_token >/dev/null 2>&1 || true
 
 # (This used to run `makemigrations` for five apps against the bind-mounted source, which is the git checkout on the host: model drift became
 # untracked migration files that later conflicted with the real ones. A migration is written and committed by a developer; CI checks for drift.)

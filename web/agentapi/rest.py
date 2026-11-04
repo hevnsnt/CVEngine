@@ -20,6 +20,7 @@ from agentapi import egress
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
+from agentapi import reviewer_api
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
 from tenancy import roles
@@ -462,6 +463,16 @@ ROUTES = [
      lambda r, c, slug, **k: broker.list_unassignable(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks/(?P<task_id>\d+)/cancel', 'Cancel queued or leased agent work',
      lambda r, c, slug, task_id, **k: broker.cancel_task(c, slug, task_id)),
+    ('GET', r'reviewer/config', 'AI reviewer token only (docs/AI-REVIEWER.md): whether the reviewer may work, the provider, base URL, key and model of each job (review, ops), the daily cap and what is left of it, whether the operations job is due, and the allowed verdicts, confidences and reason codes',
+     lambda r, c, **k: reviewer_api.config(r, c)),
+    ('GET', r'reviewer/findings/next', 'AI reviewer token only: up to ?limit= (at most 25) review packets of open findings not yet reviewed in their current state, each leased for 15 minutes: {packets: [{ref, review_key, kind, trusted: {...}, untrusted: {...}}]}',
+     lambda r, c, **k: reviewer_api.next_findings(r, c)),
+    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/verdict', 'AI reviewer token only: one verdict {review_key, verdict, confidence, reason_code, note, model, usage: {input_tokens, output_tokens}}; answers {outcome: closed|recorded|disputed|held, reason, review_id}, 409 when the finding or its host changed since the packet',
+     lambda r, c, ref, **k: reviewer_api.verdict(r, c, ref, _body(r))),
+    ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
+     lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
+    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
+     lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
     ('POST', r'sentinels/bootstrap', 'A Sentinel\'s first call: trade a one-time enrollment secret (from the project\'s sentinels/enroll) for its own API token and Agent row (kind=scanner), pre-scoped to what the secret was generated for; body {enrollment_token, name, capabilities, os, tools, max_concurrent}. No bearer token needed; the token is returned once',
      _sentinel_bootstrap),
     ('GET', r'sentinel', 'The Sentinel registered on this token: scope, capabilities, open assignments', lambda r, c, **k: sentinels.identity(c)),

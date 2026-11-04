@@ -1406,7 +1406,7 @@ class ComposeTests(SimpleTestCase):
         self.openvas = {n: s for n, s in self.services.items() if n.startswith('openvas-')}
 
     def test_every_addon_service_is_in_the_profile_and_the_default_stack_is_unchanged(self):
-        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy'})
+        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer'})  # the AI reviewer is part of the default stack (docs/AI-REVIEWER.md)
         self.assertGreaterEqual(len(self.openvas), 10)
         for name, service in self.openvas.items():
             self.assertEqual(service['profiles'], ['openvas'], name)

@@ -178,3 +178,20 @@ jobs:
           status=0; probe > "$RUNNER_TEMP/sandbox-off.json" || status=$?  # no pipe: the probe's own exit status is what counts
           cat "$RUNNER_TEMP/sandbox-off.json"
           [ "$status" = 1 ] && grep -q '"engaged":false' "$RUNNER_TEMP/sandbox-off.json" || { echo "::error::without the profile the browser did not fail closed (status $status)"; exit 1; }
+
+  reviewer-image:
+    # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no
+    # capabilities, and import every module (the Anthropic SDK included) with the network off.
+    name: 🤖 Build the AI reviewer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 📥 Checkout the git repo
+        uses: actions/checkout@v4
+      - name: 🏗️ Build the reviewer image
+        run: docker build -t cvengine-reviewer-ci reviewer/
+      - name: 🧪 Run it the way compose runs it
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
+            --network none --entrypoint python3 cvengine-reviewer-ci -I -c \
+            "import os, cvengine_reviewer.llm, cvengine_reviewer.jobs, cvengine_reviewer.server, cvengine_reviewer.__main__, anthropic; assert os.getuid() == 10002; print('reviewer image ok', anthropic.__version__)"

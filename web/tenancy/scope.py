@@ -51,6 +51,7 @@ SCOPES = {
     'cveFeed.HostInventory': 'project_id',
     'cveFeed.HostInventoryReport': 'inventory__project_id',
     'cveFeed.Triage': 'project_id',
+    'cveFeed.FindingReview': 'project_id',  # the AI reviewer's verdicts (cveFeed.reviewer), one project's finding each
     'cveFeed.ReportExport': 'project_id',
     'cveFeed.BountyEngagement': 'project_id',
     'cveFeed.BountyReport': 'project_id',

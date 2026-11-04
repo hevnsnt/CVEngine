@@ -7,7 +7,7 @@
 COMPOSE_PREFIX_CMD := COMPOSE_DOCKER_CLI_BUILD=1
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
-SERVICES          := db web proxy redis celery celery-beat
+SERVICES          := db web proxy redis celery celery-beat reviewer
 # the optional OpenVAS (Greenbone) add-on: docs/OPENVAS.md. Named in full because `--profile openvas stop` would stop the whole stack.
 OPENVAS_SERVICES  := openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gvm openvas-pg-gvm-migrator openvas-configure openvas-gpg-data openvas-vulnerability-tests openvas-notus-data openvas-scap-data openvas-cert-bund-data openvas-dfn-cert-data openvas-data-objects openvas-report-formats
 
