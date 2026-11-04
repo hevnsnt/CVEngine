@@ -1655,7 +1655,7 @@ class ComposeProfileTests(SimpleTestCase):
 
     def test_the_rest_of_the_stack_is_unchanged_without_the_profile(self):
         services = self.compose['services']
-        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy'})
+        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer'})  # the AI reviewer is part of the default stack (docs/AI-REVIEWER.md)
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])
