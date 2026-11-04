@@ -3958,8 +3958,43 @@ def work_items(ctx, slug, params):
     order = {'fire': 0, 'smoke': 1, 'ice': 2}
     items.sort(key=lambda i: (i['triage']['classification'] in FALSE_POSITIVES, order.get(i['cve']['tier'], 3), -(i['cve']['cvss'] or 0),
                               -i['host_score']))  # likely false positives last; the host score breaks ties
+    matches = len(items)
+    items = _one_item_per_upgrade(items)
     page, size = page_args(params)
-    return {'count': len(items), 'registered_assets': patterns, 'page': page, 'page_size': size, 'results': items[(page - 1) * size:page * size]}
+    return {'count': len(items), 'matches': matches, 'registered_assets': patterns, 'page': page, 'page_size': size,
+            'results': items[(page - 1) * size:page * size]}
+
+
+def _upgrade_to(version, fixed):
+    """The fixed version an upgrade from ``version`` needs: the lowest of ``fixed`` above it (one per release line), or the only one listed.
+    '' when that cannot be told."""
+    from cveFeed.finding_lifecycle import _version_key
+    current = _version_key(version)
+    above = sorted((key, f) for f in fixed for key in [_version_key(f)] if key is not None and current is not None and key > current)
+    if above:
+        return above[0][1]
+    return fixed[0] if len(fixed) == 1 else ''
+
+
+def _one_item_per_upgrade(items):
+    """Remediation work, one item per upgrade: the CVE matches on one host that the same upgrade of the same component fixes
+    (CVE-2020-11022 and CVE-2020-11023 on one jQuery 3.4.1, both fixed in 3.5.0) are one item, the hottest match standing for them with
+    ``cves`` and ``match_ids`` naming them all and ``upgrade_to`` the version that fixes them. Each match keeps its own row, status and
+    triage (update_remediation_status takes any of the ids). ``items`` arrive in the work list's order and keep it."""
+    out, by_key = [], {}
+    for item in items:
+        fix = _upgrade_to(item.get('version') or '', item.get('fixed_in') or [])
+        key = (item.get('host'), (item.get('product') or '').lower(), item.get('version') or '', fix) if fix and item.get('host') else None
+        lead = by_key.get(key) if key else None
+        if lead is not None:
+            lead['cves'].append(item['cve']['cve_id'])
+            lead['match_ids'].append(item['id'])
+            continue
+        item.update(cves=[item['cve']['cve_id']], match_ids=[item['id']], upgrade_to=fix)
+        out.append(item)
+        if key:
+            by_key[key] = item
+    return out
 
 
 def _fixed_versions(cve, product):
