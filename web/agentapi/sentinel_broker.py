@@ -1984,7 +1984,7 @@ def _clean_openvas_result(body):
     excluded-NVT-family list a Sentinel must scan with is this instance's own (sent in the task's ``target``, never the
     Sentinel's own copy), but nothing here re-checks that a Sentinel actually honoured it: a Sentinel is already a trusted,
     administrator-approved agent, exactly like one reporting nmap or nuclei results."""
-    from cveFeed.openvas_scan import CVE_RE
+    from cveFeed.openvas_scan import _CPE_RE, CVE_RE
     from cveFeed.openvas_scan import clean as ov_clean
     raw = body.get('results')
     if not isinstance(raw, list) or len(raw) > MAX_OPENVAS_RESULTS:
@@ -2012,7 +2012,8 @@ def _clean_openvas_result(body):
             'insight': ov_clean(item.get('insight'), 1500), 'impact': ov_clean(item.get('impact'), 1500),
             'affected': ov_clean(item.get('affected'), 800), 'solution': ov_clean(item.get('solution'), 1500),
             'solution_type': ov_clean(item.get('solution_type'), 30), 'cvss_vector': ov_clean(item.get('cvss_vector'), 200),
-            'cves': cves, 'urls': urls})
+            'cves': cves, 'urls': urls,
+            'cpe': item['cpe'][:200] if isinstance(item.get('cpe'), str) and _CPE_RE.match(item['cpe']) else ''})  # the detected product, if sent
     scanned = body.get('scanned_addresses')
     scanned_addresses = [ov_clean(a, 60) for a in scanned[:MAX_ADDRESSES] if isinstance(a, str)] if isinstance(scanned, list) else []
     scanned_addresses = scanned_addresses + sorted(str(a) for a in seen if str(a) not in scanned_addresses)[:MAX_ADDRESSES]

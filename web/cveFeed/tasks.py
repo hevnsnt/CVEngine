@@ -1135,6 +1135,19 @@ def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
     return {'state': 'done' if done else 'resumed', 'changed': changed, 'batches': batches}
 
 
+
+@app.task(name='run_upgrade_backfills', bind=False, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
+def run_upgrade_backfills():
+    """Apply the next backfill this install has not finished (``cveFeed.upgrade_backfills``), then queue the next run while any remain.
+    Queued by ``reNgine.celery.run_pending_backfills`` when a worker starts, so an update needs nobody to run a command. A run that finds
+    another one holding the claim returns; that one queues the rest. Returns the outcome."""
+    from cveFeed import upgrade_backfills
+    result = upgrade_backfills.run_next()
+    if result['state'] in ('done', 'failed', 'given_up') and result['remaining']:
+        # a failure waits before the next try (it is tried again after the others, at most MAX_ATTEMPTS times)
+        run_upgrade_backfills.apply_async(countdown=600 if result['state'] == 'failed' else 5)
+    return result
+
 LIBRARY_SWEEP_BATCH = 500   # open technology-scan matches looked at per run of the reconcile sweep (every five minutes)
 LIBRARY_SWEEP_SECONDS = 120  # and at most this long
 

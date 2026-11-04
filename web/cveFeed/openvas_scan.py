@@ -64,6 +64,7 @@ DEFAULT_SOCKET = '/run/gvmd/gvmd.sock'
 RESULT_PAGE = 100
 MAX_RESULTS = 5000  # per task: more is a misconfigured scan, not a report
 MAX_TEXT = 4000
+RESULT_EVIDENCE = 1000  # how much of an NVT's result text a CVE match keeps (triage quotes part of it, cleaned)
 MIN_NVTS = 1000  # fewer NVTs than this in "Full and fast" means the feed has not been loaded into gvmd yet
 
 # GVM built-ins (the community feed's fixed ids; each is confirmed by name when it is looked up).
@@ -1115,6 +1116,41 @@ def _port(text):
     return 'general/tcp', 0
 
 
+_CPE_RE = re.compile(r'^cpe:(?:/|2\.3:)[aoh]:[A-Za-z0-9._~%+-]+:[A-Za-z0-9._~%+-]+(?::[A-Za-z0-9._~%+*-]*)*$')
+# what a version-check NVT prints in its result ("Installed version: 9.11.3", "Fixed version:     9.11.31"): a version has a digit and no space
+_VERSION_LINE = {'installed': re.compile(r'Installed\s+version\s*:\s*([A-Za-z0-9][A-Za-z0-9._:+~-]{0,99})', re.I),
+                 'fixed': re.compile(r'Fixed\s+version\s*:\s*([A-Za-z0-9][A-Za-z0-9._:+~-]{0,99})', re.I)}
+
+
+def _detected_cpe(result):
+    """The CPE of the product the NVT tested, from the result's ``<detection>`` block (the detection NVT that identified the product), or ''."""
+    for detail in result.findall('./detection/result/details/detail'):
+        if _text(detail, 'name').lower() == 'product':
+            value = _text(detail, 'value')
+            return value[:200] if _CPE_RE.match(value) else ''
+    return ''
+
+
+def _version_from(text, kind):
+    found = _VERSION_LINE[kind].search(str(text or ''))
+    value = found.group(1).rstrip('.') if found else ''
+    return value if any(ch.isdigit() for ch in value) else ''  # "Installed version: unknown" is no version
+
+
+def identified(ev):
+    """What the NVT identified, from a parsed result or a stored observation's evidence: ``{'product', 'cpe', 'installed_version',
+    'fixed_version'}``, each '' when the result does not say. The product is the detected CPE's product part ("openssh"); the installed
+    version is the result's "Installed version:" line, else the CPE's version. A Sentinel-reported result carries no CPE; its version
+    still comes from the result text."""
+    cpe = ev.get('cpe') or ''
+    cpe = cpe if _CPE_RE.match(cpe) else ''
+    parts = cpe.replace('cpe:2.3:', 'cpe:/', 1).split(':') if cpe else []
+    product = parts[3].replace('_', ' ')[:120] if len(parts) > 3 else ''
+    cpe_version = parts[4] if len(parts) > 4 and parts[4] not in ('', '*', '-') else ''
+    installed = _version_from(ev.get('result'), 'installed') or (cpe_version[:100] if any(ch.isdigit() for ch in cpe_version) else '')
+    return {'product': product, 'cpe': cpe, 'installed_version': installed, 'fixed_version': _version_from(ev.get('result'), 'fixed')}
+
+
 def parse_result(result):
     """One ``<result>`` element as a plain dict, or None when it is unusable (no host, no NVT OID). Every text is cleaned and clipped; the
     CVE ids are the ``cve`` references of the NVT, validated; a missing or malformed number reads as zero."""
@@ -1150,6 +1186,7 @@ def parse_result(result):
         'insight': clean(tags.get('insight'), 1500), 'impact': clean(tags.get('impact'), 1500), 'affected': clean(tags.get('affected'), 800),
         'solution': clean(_text(nvt, 'solution') or tags.get('solution'), 1500), 'solution_type': clean(tags.get('solution_type'), 30),
         'cvss_vector': clean(tags.get('cvss_base_vector'), 200), 'cves': cves, 'urls': urls, 'stale_refs': stale,
+        'cpe': _detected_cpe(result),
     }
 
 
@@ -1406,6 +1443,7 @@ def record_observations(project_id, domain_id, host, found, scanned_now):
         keys.add((port_number, _product(item['oid'], udp)))
         evidence = {k: item[k] for k in ('name', 'family', 'port', 'severity', 'threat', 'qod', 'qod_type', 'result', 'summary', 'insight', 'impact',
                                          'affected', 'solution', 'solution_type', 'cvss_vector', 'cves', 'urls', 'oid')}
+        evidence['cpe'] = item.get('cpe') or ''  # a Sentinel-reported result has none
         ProbeObservation.objects.update_or_create(
             project_id=project_id, host=host, probe=PROBE, port=port_number, kind=OBS_KIND, product=_product(item['oid'], udp)[:120],
             defaults={'domain_id': domain_id, 'outcome': 'found', 'confidence': item['qod'] / 100, 'source': 'openvas', 'evidence': evidence, 'observed_at': now})
@@ -1451,17 +1489,23 @@ def apply_observations(sub):
             remediation=ev.get('solution') or None, source=SOURCE, template_id=template_id, type='openvas', cvss_score=ev['severity'] or None,
             cvss_metrics=ev.get('cvss_vector') or None, extracted_results=[ev['result']] if ev.get('result') else None, cve_ids=list(ev['cves']),
             references=list(ev.get('urls') or []), tags=['openvas', 'qod-confirmed' if hard else 'qod-unconfirmed'])
+        # The OID and port stay the match's key (``matched_product``, one row per NVT and port, as resolve_missing reads it); what the NVT
+        # identified (the detected product and the installed version it printed) is recorded beside it, so the version is the row's own
+        # and the product is not a guess (correlation.invalid_identity_reason never compares an OpenVAS match's name: the NVT tested it).
         product = f'OpenVAS NVT {ev["oid"]} on {ev["port"]}'[:255]
+        seen = identified(ev)
         for cve_id in ev['cves']:
             cve = known.get(cve_id)
             if cve is None:
                 continue
             matches.add((cve.id, product))
-            rows.append({'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': product, 'matched_version': '',
+            rows.append({'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': product,
+                         'matched_version': seen['installed_version'][:100],
                          'version_in_range': True if hard else None, 'confidence': 0.95 if hard else min(0.5, ev['qod'] / 100),
                          'scan_history_id': sub.scan_history_id, 'distro_status': 'no_data', 'distro_fixed_version': '',
                          'evidence': {'source': 'openvas', 'oid': ev['oid'], 'nvt': ev['name'], 'port': ev['port'], 'qod': ev['qod'], 'qod_type': ev['qod_type'],
-                                      'severity': ev['severity'], 'result': ev['result'][:300], 'tested_at': obs.observed_at.isoformat()}})
+                                      'severity': ev['severity'], 'result': ev['result'][:RESULT_EVIDENCE], 'tested_at': obs.observed_at.isoformat(),
+                                      **{k: v for k, v in seen.items() if v}}})
     correlation.save_matches(rows)
     now = timezone.now()
     for row in rows:

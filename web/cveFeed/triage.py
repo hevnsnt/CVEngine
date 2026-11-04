@@ -84,7 +84,12 @@ def hard_evidence(kind, facts):
             floor = level
     if kind == 'cve_match':
         if facts.get('template_result') == 'vulnerable':
-            raise_to('confirmed', 'a nuclei template check matched this host')
+            if facts.get('checked_by') == 'openvas':
+                quality = ', '.join(str(x) for x in (f'QoD {facts["check_qod"]}' if facts.get('check_qod') is not None else '',
+                                                     facts.get('check_qod_type') or '') if x)
+                raise_to('confirmed', 'an OpenVAS check' + (f' ({quality})' if quality else '') + ' confirmed it on this host')
+            else:
+                raise_to('confirmed', 'a nuclei template check matched this host')
         if facts.get('distro_status') == 'vulnerable':
             raise_to('confirmed', "the distribution's security tracker lists this package release as affected")
         if facts.get('version_in_range') is True and facts.get('distro_status') != 'patched' and not facts.get('closure_basis'):
@@ -450,17 +455,46 @@ def describe_cve_match(m):
     library = library_brief(evidence, names)
     if library:
         payload['library'] = library
+    scanner = openvas_brief(m, evidence, names)
+    if scanner:
+        payload['openvas'] = scanner
+        if scanner.get('detected_product'):
+            payload['product'] = scanner['detected_product']  # what the NVT identified, not its opaque "OpenVAS NVT <oid> on <port>" key
+        if facts['template_result'] == 'vulnerable':
+            facts['checked_by'] = 'openvas'
+            facts['check_qod'], facts['check_qod_type'] = scanner.get('qod'), scanner.get('qod_type') or ''
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',
               **({'version_unknown': True} if facts['version_unknown'] else {}),
               **({'library': hashlib.sha1(json.dumps(library, sort_keys=True).encode()).hexdigest()[:16]} if library else {}),
+              **({'openvas': [scanner.get('qod'), scanner.get('qod_type'), scanner.get('fixed_version', '')]} if scanner else {}),
               'intelligence': hashlib.sha1(json.dumps([cve.affected, cve.cvss, cve.kev, cve.epss_reached, cve.exploit_db,
                                                        cve.original_description or cve.summary], sort_keys=True, default=str).encode()).hexdigest()[:16]}
     cvss = cve.cvss
     base = 4 if cvss and cvss >= 9 else 3 if cvss and cvss >= 7 else 2 if cvss and cvss >= 4 else 1 if cvss else 0
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
             'priority': (9, 0) if facts['version_unknown'] else (0 if floor else 3, -base)}
+
+
+OPENVAS_RESULT_LIMIT = 600  # how much of an NVT's result text a prompt quotes
+
+
+def openvas_brief(m, evidence, names=()):
+    """What the OpenVAS NVT behind a match reported (cveFeed.openvas_scan.apply_observations), for the prompt: its name, port, quality of
+    detection and its type (a QoD 30 banner read is weak, a QoD 98 active check is not), the product and version it identified and the
+    start of its result text. The result is the scanned host's own text: cleaned strictly, the host's names redacted, secrets masked and
+    sentences of instructions dropped, like any other host text in a prompt. Empty for any other match."""
+    if getattr(m, 'source', '') != 'openvas' or not isinstance(evidence, dict):
+        return {}
+    qod = evidence.get('qod')
+    out = {'nvt': _prose(evidence.get('nvt'), 200, names), 'port': _s(evidence.get('port'), 20),
+           'qod': qod if isinstance(qod, (int, float)) and not isinstance(qod, bool) else None,
+           'qod_type': _s(evidence.get('qod_type'), 40),
+           'detected_product': _s(evidence.get('product'), 120, names),  # its CPE is the payload's own ``cpe``
+           'installed_version': _s(evidence.get('installed_version'), 100, names), 'fixed_version': _s(evidence.get('fixed_version'), 100, names),
+           'result': _s(redact_text(evidence.get('result') or ''), OPENVAS_RESULT_LIMIT, names)}
+    return {k: v for k, v in out.items() if v not in (None, '')}
 
 
 LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',

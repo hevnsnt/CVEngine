@@ -371,9 +371,11 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             if port is not None and port.ports.exclude(pk=ip_obj.pk).exists():
                 ip_obj.ports.remove(port)  # a row shared with other IPs by older code: give this IP its own
                 port = None
-            if port is not None and _unprobed(rec) and (port.product or (port.extra or {}).get('method') == 'probed'):
+            if port is not None and _unprobed(rec) and (port.product or (port.extra or {}).get('method') == 'probed' or port.service_extra):
                 # a run with no -sV (the -p- sweep, naabu) knows only that the port is open: what a fingerprinting pass found (distro,
-                # package release, CPEs, TLS tunnel, the service name) is not what this run says, and must not be overwritten by a port-table guess
+                # package release, CPEs, TLS tunnel, the service name) is not what this run says, and must not be overwritten by a port-table guess.
+                # A stored service_extra is a fingerprint too: only a service probe's match line gives one (nmap's soft match "generic dns
+                # response: REFUSED" names "domain" even when the probing did not finish), so 5353 stays "domain", never the table's "mdns"
                 for field in ('protocol', 'state'):
                     if rec.get(field):
                         setattr(port, field, rec[field])
