@@ -1846,17 +1846,21 @@ def _clean_findings(findings):
             continue
         extracted = item.get('extracted_results') or []
         tags = item.get('tags') or []
-        out.append({'template_id': _clip(item.get('template_id'), 'template_id'), 'name': _clip(item.get('name'), 'name'),
+        finding = {'template_id': _clip(item.get('template_id'), 'template_id'), 'name': _clip(item.get('name'), 'name'),
                     'severity': item.get('severity') if item.get('severity') in _SEVERITIES else 'unknown',
                     'host': _clip(item.get('host'), 'host'), 'matched_at': _clip(item.get('matched_at'), 'matched_at'),
                     'description': _clip(item.get('description'), 'description'),
                     'matcher_name': _clip(item.get('matcher_name'), 'matcher_name'),
                     'extracted_results': [_text(v, 300) for v in extracted[:MAX_EXTRACTED] if isinstance(v, str)],
-                    'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)],
-                    # the CVEs the template names (nuclei's ``classification.cve-id``), when the client reports them: optional, and only
-                    # well-formed ids are kept, so a client that does not send them is unchanged
-                    'cve_ids': list(dict.fromkeys(v.strip().upper() for v in (item.get('cve_ids') or [])[:MAX_CVE_IDS]
-                                                  if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))})
+                    'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)]}
+        # the CVEs the template names (nuclei's ``classification.cve-id``), when the client reports them: optional (only when the client sent the
+        # field, so a client that does not send them gets its result back unchanged, as the contract's pass-through tests hold), and only
+        # well-formed ids are kept
+        if 'cve_ids' in item:
+            ids = item.get('cve_ids')
+            finding['cve_ids'] = list(dict.fromkeys(v.strip().upper() for v in (ids if isinstance(ids, list) else [])[:MAX_CVE_IDS]
+                                                    if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))
+        out.append(finding)
     return out, dropped
 
 

@@ -240,6 +240,7 @@ class ContractMatchesTheServerTests(SimpleTestCase):
         self.assertEqual(nuclei['maxItems'], broker.MAX_FINDINGS_SENT)
         self.assertEqual(nuclei['items']['properties']['extracted_results']['maxItems'], broker.MAX_EXTRACTED)
         self.assertEqual(nuclei['items']['properties']['tags']['maxItems'], broker.MAX_TAGS)
+        self.assertEqual(nuclei['items']['properties']['cve_ids']['maxItems'], broker.MAX_CVE_IDS)
         self.assertEqual(self.body('testssl')['items']['maxItems'], broker.MAX_TESTSSL_ITEMS)
         self.assertEqual(self.body('nmap_udp')['xml']['maxLength'], broker.MAX_NMAP_UDP_XML)
         self.assertEqual(self.body('discover')['hosts']['maxItems'], broker.MAX_DISCOVER_HOSTS)

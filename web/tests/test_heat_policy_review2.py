@@ -488,7 +488,11 @@ class NucleiCveTests(Base):
 		self.assertEqual(findings[0]['cve_ids'], ['CVE-2099-7302'])
 		line = sentinel_dispatch._finding_to_nuclei_line(findings[0])
 		self.assertEqual(parse_nuclei_result(line)['cve_ids'], ['CVE-2099-7302'])
-		self.assertEqual(sentinel_broker._clean_findings([{'template_id': 't', 'severity': 'low'}])[0][0]['cve_ids'], [])
+		# a client that does not send the field gets its finding back without it (the contract's pass-through rule); a line built from it names no CVE
+		without = sentinel_broker._clean_findings([{'template_id': 't', 'severity': 'low'}])[0][0]
+		self.assertNotIn('cve_ids', without)
+		self.assertEqual(parse_nuclei_result(sentinel_dispatch._finding_to_nuclei_line(without))['cve_ids'], [])
+		self.assertEqual(sentinel_broker._clean_findings([{'template_id': 't', 'severity': 'low', 'cve_ids': []}])[0][0]['cve_ids'], [])
 
 
 class FindingLaneAndScoreTests(Base):
