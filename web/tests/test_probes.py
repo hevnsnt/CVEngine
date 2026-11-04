@@ -356,3 +356,120 @@ class StageTests(RouteFixture, TestCase):
         with mock.patch('cveFeed.probes.max_hosts', return_value=1):
             out = self.stage()
         self.assertEqual(out['hosts'], 1)
+
+
+# The shape of the port in #408: a DNS server on a non-standard port that nmap only soft-matched, stored with the port table's name
+BIND_XML = """<?xml version="1.0"?><nmaprun><scaninfo protocol="tcp" services="5353"/><host><address addr="192.0.2.53" addrtype="ipv4"/><ports>
+<port protocol="tcp" portid="5353"><state state="open"/><service name="domain" product="ISC BIND" version="9.11.3-1ubuntu1.11" extrainfo="Ubuntu Linux"
+ostype="Linux" method="probed" conf="10"><cpe>cpe:/a:isc:bind:9.11.3-1ubuntu1.11</cpe><cpe>cpe:/o:linux:linux_kernel</cpe></service></port></ports></host>
+<runstats><finished exit="success"/></runstats></nmaprun>"""
+
+
+def soft_matched_dns(**fields):
+    values = {'number': 5353, 'protocol': 'tcp', 'state': 'open', 'service_name': 'mdns', 'product': '', 'version': '', 'cpe': '',
+              'service_extra': 'generic dns response: REFUSED', 'extra': {'method': 'table', 'confidence': '3'}, 'source': 'nmap'}
+    return Port(**{**values, **fields})
+
+
+class UnidentifiedPortLeadTests(SimpleTestCase):
+    """#408: an open port with a service name and no product is a lead for the full-intensity nmap probe."""
+
+    def test_a_soft_matched_dns_port_with_no_product_is_a_lead(self):
+        leads = probes.unidentified_leads([('192.0.2.53', soft_matched_dns())])
+        self.assertEqual([(lead['ip'], lead['port'], lead['service'], lead['unidentified']) for lead in leads], [('192.0.2.53', 5353, 'mdns', True)])
+
+    def test_ports_that_are_not_unidentified_are_not_leads(self):
+        ports = [soft_matched_dns(product='ISC BIND'),  # named: an unversioned product is the product lead's business
+                 soft_matched_dns(cpe='cpe:/a:isc:bind'),
+                 soft_matched_dns(service_name='', service_extra=''),  # nothing fingerprinted it: naabu's bare "open"
+                 soft_matched_dns(service_name='https'), soft_matched_dns(service_name='http-alt'), soft_matched_dns(service_name='tcpwrapped'),
+                 soft_matched_dns(protocol='udp'),  # the probe speaks TCP
+                 soft_matched_dns(state='closed'),
+                 soft_matched_dns(source='nmap-probe')]  # the probe already answered for it; the next fingerprinting pass asks again
+        self.assertEqual(probes.unidentified_leads([('192.0.2.53', p) for p in ports]), [])
+
+    def test_only_the_nmap_probe_follows_an_unidentified_port(self):
+        lead = probes.unidentified_leads([('192.0.2.53', soft_matched_dns(service_name='http-proxy-like'))])
+        self.assertEqual(lead, [])
+        lead = probes.unidentified_leads([('192.0.2.53', soft_matched_dns(service_name='nginx'))])[0]  # a service name that looks like a product
+        self.assertEqual([p['id'] for p in probes.PROBES if probes._lead_matches(p, probes._token(lead['name']), lead)], ['nmap-version-all'])
+
+
+class UnidentifiedPortPlanTests(RouteFixture, TestCase):
+    def host(self, technologies=('nginx',)):
+        scan = self.scan(ip='192.0.2.53')
+        sub = Subdomain.objects.get(scan_history=scan)
+        for name in technologies:
+            sub.technologies.add(Technology.objects.create(name=name))
+        port = soft_matched_dns()
+        port.save()
+        sub.ip_addresses.first().ports.add(port)
+        return scan, Subdomain.objects.filter(pk=sub.pk).prefetch_related('technologies', 'ip_addresses__ports').get()
+
+    def test_an_unidentified_port_alone_gets_the_nmap_probe(self):
+        _scan, sub = self.host(technologies=())
+        plan = probes.plan_for_host(sub)
+        self.assertEqual([(p['probe'], p['target']['port']) for p in plan], [('nmap-version-all', 5353)])
+        self.assertEqual(probes.plan_for_host(sub, edge_fronted=True), [])
+
+    def test_the_products_probes_come_first_and_the_cap_holds(self):
+        _scan, sub = self.host(technologies=('nginx', 'Drupal', 'Joomla'))
+        known = probes.plan_for_host(sub, probes.leads_for(sub), limit=None)
+        self.assertEqual(len(known), probes.MAX_PROBES_PER_HOST)  # as before: the products' own plan is cut at the cap
+        everything = probes.plan_for_host(sub, limit=None)
+        self.assertEqual(everything[:len(known)], known)
+        self.assertEqual([(p['probe'], p['target'].get('port')) for p in everything[len(known):]], [('nmap-version-all', 5353)])
+        capped = probes.plan_for_host(sub)
+        self.assertEqual(len(capped), probes.MAX_PROBES_PER_HOST)
+        self.assertEqual(capped, everything[:probes.MAX_PROBES_PER_HOST])
+        self.assertNotIn(5353, [p['target'].get('port') for p in capped])  # it never takes a product probe's place
+
+    def test_an_unidentified_port_fills_a_place_the_products_leave(self):
+        _scan, sub = self.host(technologies=())
+        port = sub.ip_addresses.first().ports.get(number=443)
+        port.product = 'OpenResty'
+        port.save()
+        sub = Subdomain.objects.filter(pk=sub.pk).prefetch_related('technologies', 'ip_addresses__ports').get()
+        plan = probes.plan_for_host(sub)
+        self.assertLessEqual(len(plan), probes.MAX_PROBES_PER_HOST)
+        self.assertEqual(plan[-1]['target'].get('port'), 5353)
+        self.assertIn(('nmap-version-all', 443), [(p['probe'], p['target'].get('port')) for p in plan[:-1]])
+
+
+class UnidentifiedPortStageTests(RouteFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.scan_obj = self.scan(ip='192.0.2.53')
+        self.sub = Subdomain.objects.get(scan_history=self.scan_obj)
+        for name in ('nginx', 'Drupal', 'Joomla'):
+            self.sub.technologies.add(Technology.objects.create(name=name))
+        port = soft_matched_dns()
+        port.save()
+        ip = self.sub.ip_addresses.first()
+        ip.org = self.project.org  # the organization's own address row, which the probe's result is written to
+        ip.save(update_fields=['org'])
+        ip.ports.add(port)
+        self.nmap_asked = []
+
+    def nmap(self, argv):
+        self.nmap_asked.append(argv[argv.index('-p') + 1])
+        return BIND_XML
+
+    def stage(self):
+        with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
+                mock.patch('targetApp.target_types.is_scannable_ip', return_value=True):
+            return probes.run_for_scan(self.scan_obj.id, get=answers({probes.PROBE_PATH: page(404, body=NGINX_404_HIDDEN)}),
+                                       nmap_runner=self.nmap, sleep=lambda s: None)
+
+    def test_the_port_is_probed_once_the_products_probes_are_fresh_and_bind_is_stored(self):
+        first = self.stage()
+        self.assertEqual(first['probes'], probes.MAX_PROBES_PER_HOST)  # the per-host cap holds
+        self.assertEqual(self.nmap_asked, [])  # the products went first
+        second = self.stage()
+        self.assertEqual(self.nmap_asked, ['5353'])
+        self.assertLessEqual(second['probes'], probes.MAX_PROBES_PER_HOST)
+        port = IpAddress.objects.get(address='192.0.2.53').ports.get(number=5353)
+        self.assertEqual((port.service_name, port.product, port.version, port.source), ('domain', 'ISC BIND', '9.11.3-1ubuntu1.11', 'nmap-probe'))
+        self.assertTrue(ProbeObservation.objects.filter(probe='nmap-version-all', port=5353, product='ISC BIND', outcome='found').exists())
+        self.stage()
+        self.assertEqual(self.nmap_asked, ['5353'])  # identified now, and fresh in the ledger: not asked again
