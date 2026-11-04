@@ -6,7 +6,7 @@ import validators
 
 from urllib.parse import urlparse
 from celery.utils.log import get_task_logger
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from dotted_dict import DottedDict
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -21,7 +21,7 @@ from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
-from cveFeed import versions
+from cveFeed import js_libraries, versions
 
 """
 Celery tasks.
@@ -87,6 +87,8 @@ def persist_bbot_result(result, ctx):
 		if not subdomain:
 			continue
 		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
+		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
 		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
@@ -200,10 +202,25 @@ def _persist_bbot_findings(result, ctx, subdomains):
 			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.bbot)
 			record_label(domain.project_id, domain.id, f['host'], label_for(f['name']), detail=f['description'])
 			continue
+		severity, description = f['severity'], f['description']
+		if f['module'] == 'baddns':
+			# rated by what an outsider can claim, at the client's own zone cut (cveFeed.dangling_dns); a provider's DNS reached through a
+			# CNAME, or a "not found" page the provider shows for every host, is not a finding
+			from cveFeed import dangling_dns
+			rating = dangling_dns.assess(f)
+			if rating is not None and rating.drop:
+				logger.info(f'bbot baddns finding on {f["host"]} dropped: {rating.note}')
+				continue
+			if rating is not None:
+				severity = rating.severity if rating.severity is not None else severity
+				description = dangling_dns.with_note(description, rating)
 		sub = subdomains.get(f['host']) or Subdomain.objects.filter(scan_history=scan, name=f['host']).first()
+		if sub is None and f['module'] == 'baddns' and f['host']:
+			# a dangling name often does not resolve, so no host row exists for it yet: the finding is still about that name ("Matched at")
+			sub, _ = save_subdomain(f['host'], ctx=ctx)
 		save_vulnerability(
 			target_domain=domain, scan_history=scan, subdomain=sub, http_url=f['url'] or f['host'], name=f['name'],
-			severity=f['severity'], description=f['description'], source='bbot', type='bbot', template_id=f['module'],
+			severity=severity, description=description, source='bbot', type='bbot', template_id=f['module'],
 			matcher_name=finding_key(f['description']),
 			request=f"bbot {f['module']} event on {f['host']}" + (f" at {f['url']}" if f['url'] else ''),
 			extracted_results=[x[:5000] for x in (f['host'], f['url']) if x])
@@ -363,6 +380,7 @@ def parse_nuclei_result(line):
 	Returns:
 		dict: Vulnerability data.
 	"""
+	from cveFeed.nuclei_fp import bounded
 	return {
 		'name': line['info'].get('name', ''),
 		'type': line['type'],
@@ -372,9 +390,10 @@ def parse_nuclei_result(line):
 		'template_id': line['template-id'],
 		'description': line['info'].get('description', ''),
 		'matcher_name': line.get('matcher-name', ''),
-		'curl_command': line.get('curl-command'),
-		'request': line.get('request'),
-		'response': line.get('response'),
+		'curl_command': bounded(line.get('curl-command'), 15000),
+		# the matched request and response are the evidence of the finding: kept, clipped (cveFeed.nuclei_fp.MAX_EVIDENCE)
+		'request': bounded(line.get('request')),
+		'response': bounded(line.get('response')),
 		'extracted_results': line.get('extracted-results', []),
 		'cvss_metrics': line['info'].get('classification', {}).get('cvss-metrics', ''),
 		'cvss_score': line['info'].get('classification', {}).get('cvss-score'),
@@ -531,21 +550,6 @@ VULNERABILITY_KEY = ('target_domain', 'scan_history', 'subdomain', 'endpoint', '
 					 'matcher_name')
 
 
-def _carry_finding_state(vuln, lookup):
-	"""A finding seen again on a later scan is a new row (rows are per scan); give it the remediation state a person set on the same
-	finding (same host, template, name, URL and matcher) in an earlier scan, so what was marked fixed or accepted does not reopen."""
-	subdomain, domain = lookup.get('subdomain'), lookup.get('target_domain')
-	if subdomain is None or domain is None:
-		return
-	same = {k: lookup[k] for k in ('source', 'template_id', 'name', 'http_url', 'matcher_name') if k in lookup}
-	earlier = (Vulnerability._base_manager.filter(target_domain=domain, subdomain__name=subdomain.name, **same)
-			   .exclude(pk=vuln.pk).exclude(remediation_status='open').order_by('-id').first())
-	if earlier is not None:
-		vuln.remediation_status, vuln.remediation_note = earlier.remediation_status, earlier.remediation_note
-		vuln.remediation_updated_at, vuln.remediation_by_id, vuln.assignee_id = (
-			earlier.remediation_updated_at, earlier.remediation_by_id, earlier.assignee_id)
-
-
 def _reference(url):
 	"""The stored VulnerabilityReference of ``url``: the first when duplicate rows exist (``url`` is not unique), made when there is none."""
 	return VulnerabilityReference.objects.filter(url=url).order_by('id').first() or VulnerabilityReference.objects.create(url=url)
@@ -562,30 +566,34 @@ def save_vulnerability(**vuln_data):
 	vuln_data = replace_nulls(vuln_data)
 
 	# One row per finding: the key is where and what (host, template, name, URL, matcher), never the response body, which
-	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again.
+	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again. A finding an
+	# earlier scan (or another target of the project) filed on the same host is that same row, moved onto this scan
+	# (cveFeed.finding_lifecycle): rescans update it instead of opening a copy, and its history, status and assignee stay with it.
+	from cveFeed import finding_lifecycle
 	lookup = {k: vuln_data[k] for k in VULNERABILITY_KEY if k in vuln_data}
 	defaults = {k: v for k, v in vuln_data.items() if k not in lookup}
-	defaults.setdefault('discovered_date', timezone.now())
-	try:
-		vuln, created = Vulnerability.objects.get_or_create(**lookup, defaults=defaults)
-	except (Vulnerability.MultipleObjectsReturned, IntegrityError):
-		vuln, created = Vulnerability.objects.filter(**lookup).order_by('id').first(), False
-	was_created = created
-	if created:
-		vuln.discovered_date = timezone.now()
-		vuln.open_status = True
-		_carry_finding_state(vuln, lookup)
-		vuln.save()
+	vuln = Vulnerability.objects.filter(**lookup).order_by('id').first()
+	created = False
+	if vuln is None:
+		earlier = finding_lifecycle.earlier_copy(lookup)
+		if earlier is not None and finding_lifecycle.move_onto(earlier, lookup, defaults):
+			vuln = earlier
+		else:
+			try:
+				with transaction.atomic():
+					vuln = Vulnerability.objects.create(**lookup, **{**defaults, 'discovered_date': timezone.now(), 'open_status': True})
+				created = True
+			except IntegrityError:  # filed meanwhile by a parallel save of the same finding
+				vuln = Vulnerability.objects.filter(**lookup).order_by('id').first()
 	else:
 		# seen again: keep the newest evidence, and it is evidently still there
 		changed = [k for k, v in defaults.items() if k != 'discovered_date' and getattr(vuln, k) != v]
 		for k in changed:
 			setattr(vuln, k, defaults[k])
-		if not vuln.open_status:
-			vuln.open_status = True
-			changed.append('open_status')
+		changed += finding_lifecycle.seen_again(vuln)
 		if changed:
 			vuln.save(update_fields=changed)
+	was_created = created
 
 	# Save vuln tags
 	for tag_name in tags or []:

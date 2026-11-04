@@ -268,9 +268,13 @@ def _marked(*fields):
     return query
 
 
-def collect(project_id):
+def collect(project_id, owner_check=None, skipped=None):
     """``(candidates, complete)``: every bucket the project's data points at or its domain labels suggest, strongest tier first, and the set of
-    tiers whose list is complete (a tier read up to a row limit is not, so a finding is never closed for a reference that was merely not read)."""
+    tiers whose list is complete (a tier read up to a row limit is not, so a finding is never closed for a reference that was merely not read).
+
+    No name is guessed from a domain that shows another owner than the project's other domains (``owner_check``, by default
+    ``cveFeed.domain_ownership.foreign_owner``: its registrant, or its name and mail servers): its buckets are someone else's. ``skipped``, when
+    given, collects ``{domain: reason}`` for those."""
     from django.db.models import Q
 
     from cveFeed import exclusions
@@ -321,7 +325,17 @@ def collect(project_id):
     labels = domain_labels(name for _id, name in domains if name not in banned)  # an excluded domain gets no name guesses
     by_name = {name: pk for pk, name in domains}
     if guesses_enabled():
+        from cveFeed import domain_ownership
+        from targetApp.target_types import apex_domain
+        owner_check = owner_check or domain_ownership.foreign_owner
+        apexes = {apex_domain(name) or name for _id, name in domains if name not in banned}
         for label, apex in labels.items():
+            reason = owner_check(apex, sorted(apexes - {apex}))
+            if reason:
+                logger.info('bucket name guesses skipped for %s: %s', apex, reason)
+                if skipped is not None:
+                    skipped[apex] = reason
+                continue
             owner = next((pk for name, pk in by_name.items() if name == apex or name.endswith('.' + apex)), domains[0][0] if domains else 0)
             for provider, name in guess_names(label, apex):
                 _merge(found, Ref(provider, name, explicit=False), 'guess', owner, '', f'name guess from {apex}')
@@ -488,9 +502,10 @@ def resolve_gone(project_id, candidates, complete):
 
 # ----------------------------------------------------------------------------- the sweep
 
-def sweep(project_id, fetch=None, dns=None):
+def sweep(project_id, fetch=None, dns=None, owner_check=None):
     """Check the due buckets of one project, one at a time. Returns ``{'checked', 'public', 'takeover', 'private', 'missing', 'unknown',
-    'resolved'}`` (and ``skipped`` with the reason when nothing ran). ``fetch`` and ``dns`` replace the network in tests."""
+    'resolved'}`` (and ``skipped`` with the reason when nothing ran; ``not_guessed`` names the domains no bucket name was guessed from because
+    they show another owner). ``fetch``, ``dns`` and ``owner_check`` replace the network in tests."""
     from cveFeed import activity, exclusions, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from reNgine import resources
@@ -505,7 +520,10 @@ def sweep(project_id, fetch=None, dns=None):
     with resources.redis_claim(f'cvengine:buckets:{project_id}', owner, 300) as holder:
         if holder is not True:
             return {**summary, 'skipped': 'another bucket sweep is running for this project'}
-        candidates, complete = collect(project_id)
+        not_guessed = {}
+        candidates, complete = collect(project_id, owner_check=owner_check, skipped=not_guessed)
+        if not_guessed:
+            summary['not_guessed'] = sorted(not_guessed)
         domains = {d.pk: d for d in Domain.objects.filter(project_id=project_id)}
         manual = {pk for pk, d in domains.items() if d.discovery_mode == Domain.DISCOVERY_MANUAL}
         found_by_domain, checked_by_domain = {}, {}
@@ -543,7 +561,8 @@ def sweep(project_id, fetch=None, dns=None):
         summary['resolved'] += resolve_gone(project_id, candidates, complete)
         activity.settle(running, 'done', message=(
             f'Cloud storage check: {summary["checked"]} checked, {summary["public"]} public listing{"s" if summary["public"] != 1 else ""}'
-            f', {summary["takeover"]} dangling' + (f', {summary["unknown"]} without an answer' if summary['unknown'] else '')), **summary)
+            f', {summary["takeover"]} dangling' + (f', {summary["unknown"]} without an answer' if summary['unknown'] else '')
+            + ''.join(f'; no bucket names guessed from {d}: {r}' for d, r in sorted(not_guessed.items()))), **summary)
     return summary
 
 

@@ -1205,6 +1205,23 @@ _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, '
 
 MAX_CVE_IDS = 20
 _CVE_ID = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)  # bounded: a longer one would overflow CveId.name and fail the whole stage
+MAX_EVIDENCE = 4096  # characters of a finding's matched request and of its response kept from a Sentinel's result (500 findings: ~4 MB)
+_NUCLEI_TYPES = ('http', 'tcp', 'network', 'javascript', 'dns', 'ssl', 'headless', 'file', 'whois', 'code', 'websocket')
+
+
+def _evidence(item):
+    """The optional evidence fields of one Sentinel nuclei finding: ``type`` (nuclei's protocol type), ``request`` and ``response`` (the
+    matched request and the answer, clipped to ``MAX_EVIDENCE``, control bytes but not newlines removed). A client that sends none of them
+    gets none of them back: the finding is stored as before, without evidence."""
+    from cveFeed.nuclei_fp import bounded
+    out = {}
+    kind = item.get('type')
+    if isinstance(kind, str) and kind.strip().lower() in _NUCLEI_TYPES:
+        out['type'] = kind.strip().lower()
+    for key in ('request', 'response'):
+        if isinstance(item.get(key), str) and item[key]:
+            out[key] = bounded(item[key], MAX_EVIDENCE)
+    return out
 
 
 def _clean_findings(findings):
@@ -1235,7 +1252,8 @@ def _clean_findings(findings):
                     # the CVEs the template names (nuclei's ``classification.cve-id``), when the client reports them: optional, and only
                     # well-formed ids are kept, so a client that does not send them is unchanged
                     'cve_ids': list(dict.fromkeys(v.strip().upper() for v in (item.get('cve_ids') or [])[:MAX_CVE_IDS]
-                                                  if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))})
+                                                  if isinstance(v, str) and _CVE_ID.fullmatch(v.strip()))),
+                    **_evidence(item)})
     return out, dropped
 
 

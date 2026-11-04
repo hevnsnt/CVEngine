@@ -272,7 +272,8 @@ def list_engines(ctx, params=None):
 def _target(d):
     out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
-           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
+           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode,
+           'expect_private_ca': bool(d.expect_private_ca)}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
@@ -379,6 +380,26 @@ def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
         audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
         d.discovery_mode = discovery_mode
         d.save(update_fields=['discovery_mode'])
+    return _target(d)
+
+
+def set_target_private_ca(ctx, slug, target_id, expect_private_ca):
+    """Say whether a target's devices use their vendor's own private CA. When they do, an untrusted or self-signed certificate chain on
+    the target is expected and the hygiene check rates it information instead of medium. Applies from the next hygiene run."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    if isinstance(expect_private_ca, str) and expect_private_ca.strip().lower() in ('true', 'false', '1', '0', 'yes', 'no'):
+        expect_private_ca = expect_private_ca.strip().lower() in ('true', '1', 'yes')
+    if not isinstance(expect_private_ca, bool):
+        raise ApiError(400, 'expect_private_ca must be true or false')
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    if d.expect_private_ca != expect_private_ca:
+        audit(ctx.user, 'target.private_ca', d.name, project.org, project=slug, was=d.expect_private_ca, now=expect_private_ca)
+        d.expect_private_ca = expect_private_ca
+        d.save(update_fields=['expect_private_ca'])
     return _target(d)
 
 
@@ -1865,7 +1886,7 @@ def _name_siblings(project, subs):
     ids = host_siblings([s.id for s in subs])
     wanted = {i for rows in ids.values() for i, _ in rows}
     rows = {r.id: r for r in Subdomain.objects.filter(id__in=wanted).select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')}
+        'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')}
     return {s.id: [rows[i] for i, _ in ids.get(s.id, []) if i in rows] for s in subs}
 
 
@@ -2020,7 +2041,7 @@ def list_hosts(ctx, slug, params):
 
     def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
         rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
-            .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')
+            .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')
         by_id = {row.pk: row for row in rows}
         return [by_id[i] for i in ids if i in by_id]
     return _mark_zombies(project, _hosts_page(project, ordered, params, load=load))
@@ -2375,7 +2396,7 @@ def _heat_facets(project, qs):
     badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
     total = qs.count()
     subs = list(qs.select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
+        'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
     ).order_by('id')[:HEAT_FACET_CAP])
     others = _name_siblings(project, subs)
     counts = {v: 0 for v in HEAT_FACET_VALUES}
@@ -2527,7 +2548,7 @@ def search_hosts(ctx, slug, params):
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies').order_by(*_host_order(params))
+        'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies').order_by(*_host_order(params))
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
     for row in page['results']:
         row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
@@ -2570,7 +2591,7 @@ def _vuln(v):
             'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'internal': _internal_row(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else ''),
-            'triage': _triage_brief(_triage_of(v))}
+            'heat_override': _heat_override(_triage_of(v)), 'triage': _triage_brief(_triage_of(v))}
 
 
 def _internal_row(project_id, host):
@@ -2583,7 +2604,7 @@ def list_vulnerabilities(ctx, slug, params):
     from startScan.models import Vulnerability
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
-    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'target_domain', 'triage__verdict', 'remediation_by', 'assignee') \
+    qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project').select_related('subdomain', 'target_domain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .prefetch_related('cve_ids', 'tags', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     if everywhere:
         qs = qs.select_related('target_domain__project')
@@ -2962,6 +2983,9 @@ def _cve_description(c, limit=500):
     return text[:limit].rsplit(' ', 1)[0] + '…' if len(text) > limit and ' ' in text[:limit] else text[:limit]
 
 
+MAX_LISTED_RANGES = 60  # ranges of one affected block an advisory lists in full; more are counted (ranges_total), never cut silently
+
+
 def _cve_context(c):
     """Structured advisory context. Unknown feed signals stay unknown, not false."""
     from urllib.parse import urlparse
@@ -2987,8 +3011,14 @@ def _cve_context(c):
     for item in (c.affected if isinstance(c.affected, list) else [])[:30]:
         if isinstance(item, dict):
             part = {k: item.get(k) for k in ('vendor', 'product', 'package') if isinstance(item.get(k), str) and item.get(k)}
-            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))}
-                              for rng in prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)[:20]]
+            # every range matching reads, never a silent cut: a record with 25 release branches (WordPress' CVE-2026-119977, 4.7 through
+            # 7.1.3) read as if it stopped at the 20th (6.6.10) looked like a match made from the description
+            ranges = prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)
+            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))} for rng in ranges[:MAX_LISTED_RANGES]]
+            if len(ranges) > MAX_LISTED_RANGES:
+                part['ranges_total'] = len(ranges)  # the list above is the first MAX_LISTED_RANGES of them
+            if isinstance(item.get('range_corrections'), list) and item['range_corrections']:
+                part['range_corrections'] = item['range_corrections'][:5]  # a bound cvENGINE corrected, with its sources (range_corrections)
             affected.append(part)
     return {'description': (c.original_description or c.summary or c.title or '').strip()[:12000],
             'summary': (c.summary or '').strip()[:3000], 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],
@@ -3141,6 +3171,7 @@ def _match(m):
     cve['heat_capped'] = cve['tier'] != cve['validation_tier']
     return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None, 'version_only': match_policy.is_version_only(m),
             'version_proven': match_policy.version_proven(m), 'heat_reason': heat_reason(m, cve['tier']),
+            'heat_override': _heat_override(_triage_of(m)),
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
             'confidence': m.confidence, 'source': m.source, 'host_reported': m.source == 'host',
             'ai_verdict': m.ai_verdict, 'ai_reason': m.ai_reason,
@@ -3181,7 +3212,7 @@ def _matches_qs(project):
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
-        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
 
@@ -3274,7 +3305,8 @@ def _finding_sources(project, params):
         sources['cve'] = qs
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
-            .select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee', *(['target_domain__project'] if everywhere else [])) \
+            .select_related('subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee',
+                            *(['target_domain__project'] if everywhere else [])) \
             .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
                       comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
@@ -3333,6 +3365,10 @@ def _finding_row(kind, obj):
     elif kind == 'scanner':
         title, host, note = obj.name, obj.subdomain.name if obj.subdomain else None, obj.source or ''
         status, extra = ('closed' if not obj.open_status else obj.remediation_status), {}
+        from cveFeed.threat import manual_heat_reason
+        manual = manual_heat_reason(obj)  # a heat set by hand says who and why (no extra query: the list joins the row and the user)
+        if manual:
+            extra['heat_reason'] = manual
     else:
         title, host, note = obj.title, obj.host, obj.check_name
         status, extra = ('resolved' if obj.status == 'resolved' else obj.remediation_status), {}
@@ -3345,7 +3381,8 @@ def _finding_row(kind, obj):
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),
             'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)), **_closure_fields(FINDING_TYPES[kind], obj),
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
-            'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when), 'triage': _triage_brief(_triage_of(obj)), **extra}
+            'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when),
+            'heat_override': _heat_override(_triage_of(obj)) if kind != 'hygiene' else None, 'triage': _triage_brief(_triage_of(obj)), **extra}
 
 
 def _finding_project(kind, obj):
@@ -3660,6 +3697,171 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
     return {'updated': updated, 'failed': failed}
 
 
+# --- a heat set by hand ------------------------------------------------------------------------------------------------
+
+HEAT_KINDS = ('match', 'vulnerability')  # finding kinds with a heat a person can set; a hygiene finding and a web route have none
+HEAT_VALUES = ('fire', 'smoke', 'ice')
+MAX_BULK_HEAT = 500
+HEAT_REASON_MAX = 1000
+
+
+def _shown_heat(kind, obj):
+    """The heat a CVE match or a scanner finding shows on its host (``threat.match_heat``, ``threat.finding_heat``; a heat set by hand wins)."""
+    from cveFeed.threat import finding_heat, match_heat
+    return match_heat(obj) if kind == 'match' else finding_heat(obj)
+
+
+def _shown_heat_reason(kind, obj, heat):
+    from cveFeed.threat import finding_heat_reason, heat_reason
+    return heat_reason(obj, heat) if kind == 'match' else finding_heat_reason(obj, heat)
+
+
+def _check_heat_kind(kind):
+    if kind not in HEAT_KINDS:
+        raise ApiError(400, 'kind must be match or vulnerability: a hygiene finding or a web route has no heat to set')
+
+
+def _clean_heat(heat, reason):
+    """``(heat, reason)`` as stored: heat one of fire, smoke, ice, or '' (null or empty: go back to the heat cvENGINE derives); the reason
+    cleaned like a closure note, at most HEAT_REASON_MAX characters, and required when setting a heat. A 400 before anything is written."""
+    from cveFeed import closure
+    if heat is None:
+        heat = ''
+    if not isinstance(heat, str) or heat.strip().lower() not in ('', *HEAT_VALUES):
+        raise ApiError(400, 'heat must be fire, smoke or ice, or null to go back to the heat cvENGINE derives')
+    heat = heat.strip().lower()
+    try:
+        reason = closure.clean_note(reason, limit=HEAT_REASON_MAX)
+    except closure.NoteError as exc:
+        raise ApiError(400, str(exc).replace('note', 'reason'))
+    if heat and not reason:
+        raise ApiError(400, 'reason is required: say why this finding is ' + heat)
+    return heat, reason or ''
+
+
+def _apply_heat(project, kind, obj, heat, reason, actor):
+    """Set (``heat``) or clear (``''``) the heat of one finding the caller loaded through ``_finding_obj``, on its Triage row (made the way
+    triage makes it, ``triage.track``, when the finding has none yet), and write the audit event (``heat``: the heat shown and the override
+    before and after, who, and the reason). Returns ``(obj, heat shown before, heat shown after, changed)``; the same heat and reason again
+    change nothing."""
+    from cveFeed import triage as triage_lib
+    from cveFeed.models import FindingAuditEvent, Triage
+    row = _triage_of(obj)
+    if row is None:
+        if not triage_lib.track([obj]):
+            raise ApiError(409, 'this finding has no owning project to rate it under')
+        obj = _finding_obj(project, kind, obj.pk)  # again, with its new Triage row
+        row = _triage_of(obj)
+        if row is None:
+            raise ApiError(409, 'this finding has no triage record to rate it on')
+    before, old = _shown_heat(kind, obj), row.heat_override or ''
+    if heat == old and (not heat or reason == row.heat_override_reason):
+        return obj, before, before, False
+    now = timezone.now()
+    fields = {'heat_override': heat, 'heat_override_reason': reason if heat else '', 'heat_override_by': actor if heat else None,
+              'heat_override_at': now if heat else None}
+    Triage.objects.filter(pk=row.pk).update(**fields, updated_at=now)  # these four only: nothing triage or validation wrote is touched
+    for name, value in fields.items():
+        setattr(row, name, value)
+    after = _shown_heat(kind, obj)
+    FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='heat', actor=actor,
+                                      before={'heat': before, 'override': old or None},
+                                      after={'heat': after, 'override': heat or None, 'reason': reason})
+    return obj, before, after, True
+
+
+def _heat_followup(project, changes, heat, reason):
+    """After heat changes (``[(kind, finding, before, after)]``): rescore their hosts once each, page the CVE matches that now show fire and
+    did not before (``notify.fire_set_by_hand``: at most once per match, never a closed one; lowering never pages), make the dashboards
+    re-read, and write one activity line."""
+    from django.db import transaction
+
+    from cveFeed import activity, notify
+    from cveFeed.threat import FIRE
+    if not changes:
+        return
+    hosts = {h for h in (_host_of(obj) for _kind, obj, _b, _a in changes) if h}
+    _rescore_hosts(hosts)
+    raised = [obj.pk for kind, obj, before, after in changes if kind == 'match' and after == FIRE and before != FIRE]
+    if raised:
+        transaction.on_commit(lambda: notify.fire_set_by_hand(raised))
+    try:
+        from cveFeed.views import bump_stats_revision
+        bump_stats_revision()  # the dashboards' fire, smoke and ice counts are a snapshot
+    except Exception:  # noqa: BLE001 - the change is stored; the snapshot follows at its next refresh
+        logger.warning('could not refresh the dashboard snapshot after a heat change', exc_info=True)
+    if len(changes) == 1:
+        kind, obj, before, after = changes[0]
+        what = (f'{obj.cve_entry.cve_id} on {obj.subdomain.name if obj.subdomain else "?"}' if kind == 'match'
+                else f'{kind} finding #{obj.pk}')
+        message = f'{what} set to {heat} by hand' if heat else f'{what}: heat set by hand cleared ({after} again)'
+    else:
+        message = (f'{len(changes)} finding(s) on {len(hosts)} host(s) set to {heat} by hand' if heat
+                   else f'heat set by hand cleared on {len(changes)} finding(s) on {len(hosts)} host(s)')
+    activity.log('remediation', message, project=project, count=len(changes), heat=heat or None, **({'reason': reason[:500]} if reason else {}))
+
+
+def _heat_state(kind, obj, changed):
+    """What a heat write answers: the finding, the heat it shows now and why, and the heat set by hand (null when cleared)."""
+    heat = _shown_heat(kind, obj)
+    return {'kind': kind, 'id': obj.pk, 'heat': heat, 'heat_reason': _shown_heat_reason(kind, obj, heat) if heat else '',
+            'heat_override': _heat_override(_triage_of(obj)), 'changed': changed}
+
+
+def set_finding_heat(ctx, slug, kind, finding_id, heat, reason=None):
+    """Re-rate one finding by hand: set the heat a CVE match (``kind=match``) or a scanner finding (``kind=vulnerability``) shows to fire,
+    smoke or ice, with a reason (required), or clear it (``heat`` null or '') so cvENGINE derives it again. The heat set wins everywhere a
+    heat is read (``threat.manual_heat``): lists, counts, the heat facet, host heat and scores, reports, the graph, OpenVAS and validation
+    order, alerts and the API. Same permissions and project-scoped 404 as ``update_finding_status`` (a read-only token or the audit role is a
+    403, ``_all`` a 400). A hygiene finding or a web route has no heat (400). Audited on the finding (``event: heat``); a match raised to
+    fire is paged once like any match that becomes fire."""
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before body validation
+    _check_heat_kind(kind)
+    heat, reason = _clean_heat(heat, reason)
+    obj = _finding_obj(project, kind, finding_id)
+    obj, before, after, changed = _apply_heat(project, kind, obj, heat, reason, ctx.user)
+    if changed:
+        _heat_followup(project, [(kind, obj, before, after)], heat, reason)
+    return _heat_state(kind, obj, changed)
+
+
+def bulk_set_finding_heat(ctx, slug, items, heat, reason=None):
+    """``set_finding_heat`` for up to MAX_BULK_HEAT findings at once, with one heat and one reason: ``items`` is ``[{kind, id}, ...]``. Each
+    item is independent (one bad kind or id never blocks the rest, and another project's finding 404s exactly like a missing one); each
+    change is audited on its own finding; hosts are rescored once and the matches raised to fire are paged in one message. A bad heat or
+    reason fails the whole call before anything is written. Returns ``{updated, unchanged, failed: [{kind, id, error}]}``."""
+    project, _ = get_project(ctx, slug, write=True)
+    heat, reason = _clean_heat(heat, reason)
+    if not isinstance(items, list) or not items:
+        raise ApiError(400, 'items must be a non-empty list')
+    if len(items) > MAX_BULK_HEAT:
+        raise ApiError(400, f'at most {MAX_BULK_HEAT} items per call')
+    changes, unchanged, failed = [], 0, []
+    for item in items:
+        kind = item.get('kind') if isinstance(item, dict) else None
+        finding_id = item.get('id') if isinstance(item, dict) else None
+        try:
+            if not isinstance(item, dict) or kind is None or finding_id is None:
+                raise ApiError(400, 'each item must be an object with kind and id')
+            _check_heat_kind(kind)
+            try:
+                finding_id = int(finding_id)
+            except (TypeError, ValueError):
+                raise ApiError(400, 'id must be a whole number')
+            obj, before, after, changed = _apply_heat(project, kind, _finding_obj(project, kind, finding_id), heat, reason, ctx.user)
+            if changed:
+                changes.append((kind, obj, before, after))
+            else:
+                unchanged += 1
+        except ApiError as e:
+            failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
+        except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            logger.warning('bulk heat change failed for %s %s', kind, finding_id, exc_info=True)
+            failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
+    _heat_followup(project, changes, heat, reason)
+    return {'updated': len(changes), 'unchanged': unchanged, 'failed': failed}
+
+
 MAX_ASSET_PATTERNS = 500
 
 
@@ -3756,8 +3958,43 @@ def work_items(ctx, slug, params):
     order = {'fire': 0, 'smoke': 1, 'ice': 2}
     items.sort(key=lambda i: (i['triage']['classification'] in FALSE_POSITIVES, order.get(i['cve']['tier'], 3), -(i['cve']['cvss'] or 0),
                               -i['host_score']))  # likely false positives last; the host score breaks ties
+    matches = len(items)
+    items = _one_item_per_upgrade(items)
     page, size = page_args(params)
-    return {'count': len(items), 'registered_assets': patterns, 'page': page, 'page_size': size, 'results': items[(page - 1) * size:page * size]}
+    return {'count': len(items), 'matches': matches, 'registered_assets': patterns, 'page': page, 'page_size': size,
+            'results': items[(page - 1) * size:page * size]}
+
+
+def _upgrade_to(version, fixed):
+    """The fixed version an upgrade from ``version`` needs: the lowest of ``fixed`` above it (one per release line), or the only one listed.
+    '' when that cannot be told."""
+    from cveFeed.finding_lifecycle import _version_key
+    current = _version_key(version)
+    above = sorted((key, f) for f in fixed for key in [_version_key(f)] if key is not None and current is not None and key > current)
+    if above:
+        return above[0][1]
+    return fixed[0] if len(fixed) == 1 else ''
+
+
+def _one_item_per_upgrade(items):
+    """Remediation work, one item per upgrade: the CVE matches on one host that the same upgrade of the same component fixes
+    (CVE-2020-11022 and CVE-2020-11023 on one jQuery 3.4.1, both fixed in 3.5.0) are one item, the hottest match standing for them with
+    ``cves`` and ``match_ids`` naming them all and ``upgrade_to`` the version that fixes them. Each match keeps its own row, status and
+    triage (update_remediation_status takes any of the ids). ``items`` arrive in the work list's order and keep it."""
+    out, by_key = [], {}
+    for item in items:
+        fix = _upgrade_to(item.get('version') or '', item.get('fixed_in') or [])
+        key = (item.get('host'), (item.get('product') or '').lower(), item.get('version') or '', fix) if fix and item.get('host') else None
+        lead = by_key.get(key) if key else None
+        if lead is not None:
+            lead['cves'].append(item['cve']['cve_id'])
+            lead['match_ids'].append(item['id'])
+            continue
+        item.update(cves=[item['cve']['cve_id']], match_ids=[item['id']], upgrade_to=fix)
+        out.append(item)
+        if key:
+            by_key[key] = item
+    return out
 
 
 def _fixed_versions(cve, product):
@@ -3788,6 +4025,23 @@ def _triage_of(obj):
         return None
 
 
+def triage_prefetch(path):
+    """A prefetch of the Triage rows at ``path`` (``cve_matches__triage``, ``vulnerability_set__triage``) with the user who set a heat by
+    hand joined in: the host cards' heat reasons name them (``threat.manual_heat_reason``) at no extra query."""
+    from django.db.models import Prefetch
+
+    from cveFeed.models import Triage
+    return Prefetch(path, queryset=Triage.objects.select_related('heat_override_by'))
+
+
+def _heat_override(t):
+    """``{heat, reason, by, at}`` of a heat a person set on a finding (``Triage.heat_override``), or None while cvENGINE derives it."""
+    if t is None or not t.heat_override:
+        return None
+    return {'heat': t.heat_override, 'reason': t.heat_override_reason, 'at': _iso(t.heat_override_at),
+            'by': _user_brief(t.heat_override_by if t.heat_override_by_id else None)}
+
+
 def _seen(obj, name, fallback):
     t = _triage_of(obj)
     return getattr(t, name, None) or fallback
@@ -3816,7 +4070,7 @@ def _triage_brief(t):
     if validation_status in ('none', 'no_check') and _library_read_step(t.validation_steps):
         validation_status = 'observed'  # shown as a check that ran: cvENGINE read the library's served file (validation.library_step)
     return {'classification': t.classification, 'status': t.status, 'validation_status': validation_status,
-            'overridden': bool(v and (v.overridden or t.classification != v.classification)),
+            'overridden': triage_lib.overridden(v, t),
             'severity_adjust': triage_lib.shown_severity_adjust(v, t),
             'first_seen': _iso(t.first_seen), 'last_seen': _iso(t.last_seen)}
 
@@ -3831,7 +4085,7 @@ def _finding_obj(project, kind, finding_id):
         obj = _matches_qs(project).filter(pk=finding_id).first()
     elif kind == 'vulnerability':
         obj = Vulnerability.objects.filter(target_domain__project=project, pk=finding_id).select_related(
-            'subdomain', 'target_domain', 'triage__verdict', 'remediation_by', 'assignee') \
+            'subdomain', 'target_domain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
             .prefetch_related('cve_ids', 'cwe_ids', 'tags').annotate(comment_count=_comment_count_annotation('vulnerability')).first()
     elif kind == 'route':
         obj = RouteAuth.objects.filter(project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
@@ -4006,8 +4260,12 @@ def finding_detail(ctx, slug, kind, finding_id):
                          'reason': result.get('reason') if result.get('reason') in (
                              'no_longer_eligible', 'finding_removed', 'evidence_changed', 'out_of_scope') else None,
                          'error': 'Validation failed; see scoped activity and worker diagnostics.' if job.error else ''}
+    heat = _shown_heat(kind, obj) if kind in HEAT_KINDS else None
     return {
         'kind': kind, 'id': obj.pk, 'title': title, 'host': host, 'target': target,
+        # the heat it shows on its host, why, and a heat a person set by hand (null: cvENGINE derives it); a hygiene finding or a route has none
+        'heat': heat, 'heat_reason': _shown_heat_reason(kind, obj, heat) if heat else '',
+        'heat_override': _heat_override(t) if kind in HEAT_KINDS else None,
         'confidence': obj.confidence if kind == 'match' else None,  # the rules' match score; the detail pane no longer needs the list row for it
         'host_reported': kind == 'match' and obj.source == 'host', 'assessment_status': assessment_status,
         'assessment_reason': obj.ai_reason if assessment_status == 'closed_not_applicable' else '',
@@ -4018,7 +4276,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'ai': {'classification': t.classification if t else '', 'status': t.status if t else 'untracked',
                'reason': f'AI review failed ({diagnostic["category"]}); retry scheduled.' if diagnostic else t.reason if t else '',
                'diagnostic': diagnostic,
-               'overridden': bool(v and (v.overridden or (t and t.classification != v.classification))),
+               'overridden': triage_lib.overridden(v, t),
                'model_classification': v.model_classification if v else '',
                'model_reason': text['model_reason'], 'model': v.model if v else '', 'invalid_output': bool(v and v.invalid_output),
                'triaged': _iso(v.created_at) if v else None, 'severity_adjust': adjust, 'severity_reason': text['severity_reason'] if adjust else '',

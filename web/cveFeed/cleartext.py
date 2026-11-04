@@ -7,8 +7,11 @@ the result with its own findings (check names ``cleartext_*``), so status, assig
 the API work as for every other hygiene finding, and a finding resolves when a later run no longer shows the service.
 
 What counts. A service is named by nmap (``Port.service_name``): ``telnet``; ``ftp``; ``exec``, ``login`` and ``shell`` on 512 to 514
-(rexec, rlogin, rsh); the same names with a TLS tunnel (``telnets``, ``ftps``, ``ssl/...``) are encrypted and never reported. A port nmap
-named from its port table, without fingerprinting it, is reported and says so. FTP is not reported when the scan read its certificate
+(rexec, rlogin, rsh); the same names with a TLS tunnel (``telnets``, ``ftps``, ``ssl/...``) are encrypted and never reported. The service
+must have answered as itself: a protocol greeting (a stored banner) or nmap's fingerprint of it (``method`` ``probed``). A port nmap named
+from its port table alone is not reported: a front end that accepts a connection on every port and closes it says nothing on 21 or 513, and
+nmap still calls those ports ftp and login. An address that accepts everything (``ACCEPT_ALL_PORTS`` or more open ports that sent nothing
+and that nmap could not name, the control ports) needs a banner: a fingerprint without one is not enough there. FTP is not reported when the scan read its certificate
 (nmap's ``ssl-cert`` script negotiates AUTH TLS on an FTP port): that proves the server offers TLS, not that it insists on it, so the
 finding for FTP without that evidence says "unencrypted unless TLS is enforced", never that it is plain. Only a port that answered counts
 (``open``): closed, filtered and ``open|filtered`` are not findings, and UDP 514 is syslog, not rsh. A login page counts only when the
@@ -44,6 +47,9 @@ R_NAMES = ('exec', 'login', 'shell', 'rexec', 'rlogin', 'rsh')
 SERVICE_NAMES = ('telnet', 'ftp') + R_NAMES
 ENCRYPTED_NAMES = ('telnets', 'ftps', 'ftps-data', 'tcpwrapped')
 SEEN_NUMBERS = (21, 23) + R_PORTS  # the ports a candidate is looked for on, besides the service names above
+# open TCP ports with no greeting and no product on one address from which it is taken to accept every connection (a top-1000 nmap scan of
+# a normal host shows a handful of open ports; of a front end that accepts everything, nearly all of them)
+ACCEPT_ALL_PORTS = 25
 
 # check -> (what it is, internal grade, public grade, why it matters, the fix)
 CHECKS = {
@@ -109,13 +115,27 @@ def _tailnet(address):
     return is_tailnet_address(address)
 
 
-def evaluate(name, entries):
-    """The cleartext findings of one host from ``entries``, ``[(address, Port)]`` of its open TCP ports: a list of ``hygiene.Finding``."""
+def greeting(port):
+    """How the service on ``port`` answered as itself: ``'banner'`` (a stored greeting), ``'fingerprint'`` (nmap matched its answer), or ''
+    (named from the port number alone)."""
+    if (port.banner or '').strip():
+        return 'banner'
+    if (port.extra or {}).get('method') == 'probed' or (port.product or '').strip():
+        return 'fingerprint'
+    return ''
+
+
+def evaluate(name, entries, accepts_all=()):
+    """The cleartext findings of one host from ``entries``, ``[(address, Port)]`` of its open TCP ports: a list of ``hygiene.Finding``.
+    ``accepts_all`` holds the addresses that accept a connection on every port (see ``ACCEPT_ALL_PORTS``)."""
     found = {}
     for address, port in entries:
         check = classify(port)
         if not check or _tailnet(address) or (check == FTP and offers_tls(port)):
             continue
+        answered = greeting(port)
+        if not answered or (address in accepts_all and answered != 'banner'):
+            continue  # no greeting: a port that accepts and closes is not a cleartext service
         row = found.setdefault(check, {})
         row.setdefault(port.number, {'port': port, 'addresses': set()})['addresses'].add(address)
     out = []
@@ -126,16 +146,16 @@ def evaluate(name, entries):
         severity = public if exposure == 'public' else internal
         numbers = sorted(ports)
         first = ports[numbers[0]]['port']
-        identified = 'fingerprint' if (first.extra or {}).get('method') == 'probed' else 'port number'
+        identified = greeting(first)
         where = ', '.join(f'{n}/tcp' for n in numbers[:MAX_PORTS])
         basis = (f'rated {SEVERITY_WORDS[severity]}: {what} answers on {"a public internet address" if exposure == "public" else "an internal address"}'
                  f'; whether a login works was not tested')
         detail = f'{why} Fix: {fix}'
-        if identified == 'port number':
-            detail = f'{why} The service was named from its port number (the scan did not fingerprint it). Fix: {fix}'
         evidence = {'source': 'nmap', 'protocol': 'tcp', 'exposure': exposure, 'port': first.number, 'ports': numbers[:MAX_PORTS],
                     'addresses': addresses[:MAX_PORTS], 'service': first.service_name or '', 'product': first.product or '',
                     'version': first.version or '', 'identified': identified, 'severity_basis': basis, 'remediation': fix}
+        if (first.banner or '').strip():
+            evidence['banner'] = ' '.join(first.banner.split())[:200]
         if check == FTP:
             evidence['tls_seen'] = False
         out.append(Finding(check, severity, f'{name}: {what} is open ({where})', detail, name, evidence))
@@ -193,10 +213,25 @@ def service_findings(domain, hosts=None):
     names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__ports__in=candidates).order_by().values_list('name', flat=True).distinct()
              if _allowed(n, wanted, banned)}
     out = []
-    for sub in _newest_rows(domain, names, candidates):
+    rows = _newest_rows(domain, names, candidates)
+    accepts_all = _accepting_everything({ip.pk for sub in rows for ip in sub.ip_addresses.all()})
+    for sub in rows:
         entries = [(ip.address, port) for ip in sub.ip_addresses.all() for port in ip.ports.all()]
-        out += evaluate(sub.name, entries)
+        out += evaluate(sub.name, entries, accepts_all)
     return out
+
+
+def _accepting_everything(ip_ids):
+    """The addresses among ``ip_ids`` with ``ACCEPT_ALL_PORTS`` or more open TCP ports that sent no greeting and that nmap could not name a
+    product for: the control ports that show the address accepts a connection on any port."""
+    from django.db.models import Count, Q
+
+    from startScan.models import OPEN_PORT_STATES, TCP_PROTOCOLS, IpAddress
+    if not ip_ids:
+        return set()
+    silent = Q(ports__state__in=OPEN_PORT_STATES, ports__protocol__in=TCP_PROTOCOLS, ports__banner='', ports__product='')
+    rows = IpAddress.objects.filter(pk__in=ip_ids).annotate(silent=Count('ports', filter=silent)).filter(silent__gte=ACCEPT_ALL_PORTS)
+    return set(rows.values_list('address', flat=True))
 
 
 def _has_https(sub, routes):

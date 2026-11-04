@@ -136,14 +136,17 @@ def dmarc_report_domains(records):
     return out
 
 
-def evaluate_report_authorization(domain, report_domain, records):
+def evaluate_report_authorization(domain, report_domain, records, policy=''):
     """RFC 7489 §7.1: a report address outside the domain must publish <domain>._report._dmarc.<report domain>, or receivers
-    drop the reports. A wildcard (*._report._dmarc) record answers the same lookup."""
+    drop the reports. A wildcard (*._report._dmarc) record answers the same lookup. Under an enforcing ``policy`` (quarantine or
+    reject) spoofed mail is already stopped and only the visibility is lost, so it is information."""
     if _first(_values(records), 'v=dmarc1'):
         return []
-    return [_finding('dmarc_report_unauthorized', MEDIUM, f'DMARC reports to {report_domain} are not authorised',
-                     f'{report_domain} does not publish {domain}._report._dmarc.{report_domain} (RFC 7489 §7.1), so receivers '
-                     'drop the reports and spoofing goes unseen.', f'_dmarc.{domain}', {'report_domain': report_domain})]
+    enforced = policy in ('quarantine', 'reject')
+    detail = (f'{report_domain} does not publish {domain}._report._dmarc.{report_domain} (RFC 7489 §7.1), so receivers drop the reports'
+              + (f'. p={policy} still stops spoofed mail; only the reports are lost.' if enforced else ' and spoofing goes unseen.'))
+    return [_finding('dmarc_report_unauthorized', INFO if enforced else MEDIUM, f'DMARC reports to {report_domain} are not authorised',
+                     detail, f'_dmarc.{domain}', {'report_domain': report_domain, **({'policy': policy} if policy else {})})]
 
 
 # ----------------------------------------------------------------------------- DKIM, ARC, ADSP
@@ -509,9 +512,11 @@ def review(domain, has_mx, spf_txt, dmarc_txt, dkim_found, fetch, records, http=
         mx.rstrip('.'): records(f'_25._tcp.{mx.rstrip(".")}', 'TLSA') for mx in mx_hosts[:MAX_DANE_MX] if mx.rstrip('.')}))
     findings += safe('dnssec', lambda: evaluate_dnssec(domain, records(domain, 'DNSKEY')))
     reports = dmarc_report_domains(dmarc_txt)
+    from cveFeed.hygiene import dmarc_policy
+    policy = dmarc_policy(dmarc_txt)
     external = [r for r in reports if registrable(r) and registrable(r) != registrable(domain)][:MAX_REPORT_DOMAINS]
     for ext in external:
-        findings += safe('report-auth', lambda ext=ext: evaluate_report_authorization(domain, ext, fetch(f'{domain}._report._dmarc.{ext}')))
+        findings += safe('report-auth', lambda ext=ext: evaluate_report_authorization(domain, ext, fetch(f'{domain}._report._dmarc.{ext}'), policy))
     if http and os.environ.get('CVENGINE_HYGIENE_RDAP', '1') != '0':
         import requests
         session = requests.Session()

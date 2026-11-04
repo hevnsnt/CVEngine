@@ -6,9 +6,9 @@ the Hosts page, search and the graph already read.
 
 | Component | Points | Cap |
 | --- | --- | --- |
-| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: under the KEV heat policy a KEV or exploited CVE is fire when its version is proven and smoke otherwise, anything else ice): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
+| CVE matches (not ruled out), at the heat they show on the host (``threat.match_heat``: under the KEV heat policy a KEV or exploited CVE is fire when hard evidence proves the flaw and smoke otherwise, anything else ice): fire 40, smoke 20, ice 5; AI-confirmed on a fire match adds 10 | worst match | 50 |
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
-| Open findings: critical/high 25, medium 10, low 3; under the KEV heat policy a finding that names CVEs counts by its heat instead (``threat.finding_heat``: fire 25, smoke 10, ice 3) | worst | 25 |
+| Open findings: critical/high 25, medium 10, low 3; under the KEV heat policy a finding that names CVEs counts by its heat instead, and so does one a cap holds below its severity (``threat.finding_heat``: fire 25, smoke 10, ice 3) | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
 | Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
 | Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS, cleartext Telnet, FTP and r-services): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
@@ -130,7 +130,8 @@ def score_host(inputs):
     if findings:
         worst = max(findings, key=lambda f: points(f) * 10 + f['severity'])
         detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip()
-                       + (f' ({worst["heat"]}: its CVE rated by the heat policy)' if worst.get('heat') in FINDING_HEAT_POINTS else ''),
+                       + ((f' ({worst["heat"]}: held until a validation confirms it)' if worst.get('held') else
+                           f' ({worst["heat"]}: its CVE rated by the heat policy)') if worst.get('heat') in FINDING_HEAT_POINTS else ''),
                        'points': points(worst)})
     detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
@@ -180,13 +181,17 @@ def _hot_finding_cves(subs):
 
 
 def _finding_input(v, hot):
-    """One open finding for ``score_host``: its severity and name, and under the KEV policy, for a finding that names CVEs, its heat."""
-    from cveFeed.threat import finding_cve_names, finding_heat
+    """One open finding for ``score_host``: its severity and name, and its heat when that is not its severity's (under the KEV policy a
+    finding that names CVEs, under either a finding a cap holds lower: a template match no validation reproduced, a triage still pending or
+    needing validation, a validation that came back clean; ``threat.finding_heat``)."""
+    from cveFeed.threat import SEVERITY_HEAT, finding_cve_names, finding_heat
     out = {'severity': v.severity, 'name': v.name}
-    if hot is not None and finding_cve_names(v):
-        heat = finding_heat(v, hot_names=hot)
-        if heat:
-            out['heat'] = heat
+    named = hot is not None and bool(finding_cve_names(v))
+    heat = finding_heat(v, hot_names=hot if hot is not None else set())
+    if heat and (named or heat != SEVERITY_HEAT.get(v.severity)):
+        out['heat'] = heat
+        if not named:
+            out['held'] = True
     return out
 
 

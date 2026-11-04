@@ -18,6 +18,7 @@ from cveFeed import distro as distro_lib
 from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
+from cveFeed import versions
 
 logger = logging.getLogger(__name__)
 
@@ -1163,7 +1164,7 @@ def _carry_remediation(fresh):
                     from cveFeed.models import CVEEntry
                     hot = set(CVEEntry.objects.filter(threat.hot_q(), pk__in={m.cve_entry_id for m in fresh}).values_list("pk", flat=True))
                 if (match.cve_entry_id in hot and match.distro_status != distro_lib.PATCHED and not match_policy.version_unknown(match)
-                        and match_policy.version_proven(match, validation_status="")):
+                        and not threat.unproven(match, validation_status="")):
                     match.fire_notified_at, match.fire_notified_rule = now, rule
 
 
@@ -1200,6 +1201,15 @@ def save_matches(rows, covered=None):
         for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).select_related("cve_entry", "triage").only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "ai_model", "template_result",
             "cve_entry__kev", "cve_entry__exploit_db", "triage__validation_status", *_MATCH_FIELDS)}
+    # a NEW KEV match from a technology fingerprint older than a day is held until the version is read again (cveFeed.kev_freshness)
+    from cveFeed import kev_freshness
+    held = kev_freshness.hold([r for k, r in unique.items() if k not in existing])[1]
+    if held:
+        held_ids = {id(r) for r in held}
+        unique = {k: r for k, r in unique.items() if id(r) not in held_ids}
+        kev_freshness.request_reread({r["subdomain_id"] for r in held})
+        logger.info('held %d new KEV match(es) on %d host(s) until their version is read again', len(held),
+                    len({r["subdomain_id"] for r in held}))
     from cveFeed import threat
     kev_policy = threat.heat_policy() != threat.LEGACY_POLICY
     proved, backfilled = [], []  # matches the new evidence turned proven: news (paged once) or provenance recorded on an old row (not)
@@ -1411,14 +1421,16 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # Technology fingerprints (httpx tech-detect). A version of a one-core product the evidence disproves (jQuery's number read as
     # WordPress's) is kept on the host as evidence and not matched.
     technologies = list(subdomain.technologies.all())
-    wrong = cms.superseded(subdomain, technologies)
     # a JavaScript library's version stands on what its file states (cveFeed.js_libraries): a copy a later one replaces, or a string a
     # script's query or name carried where the file says otherwise, is not matched; a file-name-only version is matched at low confidence
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
+    # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
+    wrong = cms.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
             continue
+        name, version = versions.legacy_aspnet(name, version)  # an earlier build stored X-AspNet-Version's CLR line as "ASP.NET"
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
             continue

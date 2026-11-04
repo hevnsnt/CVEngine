@@ -1472,6 +1472,9 @@ function renderFinding(d, cfg, row) {
   const head = el("div", "host-head");
   head.append(el("h2", "host-title", d.title), copyButton(() => location.href, "link to this finding", "link"));
   const detailAge = agingOf(row || {});
+  // the heat it shows on its host (a heat a person set wins; the tooltip says who and why), for a CVE match or a scanner finding
+  let heatChip = d.heat ? heatBadge(d.heat, d.heat_reason) : null;
+  if (heatChip) head.append(heatChip);
   if (d.severity) head.append(badge(d.severity, d.severity));
   // from the machine's own inventory report, not from an outside scan: the only way a local-only CVE becomes a finding
   if (d.host_reported) head.append(Object.assign(badge("Reported by the host", "success"), { title: "Found in this host's own inventory report (installed software and patch level), not by an outside scan" }));
@@ -1632,6 +1635,16 @@ function renderFinding(d, cfg, row) {
       fix.append(ro, openInProject(row, cfg.kind === "match" ? "matches" : "vulns", `#${row.id}`));
     }
   }
+  if (cfg.statusControl && (d.kind === "match" || d.kind === "vulnerability")) {
+    // set from the finding's own project; in the all-projects view only shown
+    if (!ALL) fix.append(findingHeatControl(d, () => {
+      const next = d.heat ? heatBadge(d.heat, d.heat_reason) : null;
+      if (heatChip && next) heatChip.replaceWith(next);
+      else if (next) head.append(next);
+      heatChip = next;
+    }));
+    else if (d.heat_override) fix.append(el("p", "note heat-override", heatOverrideText(d.heat_override)));
+  }
   if (d.kind === "match" && d.assessment_status !== "closed_not_applicable") {
     const controls = el("div", "tools");
     const run = el("button", "btn sm", "Validate now", { type: "button" });
@@ -1771,6 +1784,56 @@ function findingStatusControl(d) {
   s.value = d.remediation.status;
   const box = el("div", "tools");
   box.append(el("span", "note", "Remediation status"), s, why);
+  paint();
+  return box;
+}
+
+// A heat a person set by hand (the finding's heat_override, POST .../findings/{kind}/{id}/heat): the line that says who set it, when and
+// why, and the control to set or clear it. Setting needs a reason; Clear goes back to the heat cvENGINE derives. Text only (el() sets
+// textContent).
+const HEAT_CHOICES = [["fire", "Fire"], ["smoke", "Smoke"], ["ice", "Ice"]];
+const heatOverrideText = (o) => (o
+  ? `Heat set to ${o.heat.charAt(0).toUpperCase()}${o.heat.slice(1)} by ${o.by ? o.by.username : "a user no longer here"} on ${shortDate(o.at)}${o.reason ? `: ${o.reason}` : ""}`
+  : "");
+function findingHeatControl(d, onChange) {
+  const line = el("p", "note heat-override");
+  const s = select("Heat set by hand", HEAT_CHOICES, () => {});
+  const reason = el("input", "", null, { type: "text", maxlength: "1000", placeholder: "Why this heat (required)", "aria-label": "Why this heat" });
+  const save = el("button", "btn sm", "Set heat", { type: "button" });
+  const clear = el("button", "btn ghost sm", "Clear", { type: "button", title: "Go back to the heat cvENGINE derives" });
+  const paint = () => {
+    const o = d.heat_override;
+    line.textContent = heatOverrideText(o);
+    line.hidden = !o;
+    clear.hidden = !o;
+    s.value = o ? o.heat : d.heat || "smoke";
+    reason.value = o ? o.reason : "";
+  };
+  const send = async (heat) => {
+    const why = reason.value.trim();
+    if (heat && !why) {
+      toast("Say why this finding is " + heat, true);
+      reason.focus();
+      return;
+    }
+    save.disabled = clear.disabled = true;
+    try {
+      const r = await api("POST", `${base}/findings/${d.kind}/${d.id}/heat`, { heat: heat || null, reason: why });
+      Object.assign(d, { heat: r.heat, heat_reason: r.heat_reason, heat_override: r.heat_override });
+      paint();
+      onChange();
+      toast(heat ? `Heat set to ${heat}` : `Heat back to ${r.heat || "derived"}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    save.disabled = clear.disabled = false;
+  };
+  save.onclick = () => send(s.value);
+  clear.onclick = () => send("");
+  const box = el("div", "heat-control");
+  const tools = el("div", "tools");
+  tools.append(el("span", "note", "Heat"), s, reason, save, clear);
+  box.append(tools, line);
   paint();
   return box;
 }

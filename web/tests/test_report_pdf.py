@@ -218,9 +218,10 @@ class ReportContentTests(ReportBase):
 
     def test_executive_summary_counts_by_heat_and_severity_and_lists_top_risks(self):
         summary = self.text[self.text.index('Executive summary'):self.text.index('Hosts Highest score first')]
-        # open and not ruled out: the KEV match (fire), the critical scanner finding (fire), the 7.5 match (ice under the KEV heat rule: it is
-        # neither on the KEV nor exploited; the legacy rule made it smoke), and the legend says which rule the counts follow
-        self.assertIn('This report lists 3 open findings across 2 hosts: 2 fire, 0 smoke and 1 ice', summary)
+        # open and not ruled out: the KEV match (fire), the critical scanner finding (smoke until a validation reproduces it: 1.3.5), the 7.5
+        # match (ice under the KEV heat rule: it is neither on the KEV nor exploited; the legacy rule made it smoke), and the legend says which
+        # rule the counts follow
+        self.assertIn('This report lists 3 open findings across 2 hosts: 1 fire, 1 smoke and 1 ice', summary)
         self.assertIn('Ice: not on the KEV and no public exploit', summary)
         self.assertIn('A further 2 TLS, certificate or email hygiene findings are listed separately', summary)
         for severity in ('Critical 2', 'High 1', 'Medium 0', 'Low 0'):  # the bars: one critical match, one critical finding, one 7.5 match
@@ -736,10 +737,10 @@ class CapTests(ReportBase):
             job = queued(self.worker, 'acme')
         self.assertEqual(len(data['findings']), 2)
         self.assertEqual(data['summary']['findings'], 3)  # the counts cover everything
-        self.assertEqual(data['summary']['heat'], {'fire': 2, 'smoke': 1, 'ice': 0})
+        self.assertEqual(data['summary']['heat'], {'fire': 1, 'smoke': 2, 'ice': 0})  # the scanner finding waits for a validation (1.3.5)
         self.assertEqual(data['caps']['findings_omitted'], 1)
         self.assertEqual(data['caps']['hygiene_omitted'], 1)
-        self.assertEqual([f['heat'] for f in data['findings']], ['fire', 'fire'])  # hottest kept
+        self.assertEqual([f['heat'] for f in data['findings']], ['fire', 'smoke'])  # hottest kept
         self.assertEqual(job.status, 'done', job.error)
         text = pdf_text(os.path.join(self.reports_dir, job.filename))
         self.assertIn('Showing the 2 hottest of 3', text)

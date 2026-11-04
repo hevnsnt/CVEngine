@@ -190,6 +190,9 @@ ROUTES = [
      lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('PATCH', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile', 'Same as POST: set a target\'s alias and note',
      lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/private-ca',
+     'Say whether a target\'s devices use their vendor\'s own private CA: when true an untrusted or self-signed chain on it is rated information; body {expect_private_ca: true|false}',
+     lambda r, c, slug, target_id, **k: svc.set_target_private_ca(c, slug, int(target_id), _body(r).get('expect_private_ca'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discovery-mode',
      'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}',
      lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
@@ -374,6 +377,14 @@ ROUTES = [
      "body {items: [{kind, id}, ...], status, note}; returns {updated, failed: [{kind, id, error}]}",
      lambda r, c, slug, **k: svc.bulk_update_finding_status(c, slug, _body(r).get('items'), *_need(_body(r), 'status'),
                                                              note=_body(r).get('note'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/heat',
+     'Re-rate one finding by hand: body {heat: fire|smoke|ice, reason} sets the heat a CVE match or scanner finding shows everywhere (lists, counts, '
+     'host heat, reports, alerts), reason required (at most 1000 characters); {heat: null} clears it back to the derived heat. Audited; a match '
+     'raised to fire is paged once. A hygiene finding or a web route has no heat (400). Answers {kind, id, heat, heat_reason, heat_override, changed}',
+     lambda r, c, slug, kind, finding_id, **k: svc.set_finding_heat(c, slug, kind, int(finding_id), _body(r).get('heat'), _body(r).get('reason'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/heat', 'Re-rate up to 500 findings by hand at once with one heat and one reason; '
+     "body {items: [{kind: match|vulnerability, id}, ...], heat: fire|smoke|ice or null to clear, reason}; each is audited on its own; returns {updated, unchanged, failed: [{kind, id, error}]}",
+     lambda r, c, slug, **k: svc.bulk_set_finding_heat(c, slug, _body(r).get('items'), _body(r).get('heat'), _body(r).get('reason'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/retriage',
      'Look at a finding again; CVE matches use the bounded per-match validation queue',
      lambda r, c, slug, kind, finding_id, **k: (svc.retriage_finding(c, slug, kind, int(finding_id)), 202)),

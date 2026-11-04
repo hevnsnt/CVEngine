@@ -37,7 +37,14 @@ def handshake(host, port, timeout, addresses=None, project=None):
         return None
 
 
+def negotiated(host, port, timeout, addresses=None, project=None):
+    """``{'protocol', 'cipher'}`` of a completed TLS 1.0 / 1.1 handshake, or None: only a negotiated TLS 1.0 or 1.1 counts."""
+    got = handshake(host, port, timeout, addresses=addresses, project=project)
+    if not got or got[1] not in ('TLSv1', 'TLSv1.1'):
+        return None
+    return {'protocol': got[1], 'cipher': got[2] or ''}
+
+
 def accepts(host, port, timeout, addresses=None, project=None):
     """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
-    got = handshake(host, port, timeout, addresses=addresses, project=project)
-    return bool(got) and got[1] in ('TLSv1', 'TLSv1.1')
+    return negotiated(host, port, timeout, addresses=addresses, project=project) is not None

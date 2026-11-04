@@ -277,6 +277,19 @@ def _absolute(value, page_url):
     return absolute[:1000]
 
 
+_SCRIPT_END = re.compile(r'</script[\t\n\f\r />]')
+
+
+def script_end(lower, start):
+    """Where the ``<script>`` whose text starts at ``start`` ends, or -1 when it never does, read as a browser's tokenizer reads it: only
+    ``</script`` followed by whitespace, ``/`` or ``>`` ends it (``</scripts>`` or ``</script-x>`` is text). A script that never ends makes
+    the rest of the page its text: the tags in it load nothing. ``lower`` is the page lower-cased."""
+    found = _SCRIPT_END.search(lower, start)
+    if found:
+        return found.start()
+    return len(lower) - 8 if lower.endswith('</script') else -1  # the page ends right at the end tag's name
+
+
 MAX_INLINE_READ = 100  # inline scripts whose text is read for a library's banner or code (a page with more is not known whole)
 
 
@@ -323,7 +336,7 @@ def parse_page(body, page_url):
         if not tag:
             pos = start + 7
             continue
-        close = lower.find('</script', tag.end())
+        close = script_end(lower, tag.end())
         if close == -1:
             out.capped = True  # a script that never closes: the rest of the page is its text, or the page was cut
         inner = text[tag.end():close if close != -1 else len(text)]
@@ -684,7 +697,7 @@ def _inline_code(markup):
         if not tag:
             pos = start + 7
             continue
-        close = lower.find('</script', tag.end())
+        close = script_end(lower, tag.end())
         end = close if close != -1 else len(markup)
         if 'src' not in _attributes(tag.group(1)):
             parts.append(markup[tag.end():end][:MAX_INLINE])
@@ -972,6 +985,23 @@ def names_of(records):
 
 
 _TOKENS = {re.sub(r'[^a-z0-9]', '', n) for n in (*PRODUCTS, *LIBRARIES)}
+_TOKEN_KEYS = {**{re.sub(r'[^a-z0-9]', '', key): key for key in LIBRARIES}, **{re.sub(r'[^a-z0-9]', '', p): key for p, key in PRODUCTS.items()}}
+
+
+def unversioned(name):
+    """A technology name another tool reported (bbot with Shodan InternetDB's CPEs, Wappalyzer, the nuclei technology pass) with the version
+    taken off when it names one of the JavaScript libraries read here: ``jquery:3.2.1`` -> ``jQuery``. Those tools read a library's version
+    from a script URL's ``?ver=`` string or another plugin's file name or banner (Wappalyzer's jQuery rule takes
+    ``jquery.smartmenus.min.js?ver=1.2.1`` for jQuery 1.2.1, jQuery Migrate's ``?ver=3.4.1`` for jQuery 3.4.1, a Gravity Forms script's
+    ``?ver=3.2.1`` for jQuery 3.2.1), from whichever of several such scripts they met first (so the version flips between scans), and record
+    the result as the library's. A library's version comes only from its own file: the route check and the html-libraries probe read it
+    (its banner, or ``jquery:"x.y.z"`` in its code) and store it beside this bare name. Any other name is returned as it is."""
+    text = str(name or '')
+    base, sep, version = text.partition(':')
+    key = _TOKEN_KEYS.get(re.sub(r'[^a-z0-9]', '', base.lower()))
+    if not sep or not key or not version.strip():
+        return text
+    return LIBRARIES[key][0]
 
 
 FRESH_DAYS = 8  # a front page's reading speaks for the host this long: the route check reads each front page again every 7 days
@@ -1186,6 +1216,12 @@ class HostLibraries:
             if any(isinstance(c, dict) and c.get('version') == version and c.get('source') == 'body' for c in record.get('copies') or []):
                 return True
         return False
+
+    def file_versions(self):
+        """Every version a JavaScript library's own file on the host's page states (a copy read from its body): a number a technology scan
+        must not take for a core's (``cms.disproven``: jQuery 3.7.1 is not WordPress 3.7.1)."""
+        return {str(c['version']) for record in self.records.values() if isinstance(record, dict) for c in record.get('copies') or []
+                if isinstance(c, dict) and c.get('version') and c.get('source') == 'body'}
 
     @classmethod
     def for_subdomain(cls, subdomain, now=None):
