@@ -81,6 +81,7 @@ ALLOWED = {
         'cveFeed/models.py',
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
+        'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): reads the stored nmap service name of a port (echo), runs nothing
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/os_detection.py',
@@ -152,6 +153,7 @@ ALLOWED = {
         'cveFeed/models.py',
         'cveFeed/nmap_scan.py',
         'cveFeed/notify.py',
+        'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/performance_review.py',
@@ -164,6 +166,7 @@ ALLOWED = {
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
         'cveFeed/template_fixtures.py',
+        'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): holds back a nuclei template's hit on a patched version, runs nothing
         'cveFeed/templategen.py',
         'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/triage.py',
@@ -218,10 +221,12 @@ ALLOWED = {
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/discovery.py',
         'cveFeed/egress_proxy.py',
+        'cveFeed/finding_lifecycle.py',  # 1.3.5 lifecycle (develop): closes stored WPScan findings past their fix, runs nothing
         'cveFeed/heavy_process.py',
         'cveFeed/host_context.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/close_fixed_findings.py',  # 1.3.5 backfill (develop): closes stored WPScan findings past their fix, runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/models.py',
         'cveFeed/nuclei_templates.py',
@@ -229,6 +234,7 @@ ALLOWED = {
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tasks.py',
+        'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): reads the WordPress version WPScan stored, runs nothing
         'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/wp_correlation.py',
         'cveFeed/wpscan_scan.py',
@@ -248,6 +254,7 @@ ALLOWED = {
         'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/egress_proxy.py',
+        'cveFeed/finding_lifecycle.py',  # 1.3.5 lifecycle (develop): folds stored testssl findings of redirect aliases, runs nothing
         'cveFeed/heavy_process.py',
         'cveFeed/hygiene.py',
         'cveFeed/internal_scan.py',
@@ -260,6 +267,7 @@ ALLOWED = {
         'cveFeed/tasks.py',
         'cveFeed/templategen.py',  # 1.3.3 template confirmations (develop): docstring naming evidence sources, runs nothing
         'cveFeed/testssl_scan.py',
+        'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names testssl among the scanners whose checks confirm a flaw, runs nothing
         'cveFeed/tunables.py',  # 1.3.4 port budget tunable (develop): help text about what one run is charged, runs nothing
         'reNgine/input_guard.py',
         'reNgine/resources.py',
@@ -277,6 +285,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
         'cveFeed/ctmonitor.py',
+        'cveFeed/dangling_dns.py',  # 1.3.5 dangling DNS (develop): re-rates stored bbot/baddns findings with read-only DNS questions, runs no tool
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
         'cveFeed/egress_proxy.py',
@@ -284,6 +293,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/labels.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/rerate_dangling_dns.py',  # 1.3.5 backfill (develop): re-rates stored bbot/baddns findings, runs no tool
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
         'cveFeed/models.py',
@@ -299,6 +309,7 @@ ALLOWED = {
         'cveFeed/shots.py',
         'cveFeed/supplier_scan.py',
         'cveFeed/tasks.py',
+        'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',
         'cveFeed/versions.py',
         'cveFeed/views.py',
