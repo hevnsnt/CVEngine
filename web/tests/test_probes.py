@@ -340,7 +340,8 @@ class StageTests(RouteFixture, TestCase):
 
     def stage(self, **kw):
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            return probes.run_for_scan(self.scan_obj.id, get=self.get, sleep=lambda s: None, **kw)
+            return probes.run_for_scan(self.scan_obj.id, get=self.get, nmap_runner=lambda argv: '<nmaprun/>',
+                                       sleep=lambda s: None, **kw)
 
     def test_the_stage_probes_leads_records_versions_and_uses_the_ledger(self):
         out = self.stage()
@@ -399,7 +400,8 @@ class StageTests(RouteFixture, TestCase):
         def boom(url):
             raise OSError('connection reset')
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            out = probes.run_for_scan(self.scan_obj.id, get=boom, sleep=lambda s: None)
+            out = probes.run_for_scan(self.scan_obj.id, get=boom, nmap_runner=lambda argv: '<nmaprun/>',
+                                      sleep=lambda s: None)
         self.assertEqual(out['errors'], 0)  # a request error inside a probe is an unanswered request, not a crashed probe
         self.assertEqual(ProbeObservation.objects.filter(kind='version', outcome='found').count(), 0)
 
