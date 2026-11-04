@@ -430,17 +430,25 @@ def vulnerability_data(report, token):
 
 
 def persist_report(scan, sub, url, report):
-    """Save one site's report; returns ``(new findings, technologies added)``."""
+    """Save one site's report; returns ``(new findings, technologies added)``. The open rows of this host that the versions it read are past
+    the fix of are closed as fixed (cveFeed.finding_lifecycle.close_fixed_wpscan_rows)."""
+    from cveFeed import finding_lifecycle
     from reNgine.tasks import save_vulnerability
     from startScan.ip_rows import get_or_create_first
     from startScan.models import Technology
-    new = 0
+    new, seen = 0, {}
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
-        _vuln, created = save_vulnerability(
+        vuln, created = save_vulnerability(
             target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=url, name=name, severity=severity,
             description=description, source='wpscan', template_id='wpscan:' + component[:150], type='wpscan', cve_ids=cves,
             references=refs, tags=['wordpress', 'wpscan'])
         new += int(created)
+        if vuln is not None:
+            seen[vuln.name] = vuln.pk
+    try:
+        finding_lifecycle.close_fixed_wpscan_rows(scan, sub, report, seen)
+    except Exception:  # noqa: BLE001 - closing what a newer version fixed never fails the stage; the next scan tries again
+        logger.exception('could not close the fixed WPScan findings of %s', getattr(sub, 'name', ''))
     added = 0
     for tech_name in _technologies(report):
         tech, _ = get_or_create_first(Technology, name=tech_name)

@@ -33,6 +33,10 @@ _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u2028-
 VULNERABILITY_GONE = 'Closed automatically: a later scan of this host no longer reports this finding.'
 HYGIENE_RESOLVED = 'Resolved automatically: a later check no longer finds this.'
 RULED_OUT_NO_REASON = 'Ruled out automatically by the AI review.'
+# Every closure the engine writes into a finding's own note starts with this. A scanner finding a later scan read past its fixed version
+# (remediation_status fixed with no remediation_by, cveFeed.finding_lifecycle) and a duplicate or redirect-alias copy the engine folded into
+# another row (open_status False or hygiene status resolved) store their reason that way, so ``closure_of`` reads them as automatic.
+AUTOMATIC = 'Closed automatically:'
 SUPPLIER_RESOLVED = 'Resolved automatically: a later check no longer finds this.'
 
 
@@ -88,11 +92,16 @@ def closure_of(kind, obj):
             return SUPPLIER_RESOLVED, None, obj.resolved_at, True
         return None, None, None, False
     if obj.remediation_status in CLOSED:
-        return obj.remediation_note or '', obj.remediation_by, obj.remediation_updated_at, False
+        note = obj.remediation_note or ''
+        # the engine closed it (a later scan read a fixed version): nobody set it, and its note says why
+        automatic = kind != 'match' and obj.remediation_by_id is None and note.startswith(AUTOMATIC)
+        return note, obj.remediation_by, obj.remediation_updated_at, automatic
     if kind == 'match' and obj.ai_verdict == 'not_affected':
         return _clip(obj.ai_reason) or RULED_OUT_NO_REASON, None, getattr(obj, 'updated_at', None), True
     if kind == 'vulnerability' and obj.open_status is False:
-        return VULNERABILITY_GONE, None, None, True
+        note = obj.remediation_note or ''
+        return (_clip(note) if note.startswith(AUTOMATIC) else VULNERABILITY_GONE), None, None, True
     if kind == 'hygiene' and obj.status == 'resolved':
-        return HYGIENE_RESOLVED, None, obj.resolved_at, True
+        note = obj.remediation_note or ''
+        return (_clip(note) if note.startswith(AUTOMATIC) else HYGIENE_RESOLVED), None, obj.resolved_at, True
     return None, None, None, False

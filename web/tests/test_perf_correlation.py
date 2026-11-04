@@ -86,7 +86,9 @@ class CorrelationPerfTests(TestCase):
 			out = correlate_cves()
 		self.assertEqual(out['matches'], 30)
 		self.assertEqual(CVEMatch.objects.count(), 30)
-		self.assertLessEqual(len(ctx), small + 4)  # a few more statements for the new rows, nowhere near one per host
+		# a few more statements for the new rows, nowhere near one per host (1.3.5: one reads when the new KEV rows' hosts were fingerprinted,
+		# cveFeed.kev_freshness)
+		self.assertLessEqual(len(ctx), small + 5)
 		self.assertLess(len(ctx), 30)
 
 	def test_rerun_keeps_ai_verdict_and_does_not_touch_unchanged_rows(self):
@@ -279,8 +281,9 @@ class FindingStateCarriesTests(CorrelationPerfTests):
 		save_vulnerability(name='Exposed panel', severity=3, subdomain=new_sub, target_domain=self.domain, scan_history=new_scan, source='nuclei',
 						   template_id='panel', http_url='https://web.perf.test/admin', matcher_name='')
 		again = Vulnerability.objects.get(scan_history=new_scan)
-		self.assertNotEqual(again.pk, first.pk)
-		self.assertEqual((again.remediation_status, again.remediation_note), ('fixed', 'patched'))
+		self.assertEqual(again.pk, first.pk)  # the same row, moved onto the new scan (1.3.5): one row per finding, not one per scan
+		self.assertEqual(Vulnerability.objects.filter(name='Exposed panel').count(), 1)
+		self.assertEqual((again.remediation_status, again.remediation_note, again.subdomain_id), ('fixed', 'patched', new_sub.id))
 
 	def test_a_scanner_finding_marked_false_positive_stays_closed_on_the_next_scan(self):
 		from reNgine.tasks import save_vulnerability

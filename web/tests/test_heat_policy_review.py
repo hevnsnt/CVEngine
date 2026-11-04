@@ -8,6 +8,9 @@
   switch itself pages nothing (the baseline), and neither does the first correlation that records the new provenance on old rows.
 - The database form agrees with the Python form on odd JSON values.
 - A scanner finding that names CVEs follows the CVE rule under the KEV policy.
+
+1.3.5: a version proven by a banner (or any read of the component) no longer makes a match fire, so the paging tests below prove a match with
+a runZero report of the CVE (hard evidence, ``Base.report``) where they used to rely on a probed vendor banner.
 """
 import importlib
 import os
@@ -53,6 +56,11 @@ class Base(Policy, Fixture):
 		sql = dict(CVEMatch.objects.annotate(h=threat.match_heat_rank_expr()).values_list('pk', 'h'))
 		return {m.pk: (HEAT_RANK[threat.match_heat(m)], sql[m.pk]) for m in CVEMatch.objects.select_related('cve_entry', 'triage')}
 
+	def report(self, *cve_ids, port=443):
+		"""runZero reports these CVEs on the host's port: hard evidence correlation records (``evidence.runzero``), so the match is fire."""
+		self.ip.fingerprint = {'runzero': {'vulns': [{'cve': c, 'port': port} for c in cve_ids]}}
+		self.ip.save()
+
 	def only_match(self, **filters):
 		return CVEMatch.objects.select_related('cve_entry', 'triage').get(**filters)
 
@@ -91,14 +99,20 @@ class BannerProofTests(Base):
 				self.assertEqual(threat.match_heat(m), SMOKE)
 				self.assertEqual(self.parity()[m.pk], (HEAT_RANK[SMOKE], HEAT_RANK[SMOKE]))
 
-	def test_a_probed_banner_of_a_vendor_built_product_is_fire(self):
+	def test_a_probed_banner_of_a_vendor_built_product_proves_the_version_not_the_flaw(self):
 		self.entry('CVE-2099-6110', JENKINS)
 		self.probed('Jenkins', '2.440')
 		self.correlate()
 		m = self.only_match()
 		self.assertTrue(match_policy.version_proven(m))
+		self.assertEqual(threat.match_heat(m), SMOKE)  # 1.3.5: a proven version is still version-only
+		self.assertEqual(threat.heat_reason(m), 'on the KEV; version proven: read from the service banner by nmap, but no check has shown the '
+											   'flaw: smoke until one does')
+		self.assertEqual(self.parity()[m.pk], (HEAT_RANK[SMOKE], HEAT_RANK[SMOKE]))
+		self.report('CVE-2099-6110')  # hard evidence of the flaw: fire
+		self.correlate()
+		m = self.only_match()
 		self.assertEqual(threat.match_heat(m), FIRE)
-		self.assertEqual(threat.heat_reason(m), 'on the KEV; version proven: read from the service banner by nmap')
 		self.assertEqual(self.parity()[m.pk], (HEAT_RANK[FIRE], HEAT_RANK[FIRE]))
 
 	def test_the_same_vendor_banner_from_the_port_table_is_smoke(self):
@@ -139,9 +153,11 @@ class JsonParityTests(Base):
 		got = {rows[pk]: pair for pk, pair in self.parity().items()}
 		for name, (python, sql) in got.items():
 			self.assertEqual(python, sql, name)
-		for name in ('true', 'list', 'object', 'string', 'null'):
-			self.assertEqual(got[name][0], HEAT_RANK[SMOKE], name)
-		self.assertEqual((got['one'][0], got['high'][0]), (HEAT_RANK[FIRE], HEAT_RANK[FIRE]))
+			self.assertEqual(python, HEAT_RANK[SMOKE], name)  # 1.3.5: a proven version alone is smoke
+		proven_sql = {rows[pk] for pk in CVEMatch.objects.filter(match_policy.version_proven_q()).values_list('pk', flat=True)}
+		proven_python = {rows[m.pk] for m in CVEMatch.objects.select_related('triage') if match_policy.version_proven(m)}
+		self.assertEqual(proven_sql, proven_python)
+		self.assertEqual(proven_python, {'one', 'high'})
 
 
 class RescanPagingTests(Base):
@@ -150,6 +166,7 @@ class RescanPagingTests(Base):
 	def test_a_rescan_does_not_page_the_same_match_again(self):
 		self.entry('CVE-2099-6301', JENKINS)
 		self.probed('Jenkins', '2.440')
+		self.report('CVE-2099-6301')
 		self.correlate()
 		self.assertTrue(notify.fire_matches(self.scan.start_scan_date, self.scan))
 		self.assertEqual(len(self.sends), 1)
@@ -168,6 +185,7 @@ class RescanPagingTests(Base):
 		self.assertEqual(self.sends, [])  # smoke
 		port.extra = {'method': 'probed'}
 		port.save()
+		self.report('CVE-2099-6302')
 		scan2, sub2 = self.rescan()
 		self.correlate()
 		self.assertTrue(notify.fire_matches(scan2.start_scan_date, scan2))
@@ -222,7 +240,7 @@ class RescanPagingTests(Base):
 		self.assertIsNone(CVEMatch.objects.get(pk=old.pk).fire_notified_at)
 		scan2, sub2 = self.rescan()
 		self.correlate()
-		self.assertEqual(threat.match_heat(self.only_match(subdomain=sub2)), FIRE)
+		self.assertEqual(threat.match_heat(self.only_match(subdomain=sub2)), SMOKE)  # 1.3.5: the recorded banner proves the version only
 		self.assertFalse(notify.fire_matches(scan2.start_scan_date, scan2))
 		self.assertEqual(self.sends, [])
 
@@ -242,9 +260,14 @@ class CorrelationProofTests(Base):
 		port = self.probed('Jenkins', '2.440', method='table')
 		self.correlate()
 		self.assertEqual(threat.match_heat(self.only_match()), SMOKE)
-		self.rescored.clear()
 		port.extra = {'method': 'probed'}
 		port.save()
+		with self.captureOnCommitCallbacks(execute=True):
+			self.correlate()
+		self.assertEqual(threat.match_heat(self.only_match()), SMOKE)  # 1.3.5: a probe proves the version, not the flaw: no page
+		self.assertEqual(self.sends, [])
+		self.rescored.clear()
+		self.report('CVE-2099-6401')
 		with self.captureOnCommitCallbacks(execute=True):  # the page follows the committed write
 			self.correlate()
 		self.assertEqual(threat.match_heat(self.only_match()), FIRE)
@@ -267,10 +290,9 @@ class CorrelationProofTests(Base):
 		with self.captureOnCommitCallbacks(execute=True):
 			self.correlate()
 		m = self.only_match()
-		self.assertEqual(threat.match_heat(m), FIRE)
-		self.assertIn(self.sub.name, self.rescored)
+		self.assertEqual(threat.match_heat(m), SMOKE)  # 1.3.5: the recorded packaging proves the version only
 		self.assertEqual(self.sends, [])
-		self.assertIsNotNone(m.fire_notified_at)  # baselined: a later copy does not page it either
+		self.assertIsNone(m.fire_notified_at)  # not fire, so not marked: real proof later is still paged
 
 	def test_proof_on_an_ice_cve_or_under_legacy_pages_nothing(self):
 		self.entry('CVE-2099-6403', JENKINS, kev=False, cvss=9.8)
@@ -308,6 +330,7 @@ class FeedTurnsHotTests(Base):
 		smoke_cve = self.entry('CVE-2099-6502', affected('confluence', '1.0', '9.0'), kev=False, exploit_db=False)
 		self.probed('Jenkins', '2.440')
 		self.probed('Confluence', '8.5', number=8090, method='table')
+		self.report('CVE-2099-6501')  # hard evidence on the first (1.3.5: a probed banner proves the version only)
 		self.correlate()
 		self.assertEqual({threat.match_heat(m) for m in CVEMatch.objects.select_related('cve_entry')}, {ICE})
 		return proven_cve, smoke_cve
@@ -396,7 +419,7 @@ class ScannerFindingHeatTests(Base):
 		confirmed = self.finding('OpenVAS: CVE-2099-6603 active', 3, 'openvas', ['CVE-2099-6603'], ['openvas', 'qod-confirmed'])
 		wpscan = self.finding('Plugin x', 3, 'wpscan', ['CVE-2099-6602'])
 		unknown = self.finding('CVE-2099-6699: template', 4, 'nuclei', ['CVE-2099-6699'])  # a CVE this instance does not store
-		exposure = self.finding('Exposed .git', 3, 'nuclei')  # names no CVE: severity heat
+		exposure = self.finding('Exposed .git', 3, 'nuclei')  # names no CVE: severity heat, held at smoke until validated (1.3.5)
 		info = self.finding('CVE-2099-6602 detected', 0, 'nuclei', ['CVE-2099-6602'])  # informational: no heat
 		heats = self.heats()
 		self.assertEqual(heats[cold.pk], (ICE, ICE))
@@ -405,7 +428,7 @@ class ScannerFindingHeatTests(Base):
 		self.assertEqual(heats[confirmed.pk], (FIRE, FIRE))
 		self.assertEqual(heats[wpscan.pk], (SMOKE, SMOKE))
 		self.assertEqual(heats[unknown.pk], (ICE, ICE))
-		self.assertEqual(heats[exposure.pk], (FIRE, FIRE))
+		self.assertEqual(heats[exposure.pk], (SMOKE, SMOKE))
 		self.assertEqual(heats[info.pk], (None, None))
 		uncapped = self.heats(capped=False)
 		self.assertEqual((uncapped[unconfirmed.pk], uncapped[wpscan.pk], uncapped[cold.pk]), ((FIRE, FIRE), (FIRE, FIRE), (ICE, ICE)))
@@ -413,6 +436,9 @@ class ScannerFindingHeatTests(Base):
 		Triage.objects.create(project=self.project, domain=self.domain, host=self.sub.name, kind='vulnerability', vulnerability=unconfirmed,
 							  classification='needs_validation', status='triaged', validation_status='hit')
 		self.assertEqual(self.heats()[unconfirmed.pk], (FIRE, FIRE))
+		Triage.objects.create(project=self.project, domain=self.domain, host=self.sub.name, kind='nuclei', vulnerability=exposure,
+							  classification='confirmed', status='triaged', validation_status='hit')
+		self.assertEqual(self.heats()[exposure.pk], (FIRE, FIRE))  # a validation reproduced the template's match
 
 	def test_a_template_confirmed_cve_that_is_not_hot_leaves_the_host_ice(self):
 		cve = self.entry('CVE-2099-6611', [], kev=False, exploit_db=False, cvss=9.8)
@@ -431,7 +457,12 @@ class ScannerFindingHeatTests(Base):
 	def test_legacy_keeps_the_severity_heat(self):
 		self.entry('CVE-2099-6621', [], kev=False, exploit_db=False, cvss=9.8)
 		v = self.finding('CVE-2099-6621: template', 4, 'nuclei-cve', ['CVE-2099-6621'])
+		db = self.finding('PostgreSQL without a password', 4, 'db_exposure')
 		with mock.patch.dict(os.environ, LEGACY):
+			self.assertEqual(self.heats()[v.pk], (SMOKE, SMOKE))  # 1.3.5: a template's severity waits for a validation
+			self.assertEqual(self.heats()[db.pk], (FIRE, FIRE))  # cvENGINE's own check is not held
+			Triage.objects.create(project=self.project, domain=self.domain, host=self.sub.name, kind='nuclei', vulnerability=v,
+								  classification='confirmed', status='triaged', validation_status='hit')
 			self.assertEqual(self.heats()[v.pk], (FIRE, FIRE))
 
 

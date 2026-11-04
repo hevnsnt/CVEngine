@@ -9,6 +9,9 @@
 - The database form of a finding's heat trims CVE names and skips empty ones, as Python does.
 - A CVE that turns hot pages every proven match, however many, and the forced cve.now backfill pages too.
 - A scanner finding's validation lane and its share of the host score follow its heat.
+
+1.3.5: a version proven by a banner (or any read of the component) no longer makes a match fire; where these tests need proof of the flaw they
+use a runZero report of the CVE (``Base.report``), and the banner cases now pin that a proven version alone stays smoke and pages nothing.
 """
 import importlib
 import os
@@ -76,6 +79,7 @@ class PerRuleAnnouncementTests(Switching):
 		notify.baseline_heat_policy()
 		port.extra = {'method': 'probed'}
 		port.save()
+		self.report('CVE-2099-7003')  # proof of the flaw (a probed banner alone proves the version only: 1.3.5)
 		with self.captureOnCommitCallbacks(execute=True):
 			self.correlate()
 		self.assertEqual(threat.match_heat(self.only_match()), FIRE)
@@ -90,8 +94,8 @@ class PerRuleAnnouncementTests(Switching):
 				  'copies': [{'url': 'https://x/jquery.js', 'source': 'body', 'state': 'effective'}]}
 		m = self.match_for(cve, version='1', in_range=True, evidence=banner, ai_verdict='uncertain')
 		old(m.pk)
-		notify.baseline_heat_policy()  # to the KEV rule: the library's own file proves it, fire there: marked for kev
-		self.assertIsNotNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
+		notify.baseline_heat_policy()  # to the KEV rule: the library's own file proves the version only, smoke there (1.3.5): not marked
+		self.assertIsNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
 		with mock.patch.dict(os.environ, LEGACY):
 			notify.baseline_heat_policy()  # back to legacy: version-only, smoke there: not marked for legacy
 			CVEMatch.objects.filter(pk=m.pk).update(evidence={**banner, 'runzero': True})  # hard evidence arrives under legacy
@@ -164,18 +168,28 @@ class UpgradeGuardTests(Base):
 
 	def test_new_probe_proof_on_the_first_rescan_after_the_update_pages(self):
 		port = self._old_row('table')  # a port-table guess: smoke before and after the update
-		port.extra = {'method': 'probed'}  # nmap now really probes the service: new proof
+		port.extra = {'method': 'probed'}  # nmap now really probes the service: the version is proven, not the flaw (1.3.5)
 		port.save()
 		scan2, sub2 = self.rescan()
 		self.correlate()
-		self.assertEqual(threat.match_heat(self.only_match(subdomain=sub2)), FIRE)
-		self.assertTrue(notify.fire_matches(scan2.start_scan_date, scan2))
+		self.assertEqual(threat.match_heat(self.only_match(subdomain=sub2)), SMOKE)
+		self.assertFalse(notify.fire_matches(scan2.start_scan_date, scan2))
+		self.report('CVE-2099-7101')  # proof of the flaw: new, and paged on the next scan
+		scan3, sub3 = self.rescan()
+		self.correlate()
+		self.assertEqual(threat.match_heat(self.only_match(subdomain=sub3)), FIRE)
+		self.assertTrue(notify.fire_matches(scan3.start_scan_date, scan3))
 		self.assertEqual(len(self.sends), 1)
 
 	def test_new_probe_proof_on_recorrelation_after_the_update_pages(self):
 		port = self._old_row('table')
 		port.extra = {'method': 'probed'}
 		port.save()
+		with self.captureOnCommitCallbacks(execute=True):
+			self.correlate()
+		self.assertEqual(threat.match_heat(self.only_match()), SMOKE)  # 1.3.5: the version only
+		self.assertEqual(self.sends, [])
+		self.report('CVE-2099-7101')
 		with self.captureOnCommitCallbacks(execute=True):
 			self.correlate()
 		self.assertEqual(threat.match_heat(self.only_match()), FIRE)
@@ -186,7 +200,7 @@ class UpgradeGuardTests(Base):
 		self._old_row('probed')
 		with self.captureOnCommitCallbacks(execute=True):
 			self.correlate()
-		self.assertEqual(threat.match_heat(self.only_match()), FIRE)
+		self.assertEqual(threat.match_heat(self.only_match()), SMOKE)
 		scan2, _sub2 = self.rescan()
 		self.correlate()
 		self.assertFalse(notify.fire_matches(scan2.start_scan_date, scan2))
@@ -196,6 +210,10 @@ class UpgradeGuardTests(Base):
 		port = self._old_row('probed')
 		port.version = '2.441'
 		port.save()
+		with self.captureOnCommitCallbacks(execute=True):
+			self.correlate()
+		self.assertEqual(len(self.sends), 0)  # 1.3.5: another proven version is still no proof of the flaw
+		self.report('CVE-2099-7101')
 		with self.captureOnCommitCallbacks(execute=True):
 			self.correlate()
 		self.assertEqual(len(self.sends), 1)
@@ -225,8 +243,9 @@ class VendorBannerTests(Base):
 		self.correlate()
 		m = self.only_match()
 		self.assertTrue(m.evidence['vendor_banner'])
-		self.assertEqual(threat.match_heat(m), FIRE)
-		self.assertEqual(self.parity()[m.pk], (HEAT_RANK[FIRE], HEAT_RANK[FIRE]))
+		self.assertTrue(match_policy.version_proven(m))
+		self.assertEqual(threat.match_heat(m), SMOKE)  # 1.3.5: the version is proven, not that the flaw is exploitable
+		self.assertEqual(self.parity()[m.pk], (HEAT_RANK[SMOKE], HEAT_RANK[SMOKE]))
 
 	def test_a_probed_powerdns_banner_is_smoke(self):
 		self.entry('CVE-2099-7601', affected('PowerDNS Recursor', '4.0', '4.9'), kev=True)
@@ -244,7 +263,8 @@ class FindingParityTests(Base):
 		self.entry('CVE-2099-7401', [], kev=True)
 		self.entry('CVE-2099-7402', [], kev=False, exploit_db=False, cvss=9.8)
 		cases = {'lower hot': (['cve-2099-7401'], FIRE), 'space hot': ([' CVE-2099-7401 '], FIRE), 'newline hot': (['CVE-2099-7401\n'], FIRE),
-				 'empty': ([''], FIRE), 'blank': (['  '], FIRE), 'empty+hot': (['', 'CVE-2099-7401'], FIRE), 'space cold': (['CVE-2099-7402\n'], ICE)}
+				 # no CVE name at all: its severity, held at smoke until a validation reproduces it (1.3.5)
+				 'empty': ([''], SMOKE), 'blank': (['  '], SMOKE), 'empty+hot': (['', 'CVE-2099-7401'], FIRE), 'space cold': (['CVE-2099-7402\n'], ICE)}
 		ids = {}
 		for label, (names, _want) in cases.items():
 			v = Vulnerability.objects.create(name=label, severity=4, source='nuclei', subdomain=self.sub, target_domain=self.domain,
@@ -300,6 +320,7 @@ class TurnedHotTests(Base):
 		from cveFeed import tasks
 		cve = self.entry('CVE-2099-7202', JENKINS, kev=False, exploit_db=False, cvss=9.8)
 		self.probed('Jenkins', '2.440')
+		self.report('CVE-2099-7202')
 		self.correlate()
 		client = mock.Mock()
 		client.get_entry.return_value = {'id': cve.cve_id, 'affected': JENKINS, 'severity': {'cvss': 9.8}, 'exploitation': {'kev': True}}
@@ -434,6 +455,7 @@ class CarryPerRuleTests(Base):
 	def test_a_page_under_another_rule_is_not_carried_and_the_rescan_pages(self):
 		self.entry('CVE-2099-8501', JENKINS)
 		self.probed('Jenkins', '2.440')
+		self.report('CVE-2099-8501')
 		self.correlate()
 		CVEMatch.objects.update(fire_notified_at=timezone.now(), fire_notified_rule='legacy:smoke')  # paged under legacy, never under kev
 		scan2, sub2 = self.rescan()
@@ -530,7 +552,8 @@ class FindingLaneAndScoreTests(Base):
 		with mock.patch.dict(os.environ, LEGACY):
 			scoring.rescore_hosts(self.project.id, [self.sub.name])
 		detail = Subdomain.objects.get(pk=self.sub.pk).score_detail
-		self.assertEqual([d for d in detail if 'finding' in d['label']][0]['points'], 25)
+		# legacy: its severity, held at smoke until a validation reproduces the template's match (1.3.5)
+		self.assertEqual([d for d in detail if 'finding' in d['label']][0]['points'], scoring.FINDING_HEAT_POINTS[SMOKE])
 		self.assertEqual(scoring.score_host({'findings': [{'severity': 4, 'name': 'x', 'heat': ICE}]})[0], scoring.FINDING_HEAT_POINTS[ICE])
 		self.assertLess(scoring.FINDING_HEAT_POINTS[ICE], scoring.CVE_POINTS[SMOKE])  # it no longer outranks a KEV host with a version inferred
 

@@ -809,6 +809,10 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
 
     if stopped(scan_id):
         return gone
+    from cveFeed import finding_lifecycle
+    from startScan.models import Subdomain
+    # a host that only redirects to another host of the project (www to the apex): what it shares with that host is that host's finding
+    finding_lifecycle.fold_aliases_quietly(scan.domain.project_id, set(Subdomain.objects.filter(scan_history=scan).values_list('name', flat=True)))
     from cveFeed import triage
     triage_result = _stage(scan, 'AI triage and validation', 'triage', lambda: triage.run_for_scan(scan_id, provider=provider),
                            fallback={'rows': 0})  # after the targeted pass, so its findings exist; before the change log, which can cite the verdicts

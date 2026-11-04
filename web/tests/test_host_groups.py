@@ -33,6 +33,9 @@ class OneRowPerHostTests(TestCase):
 		# the scan-less copy carries its own open finding and its own IP without ports
 		cls.bare.ip_addresses.add(IpAddress.objects.create(address='203.0.113.27'))
 		cls.vuln = Vulnerability.objects.create(name='Exposed thing', severity=3, subdomain=cls.bare, target_domain=cls.domain, http_url='https://www.grp.example/')
+		from cveFeed.models import Triage
+		Triage.objects.create(project=cls.project, domain=cls.domain, host=cls.bare.name, kind='nuclei', vulnerability=cls.vuln, status='triaged',
+							  classification='confirmed', validation_status='hit')  # a validation reproduced it: fire (1.3.5)
 		Subdomain.objects.create(name='other.grp.example', target_domain=cls.domain)
 		cls.ctx = Ctx(user=User.objects.create_user('g-admin', password='x', is_superuser=True))
 

@@ -107,12 +107,11 @@ class EvaluationTests(Base):
         run(self.domain)
         self.assertEqual(open_checks(self.domain), {})
 
-    def test_a_port_named_from_the_port_table_is_flagged_and_says_so(self):
+    def test_a_port_named_from_the_port_table_alone_is_not_flagged(self):
+        # no greeting and no fingerprint: a listener that accepts and closes every port is named "telnet" on 23 all the same (1.3.5)
         self.host('quiet.example.test', '192.168.1.9', (23, 'telnet', {'extra': {'method': 'table'}}))
         run(self.domain)
-        row = open_checks(self.domain)[('quiet.example.test', 'cleartext_telnet')]
-        self.assertEqual(row.evidence['identified'], 'port number')
-        self.assertIn('did not fingerprint', row.detail)
+        self.assertNotIn(('quiet.example.test', 'cleartext_telnet'), open_checks(self.domain))
         self.host('seen.example.test', '192.168.1.10', (23, 'telnet'))
         run(self.domain)
         self.assertEqual(open_checks(self.domain)[('seen.example.test', 'cleartext_telnet')].evidence['identified'], 'fingerprint')
@@ -192,7 +191,7 @@ class LifecycleTests(Base):
     def test_two_addresses_and_two_ports_are_one_finding_and_a_rerun_adds_none(self):
         sub, _ = self.host('multi.example.test', '192.168.1.50', (23, 'telnet'), (2323, 'telnet'))
         second = IpAddress.objects.create(address='192.168.1.51')
-        second.ports.add(Port.objects.create(number=23, service_name='telnet', state='open', protocol='tcp'))
+        second.ports.add(Port.objects.create(number=23, service_name='telnet', state='open', protocol='tcp', extra={'method': 'probed'}))
         sub.ip_addresses.add(second)
         run(self.domain)
         run(self.domain)

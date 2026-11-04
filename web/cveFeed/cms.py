@@ -155,15 +155,21 @@ LIBRARIES = frozenset({'jquery', 'jquerymigrate', 'jqueryui', 'bootstrap', 'angu
 TRUSTED = 0.6  # the least confidence at which a probe's reading of a product's version settles a dispute
 
 
-def disproven(pairs, attested=None):
+def disproven(pairs, attested=None, stated=()):
     """``{(product key, version)}`` a host's technologies state that the evidence shows are wrong, for ``pairs`` of ``(name, version)``.
 
     Only a version that is disproved is returned, never a guess at the right one. When a product that runs once per host has two versions:
     one a probe states (``attested``: ``{product key: {versions}}``, from what WPScan or a version probe read on this host) settles it, and
     the others are dropped; with none attested, a version that is also a library's version on the same host is the library's number read as
     the core's and is dropped, unless it is the only version left. A dispute neither rule settles keeps every version: a host's risk is never
-    hidden by choosing between two claims at random."""
+    hidden by choosing between two claims at random.
+
+    ``stated`` are the versions a JavaScript library's OWN file on this host states (``js_libraries.HostLibraries.file_versions``: jQuery
+    3.7.1 read from jquery.min.js's banner). A core version equal to one of them is that file's number read as the core's and is dropped
+    even when it is the only version of the core (a technology scan that recorded "WordPress 3.7.1" from WordPress' jQuery), unless a probe
+    attests it: the core then has no version until something reads its own (its generator tag, its feed)."""
     attested = attested or {}
+    stated = set(stated or ())
     cores, libraries = {}, set()
     for name, version in pairs:
         k = key(name)
@@ -175,11 +181,16 @@ def disproven(pairs, attested=None):
             libraries.add(version)
     out = set()
     for k, found in cores.items():
+        sure = set(attested.get(k, ()))
+        from_files = (found & stated) - sure
+        if from_files:  # a library's own file states this number: it is the library's, whatever else the host says
+            out |= {(k, v) for v in from_files}
+            found = found - from_files
         if len(found) < 2:
             continue
-        stated = found & set(attested.get(k, ()))
-        if stated:
-            out |= {(k, v) for v in found - stated}
+        probe = found & sure
+        if probe:
+            out |= {(k, v) for v in found - probe}
             continue
         borrowed = found & libraries
         if borrowed and found - borrowed:
@@ -199,17 +210,19 @@ def attested(project_id, host, keys):
     return found
 
 
-def superseded(subdomain, technologies):
+def superseded(subdomain, technologies, stated=()):
     """``{(product key, version)}`` of ``subdomain``'s technologies that ``disproven`` rules out. Reads the probe evidence only when a one-core
-    product has more than one version, so a host with no dispute costs no query. ``technologies`` is the host's Technology rows (or names)."""
+    product has more than one version, or one a library's own file states (``stated``), so a host with no dispute costs no query.
+    ``technologies`` is the host's Technology rows (or names)."""
     from cveFeed.correlation import split_name_version
     pairs = [split_name_version(getattr(t, 'name', t) or '') for t in technologies]
+    stated = set(stated or ())
     seen = {}
     for name, version in pairs:
         if version and key(name) in SINGLE_INSTANCE:
             seen.setdefault(key(name), set()).add(version)
-    disputed = {k for k, versions in seen.items() if len(versions) > 1}
+    disputed = {k for k, versions in seen.items() if len(versions) > 1 or versions & stated}
     if not disputed:
         return set()
     project = subdomain.target_domain.project_id
-    return disproven(pairs, attested(project, subdomain.name, disputed))
+    return disproven(pairs, attested(project, subdomain.name, disputed), stated)
