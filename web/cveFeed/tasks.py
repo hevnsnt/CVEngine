@@ -615,6 +615,14 @@ def correlate_refreshed_cves():
     return {'correlated': len(pending)}
 
 
+@app.task(name='reread_stale_fingerprints', bind=False, queue='cve_feed_queue', time_limit=900, soft_time_limit=840)
+def reread_stale_fingerprints(subdomain_ids):
+    """Read again the version of hosts whose new KEV match was held on a fingerprint older than a day, and correlate them again
+    (cveFeed.kev_freshness)."""
+    from cveFeed import kev_freshness
+    return {'read': kev_freshness.reread(subdomain_ids or [])}
+
+
 @app.task(name="correlate_host_inventory", bind=False, queue="cve_feed_queue")
 def correlate_host_inventory(inventory_id):
     """Match one host report (its packages, operating system and patch level) against the CVEs."""

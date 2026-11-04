@@ -127,6 +127,10 @@ TOOLS = [
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'scope_mode': {'type': 'string', 'enum': ['auto', 'host', 'parent']}},
         ['project', 'target_id', 'scope_mode']),
      lambda c, a: svc.set_target_scope(c, a.get('project'), int(a['target_id']), a.get('scope_mode')), True),
+    ('set_target_private_ca', "Say whether a target's devices use their vendor's own private CA (an appliance, a camera, a controller). When true, an untrusted or self-signed certificate chain on the target is expected and rated information instead of medium, from the next hygiene run.", _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'expect_private_ca': {'type': 'boolean'}},
+        ['project', 'target_id', 'expect_private_ca']),
+     lambda c, a: svc.set_target_private_ca(c, a.get('project'), int(a['target_id']), a.get('expect_private_ca')), True),
     ('set_target_discovery_mode', "Set the mode a target is discovered in whenever discovery starts on its own (the work conductor's rescans, the weekly sweeps): standard, deep, passive (public sources only) or manual (never started automatically). Changing it starts nothing.", _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'discovery_mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}},
         ['project', 'target_id', 'discovery_mode']),
@@ -324,7 +328,7 @@ TOOLS = [
     ('register_assets', 'Register the hosts, IPs or CIDRs you are responsible for (needs a token). get_remediation_work then defaults to them.',
      _schema({'assets': {'type': 'array', 'items': {'type': 'string'}}}, ['assets']),
      lambda c, a: svc.register_assets(c, a.get('assets')), True),
-    ('get_remediation_work', 'CVE-on-host items still to fix for your registered assets (or the assets arg), fire first, with fixed versions.',
+    ('get_remediation_work', 'CVE-on-host items still to fix for your registered assets (or the assets arg), fire first, with fixed versions. One item per upgrade: the CVEs one upgrade of one component on one host fixes are one item (cves, match_ids, upgrade_to); count counts items, matches the matches behind them.',
      _schema(_page_props({'project': SLUG, 'assets': {'type': 'string', 'description': 'comma separated hosts/IPs/CIDRs'}, 'tier': {'type': 'string'}}), ['project']),
      lambda c, a: svc.work_items(c, a.get('project'), a), False),
     ('update_remediation_status', f'Set a match to open, in_progress, fixed, accepted_risk or false_positive, with a note on why; {CLOSING}.',

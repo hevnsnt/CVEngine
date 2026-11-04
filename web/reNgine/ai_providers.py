@@ -935,6 +935,12 @@ TRIAGE_SYSTEM_PROMPT = (
 	'inside the advisory range, with no template result, no distribution status and no probe that stated the version, answer '
 	'needs_validation: a version string alone does not show that the host is affected (back-ported fixes, repackaged builds and edge '
 	'devices that report another product\'s version are common). Answer likely only when something beyond the version supports it. '
+	'A FINDING may carry "facts": what cvENGINE parsed itself from the evidence, so you do not have to infer it: an SPF record rebuilt term '
+	'by term with each qualifier as published and its closing "all" term with what a receiver gets (?all is neutral, ~all soft fail, -all '
+	'fail; only a bare all or +all passes everyone), the registrable domain of each name in the evidence and whether it is the same as the '
+	'finding host\'s (that host is redacted, so you cannot compare it yourself), and the products the host fingerprint names (a template\'s '
+	'tags name the products it was written for, not what this host runs). Use these values as given and never contradict them; when the '
+	'fingerprint names no product, do not name one. '
 	+ UNTRUSTED_NOTICE)
 
 
