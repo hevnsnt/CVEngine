@@ -508,7 +508,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None, products=Non
         payload = {'service': _s(label, 40), 'port': number, 'server_reply': extracted[0] if extracted else '',
                    'product': _s((port or ('', ''))[0], 120, names), 'version': _s((port or ('', ''))[1], 120, names),
                    'name': _prose(v.name, 200, names)}
-        fields = {'label': label, 'port': number, 'reply': reply}
+        fields = {'label': label, 'port': number, 'reply': stable_text(reply, tokens=False)}
         priority = (1, 0)
     elif kind == 'bbot':
         facts = {}
@@ -526,7 +526,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None, products=Non
                    'description': _prose(redact_text(v.description), 1500, names), 'path': _path_only(v.http_url, names),
                    'http_status': _status_of(v.response), 'source': _s(source, 40)}
         fields = {'source': source, 'template_id': v.template_id or '', 'matcher': v.matcher_name or '', 'name': v.name,
-                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(signed)}
+                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(stable_text(e, tokens=False) for e in signed)}
         priority = (0, 0) if source == 'nuclei-cve' else (3, -severity)
         if products is not None and severity >= MEDIUM:
             payload['facts'] = facts['parsed'] = {'products': nuclei_product_facts(products, tags, v.template_id, v.name, names)}
@@ -568,7 +568,8 @@ def describe_hygiene(f):
     if parsed:
         payload['facts'] = parsed
     return {'kind': 'hygiene', 'facts': {'parsed': parsed} if parsed else {}, 'payload': payload,
-            'signature_fields': {'check': f.check_name, 'severity': f.severity, 'evidence': evidence}, 'severity': f.severity,
+            'signature_fields': {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)},
+            'severity': f.severity,
             'priority': (5, -f.severity)}
 
 
@@ -919,14 +920,87 @@ def describe(finding):
 
 
 def shown_digest(d):
-    """The sha1 (16 hex) of exactly what the prompt of a description shows the model: its payload and host context. Part of the signature
-    of every kind but a CVE match (whose shown host text is bound by ``bind_host_text``), so one signature is one question: the answer
-    stored for it is the answer any finding of the project with the same signature would get, on any host, and it is reused there instead
-    of each host asking its own (``reached_here``). Before, the signature of these kinds left out a page title, a path, a detail the prompt
-    showed, so a closing answer or a step down was kept to the host it was reached on and its twins on other hosts each asked again and
-    could be answered differently."""
-    shown = [d.get('payload'), d.get('host_context')]
+    """The sha1 (16 hex) of what the prompt of a description shows the model (its payload and host context), with the values that change on
+    their own over time made stable (``stable``). Part of the signature of every kind but a CVE match (whose shown host text is bound by
+    ``bind_host_text``), so one signature is one question: the answer stored for it is the answer any finding of the project with the same
+    signature would get, on any host, and it is reused there instead of each host asking its own (``reached_here``). Before, the signature
+    of these kinds left out a page title, a path, a detail the prompt showed, so a closing answer or a step down was kept to the host it was
+    reached on and its twins on other hosts each asked again and could be answered differently. The prompt still shows the exact values
+    (15 days left, the expiry date); only the key ignores them, or keeps their bucket, so a day passing is not a new (paid) question."""
+    shown = [stable(d.get('payload')), stable(d.get('host_context'))]
     return hashlib.sha1(json.dumps(shown, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+# ----------------------------------------------------------------------------- stable keys: what changes on its own is not new evidence
+#
+# A day count, a date or a time, a counter, a response time, a header that carries the clock (Date, Expires, Last-Modified, ETag,
+# Set-Cookie) or a nonce or session id in an excerpt changes from one scan to the next while the finding does not. In a signature it made
+# every rescan a new question: one AI call per finding per day for an expiring certificate. ``stable`` is what keys read instead; the
+# prompt is unchanged. A day count is kept as a bucket, because the bucket is what moves the answer (an expired certificate, a week left,
+# a month left).
+
+VOLATILE_KEYS = frozenset((
+    'not_after', 'not_before', 'notafter', 'notbefore', 'valid_from', 'valid_to', 'valid_until', 'expires', 'expiry', 'expires_at',
+    'last_seen', 'first_seen', 'checked_at', 'checked', 'observed_at', 'scanned_at', 'captured_at', 'validated_at', 'updated_at',
+    'created_at', 'date', 'last_modified', 'last-modified', 'etag', 'set-cookie', 'set_cookie', 'response_time', 'response_time_ms',
+    'elapsed', 'elapsed_ms', 'duration', 'latency', 'timestamp', 'time', 'uptime', 'uptime_in_seconds', 'sensitive_score', 'age',
+))
+DAY_KEYS = frozenset(('days_left', 'days_remaining', 'days_to_expiry', 'expires_in_days', 'days_ago', 'days_since', 'age_days'))
+_DAY_COUNT = re.compile(r'(?<![\w-])(-?\d{1,6})\s+days?\s+(left|remaining|ago)\b', re.I)
+_ISO_TIME = re.compile(r'\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b')
+_HTTP_DATE = re.compile(r'\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}[ -][A-Z][a-z]{2}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}(?:\s+(?:GMT|UTC))?')
+_CLOCK = re.compile(r'\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b')
+_EPOCH = re.compile(r'\b1\d{9}(?:\d{3})?\b')
+_HEADER_CLOCK = re.compile(r'\b(Date|Expires|Last-Modified|ETag|Set-Cookie|Age)\s*:\s*[^\r\n]*', re.I)
+# a nonce, a session id, a CSRF or state value: a long run of letters and digits mixed (with - or _), or long hex
+_TOKEN = re.compile(r'(?<![\w.])(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{24,}(?![\w.])|\b[0-9a-fA-F]{16,}\b')
+
+
+def days_bucket(days):
+    """A day count in the bucket that changes what a finding means: expired, under 7 days, under 30 days, 30 days or more."""
+    try:
+        days = int(str(days).strip())
+    except (TypeError, ValueError):
+        return 'unknown'
+    return 'expired' if days < 0 else 'under 7 days' if days < 7 else 'under 30 days' if days < 30 else '30 days or more'
+
+
+def stable_text(text, tokens=True):
+    """``text`` with what changes on its own replaced: a day count by its bucket ("15 days left" -> "<under 30 days> left", "662 days ago"
+    -> "<expired>"), dates, times, epoch seconds and clock-bearing header values by a placeholder and, with ``tokens``, nonces and session
+    ids (``_TOKEN``). Without ``tokens`` for a value the signature keeps whole (an extracted secret must not share a key with another)."""
+    if not isinstance(text, str):
+        return text
+    text = _DAY_COUNT.sub(lambda m: f'<{"expired" if m.group(2).lower() == "ago" else days_bucket(m.group(1))}> {m.group(2).lower()}', text)
+    text = _HEADER_CLOCK.sub(lambda m: f'{m.group(1)}: <volatile>', text)
+    text = _HTTP_DATE.sub('<date>', _ISO_TIME.sub('<date>', text))
+    text = _EPOCH.sub('<time>', _CLOCK.sub('<time>', text))
+    return _TOKEN.sub('<token>', text) if tokens else text
+
+
+def stable(value, tokens=True, depth=0):
+    """``value`` (a payload, evidence) as keys read it: ``VOLATILE_KEYS`` left out, ``DAY_KEYS`` as their bucket, ``sensitive_types`` as the
+    types without their counts, every string through ``stable_text``."""
+    if isinstance(value, str):
+        return stable_text(value, tokens)
+    if depth > 8:
+        return value
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in VOLATILE_KEYS:
+                continue
+            if name in DAY_KEYS:
+                out[key] = days_bucket(item)
+            elif name == 'sensitive_types' and isinstance(item, dict):
+                out[key] = sorted(item)
+            else:
+                out[key] = stable(item, tokens, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [stable(item, tokens, depth + 1) for item in value]
+    return value
 
 
 def request_fresh_review(row, d, nonce):

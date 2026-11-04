@@ -1436,3 +1436,73 @@ class ParsedFactsDbTests(TriageDbBase):
 		self.assertIn('template_tags_naming_products', prompt)
 		self.assertNotIn('sso.tr.test', prompt)
 		self.assertNotIn('Keycloak', Triage.objects.get(vulnerability=vuln).verdict.impact)
+
+
+@mock.patch('cveFeed.activity.log', return_value=None)
+class StableSignatureTests(TriageDbBase):
+	"""The signature carries what the prompt shows (``shown_digest``), so what changes on its own (a day count, a date, a counter, a nonce)
+	must not make a new, paid question every day: the key reads it stable (``triage.stable``), the prompt still shows the exact value."""
+
+	def expiring(self, days, last_seen=None, severity=2, host='app.tr.test'):
+		f = HygieneFinding.objects.filter(domain=self.domain, host=f'{host}:443', check_name='tls_expiring').first()
+		fields = dict(severity=severity, title=f'Certificate for {host}:443 expires within 30 days ({days} days left)',
+					  detail='Valid until 2026-11-18.', evidence={'days_left': days, 'not_after': '2026-11-18T23:59:59+00:00'},
+					  last_seen=last_seen or timezone.now())
+		if f is None:
+			return HygieneFinding.objects.create(domain=self.domain, host=f'{host}:443', check_name='tls_expiring', **fields)
+		HygieneFinding.objects.filter(pk=f.pk).update(**fields)
+		f.refresh_from_db()
+		return f
+
+	def test_a_day_later_the_same_certificate_is_the_same_question(self, _log):
+		f = self.expiring(16)
+		before = triage.describe(f)
+		p = self.provider(model_reply('likely', 'Expires soon.'))
+		self.run_all(matches=[f], provider=p)
+		f = self.expiring(15, last_seen=timezone.now() + datetime.timedelta(days=1))  # a day later: one day fewer, a new last_seen
+		after = triage.describe(f)
+		self.assertEqual(before['signature'], after['signature'])
+		self.assertEqual(before['evidence_key'], after['evidence_key'])
+		self.assertIn('(15 days left)', ai_providers.build_triage_prompt(after['kind'], after['payload']))  # the prompt shows the exact value
+		again = self.provider(model_reply('likely', 'Expires soon.'))
+		self.run_all(matches=[f], provider=again)
+		self.assertEqual(again.complete.call_count, 0)
+		self.assertEqual(Triage.objects.get(hygiene=f).status, 'triaged')
+
+	def test_crossing_a_bucket_is_a_new_question(self, _log):
+		def sig(days):
+			return triage.describe_hygiene(SimpleNamespace(
+				host='app.tr.test:443', domain=SimpleNamespace(name='tr.test'), check_name='tls_expiring', severity=2,
+				title=f'Certificate for app.tr.test:443 expires within 30 days ({days} days left)', detail='Valid until 2026-11-18.',
+				evidence={'days_left': days, 'not_after': '2026-11-18T23:59:59+00:00'}))
+
+		def key(days):
+			d = sig(days)
+			fields = {**d['signature_fields'], 'shown': triage.shown_digest(d)}
+			return triage.signature_for('hygiene', fields)
+		self.assertEqual(len({key(d) for d in (29, 20, 8, 7)}), 1)  # under 30 days
+		self.assertEqual(len({key(d) for d in (6, 1, 0)}), 1)  # under 7 days
+		self.assertNotEqual(key(7), key(6))
+		self.assertNotEqual(key(30), key(29))
+		self.assertNotEqual(key(0), key(-1))
+		self.assertEqual(triage.days_bucket(-3), 'expired')
+
+	def test_dates_counters_and_nonces_do_not_move_other_kinds(self, _log):
+		def nuclei(extracted, description):
+			return triage.describe_vulnerability(fake_vuln(extracted_results=extracted, description=description))
+
+		def route(score, count, title):
+			return triage.describe_route(SimpleNamespace(
+				host='a.tr.test', domain=SimpleNamespace(name='tr.test'), path='/backup/', auth_state='open', http_status=200, title=title,
+				content_type='text/html', evidence={}, sensitive_score=score, sensitive={'email': {'count': count}}))
+
+		def key(d):
+			return triage.signature_for(d['kind'], {**d['signature_fields'], 'shown': triage.shown_digest(d)})
+		a = nuclei(['Date: Tue, 03 Nov 2026 12:00:00 GMT'], 'Seen at 2026-11-03T12:00:00Z, state=eyJ6aXAiOiJERUYiLCJhbGciOiJkaXIi1')
+		b = nuclei(['Date: Wed, 04 Nov 2026 09:30:12 GMT'], 'Seen at 2026-11-04T09:30:12Z, state=Zm9vYmFyYmF6cXV4cXV1eHh5ejEyMzQ1')
+		self.assertEqual(key(a), key(b))
+		self.assertNotEqual(key(a), key(nuclei(['v1.2'], 'Seen at 2026-11-03T12:00:00Z')))  # real evidence still counts
+		self.assertEqual(key(route(40, 3, 'Index of /backup')), key(route(55, 9, 'Index of /backup')))
+		self.assertNotEqual(key(route(40, 3, 'Index of /backup')), key(route(40, 3, 'Admin console')))
+		self.assertNotIn('sensitive_score', triage.stable(route(40, 3, 'x')['payload']))
+		self.assertEqual(route(40, 3, 'x')['payload']['sensitive_score'], 40)  # the prompt keeps it
