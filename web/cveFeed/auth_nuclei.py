@@ -80,7 +80,7 @@ def _asset(url, cred):
 def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, service='nuclei', force=False):
     """Run the plain pass's selection (``tags``, ``severities``) signed in over the nuclei ``targets`` the scope covers. Returns a summary
     dict (``targets``, ``findings``, ``new``, ``error`` when it failed); never raises, so the plain pass's result stands whatever happens here."""
-    from cveFeed import activity, ledger, nuclei_scan, template_gates
+    from cveFeed import activity, ledger, nuclei_fp, nuclei_scan, template_gates
     from cveFeed.models import DiscoveryEvent
     from reNgine import resources
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -149,6 +149,8 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                                 try:
                                     for line in stream(path, **kwargs):
                                         line = auth_checks.redact_obj(line, values)
+                                        if isinstance(line, dict) and nuclei_fp.same_body_artefact(line, project):
+                                            continue  # the host answers anything with this error page (cveFeed.nuclei_fp)
                                         try:
                                             data = parse_nuclei_result(line)
                                         except (KeyError, TypeError):

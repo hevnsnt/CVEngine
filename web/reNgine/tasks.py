@@ -380,6 +380,7 @@ def parse_nuclei_result(line):
 	Returns:
 		dict: Vulnerability data.
 	"""
+	from cveFeed.nuclei_fp import bounded
 	return {
 		'name': line['info'].get('name', ''),
 		'type': line['type'],
@@ -389,9 +390,10 @@ def parse_nuclei_result(line):
 		'template_id': line['template-id'],
 		'description': line['info'].get('description', ''),
 		'matcher_name': line.get('matcher-name', ''),
-		'curl_command': line.get('curl-command'),
-		'request': line.get('request'),
-		'response': line.get('response'),
+		'curl_command': bounded(line.get('curl-command'), 15000),
+		# the matched request and response are the evidence of the finding: kept, clipped (cveFeed.nuclei_fp.MAX_EVIDENCE)
+		'request': bounded(line.get('request')),
+		'response': bounded(line.get('response')),
 		'extracted_results': line.get('extracted-results', []),
 		'cvss_metrics': line['info'].get('classification', {}).get('cvss-metrics', ''),
 		'cvss_score': line['info'].get('classification', {}).get('cvss-score'),

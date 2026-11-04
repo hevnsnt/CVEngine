@@ -18,7 +18,9 @@ What it records:
 
 * configuration findings (``HygieneFinding``, check names ``tlsa_*``): SSLv2/SSLv3 offered, NULL, anonymous, export, low-strength and
   3DES ciphers, no forward secrecy, insecure renegotiation, and every named vulnerability testssl.sh reports as vulnerable or
-  potentially vulnerable. A finding resolves only when a later test of the same port ran and no longer reports it;
+  potentially vulnerable. A finding resolves only when a later test of the same port ran and no longer reports it. A listener that
+  completes no handshake with any protocol gets one low "TLS listener does not negotiate" finding (``tlsa_no_handshake``) in place of its
+  cipher results, and a fallback test whose downgraded handshake never completed (a refusal without the standard alert) is no finding;
 * a durable ``ProbeObservation`` per vulnerability test (kind ``tls-vuln``), found or absent, which is the evidence;
 * hard CVE evidence: a vulnerability testssl.sh proved (Heartbleed answered with memory, a ROBOT oracle, an accepted export cipher)
   is a ``CVEMatch`` (source ``testssl``, ``template_result`` ``vulnerable``) for each CVE the test names. A later test that finds it
@@ -83,6 +85,12 @@ CONFIG = {
     'fallback_SCSV': 'does not support TLS_FALLBACK_SCSV', 'DH_groups': 'uses weak Diffie-Hellman parameters',
 }
 GOOD = re.compile(r'^(not vulnerable|not offered|supported|ok\b)', re.I)
+PROTOCOL_IDS = ('TLS1', 'TLS1_1', 'TLS1_2', 'TLS1_3', 'SSLv2', 'SSLv3')
+# A listener that completes no handshake at all (every protocol "not offered"): testssl.sh still reports "no forward secrecy" and the other
+# cipher tests as failed, which says nothing about a cipher setup. It gets this one finding instead.
+NO_HANDSHAKE = 'tlsa_no_handshake'
+# testssl.sh's fallback test when the downgraded handshake was refused without the standard alert: no downgraded session was established
+FALLBACK_REFUSED = re.compile(r"handshake.?failure|no cipher|did ?n[o']t complete|never completes?|aborted|connection (?:was )?(?:closed|reset)", re.I)
 
 
 class TestsslError(RuntimeError):
@@ -197,7 +205,7 @@ def evaluate(items, where):
     result = Result()
     for item in items:
         test_id, level, text = str(item['id']), str(item.get('severity') or '').upper(), ' '.join(str(item.get('finding') or '').split())
-        if test_id in ('TLS1', 'TLS1_1', 'TLS1_2', 'TLS1_3', 'SSLv2', 'SSLv3'):
+        if test_id in PROTOCOL_IDS:
             result.protocols[test_id] = 'offered' if text.lower().startswith('offered') else 'not offered'
         if test_id not in VULNS and test_id not in CONFIG:
             continue
@@ -225,9 +233,33 @@ def evaluate(items, where):
         else:
             if sev == 0:
                 continue
+            if test_id == 'fallback_SCSV' and FALLBACK_REFUSED.search(text):
+                continue  # the downgraded handshake never completed: the server refuses the downgrade, only without the standard alert
             result.findings.append({'check': name, 'severity': sev, 'title': f'{where} {CONFIG[test_id]}', 'detail': text[:600],
                                     'evidence': {'source': 'testssl.sh', 'test': test_id, 'result': text[:300]}})
+    if negotiates_nothing(result):
+        _no_handshake(result, where)
     return result
+
+
+def negotiates_nothing(result):
+    """True when the report tested the protocols and the listener offered none of them: it completed no TLS handshake."""
+    return bool(result.protocols) and not any(v == 'offered' for v in result.protocols.values())
+
+
+def _no_handshake(result, where):
+    """A listener that negotiates nothing: its cipher findings ("no forward secrecy" and the like) are artefacts of no handshake, so they
+    give way to one low finding that says so. A proven vulnerability stays (it needed an answer from the server)."""
+    proven = {check_name(test_id) for test_id in result.vulnerable}
+    result.findings = [f for f in result.findings if f['check'] in proven]
+    result.inconclusive -= {check_name(test_id) for test_id in CONFIG}  # an earlier cipher finding of this port resolves: it never applied
+    tested = ', '.join(f'{k}: {v}' for k, v in sorted(result.protocols.items()))
+    result.findings.append({
+        'check': NO_HANDSHAKE, 'severity': SEVERITY['LOW'], 'title': f'{where}: TLS listener does not negotiate',
+        'detail': ('The port accepts a connection but completes no TLS handshake with any protocol version for this server name, so no cipher '
+                   'or forward-secrecy result applies. A stale mapping (a CNAME to a service that no longer serves this name) or a listener '
+                   'that is not TLS looks like this. Fix: remove the name or the listener, or serve a certificate for the name.'),
+        'evidence': {'source': 'testssl.sh', 'test': 'protocols', 'result': tested[:300], 'protocols': dict(result.protocols)}})
 
 
 # ----------------------------------------------------------------------------- storing it
