@@ -594,8 +594,10 @@ def save_vulnerability(**vuln_data):
 			vuln.tags.add(tag)
 			vuln.save()
 
-	# Save CVEs
+	# Save CVEs (an id that cannot be one, too long for CveId.name, is dropped rather than failing the whole save)
 	for cve_id in cve_ids or []:
+		if not isinstance(cve_id, str) or not 0 < len(cve_id) <= 100:
+			continue
 		cve, _ = CveId.objects.get_or_create(name=cve_id)
 		if cve:
 			vuln.cve_ids.add(cve)

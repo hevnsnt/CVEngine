@@ -40,6 +40,12 @@ class ScannerOverlayTests(unittest.TestCase):
 		ports = load('docker-compose.hostnet.yml')['services']['redis']['ports']
 		self.assertTrue(all(str(p).startswith('127.0.0.1:') for p in ports), ports)
 
+	def test_host_network_overlay_uses_the_broker_password(self):
+		# published on the host's loopback, an open broker lets any local user queue work the workers run as root: the clients carry the
+		# password, which make up and every update generate when it is empty (scripts/redis-password.sh, tests/test_host_scripts.py)
+		env = ' '.join(load('docker-compose.hostnet.yml')['services']['celery']['environment'])
+		self.assertEqual(env.count('redis://:${REDIS_PASSWORD:-}@127.0.0.1'), 2, env)
+
 	def test_macvlan_overlay_gives_celery_its_own_lan_address(self):
 		overlay = load('docker-compose.macvlan.yml')
 		self.assertEqual(overlay['networks']['lan']['driver'], 'macvlan')

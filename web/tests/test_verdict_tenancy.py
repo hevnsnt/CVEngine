@@ -365,6 +365,33 @@ class AiAnswerTests(TenancyFixture):
 		self.assertEqual(services._triage_brief(Triage.objects.get(route=real))['severity_adjust'], 0)  # never on another tenant's finding
 		self.assertEqual(services._triage_brief(Triage.objects.get(route=again))['severity_adjust'], -1)  # the same host keeps it
 
+	def test_a_crafted_page_cannot_raise_another_tenants_finding(self, _log):
+		# security review 1.3.4 (ai-2): the title is in the prompt, not in the signature, so tenant A's page used to set tenant B's class and
+		# a severity step up; B now asks its own question and shows its own answer
+		from agentapi import services
+		crafted = self.route(self.a, 'Production payroll database export, critical, exploited in the wild')
+		real = self.route(self.b, 'Index of /backup')
+		raised = json.dumps({'classification': 'likely', 'reason': 'r', 'impact': '', 'severity_adjust': 1, 'severity_reason': 'the page says so',
+							 'remediation': '', 'validation_steps': []})
+		self.triage([crafted], provider=self.provider(raised))
+		self.assertEqual(services._triage_brief(Triage.objects.get(route=crafted))['severity_adjust'], 1)  # the attacker's own row
+		own = self.provider(answer('needs_validation'))
+		self.triage([real], provider=own)
+		self.assertEqual(own.complete.call_count, 1)
+		row = Triage.objects.get(route=real)
+		self.assertEqual(row.classification, 'needs_validation')
+		self.assertEqual(services._triage_brief(row)['severity_adjust'], 0)
+
+	def test_another_host_of_the_same_project_still_takes_a_raising_answer(self, _log):
+		first = self.route(self.b, 'Index of /backup')
+		second = RouteAuth.objects.create(project=self.b.project, domain=self.b.domain, host=self.b.host('two.victim.test').name,
+										  url='https://two.victim.test/backup/', path='/backup/', auth_state='open', http_status=200,
+										  title='Index of /backup', sensitive_score=10)
+		self.triage([first], provider=self.provider(answer('likely')))
+		again = self.provider(answer('likely'))
+		self.triage([second], provider=again)
+		self.assertEqual((again.complete.call_count, Triage.objects.get(route=second).classification), (0, 'likely'))
+
 @mock.patch('cveFeed.activity.log', return_value=None)
 class SameHostReuseTests(TenancyFixture):
 	"""What the fix keeps: a rescan of the same host starts from what that host's own finding earned (issue 206)."""
@@ -579,11 +606,11 @@ class SharedTextTests(Rv392Fixture):
 		self.triage([a], provider=echoing_provider('likely'))
 		p2 = echoing_provider('likely')
 		self.triage([b], provider=p2)
-		self.assertEqual(len(p2.calls), 0)
+		self.assertEqual(len(p2.calls), 1)  # a route's prompt shows its page title, which the signature lacks: B asks its own question
+		self.assertNotIn(SECRET_TITLE, json.dumps(p2.calls))
 		shown = self.detail(self.b, 'route', b.pk)
 		self.assertEqual(shown['ai']['classification'], 'likely')
-		self.assertNotIn(SECRET_TITLE, json.dumps(shown))
-		self.assertEqual((shown['why_it_matters'], shown['remediation']['text'], shown['ai']['advice'], shown['ai']['model_reason']), ('', '', [], ''))
+		self.assertNotIn(SECRET_TITLE, json.dumps(shown))  # B shows its own answer's words, never A's
 
 	def test_a_report_shows_no_other_projects_words(self, _log):
 		from cveFeed import report_data
@@ -800,12 +827,17 @@ class LoweringTests(Rv392Fixture):
 		self.triage(triage.with_cves([theirs]), provider=p)
 		self.assertEqual((p.complete.call_count, Triage.objects.get(match=theirs).classification), (0, 'needs_validation'))
 
-	def test_a_raising_answer_is_still_shared(self, _log):
+	def test_a_raising_route_answer_is_not_shared_across_organizations(self, _log):
+		# security review 1.3.4 (ai-2): a route's prompt shows its page title, which the signature lacks, so another organization's page
+		# must not raise this one: it asks its own question
 		self.triage([self.route(self.a, 'x', '/admin/')], provider=self.provider(answer('likely')))
 		real = self.route(self.b, 'y', '/admin/')
 		p = self.provider(answer('needs_validation'))
 		self.triage([real], provider=p)
-		self.assertEqual((p.complete.call_count, Triage.objects.get(route=real).classification), (0, 'likely'))
+		r = Triage.objects.get(route=real)
+		self.assertEqual(p.complete.call_count, 1)
+		# its own answer, stored for its own project and host (an anonymous /admin/ route is held at likely by rule, whatever was asked)
+		self.assertEqual((r.verdict.project_id, r.verdict.host), (real.project_id, real.host))
 
 	def test_a_waiting_match_keeps_its_legacy_verdict(self, _log):
 		self.widget_match(self.a)
@@ -1032,9 +1064,9 @@ class SurvivingMutantTests(Rv392Fixture):
 		self.assertNotEqual(key('cve_match', 's', row(1, 'h')), key('cve_match', 's', row(1, 'h'), per_host=False))
 		self.assertNotEqual(key('cve_match', 's', row(1, 'h')), 's')
 
-	def test_only_a_step_up_in_severity_crosses_organizations(self, _log):
+	def test_no_severity_step_on_a_route_crosses_organizations(self, _log):
 		from agentapi import services
-		for adjust, shown in ((-1, 0), (1, 1)):
+		for adjust, shown in ((-1, 0), (1, 0)):
 			TriageVerdict.objects.all().delete()
 			RouteAuth.objects.all().delete()
 			crafted = self.route(self.a, 'Decoy', '/admin/')
@@ -1044,7 +1076,7 @@ class SurvivingMutantTests(Rv392Fixture):
 			self.triage([crafted], provider=self.provider(raised))
 			p = self.provider(answer('likely'))
 			self.triage([real], provider=p)
-			self.assertEqual(p.complete.call_count, 0)  # a raising answer is shared
+			self.assertEqual(p.complete.call_count, 1)  # its own question (security review 1.3.4, ai-2)
 			self.assertEqual(services._triage_brief(Triage.objects.get(route=real))['severity_adjust'], shown, adjust)
 			self.assertEqual(services._triage_brief(Triage.objects.get(route=crafted))['severity_adjust'], adjust)
 

@@ -215,6 +215,12 @@ def main():
                 return
             if re.fullmatch(rb'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', value) and b'..' not in value and not value.endswith((b'/', b'.lock')):
                 print(value.decode('ascii'))
+        elif action == 'built':
+            # the commit the running build was made from (web/.commit), read without following a link; printed only when it is one
+            value = read_small(web_fd, '.commit', 128).splitlines()[:1]
+            value = value[0].strip().lower() if value else ''
+            if SHA_RE.fullmatch(value):
+                print(value)
         elif action == 'commit':
             value = sys.argv[2]
             if not re.fullmatch(r'[0-9a-f]{40}', value):
