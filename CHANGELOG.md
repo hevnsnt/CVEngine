@@ -2,6 +2,21 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Upgrade notes
+
+- **Re-rating stored dangling-DNS findings is a separate, opt-in step.** New scans rate baddns findings the new way by themselves. To re-rate the open ones already stored, run `python3 manage.py rerate_dangling_dns` (a dry run: it runs the same read-only DNS and HTTP checks and prints, per project, how many findings would change severity and how many would get their host), then `python3 manage.py rerate_dangling_dns --apply` to write them. `--project <slug>` limits it to one project.
+
+### Fixed
+
+- **A delegation nobody hosts at a self-service DNS provider is now fire.** A name delegated to Google Cloud DNS, Route 53, Azure DNS, DigitalOcean, Linode or Hurricane Electric where every delegated name server answers REFUSED or SERVFAIL to a non-recursive SOA query can be claimed by anyone who creates that zone there; baddns rated it medium, so it showed as smoke. It is now high (fire), with the zone and the name servers in the finding. A lame delegation elsewhere stays smoke, and one that a delegated server does serve is ice.
+- **Dangling-NS findings are judged at the client's own zone cut.** baddns followed a client's CNAME into the provider's zone (Railway, Marigold) and reported how the provider's name servers answer as a dangling delegation of the client. cvENGINE now walks the delegation down from the registry; a name of the client's that is a CNAME is not a delegation the client made, and that finding is no longer recorded.
+- **A dangling CNAME no outsider can claim is ice.** A CNAME whose target does not resolve was smoke even when nobody else can create the target (a load balancer's random name, a tenant name the provider assigns, a domain that is still registered, the client's own domain). It is now low (ice) with the reason, unless the target is at a provider documented as claimable (`cveFeed/data/takeover_providers.json`, from can-i-take-over-xyz) or its registrable domain is not registered.
+- **Mailgun "takeover" findings that every host name gets are dropped.** Mailgun answers "404 page not found" for any host, so baddns's HTTP match reported live, claimed Mailgun tracking names as takeovers. An HTTP-match finding now sends a control request with a random host name to the same addresses and is not recorded when the control gets the same answer (a target at a provider listed as claimable is not controlled: its unclaimed page is the same for every unknown host by design).
+- **Dangling-DNS findings name their host.** A finding on a name that does not resolve was stored with no host although it says where it matched; it now gets that host.
+- **No bucket names are guessed from a domain that belongs to someone else.** The cloud storage sweep guessed bucket names from every target's label, so a target domain owned by another company (say, a retailer's brand that shares the client's word) produced public buckets of that company reported as the client's. Before guessing, cvENGINE now compares the domain with the project's other domains: a different published registrant (RDAP), or name servers and mail servers on another organization's own infrastructure that none of the project's other domains use, means no guesses for it; the sweep's activity line says which domain was skipped and why. Earlier guess findings for such a domain resolve at the next sweep.
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes
