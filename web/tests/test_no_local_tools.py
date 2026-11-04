@@ -42,6 +42,7 @@ SKIP_DIRS = {'__pycache__', 'tests'}
 ALLOWED = {
     'nmap': [
         'Dockerfile',
+        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
@@ -54,11 +55,14 @@ ALLOWED = {
         'cveFeed/changes.py',
         'cveFeed/check_coverage.py',
         'cveFeed/cleartext.py',  # 1.3.2 cleartext hygiene (develop): reads stored nmap service rows, runs nothing
+        'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/correlation.py',
         'cveFeed/coverage_topup.py',
         'cveFeed/db_exposure.py',
         'cveFeed/db_intel.py',
         'cveFeed/detection.py',
+        'cveFeed/detection_author.py',  # 1.3.3 detection rules author (develop): prompt text about which check fits a class, runs nothing
+        'cveFeed/detection_classes.py',  # 1.3.3 detection classes (develop): comments about which reader fits a class, runs nothing
         'cveFeed/detection_commands.py',
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
@@ -71,6 +75,7 @@ ALLOWED = {
         'cveFeed/intel.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',
         'cveFeed/models.py',
@@ -92,6 +97,7 @@ ALLOWED = {
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
         'cveFeed/testssl_scan.py',
+        'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
@@ -107,6 +113,7 @@ ALLOWED = {
     ],
     'nuclei': [
         'Dockerfile',
+        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
@@ -122,6 +129,7 @@ ALLOWED = {
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
+        'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/counts.py',
         'cveFeed/coverage_topup.py',
         'cveFeed/detection.py',
@@ -134,7 +142,9 @@ ALLOWED = {
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/internal_scan.py',
+        'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
+        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
@@ -155,6 +165,7 @@ ALLOWED = {
         'cveFeed/tasks.py',
         'cveFeed/template_fixtures.py',
         'cveFeed/templategen.py',
+        'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/triage.py',
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/validation.py',
@@ -168,17 +179,20 @@ ALLOWED = {
     ],
     'naabu': [
         'Dockerfile',
+        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
+        'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
         'celery-entrypoint.sh',
         'cveFeed/check_coverage.py',
         'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
+        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
         'cveFeed/report_data.py',
@@ -201,6 +215,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',
         'cveFeed/cms.py',
         'cveFeed/conductor.py',
+        'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/discovery.py',
         'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
@@ -214,6 +229,7 @@ ALLOWED = {
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tasks.py',
+        'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/wp_correlation.py',
         'cveFeed/wpscan_scan.py',
         'reNgine/input_guard.py',
@@ -221,6 +237,7 @@ ALLOWED = {
     ],
     'testssl': [
         'Dockerfile',
+        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
@@ -229,16 +246,21 @@ ALLOWED = {
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
+        'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
         'cveFeed/hygiene.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/match_policy.py',  # 1.3.3 heat policy (develop): docstring naming evidence sources, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tasks.py',
+        'cveFeed/templategen.py',  # 1.3.3 template confirmations (develop): docstring naming evidence sources, runs nothing
         'cveFeed/testssl_scan.py',
+        'cveFeed/tunables.py',  # 1.3.4 port budget tunable (develop): help text about what one run is charged, runs nothing
         'reNgine/input_guard.py',
         'reNgine/resources.py',
     ],
@@ -259,6 +281,7 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/egress_proxy.py',
         'cveFeed/internal_scan.py',
+        'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/labels.py',
         'cveFeed/ledger.py',
         'cveFeed/migrations/0040_hostlabel.py',
