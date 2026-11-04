@@ -89,7 +89,7 @@ class UnifiedFindingsTests(TestCase):
 		self.assertEqual(self.keys(self.get(heat='smoke')), [('scanner', self.high.id), ('hygiene', self.weak_dmarc.id), ('scanner', self.medium.id)])
 		self.assertEqual(self.keys(self.get(severity='critical')), [('cve', self.fire_match.id)])
 		self.assertEqual(self.keys(self.get(type='hygiene', status='all', severity='info')), [('hygiene', self.hyg_info.id)])
-		self.assertEqual(self.get(heat='fire')['counts'], {'cve': 1, 'scanner': 1, 'hygiene': 0})
+		self.assertEqual(self.get(heat='fire')['counts'], {'cve': 1, 'scanner': 0, 'hygiene': 0})  # the scanner finding waits for a validation
 		self.assertEqual(self.keys(self.get(host='api.')), [('scanner', self.medium.id), ('cve', self.ice_match.id)])
 
 	def test_pages_split_the_merged_order(self):
