@@ -138,9 +138,11 @@ class DkimCaaTests(TestCase):
 		self.assertNotIn('dmarc_missing', checks(findings))
 		zone['_dmarc.a.com'] = ['v=DMARC1; p=reject; sp=none; rua=mailto:d@a.com']
 		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
-		inherited = [f for f in findings if f.check == 'dmarc_none']
-		self.assertEqual([(f.severity, f.evidence['inherited_from']) for f in inherited], [(hy.MEDIUM, 'a.com')])  # sp=none is the policy it has
-		self.assertTrue({'dmarc_subdomain_weak', 'dmarc_no_reports'}.isdisjoint(checks(findings)))  # those are the apex's own findings
+		inherited = [f for f in findings if f.check == 'dmarc_subdomain_weak']
+		# sp=none is the policy it has, and the cause is the apex's record: the apex's finding, naming the name it covers (1.3.5 item 20)
+		self.assertEqual([(f.severity, f.host, f.evidence['inherited_from'], f.evidence['covers']) for f in inherited],
+						 [(hy.MEDIUM, 'a.com', 'a.com', ['mail.a.com'])])
+		self.assertTrue({'dmarc_none', 'dmarc_no_reports'}.isdisjoint(checks(findings)))  # the record's other details are the apex's own findings
 		zone.clear()
 		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
 		self.assertIn('dmarc_missing', checks(findings))  # neither the name nor its apex publishes one

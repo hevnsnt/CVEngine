@@ -113,7 +113,7 @@ def graph_payload(domain_id=None, scan_id=None):
     # a match needs its CVE's tier fields only: never the prose columns
     # (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
     matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev',
-                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status').select_related('cve_entry', 'triage')
+                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status', 'triage__heat_override').select_related('cve_entry', 'triage')
     subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
         'ip_addresses', Prefetch('cve_matches', queryset=matches))
     if domain_id:
@@ -164,7 +164,7 @@ def graph_payload(domain_id=None, scan_id=None):
     if sibling_ids:
         for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
                 'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
-                'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status').select_related('cve_entry', 'triage'):
+                'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status', 'triage__heat_override').select_related('cve_entry', 'triage'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
         for sid, severity, name, rank in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
                 .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'name', 'heat_rank'):
@@ -661,7 +661,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.3.4'
+HOW_REVIEWED_VERSION = '1.3.5'
 
 
 def how_page(request):

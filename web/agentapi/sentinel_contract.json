@@ -128,6 +128,19 @@
             "type": "string",
             "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
           }
+        },
+        "type": {
+          "description": "Optional (1.3.5): nuclei's protocol type of the template (its \"type\" field). The server keeps it, lowercased, when it is one of http, tcp, network, javascript, dns, ssl, headless, file, whois, code or websocket, and drops any other value.",
+          "type": "string",
+          "maxLength": 40
+        },
+        "request": {
+          "description": "Optional (1.3.5): the request the template sent when it matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+          "type": "string"
+        },
+        "response": {
+          "description": "Optional (1.3.5): the answer that matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+          "type": "string"
         }
       }
     },
@@ -277,6 +290,19 @@
                         "type": "string",
                         "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
                       }
+                    },
+                    "type": {
+                      "description": "Optional (1.3.5): nuclei's protocol type of the template (its \"type\" field). The server keeps it, lowercased, when it is one of http, tcp, network, javascript, dns, ssl, headless, file, whois, code or websocket, and drops any other value.",
+                      "type": "string",
+                      "maxLength": 40
+                    },
+                    "request": {
+                      "description": "Optional (1.3.5): the request the template sent when it matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
+                    },
+                    "response": {
+                      "description": "Optional (1.3.5): the answer that matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
                     }
                   }
                 }
@@ -360,6 +386,19 @@
                         "type": "string",
                         "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
                       }
+                    },
+                    "type": {
+                      "description": "Optional (1.3.5): nuclei's protocol type of the template (its \"type\" field). The server keeps it, lowercased, when it is one of http, tcp, network, javascript, dns, ssl, headless, file, whois, code or websocket, and drops any other value.",
+                      "type": "string",
+                      "maxLength": 40
+                    },
+                    "request": {
+                      "description": "Optional (1.3.5): the request the template sent when it matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
+                    },
+                    "response": {
+                      "description": "Optional (1.3.5): the answer that matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
                     }
                   }
                 }
@@ -443,6 +482,19 @@
                         "type": "string",
                         "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
                       }
+                    },
+                    "type": {
+                      "description": "Optional (1.3.5): nuclei's protocol type of the template (its \"type\" field). The server keeps it, lowercased, when it is one of http, tcp, network, javascript, dns, ssl, headless, file, whois, code or websocket, and drops any other value.",
+                      "type": "string",
+                      "maxLength": 40
+                    },
+                    "request": {
+                      "description": "Optional (1.3.5): the request the template sent when it matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
+                    },
+                    "response": {
+                      "description": "Optional (1.3.5): the answer that matched. The server keeps the first 4096 characters, control bytes but not newlines removed.",
+                      "type": "string"
                     }
                   }
                 }

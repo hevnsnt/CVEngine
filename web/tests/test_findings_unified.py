@@ -62,7 +62,8 @@ class UnifiedFindingsTests(TestCase):
 		# heat, then severity, then newest first: the hygiene finding was seen after the scanner finding of equal rank
 		self.assertEqual(self.keys(body), [('cve', self.fire_match.id), ('scanner', self.high.id), ('hygiene', self.weak_dmarc.id),
 										   ('scanner', self.medium.id), ('cve', self.ice_match.id)])
-		self.assertEqual([r['heat'] for r in body['results']], ['fire', 'fire', 'smoke', 'smoke', 'ice'])
+		# the high scanner finding is smoke until a validation reproduces it (1.3.5)
+		self.assertEqual([r['heat'] for r in body['results']], ['fire', 'smoke', 'smoke', 'smoke', 'ice'])
 		self.assertEqual(body['counts'], {'cve': 2, 'scanner': 2, 'hygiene': 1})
 		self.assertEqual((body['count'], body['total'], body['truncated']), (5, 5, False))
 		first = body['results'][0]
@@ -85,10 +86,10 @@ class UnifiedFindingsTests(TestCase):
 
 	def test_facets_compose(self):
 		self.assertEqual(self.keys(self.get(type='scanner')), [('scanner', self.high.id), ('scanner', self.medium.id)])
-		self.assertEqual(self.keys(self.get(heat='smoke')), [('hygiene', self.weak_dmarc.id), ('scanner', self.medium.id)])
+		self.assertEqual(self.keys(self.get(heat='smoke')), [('scanner', self.high.id), ('hygiene', self.weak_dmarc.id), ('scanner', self.medium.id)])
 		self.assertEqual(self.keys(self.get(severity='critical')), [('cve', self.fire_match.id)])
 		self.assertEqual(self.keys(self.get(type='hygiene', status='all', severity='info')), [('hygiene', self.hyg_info.id)])
-		self.assertEqual(self.get(heat='fire')['counts'], {'cve': 1, 'scanner': 1, 'hygiene': 0})
+		self.assertEqual(self.get(heat='fire')['counts'], {'cve': 1, 'scanner': 0, 'hygiene': 0})  # the scanner finding waits for a validation
 		self.assertEqual(self.keys(self.get(host='api.')), [('scanner', self.medium.id), ('cve', self.ice_match.id)])
 
 	def test_pages_split_the_merged_order(self):

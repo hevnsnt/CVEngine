@@ -80,7 +80,7 @@ def _asset(url, cred):
 def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, service='nuclei', force=False):
     """Run the plain pass's selection (``tags``, ``severities``) signed in over the nuclei ``targets`` the scope covers. Returns a summary
     dict (``targets``, ``findings``, ``new``, ``error`` when it failed); never raises, so the plain pass's result stands whatever happens here."""
-    from cveFeed import activity, ledger, nuclei_scan
+    from cveFeed import activity, ledger, nuclei_fp, nuclei_scan, template_gates
     from cveFeed.models import DiscoveryEvent
     from reNgine import resources
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -149,12 +149,16 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                                 try:
                                     for line in stream(path, **kwargs):
                                         line = auth_checks.redact_obj(line, values)
+                                        if isinstance(line, dict) and nuclei_fp.same_body_artefact(line, project):
+                                            continue  # the host answers anything with this error page (cveFeed.nuclei_fp)
                                         try:
                                             data = parse_nuclei_result(line)
                                         except (KeyError, TypeError):
                                             continue
                                         data['tags'] = [*(data.get('tags') or []), auth_checks.SEEN_TAG]
                                         host = nuclei_scan.host_of(line)
+                                        if template_gates.held_back(line, by_name.get(host)):
+                                            continue  # a template that matches patched releases too, on a patched host
                                         vuln, created = save_vulnerability(
                                             target_domain=domain, scan_history=scan, subdomain=by_name.get(host),
                                             http_url=line.get('matched-at') or line.get('host') or host, **data)

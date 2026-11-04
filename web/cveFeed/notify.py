@@ -4,6 +4,7 @@ Each event is one message per call, and each call is made once per scan, per fee
 - ``fire_matches``: new fire-tier CVE matches (``send_vuln_notif``);
 - ``fire_confirmed``: matches that were not proven (smoke) that evidence later turned fire (``send_vuln_notif``);
 - ``cves_turned_hot``: matches already proven whose CVE joined the KEV or gained a known exploit, so they turned fire (``send_vuln_notif``);
+- ``fire_set_by_hand``: matches a person re-rated so that they now show fire (``Triage.heat_override``) (``send_vuln_notif``);
 - ``template_hits``: hosts a template test confirmed vulnerable, for a CVE that can be fire under the heat policy (``send_vuln_notif``);
 - ``scan_finished``: a discovery scan ended, with a one-line summary (``send_scan_status_notif``);
 - ``saved_search``: a saved search found new matches, lost some or reached its threshold (``send_interesting_notif``).
@@ -105,12 +106,13 @@ def fire_matches(since, scan=None, cve_ids=None):
     new CVEs (``cve_ids``, when given) made on the inventory. A feed match belongs to the scan whose host row it sits on, so it is
     not filtered on the scan; the caller runs this after the AI has judged them.
 
-    A page needs the match to be fire on the host (``threat.match_heat``). Under the KEV heat policy that is a KEV or exploited CVE whose
-    version is proven (``match_policy.version_proven``: hard evidence, or the version read from the component itself); a version we only
-    infer is smoke and a CVE that is neither on the KEV nor exploited is ice, so neither is paged. Under ``legacy`` a version in the affected
+    A page needs the match to be fire on the host (``threat.match_heat``). Under the KEV heat policy that is a KEV or exploited CVE with
+    hard evidence of the flaw on the host (``match_policy.has_hard_evidence``; since 1.3.5 a version read from the component itself is not
+    enough), whose triage is neither pending nor needs_validation and whose validation did not come back clean; anything less is smoke or ice,
+    and neither is paged. Under ``legacy`` a version in the affected
     range alone is smoke (CVENGINE_VERSION_ONLY_MAX_HEAT), so only a match with hard evidence is paged. A match the AI left uncertain (the
     AI's false-positive call lands there when no hard evidence can close it, and triage never rates a version-only match higher) is not
-    announced unless a template hit, the distribution tracker or, under the KEV policy, a version read from the component proves it; it
+    announced unless a template hit or the distribution tracker proves it; it
     stays open, is tested, and a hit is announced by ``template_hits``. Matches the version rules out, the AI judged not affected or the
     host's distribution has patched are left out."""
     try:
@@ -119,14 +121,12 @@ def fire_matches(since, scan=None, cve_ids=None):
         from cveFeed import match_policy
         from cveFeed.counts import CLOSED
         from cveFeed.models import CVEEntry, CVEMatch
-        from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, fire_tier_q, heat_policy, match_heat_rank_expr
+        from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
         rows = rows.filter(scan_history=scan) if scan is not None else rows
         if cve_ids is not None:
             rows = rows.filter(cve_entry_id__in=list(cve_ids))
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
-        if heat_policy() != LEGACY_POLICY:
-            proven |= match_policy.version_read_from_component_q()  # the version is read from the component: fire on a KEV CVE
         rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').exclude(
             remediation_status__in=CLOSED).filter(  # a closed decision carried onto the next scan's row is not news
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(
@@ -184,6 +184,39 @@ def fire_confirmed(match_ids):
         return _send(text, 'send_vuln_notif')
     except Exception as exc:  # noqa: BLE001
         logger.warning('fire confirmation notification failed (%s)', type(exc).__name__)
+        return False
+
+
+def fire_set_by_hand(match_ids):
+    """One message for the CVE matches a person just re-rated so that they show fire (a heat set by hand, ``Triage.heat_override``, or one
+    cleared back to a derived fire: ``agentapi.services.set_finding_heat``). ``match_ids`` are only the matches that did not show fire just
+    before the change; the caller checks that. Paged like any match that becomes fire, at the moment of the change and never on a read: claimed
+    under the rule in force (``unannounced_q``, ``_claim``), so a match is paged at most once whether it is raised, lowered and raised again, or
+    was paged as fire before, and no other page (``fire_confirmed``, ``cves_turned_hot``) announces it again afterwards. A closed match (fixed,
+    an accepted risk or a false positive), one the AI ruled out and an older scan's copy are never paged; lowering a match never pages. Never
+    raises."""
+    try:
+        from cveFeed.correlation import latest_scan_q
+        from cveFeed.counts import CLOSED
+        from cveFeed.models import CVEMatch
+        from cveFeed.threat import FIRE, HEAT_RANK, match_heat_rank_expr
+        ids = sorted({int(i) for i in match_ids or () if i})[:MAX_MARK]
+        if not ids:
+            return False
+        fire = list(CVEMatch.objects.filter(unannounced_q(), latest_scan_q('subdomain__'), pk__in=ids)
+                    .exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
+                    .annotate(heat_rank=match_heat_rank_expr()).filter(heat_rank=HEAT_RANK[FIRE]).values_list('pk', flat=True))
+        claimed = _claim(fire)
+        if claimed is None:
+            return False
+        total = claimed.count()
+        sample = list(claimed.order_by('-cve_entry__cvss', 'id').values_list('cve_entry__cve_id', 'subdomain__name')[:SAMPLE])
+        hosts = claimed.values('subdomain__name').distinct().count()
+        text = (f'CVEngine: {total} CVE match{"es" if total != 1 else ""} re-rated fire-tier by hand on {hosts} '
+                f'host{"s" if hosts != 1 else ""}: {_listing([(_name(c), _name(h)) for c, h in sample], total)}')
+        return _send(text, 'send_vuln_notif')
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('manual fire notification failed (%s)', type(exc).__name__)
         return False
 
 

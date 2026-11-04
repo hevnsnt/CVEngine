@@ -22,6 +22,9 @@ from pathlib import Path
 ALLOWED_DUPLICATES = {
     # both applied; builtin_scanner_schedule depends on feedwatermark_failures_assumed, so they form one leaf and the graph is sound
     'cveFeed/0129': {'0129_builtin_scanner_schedule.py', '0129_feedwatermark_failures_assumed.py'},
+    # 0142_triage_heat_override ships in 1.3.5 and the 0142 merge is applied on the 1.4 testing installs; renaming either would make Django
+    # apply it again on the systems that have it. 0143_merge_... joins the two into one leaf
+    'cveFeed/0142': {'0142_merge_0137_merge_builtin_scanner_schedule_0141_db_default_for_update_window.py', '0142_triage_heat_override.py'},
 }
 
 PREFIX = re.compile(r'^(\d{4})_.*\.py$')

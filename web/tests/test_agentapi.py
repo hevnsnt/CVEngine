@@ -1757,7 +1757,10 @@ class HostSearchTests(TestCase):
 		from startScan.models import ScanActivity, ScanHistory, Vulnerability
 		from scanEngine.models import EngineType
 		fire = Subdomain.objects.get(name='port.srch.example')
-		Vulnerability.objects.create(name='RCE', severity=3, subdomain=fire, target_domain=fire.target_domain, http_url='x', open_status=True)
+		rce = Vulnerability.objects.create(name='RCE', severity=3, subdomain=fire, target_domain=fire.target_domain, http_url='x', open_status=True)
+		from cveFeed.models import Triage
+		Triage.objects.create(project=fire.target_domain.project, domain=fire.target_domain, host=fire.name, kind='nuclei', vulnerability=rce,
+							  status='triaged', classification='confirmed', validation_status='hit')  # reproduced: fire (1.3.5)
 		ice = Subdomain.objects.get(name='tech.srch.example')
 		Vulnerability.objects.create(name='Info leak', severity=1, subdomain=ice, target_domain=ice.target_domain, http_url='y', open_status=True)
 		clean = Subdomain.objects.get(name='db.srch.example')

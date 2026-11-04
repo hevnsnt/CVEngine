@@ -306,8 +306,10 @@ class BodyProvenTests(Base):
 
 
 class NothingElseMovesTests(Base):
-	"""B1: with other hard evidence beside the body read (runZero, the host's own report), on and off the KEV, the legacy verdict, heat
-	under both policies, paging, standing and the score are exactly what they are with the rule removed."""
+	"""B1: with other hard evidence beside the body read (runZero, the host's own report), on and off the KEV, the legacy verdict, standing
+	and paging under the legacy policy are exactly what they are with the rule removed. Since 1.3.5 heat reads the row's own classification
+	(``threat.triage_cap``: needs validation is smoke at most), so where the model left such a match at needs validation the rule's
+	confirmation is what lets its hard evidence show: heat, the score and the KEV-rule page may only rise with the rule, never fall."""
 
 	def run_case(self, extra, kev, cvss):
 		self.cve.kev, self.cve.cvss = kev, cvss
@@ -335,7 +337,15 @@ class NothingElseMovesTests(Base):
 			results[label] = {**self.state(m, 'kev'), 'legacy': self.state(m, 'legacy'), 'pages_legacy': pages_legacy, 'pages_kev': pages_kev}
 			results[label].pop('fire_notified_at')
 			results[label]['legacy'].pop('fire_notified_at')
+		moved = {}
+		for label in ('with', 'without'):
+			moved[label] = (threat.HEAT_RANK[results[label].pop('heat')], threat.HEAT_RANK[results[label]['legacy'].pop('heat')],
+							results[label].pop('pages_kev'), results[label].pop('pages_legacy'))
+			results[label].pop('score')
+			results[label]['legacy'].pop('score')
 		self.assertEqual(results['with'], results['without'], (extra, kev, cvss))
+		for now, before in zip(moved['with'], moved['without']):
+			self.assertGreaterEqual(now, before, (extra, kev, cvss))
 
 	def test_runzero_host_reported_and_non_kev(self):
 		for extra in ({'runzero': True}, {'host_reported': {'inventory_id': 1, 'component': 'jquery'}}, {}):
