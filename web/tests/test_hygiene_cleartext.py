@@ -191,7 +191,7 @@ class LifecycleTests(Base):
     def test_two_addresses_and_two_ports_are_one_finding_and_a_rerun_adds_none(self):
         sub, _ = self.host('multi.example.test', '192.168.1.50', (23, 'telnet'), (2323, 'telnet'))
         second = IpAddress.objects.create(address='192.168.1.51')
-        second.ports.add(Port.objects.create(number=23, service_name='telnet', state='open', protocol='tcp'))
+        second.ports.add(Port.objects.create(number=23, service_name='telnet', state='open', protocol='tcp', extra={'method': 'probed'}))
         sub.ip_addresses.add(second)
         run(self.domain)
         run(self.domain)
