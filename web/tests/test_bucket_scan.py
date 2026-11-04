@@ -708,8 +708,8 @@ class SweepTests(Fixture, TestCase):
     def test_an_exclusion_made_after_the_candidates_were_read_still_stops_the_request(self):
         real = bs.collect
 
-        def collect_then_exclude(project_id):
-            found = real(project_id)
+        def collect_then_exclude(project_id, **kw):
+            found = real(project_id, **kw)
             HostExclusion.objects.create(org=self.org, host='static.example.test')  # an operator excludes the host while the sweep runs
             return found
         with mock.patch.object(bs, 'collect', collect_then_exclude):
