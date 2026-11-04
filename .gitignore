@@ -77,6 +77,9 @@ web/.openvas-wanted.tmp
 web/.openvas-applied
 web/.openvas-applied.tmp
 web/.openvas-log
+web/.openvas-restart
+web/.openvas-restart.tmp
+web/.openvas-restarted
 backups/
 dump.rdb
 

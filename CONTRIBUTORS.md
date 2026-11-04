@@ -4,6 +4,10 @@
 
 CVEngine is maintained by [hevnsnt](https://github.com/hevnsnt). To contribute, see [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
+### Beta testers
+
+- [camstork](https://github.com/camstork): sixteen detailed, reproducible reports with root causes and suggested fixes, from the 1.3.0 range and triage bugs to the gvmd 22.7 OpenVAS import ([their issues](https://github.com/hevnsnt/CVEngine/issues?q=author%3Acamstork)).
+
 ## reNgine
 
 CVEngine is a fork of [reNgine](https://github.com/yogeshojha/rengine) by Yogesh Ojha. Thanks to the people who built reNgine, whose code CVEngine still uses.

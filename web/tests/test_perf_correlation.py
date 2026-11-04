@@ -281,3 +281,17 @@ class FindingStateCarriesTests(CorrelationPerfTests):
 		again = Vulnerability.objects.get(scan_history=new_scan)
 		self.assertNotEqual(again.pk, first.pk)
 		self.assertEqual((again.remediation_status, again.remediation_note), ('fixed', 'patched'))
+
+	def test_a_scanner_finding_marked_false_positive_stays_closed_on_the_next_scan(self):
+		from reNgine.tasks import save_vulnerability
+		from startScan.models import Vulnerability
+		old_scan, new_scan = self._scan(), self._scan()
+		old_sub = self._host('fp.perf.test', old_scan)
+		Vulnerability.objects.create(name='Exposed panel', severity=3, subdomain=old_sub, target_domain=self.domain, scan_history=old_scan,
+									 source='nuclei', template_id='panel', http_url='https://fp.perf.test/admin', matcher_name='',
+									 remediation_status='false_positive', remediation_note='a placeholder page', discovered_date=timezone.now())
+		new_sub = self._host('fp.perf.test', new_scan)
+		save_vulnerability(name='Exposed panel', severity=3, subdomain=new_sub, target_domain=self.domain, scan_history=new_scan, source='nuclei',
+						   template_id='panel', http_url='https://fp.perf.test/admin', matcher_name='')
+		again = Vulnerability.objects.get(scan_history=new_scan)
+		self.assertEqual((again.remediation_status, again.remediation_note), ('false_positive', 'a placeholder page'))

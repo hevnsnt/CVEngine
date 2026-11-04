@@ -38,6 +38,12 @@ class CarryRemediationTests(TestCase):
 		match = CVEMatch.objects.get(subdomain=self.new)
 		self.assertEqual((match.remediation_status, match.remediation_note), ('fixed', 'patched by ops'))
 
+	def test_a_false_positive_and_its_note_survive_the_next_scan(self):
+		self.worked(status='false_positive')
+		correlation.save_matches([self.row()])
+		match = CVEMatch.objects.get(subdomain=self.new)
+		self.assertEqual((match.remediation_status, match.remediation_note), ('false_positive', 'patched by ops'))
+
 	def test_a_different_product_label_for_the_same_cve_on_the_same_host_keeps_the_decision(self):
 		self.worked(product='nginx')
 		correlation.save_matches([self.row(product='NGINX Open Source')])  # the feed now names the product another way

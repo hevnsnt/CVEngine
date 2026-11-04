@@ -215,6 +215,12 @@ def main():
                 return
             if re.fullmatch(rb'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}', value) and b'..' not in value and not value.endswith((b'/', b'.lock')):
                 print(value.decode('ascii'))
+        elif action == 'built':
+            # the commit the running build was made from (web/.commit), read without following a link; printed only when it is one
+            value = read_small(web_fd, '.commit', 128).splitlines()[:1]
+            value = value[0].strip().lower() if value else ''
+            if SHA_RE.fullmatch(value):
+                print(value)
         elif action == 'commit':
             value = sys.argv[2]
             if not re.fullmatch(r'[0-9a-f]{40}', value):
@@ -244,6 +250,9 @@ def main():
                     or not isinstance(row.get('at'), int)):
                 raise ValueError('invalid OpenVAS answer')
             publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
+        elif action == 'openvas-restarted':
+            # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
+            publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
         elif action == 'openvas-log':
             # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:

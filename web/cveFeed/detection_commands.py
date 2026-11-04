@@ -6,8 +6,9 @@ command text, the quoting, and what the output means. Each command is read-only,
 whether it needs elevated rights, and a structured ``expect`` that says how to decide from its output, so a person reads the
 ``command`` and ``explain`` and a scanner that logs in to a host can run the same ``command`` and evaluate the same ``expect``.
 
-Remote checks render to ``how``: the tool, the invocation with ``<TARGET>`` (and ``<PORT>``) to fill in, and how to decide.
-Local checks render to ``commands``: one entry per platform."""
+Remote checks render to ``how``: the tool, the invocation with ``<TARGET>`` (and ``<PORT>``) to fill in, and how to decide; the guidance
+for one match (cveFeed.confirm_guide) fills in the real host, port and URL. Local checks render to ``commands``: one entry per platform
+(``app`` for a language package: run in the application's source or deployment directory, never by an OS package manager)."""
 import re
 import shlex
 
@@ -42,6 +43,24 @@ def _range_text(ranges):
 def render_remote(check):
     """``{'tool', 'invocation', 'decide'}`` for one remote check, or None for a kind with no rendering."""
     kind, p = check['kind'], check['params']
+    from cveFeed.detection import banner_reading, is_script_read, script_library
+    if is_script_read(check):
+        return _render_script_read({**p, 'library': p.get('library') or script_library(check)})
+    reading = banner_reading(check) if kind == 'version_banner' else ''
+    if reading == 'platform':
+        return {'tool': 'host package', 'invocation': '',
+                'decide': f"{p['product']} is a distribution release, not a product a banner states: on a host of that release, check the "
+                          "installed package the advisory names against the distribution's own fixed build."}
+    if kind == 'version_banner' and reading == 'header':
+        return {'tool': 'curl', 'invocation': f'curl -gsS -I --max-time 15 https://{TARGET}/',
+                'decide': f"Read the Server header (X-Powered-By for a runtime such as PHP or ASP.NET): the reported {p['product']} version is "
+                          f"inside {_range_text(p['ranges'])}. A Linux distribution keeps the upstream version in the header after a backported "
+                          'fix, and a proxy or CDN in front may answer with its own: the host\'s package release decides.'}
+    if kind == 'version_banner' and reading == 'technology':
+        return {'tool': 'technology fingerprint', 'invocation': f'curl -gsS -i --max-time 15 https://{TARGET}/',
+                'decide': f"cvENGINE's technology fingerprint (headers, page markers, a generator tag, a readme) names {p['product']} at a "
+                          f"version inside {_range_text(p['ranges'])}. That names the product, rarely the exact version of a dependency: the "
+                          "application's lockfile, package manager or the component's own files decide."}
     if kind == 'version_banner':
         return {'tool': 'nmap', 'invocation': f'nmap -Pn -sV --version-intensity 5 -p {PORT} {TARGET}',
                 'decide': f"The reported {p['product']} version is inside {_range_text(p['ranges'])}. A banner can hide a backported "
@@ -55,7 +74,7 @@ def render_remote(check):
             expected += f" and the body contains {p['expect_contains']!r}"
         if p.get('expect_absent'):
             expected += f" and the body does not contain {p['expect_absent']!r}"
-        return {'tool': 'curl', 'invocation': f'curl {flags}{method} --max-time 15 {shlex.quote(url)}',
+        return {'tool': 'curl', 'invocation': f'curl -g {flags}{method} --max-time 15 {shlex.quote(url)}',
                 'decide': f'Vulnerable when the response has {expected}.'}
     if kind == 'nuclei_template':
         return {'tool': 'nuclei', 'invocation': f"nuclei -duc -id {shlex.quote(p['template_id'])} -u {TARGET}",
@@ -80,6 +99,24 @@ def render_remote(check):
     return None
 
 
+def _render_script_read(p):
+    """A client-side JavaScript library (``script_version``, or a banner check whose product is one): read from the script files the page
+    loads by cvENGINE's own html-libraries read (``cveFeed.js_libraries``), which nmap cannot do."""
+    from cveFeed.detection import _script_product
+    from cveFeed.js_libraries import MAX_SCRIPT_BYTES, MAX_SCRIPTS_PER_HOST
+    product = _script_product({'kind': 'script_version', 'params': p})
+    return {'tool': 'html-libraries probe',
+            'invocation': f'curl -gsS --max-time 15 https://{TARGET}/',
+            'decide': (f"cvENGINE's html-libraries read (Validate now) fetches the page and up to {MAX_SCRIPTS_PER_HOST} of the scripts it loads; "
+                       f'by hand, fetch each script the page names (curl -sS <script URL>; cvENGINE reads up to {MAX_SCRIPT_BYTES // 1024} KB '
+                       'of each). Vulnerable version when the '
+                       f"{product} file the page loads states a version inside {_range_text(p['ranges'])}. The version is read from the file "
+                       'itself (its banner or code), never from a ?ver= query string or the file name alone. When the page loads several '
+                       'copies, the one that runs last is effective and the earlier ones are shadowed: the effective copy decides. A hit '
+                       'proves the version is present on the page, not that the page is exploitable: that depends on how the page uses '
+                       f'{product} (an XSS flaw needs attacker-controlled HTML to reach its DOM-manipulation functions).')}
+
+
 # --- local ------------------------------------------------------------------------------------------------------------------
 
 def _command(platform, shell, command, expect, explain, root=False):
@@ -87,11 +124,64 @@ def _command(platform, shell, command, expect, explain, root=False):
             'expect': expect, 'explain': explain}
 
 
+# the language ecosystems: read in the application's source or deployment directory ("app"), never by an OS package manager. Each command
+# only reads: a package manager's listing or a lockfile search. ``{q}`` is the shell-quoted package name, ``{re}`` a grep pattern for it.
+APP = 'app'
+_LANGUAGE_COMMANDS = {
+    'npm': (("npm ls {q} --all", 'Lists every copy of {name} in the dependency tree with its version (run where package.json is).'),
+            ("grep -n -A 3 -F -e {lock} package-lock.json", 'Each "version" under a node_modules/{name} entry is a copy that is installed.')),
+    'composer': (("composer show {q}", 'Prints the installed {name} with its version (run where composer.json is).'),
+                 ("grep -n -A 3 -F -e {lock} composer.lock", 'The "version" under that name is the locked version.')),
+    'gem': (("grep -n -E {gemlock} Gemfile.lock", 'The version in parentheses is the locked {name} gem (run where the Gemfile is).'),
+            ("gem list -e {q}", 'Prints the installed versions of the {name} gem.')),
+    'maven': (("mvn -q dependency:tree -Dincludes={q}", 'Prints {name} in the resolved dependency tree with its version (run where '
+               'pom.xml is). Note: Maven downloads the dependency plugin and any missing artifacts from its repositories the first time; the '
+               'grep below only reads the build files.'),
+              ("grep -rn -F -e {q} --include='*.gradle' --include='*.gradle.kts' --include='*.lockfile' .", 'A Gradle build declares {name} '
+               'with its version on that line.')),
+    'nuget': (("dotnet list package --include-transitive", 'Read the version of {name} in the list (run where the project or solution '
+               'file is).'),
+              ("grep -rn -i -F -e {q} --include=packages.config --include='*.csproj' --include=packages.lock.json .", 'The Version (or '
+               'version) next to {name} is the referenced version.')),
+    'pip': (("python3 -m pip show {q}", 'Read the Version line (run in the application\'s virtual environment).'),
+            ("grep -rn -i -E {pipreq} --include='requirements*.txt' --include=poetry.lock --include=Pipfile.lock .", 'The pinned version '
+             'of {name}.')),
+    'go': (("go list -m all", 'Read the version printed next to {name} (run where go.mod is).'),
+           ("grep -n -F -e {q} go.mod", 'The version on that line is the required version of {name}.')),
+    'cargo': (("cargo tree --locked -i {q}", 'Prints {name} with its version and what pulls it in, from Cargo.lock as it is (run where '
+               'Cargo.toml is; --locked never updates the lockfile).'),
+              ("grep -n -A 1 -F -e {cratelock} Cargo.lock", 'The version line under it is the locked version of {name}.')),
+}
+
+
+def _ere(text):
+    """``text`` as a literal inside an extended regular expression (only the ERE metacharacters are escaped: GNU grep warns on others)."""
+    return re.sub(r'([.\[\]()*+?{}|^$\\])', r'\\\1', str(text))
+
+
+def _language_commands(eco, package, below):
+    name = str(package)
+    values = {'q': shlex.quote(name), 'name': name, 'lock': shlex.quote(f'node_modules/{name}"' if eco == 'npm' else f'"name": "{name}"'),
+              'gemlock': shlex.quote(r'^    ' + _ere(name) + r' \('), 'pipreq': shlex.quote('^' + _ere(name) + r'([=<>~!; ]|$)|name = "' + _ere(name) + '"'),
+              'cratelock': shlex.quote(f'name = "{name}"')}
+    return [_command(APP, 'sh', command.format(**values), below, explain.format(**values)) for command, explain in _LANGUAGE_COMMANDS.get(eco, ())]
+
+
 def _package_commands(p):
-    package = shlex.quote(p['package'])
+    from cveFeed.detection_classes import LANGUAGE, language_ecosystem_of
     eco = p['ecosystem']
     bound = p.get('affected_below') or p.get('fixed_version')
     below = {'kind': 'version_lt', 'than': bound} if bound else {'kind': 'version_present'}
+    if eco == 'any' and language_ecosystem_of(p['package']):
+        inferred = language_ecosystem_of(p['package'])
+        # a name that can only be a language coordinate is never an OS package; a path-like name may be a container image too, so only
+        # the unambiguous Maven and npm shapes get their ecosystem's commands
+        return _language_commands(inferred, p['package'], below) if inferred in ('maven', 'npm') else []
+    if eco in LANGUAGE:
+        return _language_commands(eco, p['package'], below)
+    # OS package names are lowercase; an advisory or a model may write the product's own capitalisation (OpenSSH)
+    name = p['package'].lower() if eco == 'any' else p['package']
+    package = shlex.quote(name)
     out = []
     if eco in ('any', 'dpkg'):
         # the epoch ("1:" on OpenSSH, bind9, dovecot) is not part of the upstream version the bound is written in; a package that is not
@@ -100,7 +190,7 @@ def _package_commands(p):
                    f"{{ dpkg --compare-versions \"${{v#*:}}\" lt {shlex.quote(re.sub(r'^[0-9]+:', '', str(bound)))} "
                    "&& echo AFFECTED || echo NOT-AFFECTED; } || echo UNKNOWN") if bound else f"dpkg-query -W -f='${{Version}}\\n' {package}"
         out.append(_command('debian', 'sh', compare, below,
-                            f"Prints AFFECTED when the installed {p['package']} package is older than {bound} (an epoch such as 1: is "
+                            f"Prints AFFECTED when the installed {name} package is older than {bound} (an epoch such as 1: is "
                             'ignored), and UNKNOWN when no package of that name is installed: check the binary package name '
                             '(for example openssh-server for openssh).' if bound else 'Prints the installed version.'))
     if eco in ('any', 'rpm'):
@@ -109,13 +199,21 @@ def _package_commands(p):
                             '(a vendor backports fixes without raising the upstream version).'))
     if eco in ('any', 'apk'):
         out.append(_command('alpine', 'sh', f'apk info -v {package}', below, 'Prints the installed package and version.'))
-    if eco == 'pip':
-        out.append(_command('any', 'sh', f'python3 -m pip show {package}', below, 'Read the Version line.'))
-    if eco == 'npm':
-        out.append(_command('any', 'sh', f'npm ls -g --depth=0 {package}', below, 'Read the version in the tree.'))
-    if eco == 'gem':
-        out.append(_command('any', 'sh', f'gem list -e {package}', below, 'Read the version in parentheses.'))
     return out
+
+
+def _bundled_commands(p):
+    """Find a bundled copy of a client-side library on the web server by its own banner line (the pattern is cvENGINE's own, per library)."""
+    from cveFeed.detection import _libraries
+    from cveFeed.detection_classes import LIBRARY_FACTS
+    pattern = LIBRARY_FACTS.get(p['library'], {}).get('grep')
+    if not pattern:
+        return []
+    product = _libraries()[p['library']][0]
+    return [_command('linux', 'sh', f"grep -rIoE --include='*.js' {shlex.quote(pattern)} /var/www /srv /opt 2>/dev/null | sort -u",
+                     {'kind': 'output_lists', 'what': 'files and versions'},
+                     f'Prints each {product} file under the usual web roots with the version its banner states (add the site\'s own '
+                     'document root if it is elsewhere); a version inside the affected range is a vulnerable bundled copy.')]
 
 
 def render_local(check):
@@ -123,6 +221,8 @@ def render_local(check):
     kind, p = check['kind'], check['params']
     if kind == 'package_version':
         return _package_commands(p)
+    if kind == 'bundled_copy':
+        return _bundled_commands(p)
     if kind == 'file_version':
         return [
             _command('linux', 'sh', f"grep -F -e {shlex.quote(p['contains'])} -- {shlex.quote(p['path'])}",

@@ -5,6 +5,22 @@ It is a fixture, not a mock of cvENGINE's own code: the requests it answers are 
 GMP reference's get_version, authenticate, get_feeds, get_configs, get_scanners, get_port_lists, get_targets, create_target, create_task,
 start_task, get_tasks (status values New, Requested, Queued, Running, Stop Requested, Stopped, Interrupted, Done), get_results (nvt oid, refs, qod,
 severity, threat, port, host with hostname) and get_reports. What it cannot prove is that a real gvmd answers the same way: see docs/OPENVAS.md.
+
+The response shapes follow gvmd's own printers (src/gmp.c, src/gmp_get.c and print_report_xml_start in src/manage_sql.c, read at v22.7.0 and
+v26.43.0, which speaks GMP 22.7), not a guess:
+
+* ``get_results``: each ``<result>`` is a direct child of ``<get_results_response>``; ``<results start=".." max=".."/>`` is an empty marker after
+  them (send_get_end), never a wrapper;
+* ``get_reports``: ``<report id>`` (the envelope) holding ``<report id>`` (the report). Only with ``details=1`` does the report carry
+  ``<results start max>`` (paged by the filter's ``first`` and ``rows``) and a ``<host>`` per host; with ``details=0`` it has the counts
+  (``<hosts><count>``, ``<result_count>``) and no ``<host>`` at all. ``result_hosts_only`` (default 1) leaves out the hosts without a result;
+* ``get_tasks``: the ``<last_report>``'s ``<result_count>`` names its levels ``hole``, ``info``, ``log``, ``warning`` and ``false_positive``, as
+  gvmd 22.4 to 24.x print it (src/gmp.c at v22.7.0); ``count_names='25'`` prints gvmd 25's ``critical``, ``high``, ``medium``, ``low`` and
+  ``log`` with ``hole``, ``info`` and ``warning`` as deprecated duplicates;
+* ``max_rows`` is gvmd's "Max Rows Per Page" setting: every ``rows`` of ``get_results`` and ``get_reports`` (``-1`` too) is clamped to it;
+* ``delete_task`` of a task gvmd does not have answers 404 "Failed to find task";
+* ``modify_user`` answers 404 "Failed to find user" for a user the caller does not own: the community containers' ``admin`` is created by
+  ``gvmd --create-user``, owned by nobody, so it cannot change its own password over GMP (``modify_self=False``, as gvmd 22.7 does).
 """
 import base64
 import itertools
@@ -34,10 +50,17 @@ class FakeGvmd:
     """``with FakeGvmd() as gvmd: ... gvmd.path``. Tests drive it through the attributes below and read ``requests`` (the commands received,
     never the password) and ``connections``."""
 
-    def __init__(self, user='cvengine', password='fake-gmp-password-not-real', nvts=95000, syncing=False, feeds=FEED_TYPES, version='22.7'):
+    def __init__(self, user='cvengine', password='fake-gmp-password-not-real', nvts=95000, syncing=False, feeds=FEED_TYPES, version='22.7',
+                 modify_self=False, count_names='22.7', max_rows=1000):
         self.user, self.password, self.version = user, password, version
         self.users = {user: password}  # name -> password: a test adds more
+        self.owners = {user: None}  # name -> the user who created it (None: made by gvmd --create-user, as the containers' admin is)
+        self.roles = {'7a8cb5b4-b74d-11e2-8187-406186ea4fc5': 'Admin', '8d453140-b74d-11e2-b0be-406186ea4fc5': 'User'}
+        self.user_roles = {user: 'Admin'}
+        self.modify_self = modify_self  # False: gvmd 22.7's answer to a user changing its own password (404 Failed to find user)
         self.nvts, self.syncing, self.feeds = nvts, syncing, set(feeds)
+        self.count_names = count_names  # '22.7': hole/info/log/warning (gvmd 22.4 .. 24.x); '25': critical/high/medium/low/log plus the old names
+        self.max_rows = max_rows  # gvmd's "Max Rows Per Page" (1000 by default)
         self.tmp = tempfile.mkdtemp(prefix='fake-gvmd-')
         self.path = os.path.join(self.tmp, 'gvmd.sock')
         self.requests, self.connections = [], 0
@@ -45,8 +68,11 @@ class FakeGvmd:
         self.targets, self.tasks, self.results, self.report_hosts = {}, {}, {}, {}  # results: task id -> [result xml]
         self.fail = {}  # command -> (status, text): make one command fail
         self.report_has_hosts = True
-        self.extra_report_hosts = set()
+        self.extra_report_hosts = set()  # hosts gvmd scanned and found nothing on: in the report only with details=1 and result_hosts_only=0
+        self.host_times = {}  # address -> (start, end) of its scan in the report; the default is a 30 minute scan
+        self.deleted_reports = set()
         self._lock = threading.Lock()
+        self._local = threading.local()  # the user the current connection signed in as
         self._stop = threading.Event()
         self._ids = itertools.count(1)
 
@@ -109,8 +135,9 @@ class FakeGvmd:
         self.tasks[task_id]['status'], self.tasks[task_id]['progress'] = status, progress
 
     def add_result(self, task_id, host, port, oid, name, severity, qod, cves=(), description='Detection result.', hostname='', threat=None,
-                   qod_type='remote_banner', tags=None, urls=()):
+                   qod_type='remote_banner', tags=None, urls=(), certs=()):
         refs = ''.join(f'<ref type="cve" id="{c}"/>' for c in cves) + ''.join(f'<ref type="url" id="{escape(u)}"/>' for u in urls)
+        refs += ''.join(f'<ref type="cert-bund" id="{c}"/>' for c in certs)  # gvmd reads these from its database, the others from its NVT cache
         tags = tags if tags is not None else (f'cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=The product {name} is affected.|'
                                               'insight=A flaw in request handling.|affected=Versions before 2.4.51|solution_type=VendorFix')
         threat = threat or ('Critical' if severity >= 9 else 'High' if severity >= 7 else 'Medium' if severity >= 4 else 'Low' if severity > 0 else 'Log')
@@ -142,26 +169,44 @@ class FakeGvmd:
         if tag == 'authenticate':
             creds = root.find('credentials')
             if creds is not None and self.users.get(creds.findtext('username')) == creds.findtext('password') and creds.findtext('password'):
-                return ok('authenticate_response', '<role>User</role><timezone>UTC</timezone><severity>nist</severity>'), True
+                return ok('authenticate_response', '<role>User</role><timezone>UTC</timezone><severity>nist</severity>'), creds.findtext('username')
             return '<authenticate_response status="400" status_text="Authentication failed"/>', False
         if not authenticated:
             return f'<{tag}_response status="401" status_text="Only command GET_VERSION is allowed before AUTHENTICATE"/>', False
         handler = getattr(self, f'cmd_{tag}', None)
         if handler is None:
             return f'<{tag}_response status="400" status_text="Bogus command name"/>', authenticated
+        self._local.user = authenticated
         return handler(root), authenticated
 
     def cmd_get_users(self, root):
         wanted = (root.get('filter') or '').replace('name=', '')
-        return ok('get_users_response', ''.join(f'<user id="{uuid.uuid5(uuid.NAMESPACE_DNS, n)}"><name>{escape(n)}</name><role id="x"><name>Admin</name></role></user>'
+        return ok('get_users_response', ''.join(f'<user id="{uuid.uuid5(uuid.NAMESPACE_DNS, n)}"><name>{escape(n)}</name>'
+                                                f'<role id="x"><name>{escape(self.user_roles.get(n, "Admin"))}</name></role></user>'
                                                 for n in self.users if not wanted or wanted == n))
 
+    def cmd_get_roles(self, root):
+        return ok('get_roles_response', ''.join(f'<role id="{i}"><name>{escape(n)}</name></role>' for i, n in self.roles.items()))
+
+    def cmd_create_user(self, root):
+        name = root.findtext('name')
+        if name in self.users:
+            return '<create_user_response status="400" status_text="User already exists"/>'
+        role = root.find('role')
+        self.users[name] = root.findtext('password')
+        self.owners[name] = self._local.user
+        self.user_roles[name] = self.roles.get(role.get('id') if role is not None else '', 'User')
+        return ok('create_user_response', status='201', text='OK, resource created', id=str(uuid.uuid5(uuid.NAMESPACE_DNS, name)))
+
     def cmd_modify_user(self, root):
+        me = self._local.user
         for name in self.users:
             if str(uuid.uuid5(uuid.NAMESPACE_DNS, name)) == root.get('user_id'):
-                self.users[name] = root.findtext('password')
-                return ok('modify_user_response')
-        return '<modify_user_response status="404" status_text="Failed to find user"/>'
+                if self.owners.get(name) == me or (name == me and self.modify_self):  # gvmd: only what the caller owns (or has Super on)
+                    self.users[name] = root.findtext('password')
+                    return ok('modify_user_response')
+                break
+        return f'<modify_user_response status="404" status_text="Failed to find user &apos;{escape(root.get("user_id") or "")}&apos;"/>'
 
     def cmd_get_feeds(self, root):
         body = ''
@@ -258,7 +303,10 @@ class FakeGvmd:
         return ok('stop_task_response', status='202', text='OK, request submitted')
 
     def cmd_delete_task(self, root):
-        self.tasks.pop(root.get('task_id'), None)
+        task = self.tasks.pop(root.get('task_id'), None)
+        if task is None:  # send_find_error_to_client
+            return f'<delete_task_response status="404" status_text="Failed to find task &apos;{escape(root.get("task_id") or "")}&apos;"/>'
+        self.deleted_reports.add(task['report'])  # ultimate: the task's reports go with it
         return ok('delete_task_response')
 
     def cmd_get_tasks(self, root):
@@ -266,23 +314,84 @@ class FakeGvmd:
         if task_id not in self.tasks:
             return f'<get_tasks_response status="404" status_text="Failed to find task \'{task_id}\'"/>'
         task = self.tasks[task_id]
-        report = f'<last_report><report id="{task["report"]}"><timestamp>2026-10-27T12:30:00Z</timestamp></report></last_report>' if task['status'] == 'Done' else ''
+        counts = self._level_counts(task_id)
+        if self.count_names == '25':  # gvmd 25.0.0 and later: the new names, the old ones kept as deprecated duplicates
+            result_count = (f"<critical>{counts['critical']}</critical><hole deprecated='1'>{counts['high']}</hole><high>{counts['high']}</high>"
+                            f"<info deprecated='1'>{counts['low']}</info><low>{counts['low']}</low><log>{counts['log']}</log>"
+                            f"<warning deprecated='1'>{counts['medium']}</warning><medium>{counts['medium']}</medium><false_positive>0</false_positive>")
+        else:  # gvmd 22.4 to 24.x (src/gmp.c at v22.7.0): no critical level, and the old names only
+            result_count = (f"<hole>{counts['critical'] + counts['high']}</hole><info>{counts['low']}</info><log>{counts['log']}</log>"
+                            f"<warning>{counts['medium']}</warning><false_positive>0</false_positive>")
+        if task['status'] in ('Done', 'Stopped', 'Interrupted'):
+            report = (f'<last_report><report id="{task["report"]}"><timestamp>2026-10-27T12:30:00Z</timestamp><scan_start>2026-10-27T11:00:00Z</scan_start>'
+                      f'<scan_end>2026-10-27T12:30:00Z</scan_end><result_count>{result_count}</result_count><severity>9.8</severity></report></last_report>')
+        elif task['status'] in ('Requested', 'Queued', 'Running', 'Stop Requested'):
+            report = (f'<current_report><report id="{task["report"]}"><timestamp>2026-10-27T11:00:00Z</timestamp><scan_start>2026-10-27T11:00:00Z</scan_start>'
+                      '<scan_end/></report></current_report>')
+        else:
+            report = ''
         return ok('get_tasks_response', f'<task id="{task_id}"><name>{escape(task["name"])}</name><status>{task["status"]}</status>'
-                  f'<progress>{task["progress"]}</progress>{report}</task>')
+                  f'<progress>{task["progress"]}</progress><report_count>1<finished>{int(task["status"] == "Done")}</finished></report_count>{report}</task>')
+
+    def _level_counts(self, task_id):
+        counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'log': 0}
+        for xml in self.results.get(task_id, []):
+            threat = (etree.fromstring(xml).findtext('threat') or 'Log').lower()
+            counts[threat if threat in counts else 'log'] += 1
+        return counts
+
+    @staticmethod
+    def _filter(root):
+        return dict(w.split('=', 1) for w in (root.get('filter') or '').split() if '=' in w)
+
+    def _filtered(self, every, words):
+        min_qod = int(words.get('min_qod', 70))  # gvmd's default floor when the filter names none
+        return [x for x in every if int(etree.fromstring(x).findtext('qod/value') or 0) >= min_qod]
 
     def cmd_get_results(self, root):
-        task_id = (root.get('filter') or '').split('task_id=')[1].split()[0] if 'task_id=' in (root.get('filter') or '') else root.get('task_id')
-        words = dict(w.split('=', 1) for w in (root.get('filter') or '').split() if '=' in w)
+        words = self._filter(root)
+        task_id = words.get('task_id') or root.get('task_id')
         rows, first = int(words.get('rows', 100)), int(words.get('first', 1))
-        every = self.results.get(task_id, [])
+        rows = self.max_rows if rows < 1 else min(rows, self.max_rows)  # "Max Rows Per Page"
+        every = self._filtered(self.results.get(task_id, []), words)
         page = every[first - 1:first - 1 + rows]
-        return ok('get_results_response', f'<results start="{first}" max="{rows}">{"".join(page)}</results><result_count>{len(every)}</result_count>')
+        # gvmd's shape (handle_get_results, send_get_end): the results are direct children, <results/> is an empty marker after them
+        return ok('get_results_response', f'{"".join(page)}<filters id=""><term>{escape(root.get("filter") or "")}</term></filters>'
+                  f'<sort><field>severity<order>descending</order></field></sort><results start="{first}" max="{rows}"/>'
+                  f'<result_count>{len(every)}<filtered>{len(every)}</filtered><page>{len(page)}</page></result_count>')
 
     def cmd_get_reports(self, root):
-        task = next((t for t in self.tasks.values() if t['report'] == root.get('report_id')), None)
-        task_id = next((i for i, t in self.tasks.items() if t is task), None)
-        hosts = ''.join(f'<host><ip>{h}</ip><asset asset_id="{self.new_id()}"/><start>2026-10-27T12:00:00Z</start><end>2026-10-27T12:30:00Z</end></host>'
-                        for h in sorted(self.report_hosts.get(task_id, set()))) if self.report_has_hosts else ''
-        extra = ''.join(f'<host><ip>{h}</ip><start>x</start><end>x</end></host>' for h in sorted(self.extra_report_hosts))
-        return ok('get_reports_response', f'<report id="{root.get("report_id")}"><report id="{root.get("report_id")}"><scan_run_status>Done</scan_run_status>'
-                  f'<hosts><count>{len(self.report_hosts.get(task_id, set()))}</count></hosts>{hosts}{extra}</report></report>')
+        report_id = root.get('report_id')
+        task_id = next((i for i, t in self.tasks.items() if t['report'] == report_id), None)
+        if task_id is None or report_id in self.deleted_reports:
+            return f'<get_reports_response status="404" status_text="Failed to find report &apos;{escape(report_id or "")}&apos;"/>'
+        task = self.tasks[task_id]
+        words = self._filter(root)
+        details = root.get('details') == '1'
+        rows, first = int(words.get('rows', 100)), int(words.get('first', 1))
+        rows = self.max_rows if rows < 1 else min(rows, self.max_rows)  # "Max Rows Per Page" caps rows=-1 too
+        every = self._filtered(self.results.get(task_id, []), words)
+        scanned = set(self.report_hosts.get(task_id, set())) if self.report_has_hosts else set()
+        with_results = {etree.fromstring(x).findtext('host').strip() for x in every}
+        if words.get('result_hosts_only', '1') != '0':
+            shown = scanned & with_results
+        else:
+            shown = scanned | set(self.extra_report_hosts)
+        body = (f'<owner><name>{self.user}</name></owner><name>2026-10-27T11:00:00Z</name><task id="{task_id}"><name>{escape(task["name"])}</name></task>'
+                f'<report id="{report_id}"><scan_run_status>{escape(task["status"])}</scan_run_status>'
+                f'<hosts><count>{len(scanned | set(self.extra_report_hosts)) if self.report_has_hosts else 0}</count></hosts>'
+                f'<scan_start>2026-10-27T11:00:00Z</scan_start>')
+        if details:
+            page = every[first - 1:first - 1 + rows]
+            body += f'<results start="{first}" max="{rows}">{"".join(page)}</results>'
+        body += f'<result_count>{len(self.results.get(task_id, []))}<full>{len(self.results.get(task_id, []))}</full><filtered>{len(every)}</filtered></result_count>'
+        if details:
+            for host in sorted(shown):
+                start, end = self.host_times.get(host, ('2026-10-27T12:00:00Z', '2026-10-27T12:30:00Z'))
+                body += (f'<host><ip>{host}</ip><asset asset_id="{self.new_id()}"/><start>{start}</start><end>{end}</end>'
+                         f'<port_count><page>0</page></port_count><result_count><page>0</page></result_count>'
+                         f'<detail><name>hostname</name><value>{escape(host)}</value></detail></host>')
+        body += '<scan_end>2026-10-27T12:30:00Z</scan_end><errors><count>0</count></errors></report>'
+        return ok('get_reports_response', f'<report id="{report_id}" format_id="a994b278-1f62-11e1-96ac-406186ea4fc5" extension="xml" '
+                  f'content_type="text/xml">{body}</report><filters id=""><term>{escape(root.get("filter") or "")}</term></filters>'
+                  '<sort><field>date<order>descending</order></field></sort><reports start="1" max="1"/><report_count>1<filtered>1</filtered><page>1</page></report_count>')

@@ -8,6 +8,7 @@
 # Call from the repository root. Returns 1, after saying why on stderr, when the layout cannot be worked out safely.
 cvengine_compose_layout() {
   local files env_file project id labels path name
+  local -a paths
   _cvengine_setting() {
     local key=$1 value=${!1:-}
     if [ -z "$value" ] && [ -f .env ]; then
@@ -26,7 +27,9 @@ cvengine_compose_layout() {
     id=$(docker ps -a --filter "label=com.docker.compose.project.working_dir=$(pwd)" --filter "label=com.docker.compose.service=web" --format '{{.ID}}' 2>/dev/null | head -n1) || id=''
     if [ -n "$id" ]; then
       labels=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$id" 2>/dev/null) || labels=''
-      for path in ${labels//,/ }; do
+      IFS=',' read -r -a paths <<<"$labels"  # comma separated; a path may hold spaces (a project under "/Volumes/My Disk")
+      for path in ${paths[@]+"${paths[@]}"}; do  # (the form bash 3.2, macOS's, accepts for an empty array under set -u)
+        [ -n "$path" ] || continue
         name=$(basename "$path")
         if ! [[ $name =~ ^[A-Za-z0-9._-]+\.ya?ml$ && -f $name && $(dirname "$path") = "$(pwd)" ]]; then
           echo "The running stack was started with $path, which is not a Compose file in $(pwd). Set CVENGINE_COMPOSE_FILES (and CVENGINE_COMPOSE_ENV_FILE) in .env to the files it uses." >&2

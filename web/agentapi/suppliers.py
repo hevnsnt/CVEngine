@@ -1,8 +1,10 @@
 """Third-party suppliers of a project: the list, their host cards, the technology search and the posture findings (REST and MCP share this).
 
-Reading needs any role on the project (the audit role included). Adding and removing a supplier, and accepting a finding, need the project's
+Reading needs any role on the project (the audit role included). Adding and removing a supplier, and accepting or closing a finding, need the project's
 admin role (an organization admin or an App Admin, the rule the runZero settings use) and a write token: a supplier list drives outbound checks
 against third parties, so it is not for every member. A supplier is never an owned host (see ``cveFeed.supplier_scan``)."""
+from django.utils import timezone
+
 from agentapi import services as svc
 from agentapi.services import ApiError, _iso, _user_brief, paginate
 from tenancy import roles
@@ -34,15 +36,16 @@ def _supplier_of(project, supplier_id):
 
 
 def _counts(supplier_ids):
-    """``{supplier_id: {'open', 'critical', 'high', 'medium', 'low', 'accepted'}}`` of the findings, in one query."""
+    """``{supplier_id: {'open', 'critical', 'high', 'medium', 'low', 'accepted', 'false_positive'}}`` of the findings, in one query."""
     from django.db.models import Count
 
     from cveFeed.models import SupplierFinding
     out = {}
-    for row in SupplierFinding.objects.filter(supplier_id__in=supplier_ids, status__in=('open', 'accepted')).values('supplier_id', 'status', 'severity').annotate(n=Count('id')):
-        entry = out.setdefault(row['supplier_id'], {'open': 0, 'accepted': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0})
-        if row['status'] == 'accepted':
-            entry['accepted'] += row['n']
+    for row in (SupplierFinding.objects.filter(supplier_id__in=supplier_ids, status__in=('open', 'accepted', 'false_positive'))
+                .values('supplier_id', 'status', 'severity').annotate(n=Count('id'))):
+        entry = out.setdefault(row['supplier_id'], {'open': 0, 'accepted': 0, 'false_positive': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0})
+        if row['status'] != 'open':  # closed by a person: counted apart, never by severity
+            entry[row['status']] += row['n']
             continue
         entry['open'] += row['n']
         name = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low'}.get(row['severity'])
@@ -52,7 +55,7 @@ def _counts(supplier_ids):
 
 
 def _supplier(s, counts=None, hosts=None):
-    empty = {'open': 0, 'accepted': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    empty = {'open': 0, 'accepted': 0, 'false_positive': 0, 'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
     return {'id': s.id, 'name': s.name, 'tier': s.tier, 'domains': list(s.domains or []), 'contact': s.contact, 'notes': s.notes,
             'added_by': _user_brief(s.added_by), 'created': _iso(s.created_at), 'last_checked': _iso(s.last_checked_at),
             'findings': (counts or {}).get(s.id, empty), 'hosts': (hosts or {}).get(s.id, 0)}
@@ -72,7 +75,8 @@ def _finding(f):
     return {'id': f.id, 'supplier': {'id': s.id, 'name': s.name, 'tier': s.tier}, 'domain': f.domain, 'category': f.category, 'check': f.check_name,
             'severity': supplier_checks.level(f.severity), 'title': f.title, 'detail': f.detail, 'ask': f.ask, 'evidence': f.evidence,
             'status': f.status, 'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'resolved': _iso(f.resolved_at),
-            'status_note': f.status_note, 'status_by': _user_brief(f.status_by)}
+            'status_note': f.status_note, 'status_by': _user_brief(f.status_by), 'status_at': _iso(getattr(f, 'status_at', None)),
+            **svc._closure_fields('supplier', f)}
 
 
 def _audit(ctx, project, action, target, **detail):
@@ -186,7 +190,7 @@ def list_technologies(ctx, slug):
 
 def list_supplier_findings(ctx, slug, params=None):
     """Posture findings of the project's suppliers (certificate, email authentication, headers, exposed pages and, secondary, known CVEs for
-    announced versions): ``status`` (open by default, accepted, resolved or all), ``supplier`` (id), ``severity`` (that or worse), ``category``
+    announced versions): ``status`` (open by default, accepted, false_positive, resolved or all), ``supplier`` (id), ``severity`` (that or worse), ``category``
     (tls, email, web, exposed, cve). Worst first."""
     from cveFeed.models import SupplierFinding
     project, _ = _project(ctx, slug)
@@ -195,7 +199,7 @@ def list_supplier_findings(ctx, slug, params=None):
     status = str(params.get('status') or 'open').lower()
     if status != 'all':
         if status not in SupplierFinding.STATUSES:
-            raise ApiError(400, 'status must be open, accepted, resolved or all')
+            raise ApiError(400, 'status must be open, accepted, false_positive, resolved or all')
         qs = qs.filter(status=status)
     if params.get('supplier'):
         qs = qs.filter(supplier_id=svc._int_param(params['supplier'], 'supplier'))
@@ -209,18 +213,20 @@ def list_supplier_findings(ctx, slug, params=None):
 
 
 def set_finding_status(ctx, slug, finding_id, body):
-    """Accept a finding (the supplier knows and the project lives with it: the sweep keeps refreshing it but it leaves the open list) or open it
-    again. ``resolved`` is set by the checks alone. ``note`` is kept with it."""
-    from cveFeed import supplier_scan
+    """Accept a finding (the supplier knows and the project lives with it: the sweep keeps refreshing it but it leaves the open list), close it
+    as a false positive (the check got it wrong: the sweep leaves it as it is, so it is never resolved and reopened) or open it again.
+    ``resolved`` is set by the checks alone. ``note`` (why; cveFeed.closure.clean_note, at most 2000 characters) is kept with it, with who
+    and when, and the change is written to the audit log with the status before it."""
+    from cveFeed import closure
     from cveFeed.models import SupplierFinding
     project, _ = _project(ctx, slug, write=True)
     body = body if isinstance(body, dict) else {}
     status = body.get('status')
-    if status not in ('open', 'accepted'):
-        raise ApiError(400, 'status must be open or accepted (a finding is resolved by a later check that no longer finds it)')
+    if status not in closure.SUPPLIER_SETTABLE:
+        raise ApiError(400, 'status must be open, accepted or false_positive (a finding is resolved by a later check that no longer finds it)')
     try:
-        note = supplier_scan.clean_text(body.get('note'), 500, 'note')
-    except supplier_scan.SupplierError as exc:
+        note = closure.clean_note(body.get('note')) or ''
+    except closure.NoteError as exc:
         raise ApiError(400, str(exc))
     try:
         row = SupplierFinding.objects.filter(supplier__project=project, pk=int(finding_id)).select_related('supplier', 'status_by').first()
@@ -230,9 +236,10 @@ def set_finding_status(ctx, slug, finding_id, body):
         raise ApiError(404, 'finding not found')
     if row.status == 'resolved':
         raise ApiError(409, 'a resolved finding cannot be changed; if it comes back the next check reopens it')
-    row.status, row.status_note, row.status_by = status, note, ctx.user
-    row.save(update_fields=['status', 'status_note', 'status_by'])
-    _audit(ctx, project, 'project.supplier.finding', f'{row.supplier.name}:{row.check_name}', status=status)
+    before = row.status
+    row.status, row.status_note, row.status_by, row.status_at = status, note, ctx.user, timezone.now()
+    row.save(update_fields=['status', 'status_note', 'status_by', 'status_at'])
+    _audit(ctx, project, 'project.supplier.finding', f'{row.supplier.name}:{row.check_name}', status=status, before=before, note=note[:500])
     return _finding(row)
 
 

@@ -22,7 +22,7 @@ async function save(url, filename) {
 }
 
 /**
- * A "Download PDF report" button with a switch for fixed and accepted-risk findings.
+ * A "Download PDF report" button with a switch for closed findings (fixed, accepted risk, false positive).
  * @param {{slug: string, host?: string, label?: string}} options host: an exact host name for a one-host report
  */
 export function reportButton({ slug, host = "", label = "Download PDF report" }) {
@@ -33,7 +33,7 @@ export function reportButton({ slug, host = "", label = "Download PDF report" })
   });
   const closed = el("input", "", "", { type: "checkbox" });
   const switchLabel = el("label", "report-switch note");
-  switchLabel.append(closed, document.createTextNode(" Include fixed and accepted-risk findings"));
+  switchLabel.append(closed, document.createTextNode(" Include closed findings (fixed, accepted risk, false positive)"));
   const status = el("span", "note report-status", "", { role: "status", "aria-live": "polite" });
   box.append(button, switchLabel, status);
 

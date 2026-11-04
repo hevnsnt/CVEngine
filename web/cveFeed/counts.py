@@ -28,19 +28,21 @@ from datetime import timedelta
 from django.db.models import Q
 from django.utils import timezone
 
+from cveFeed.closure import CLOSED  # remediation states that close a finding: fixed, accepted_risk, false_positive
+
 RUNNING_WINDOW_SLACK = timedelta(hours=1)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
-CLOSED = ('fixed', 'accepted_risk')  # remediation states that do the same: someone dealt with the finding or decided to live with it
 
 
 def match_is_live(match):
-    """A CVE match that still counts toward a host's heat, score and exposure: not ruled out by the AI, not fixed, not an accepted risk."""
+    """A CVE match that still counts toward a host's heat, score and exposure: not ruled out by the AI and not closed (fixed, accepted
+    risk or false positive)."""
     return match.ai_verdict != RULED_OUT and match.remediation_status not in CLOSED
 
 
 def finding_is_live(finding):
-    """A scanner finding that still counts: open, and not fixed or an accepted risk."""
+    """A scanner finding that still counts: open, and not closed (fixed, accepted risk or false positive)."""
     return bool(finding.open_status) and finding.remediation_status not in CLOSED
 
 # a host that resolved to an address, or that something saw answer over HTTP
@@ -165,13 +167,17 @@ def exposed_among(reps, project_ids=None):
     return named(with_host_key(reps)).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(_named__in=named(exposed).values('_named')))
 
 
-def host_reps(domain_id=None, domain_ids=None):
+def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     """One row per host (project and name) of the current inventory: the row the Hosts page shows for it. ``domain_id`` (one
-    target) or ``domain_ids`` (several) narrow it to those targets' hosts."""
+    target) or ``domain_ids`` (several) narrow it to those targets' hosts. ``in_scope`` (what a sweep may scan) leaves out the rows kept
+    under a target that is now exactly one host before the rows are collapsed, so a name another target still holds keeps that row."""
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     base = Subdomain.objects.filter(latest_scan_q())
+    if in_scope:
+        from targetApp.models import in_target_scope_q
+        base = base.filter(in_target_scope_q())
     if domain_id:
         base = base.filter(target_domain_id=domain_id)
     if domain_ids is not None:
@@ -214,12 +220,12 @@ def match_group_count():
 
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
-    informational detections and closed findings (fixed or an accepted risk too) are the rest (``status=all``)."""
+    informational detections and closed findings (fixed, an accepted risk or a false positive too) are the rest (``status=all``)."""
     return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
 
 
 def actionable_hygiene(qs, severity=1):
-    """Open hygiene findings of ``severity`` or worse (low by default) that are not fixed or an accepted risk: the Findings page's
+    """Open hygiene findings of ``severity`` or worse (low by default) that are not closed (fixed, accepted risk, false positive): the Findings page's
     Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
     return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
 
@@ -234,7 +240,7 @@ def oldest_open(now=None):
       the same CVE on the same host name of the same target.
     * ``scanner``: an actionable finding (``actionable_findings``) of severity high (3) or critical (4), open since the earliest
       discovery of the same finding on the same host.
-    * ``hygiene``: an open hygiene finding of severity high or critical that is not fixed or an accepted risk, open since its first_seen.
+    * ``hygiene``: an open hygiene finding of severity high or critical that is not closed, open since its first_seen.
 
     Whole days, rounded down. ``id`` is the id of the row to link to: the current row of that finding."""
     from django.db.models import OuterRef, Subquery

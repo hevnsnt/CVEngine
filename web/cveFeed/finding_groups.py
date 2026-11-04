@@ -143,9 +143,11 @@ def registrable_domain(host):
 
 
 def has_hard_evidence(row):
-    """A template hit, a validation hit or a confirmed classification: proof about this host, never folded into a group."""
+    """A template hit, a validation hit or a confirmed classification: proof about this host, never folded into a group. A confirmation
+    the library rule gave (``library_proven``: the served file states the version, ``triage.library_body_proven_q``) is not: the same
+    file on sibling hosts still groups, as it did before the rule."""
     return (row.get('template_result') in HARD_TEMPLATE_RESULTS or row.get('triage__validation_status') in HARD_VALIDATION
-            or row.get('triage__classification') in HARD_CLASSIFICATIONS)
+            or (row.get('triage__classification') in HARD_CLASSIFICATIONS and not row.get('library_proven')))
 
 
 def is_groupable(row):
@@ -193,10 +195,15 @@ def key_id(key):
 
 def rows_of(qs, with_list_fields=True):
     """The values() query the pass reads: one query, the script fields pulled out of the evidence by the database."""
+    from django.db.models import BooleanField, Case, Value, When
     from django.db.models.fields.json import KeyTextTransform
+
+    from cveFeed.triage import library_body_proven_q
     fields = BASE_FIELDS + (LIST_FIELDS if with_list_fields else ())
     return qs.annotate(script_sha256=KeyTextTransform('script_sha256', 'evidence'),
-                       script_url=KeyTextTransform('script_url', 'evidence')).values(*fields, 'script_sha256', 'script_url')
+                       script_url=KeyTextTransform('script_url', 'evidence'),
+                       library_proven=Case(When(library_body_proven_q(), then=Value(True)), default=Value(False),
+                                           output_field=BooleanField())).values(*fields, 'script_sha256', 'script_url', 'library_proven')
 
 
 def build(rows):

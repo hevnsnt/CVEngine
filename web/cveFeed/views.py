@@ -23,7 +23,7 @@ from cveFeed import snapshot_cache
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
-from cveFeed.threat import FIRE, ICE, SMOKE, classify_threat_tier, host_heat, match_heat
+from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE, classify_threat_tier, host_heat, match_heat
 from startScan.models import OPEN_PORT_STATES, open_services
 from targetApp.target_types import is_public_address
 from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
@@ -145,9 +145,16 @@ def graph_payload(domain_id=None, scan_id=None):
         subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', flat=True))
     vulnerable_ids |= {s.pk for s in sub_list if any(match_is_live(m) for m in s.cve_matches.all())}
 
-    severities = {}
-    for sub_id, severity in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', 'severity'):
+    # each open finding's severity (the tip) and heat (threat.finding_heat_rank_expr: under the KEV policy a finding that names CVEs follows the
+    # CVE rule, any other its severity)
+    from cveFeed.threat import finding_heat_rank_expr
+    heat_names = {rank: heat for heat, rank in HEAT_RANK.items()}
+    severities, finding_heats = {}, {}
+    for sub_id, severity, rank in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
+            .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'heat_rank'):
         severities.setdefault(sub_id, []).append(severity)
+        if rank in heat_names:
+            finding_heats.setdefault(sub_id, []).append(heat_names[rank])
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
     from cveFeed.counts import host_siblings
@@ -159,9 +166,9 @@ def graph_payload(domain_id=None, scan_id=None):
                 'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
                 'cve_entry__exploit_db', 'cve_entry__cvss', 'triage__validation_status').select_related('cve_entry', 'triage'):
             sibling_matches.setdefault(m.subdomain_id, []).append(m)
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-                .values_list('subdomain_id', 'severity', 'name'):
-            sibling_findings.setdefault(sid, []).append((severity, name))
+        for sid, severity, name, rank in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
+                .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'name', 'heat_rank'):
+            sibling_findings.setdefault(sid, []).append((severity, name, heat_names.get(rank)))
     own_findings = {}
     if sibling_ids:
         for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
@@ -184,6 +191,7 @@ def graph_payload(domain_id=None, scan_id=None):
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
         live = [m for m in sub.cve_matches.all() if match_is_live(m)]
         sev = list(severities.get(sub.pk, []))
+        temps = list(finding_heats.get(sub.pk, []))
         sibs = siblings.get(sub.pk, [])
         have = {m.cve_entry.cve_id for m in live}
         seen_findings = set(own_findings.get(sub.pk, ()))
@@ -192,14 +200,16 @@ def graph_payload(domain_id=None, scan_id=None):
                 if m.cve_entry.cve_id not in have:
                     have.add(m.cve_entry.cve_id)
                     live.append(m)
-            for severity, name in sibling_findings.get(other_id, []):
+            for severity, name, temp in sibling_findings.get(other_id, []):
                 if (severity, name) not in seen_findings:
                     seen_findings.add((severity, name))
                     sev.append(severity)
+                    if temp:
+                        temps.append(temp)
         if status != 'vulnerable' and (live or sev):
             status = 'vulnerable'
-        tiers = [match_heat(m) for m in live]
-        heat = host_heat(status, tiers, sev)
+        tiers = [match_heat(m) for m in live] + temps
+        heat = host_heat(status, tiers, [])
         given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     **{k: given[k] for k in ('alias', 'note') if given[k]},
@@ -651,7 +661,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.3.1'
+HOW_REVIEWED_VERSION = '1.3.3'
 
 
 def how_page(request):

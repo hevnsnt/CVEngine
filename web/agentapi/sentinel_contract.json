@@ -119,6 +119,15 @@
             "type": "string",
             "maxLength": 40
           }
+        },
+        "cve_ids": {
+          "description": "Optional: the CVE ids the template names (nuclei's classification.cve-id). Only well-formed ids are kept; a result without the field is stored without it.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
+          }
         }
       }
     },
@@ -259,6 +268,15 @@
                         "type": "string",
                         "maxLength": 40
                       }
+                    },
+                    "cve_ids": {
+                      "description": "Optional: the CVE ids the template names (nuclei's classification.cve-id). Only well-formed ids are kept; a result without the field is stored without it.",
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
+                      }
                     }
                   }
                 }
@@ -333,6 +351,15 @@
                         "type": "string",
                         "maxLength": 40
                       }
+                    },
+                    "cve_ids": {
+                      "description": "Optional: the CVE ids the template names (nuclei's classification.cve-id). Only well-formed ids are kept; a result without the field is stored without it.",
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
+                      }
                     }
                   }
                 }
@@ -406,6 +433,15 @@
                       "items": {
                         "type": "string",
                         "maxLength": 40
+                      }
+                    },
+                    "cve_ids": {
+                      "description": "Optional: the CVE ids the template names (nuclei's classification.cve-id). Only well-formed ids are kept; a result without the field is stored without it.",
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,7}$"
                       }
                     }
                   }

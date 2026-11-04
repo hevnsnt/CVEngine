@@ -761,7 +761,7 @@ def run(now_dt=None):
     in_window = [s for s in samples if s['t'] >= now - window]
     rows = _saved_rows()
     tuned = _clean_values(row.values) if mode == 'auto' else {}
-    facts = policy.facts_of(samples[-1]) if samples else {}
+    facts = policy.steady_facts(samples) if samples else {}  # a Sentinel that missed one heartbeat still counts for sizing
     summary['facts'] = {k: facts.get(k) for k in ('cores', 'memory_budget_mb', 'memory_total_mb', 'db_max', 'sentinel_live', 'sentinel_slots',
                                                   'hosts', 'targets', 'disk_free_percent')}
     summary['sized_for'] = policy.sized_for_text(facts)
@@ -864,7 +864,9 @@ def emergency_backoff(now):
     tick's publish and ``scan_concurrency.apply_discovery``'s resize, and a starting container) lowers a pending key to its emergency number, and
     the published Redis copy carries it too. The discovery workers are resized directly with celery's ``autoscale``. The first run that reaches the
     database again writes the numbers into the row and the history (phase ``emergency``, ``record_emergency``) and clears the key. A setting
-    that is pinned, or not tuned, is not touched; nothing happens in Off or Suggest, or with the kill switch."""
+    that is pinned, or not tuned, is not touched (``_tuned_applies``: the pins as the workers see them without the database, so the discovery
+    workers are never resized below a number a person saved or the environment pins); nothing happens in Off or Suggest, or with the kill
+    switch."""
     from cveFeed import autotune_policy as policy
     summary = {'at': datetime.fromtimestamp(now, dt_timezone.utc).isoformat(), 'mode': None, 'settings': {}, 'changes': [], 'advisor': None,
                'held': 'the database does not answer: emergency back-off from Redis only'}
@@ -893,8 +895,13 @@ def emergency_backoff(now):
         remember(summary)
         return summary
     keys, changed = by_key(), {}
+    saved = resources.saved_values()
     for key in EMERGENCY_KEYS:
         if isinstance(values.get(key), int) and key in keys:
+            if not _tuned_applies(keys[key], saved, values[key]):
+                summary['settings'][key] = {'label': keys[key].label, 'state': 'pinned',
+                                            'why_not_raised': 'pinned: the emergency back-off leaves it alone'}
+                continue
             new = policy.backoff(keys[key].setting, values[key])
             if new < values[key]:
                 changed[key] = [values[key], new]
@@ -913,6 +920,12 @@ def emergency_backoff(now):
                               for k, (o, n) in changed.items()]
     remember(summary)
     return summary
+
+
+def _tuned_applies(m, saved, number):
+    """Whether the tuned ``number`` is what applies for a setting, judged without the database: not when a person saved a value for it (the
+    published copy of the saved values, ``saved``, which the workers read too) or the environment pins it (``env_pin``)."""
+    return _registry(m.registry).resolve(m.key, saved, {m.key: number})['source'] == 'auto'
 
 
 def _resize_discovery_directly(ceiling):

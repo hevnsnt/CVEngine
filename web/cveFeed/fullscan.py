@@ -76,10 +76,11 @@ def active_attached(ip):
     from django.db.models import Exists, OuterRef
     from cveFeed.models import HostState
     from startScan.models import Subdomain
-    from targetApp.models import Domain
+    from targetApp.models import Domain, in_target_scope_q
     archived = HostState.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'),
                                         archived_at__isnull=False)
     return (Subdomain.objects.filter(ip_addresses=ip, target_domain__project__isnull=False).filter(~Exists(archived))
+            .filter(in_target_scope_q())  # a name kept under a target that is now exactly one host does not hold its address in scope
             .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL))
 
 def candidates():
@@ -205,10 +206,16 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
         seen.append(xml)
         return xml
 
+    from cveFeed import local_egress
     running = activity.log('run_check', f'Background full port scan of {address} (all 65,535 TCP ports; this can take a while)',
                            project=project, status='running')
     try:
-        nmap_scan.scan_in_chunks(capture, [address], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
+        with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
+            # the egress governor: a budgeted port (25 by default) over its hourly budget is left out of this sweep and probed later by the
+            # paced catch-up pass; within budget the sweep is exactly as before
+            held = local_egress.plan([address], set(local_egress.budgets()), 'full port sweep').get(address)
+            flags = local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, held) if held else nmap_scan.FULL_PORT_FLAGS
+            nmap_scan.scan_in_chunks(capture, [address], flags, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
     except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
         from reNgine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
@@ -308,9 +315,15 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
     ports = sorted(set(new_ports))[:investigate_max()]
     out = {'ports': ports, 'capped': len(set(new_ports)) > len(ports)}
     try:
-        flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(ports)]
-        fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
-                                                 nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
+        from cveFeed import local_egress
+        with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
+            held = local_egress.plan([ip.address], set(ports), 'new port fingerprint').get(ip.address, frozenset())
+            wanted = [p for p in ports if p not in held]  # a held port is owed to the paced catch-up pass, which fingerprints it
+            fingerprinted = {'ports': 0}
+            if wanted:
+                flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(wanted)]
+                fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
+                                                         nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
         out['fingerprinted'] = fingerprinted.get('ports', 0)
     except Exception as exc:  # noqa: BLE001 - the ports are recorded; their versions arrive with the next fingerprint
         logger.warning('could not fingerprint new ports %s on %s', ports, ip.address, exc_info=True)

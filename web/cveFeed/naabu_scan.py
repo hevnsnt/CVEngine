@@ -52,9 +52,24 @@ def rate():
         return DEFAULT_RATE
 
 
-def build_command(binary, list_path, packets_per_second):
-    return [binary, '-list', list_path, '-p', '-', '-rate', str(packets_per_second), '-retries', '2', '-c', '25',
-            '-warm-up-time', '2', '-json', '-silent', '-nc']
+def build_command(binary, list_path, packets_per_second, exclude=()):
+    """The naabu command line. ``exclude``: ports this run must not probe (``-exclude-ports``): the opt-in skip list, and the ports the egress
+    governor held back for these addresses. Empty (the default) is the command line of before."""
+    command = [binary, '-list', list_path, '-p', '-', '-rate', str(packets_per_second), '-retries', '2', '-c', '25',
+               '-warm-up-time', '2', '-json', '-silent', '-nc']
+    if exclude:
+        from cveFeed import local_egress
+        command = local_egress.naabu_exclude(command, exclude)
+    return command
+
+
+class PortMap(dict):
+    """``{ip: [open ports]}`` from a naabu runner, plus ``deferred``: addresses it did not scan because the local fallback cap held them back
+    (they are not recorded as scanned, so they stay due)."""
+
+    def __init__(self, *args, deferred=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deferred = set(deferred)
 
 
 def parse_output(text):
@@ -76,19 +91,44 @@ def parse_output(text):
 
 def run_naabu(ips, binary=None):
     """Run naabu over ``ips`` and return ``{ip: [open ports]}``. Waits its turn for memory; raises reNgine.resources.MemoryKill if
-    stopped to protect the container, subprocess.TimeoutExpired past the time limit and RuntimeError on a failed run."""
+    stopped to protect the container, subprocess.TimeoutExpired past the time limit and RuntimeError on a failed run.
+
+    This is the only place naabu runs on this server (a Sentinel runs its own), so it is where the egress governor (``cveFeed.local_egress``)
+    is asked: a full sweep probes every budgeted port (25 by default) on every address, so the addresses beyond the port's hourly budget are swept
+    in a second run with that port excluded, and the port is owed to the paced catch-up pass. Within budget it is one run, exactly as before. The
+    opt-in skip list is excluded from every run."""
+    from cveFeed import local_egress
     from targetApp.target_types import refuse_local
     refuse_local('naabu')
-    from reNgine import resources
     binary = binary or naabu_path()
     if not binary:
         raise RuntimeError('naabu is not installed')
+    ips = list(ips)
+    skip = local_egress.skipped_ports()
+    if skip:
+        local_egress.note_skipped('naabu', skip, ips)
+    with local_egress.context(kind='naabu'):
+        held = local_egress.plan(ips, set(local_egress.budgets()), 'naabu')
+    groups = {}
+    for ip in ips:
+        groups.setdefault(held.get(ip, frozenset()), []).append(ip)
+    found = {}
+    for keep in sorted(groups, key=lambda k: (len(k), sorted(k))):
+        found.update(_run_naabu_once(groups[keep], binary, set(skip) | set(keep)))
+    return found
+
+
+def _run_naabu_once(ips, binary, exclude=()):
+    from cveFeed import local_egress
+    from reNgine import resources
     timeout = min(RUN_TIMEOUT_MAX, RUN_TIMEOUT_BASE + RUN_TIMEOUT_PER_IP * len(ips))
     with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
         handle.write('\n'.join(ips) + '\n')
     try:
         with resources.heavy_job(SERVICE, label=f'{len(ips)} address(es)') as job:
-            proc = subprocess.Popen(build_command(binary, handle.name, rate()), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            exclude = local_egress.launch_naabu(ips, exclude)  # charged when it starts (after the memory wait); no room: that port is left out
+            local_egress.record_naabu(ips, exclude)
+            proc = subprocess.Popen(build_command(binary, handle.name, rate(), exclude), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, start_new_session=True)
             job.attach(proc)
             try:
@@ -146,18 +186,21 @@ def discover(ips, scan=None, runner=None):
     try:
         fresh = set(ledger.fresh(SERVICE, ips, project))
         todo = [i for i in ips if i not in fresh]
-        found, lost, rejected = {}, [], set()
+        found, lost, rejected, deferred = {}, [], set(), set()
         if todo:
             with ledger.claim_many(f'{SERVICE}@{project}', todo) as won:
                 won = [i for i in todo if i in set(won)]
                 if won:
                     try:
                         answer = runner(won)
+                        # addresses the local fallback cap held back were not scanned at all: like an address another pipeline holds, they
+                        # are not recorded, and stay due for the next run
+                        deferred = set(getattr(answer, 'deferred', ())) & set(won)
                         # A tarpit is not a clean scan with no open ports. Omit it from the
                         # nmap port map so that host keeps the default top-port fallback.
                         rejected = {ip for ip, ports in answer.items() if ip in won and
                                     (ports is None or len(ports) > MAX_OPEN_PER_IP)}
-                        found = {ip: ports for ip, ports in answer.items() if ip in won and ip not in rejected}
+                        found = {ip: ports for ip, ports in answer.items() if ip in won and ip not in rejected and ip not in deferred}
                     except resources.ScannerUnavailable as exc:  # no scanner could take it and naabu may not run here: not a naabu failure, so nothing is recorded and the addresses stay due
                         logger.warning('naabu is waiting for a scanner; nmap keeps its default ports: %s', exc)
                         _waiting(exc, len(won), project, scan)
@@ -166,12 +209,13 @@ def discover(ips, scan=None, runner=None):
                         logger.warning('naabu failed; nmap keeps its default ports', exc_info=True)
                         ledger.record(SERVICE, won, project, scan, 'failed')
                         return None
-                    ledger.record(SERVICE, [ip for ip in won if ip not in rejected], project, scan)
+                    ledger.record(SERVICE, [ip for ip in won if ip not in rejected and ip not in deferred], project, scan)
                     if rejected:
                         logger.warning('naabu discarded tarpit results for %s address(es)', len(rejected))
                         ledger.record(SERVICE, rejected, project, scan, 'failed')
                     persist_open_ports(found, org_id)
                 lost = [i for i in todo if i not in won]  # another pipeline holds these: its result lands in the inventory
+                lost += sorted(deferred)
         before = known_open_ports(ips, org_id)
     except Exception:  # noqa: BLE001
         logger.warning('naabu stage failed; nmap keeps its default ports', exc_info=True)
@@ -217,10 +261,13 @@ def flags_for(ports_by_ip, base_flags, os_probe=True):
     those addresses>``, plus (``os_probe``, when the flags ask for OS detection) the ports in CLOSED_PROBE_PORTS, so nmap has a closed port to
     fingerprint the system with. None for a chunk with nothing open anywhere (nothing to fingerprint); the base flags when an address has no
     naabu answer or the port list would be unreasonably long."""
+    from cveFeed import local_egress
+    skip = set(local_egress.skipped_ports())
+
     def build(chunk):
         if any(ip not in ports_by_ip for ip in chunk):
             return list(base_flags)
-        ports = sorted({p for ip in chunk for p in ports_by_ip[ip]})
+        ports = sorted({p for ip in chunk for p in ports_by_ip[ip]} - skip)  # the handoff never brings back a port on the opt-in skip list
         if not ports:
             return None
         if os_probe and '-O' in base_flags:

@@ -14,14 +14,14 @@ from targetApp.models import Domain
 from tests.test_agentapi import call, tool_call
 
 NOW = timezone.now()
-SIBLINGS = ('www', 'blog', 'info', 'careers', 'bgu', 'givinggrace')
+SIBLINGS = ('www', 'blog', 'info', 'careers', 'learn', 'donate')
 SHA_A, SHA_B = 'a' * 64, 'b' * 64
 
 
 class RegistrableDomainTests(SimpleTestCase):
 	def test_sibling_hosts_share_their_registrable_domain(self):
-		self.assertEqual(fg.registrable_domain('givinggrace.mybluegrace.com'), 'mybluegrace.com')
-		self.assertEqual(fg.registrable_domain('WWW.MyBlueGrace.com.'), 'mybluegrace.com')
+		self.assertEqual(fg.registrable_domain('donate.acme-site.com'), 'acme-site.com')
+		self.assertEqual(fg.registrable_domain('WWW.Acme-Site.com.'), 'acme-site.com')
 		self.assertEqual(fg.registrable_domain('a.b.example.co.uk'), 'example.co.uk')
 		self.assertEqual(fg.registrable_domain('shop.example.com.au'), 'example.com.au')
 
@@ -79,27 +79,27 @@ class GroupedFindingsTests(TestCase):
 	def setUpTestData(cls):
 		cls.org = Org.objects.create(name='Grace', slug='grace')
 		cls.other_org = Org.objects.create(name='Zebra', slug='zebra-org')
-		cls.pa = Project.objects.create(name='Bluegrace', slug='fg-a', insert_date=NOW, org=cls.org)
+		cls.pa = Project.objects.create(name='Acmesite', slug='fg-a', insert_date=NOW, org=cls.org)
 		cls.pb = Project.objects.create(name='Sibling project', slug='fg-b', insert_date=NOW, org=cls.org)
 		cls.pz = Project.objects.create(name='Zebra', slug='fg-z', insert_date=NOW, org=cls.other_org)
-		cls.da = Domain.objects.create(name='mybluegrace.com', project=cls.pa, insert_date=NOW)
+		cls.da = Domain.objects.create(name='acme-site.com', project=cls.pa, insert_date=NOW)
 		cls.dao = Domain.objects.create(name='othersite.org', project=cls.pa, insert_date=NOW)
-		cls.db = Domain.objects.create(name='sister.mybluegrace.com', project=cls.pb, insert_date=NOW)  # one name per organization
-		cls.dz = Domain.objects.create(name='mybluegrace.com', project=cls.pz, insert_date=NOW)
+		cls.db = Domain.objects.create(name='sister.acme-site.com', project=cls.pb, insert_date=NOW)  # one name per organization
+		cls.dz = Domain.objects.create(name='acme-site.com', project=cls.pz, insert_date=NOW)
 		cls.c23 = CVEEntry.objects.create(cve_id='CVE-2020-11023', cvss=6.1, title='jQuery', published_at=NOW)
 		cls.c22 = CVEEntry.objects.create(cve_id='CVE-2020-11022', cvss=6.1, title='jQuery', published_at=NOW)
-		cls.hosts = {name: Subdomain.objects.create(name=f'{name}.mybluegrace.com', target_domain=cls.da) for name in SIBLINGS}
+		cls.hosts = {name: Subdomain.objects.create(name=f'{name}.acme-site.com', target_domain=cls.da) for name in SIBLINGS}
 		cls.m23 = {name: cls.jq(cls.c23, sub) for name, sub in cls.hosts.items()}
 		cls.m22 = {name: cls.jq(cls.c22, sub) for name, sub in cls.hosts.items()}
 		cls.elsewhere = cls.jq(cls.c23, Subdomain.objects.create(name='www.othersite.org', target_domain=cls.dao))
 		cls.port = CVEMatch.objects.create(cve_entry=cls.c23, subdomain=cls.hosts['www'], matched_product='jquery', matched_version='3.2.1',
 										   source='port')
 		cls.vuln = Vulnerability.objects.create(name='Exposed admin', severity=2, subdomain=cls.hosts['www'], target_domain=cls.da,
-												open_status=True, discovered_date=NOW, http_url='https://www.mybluegrace.com/')
+												open_status=True, discovered_date=NOW, http_url='https://www.acme-site.com/')
 		# hosts of the same site in a sibling project, and the same names in another organization
 		for domain, names in ((cls.db, ('a.sister', 'b.sister')), (cls.dz, ('www', 'blog'))):
 			for name in names:
-				cls.jq(cls.c23, Subdomain.objects.create(name=f'{name}.mybluegrace.com', target_domain=domain))
+				cls.jq(cls.c23, Subdomain.objects.create(name=f'{name}.acme-site.com', target_domain=domain))
 		cls.alice, cls.auditor, cls.root = (User.objects.create_user('fg-alice', password='x'), User.objects.create_user('fg-audit', password='x'),
 											User.objects.create_superuser('fg-root', 'r@x.io', 'x'))
 		ProjectMembership.objects.create(user=cls.alice, project=cls.pa, role='user')
@@ -145,9 +145,9 @@ class GroupedFindingsTests(TestCase):
 			group = self.group_of(body, cve_id)
 			self.assertEqual(sorted(group['member_ids']), sorted(m.id for m in matches.values()))
 			self.assertEqual((group['hosts'], group['findings']), (6, 6))
-			self.assertEqual(group['registrable_domain'], 'mybluegrace.com')
+			self.assertEqual(group['registrable_domain'], 'acme-site.com')
 			self.assertEqual(group['identity'], 'library')
-			self.assertEqual({m['host'] for m in group['members']}, {f'{n}.mybluegrace.com' for n in SIBLINGS})
+			self.assertEqual({m['host'] for m in group['members']}, {f'{n}.acme-site.com' for n in SIBLINGS})
 			self.assertEqual(group['status_counts'], {'open': 6})
 			self.assertIsNotNone(group['first_seen'])
 		singles = [r for r in body['results'] if not r.get('group')]
@@ -174,7 +174,7 @@ class GroupedFindingsTests(TestCase):
 		body = self.get(type='cve', group='cve')
 		row = next(r for r in self.groups(body) if r['title'] == 'CVE-2020-11023')
 		self.assertEqual(row['id'], careers.id)
-		self.assertEqual(row['host'], 'careers.mybluegrace.com')
+		self.assertEqual(row['host'], 'careers.acme-site.com')
 		heats = {m['id']: m['heat'] for m in row['group']['members']}
 		self.assertEqual(heats.pop(careers.id), row['heat'])
 		self.assertEqual(set(heats.values()), {'ice'})
@@ -182,36 +182,36 @@ class GroupedFindingsTests(TestCase):
 		self.assertEqual(row['group']['heat_counts']['ice'], 5)
 
 	def test_a_host_with_hard_evidence_is_never_folded_in(self):
-		proven = self.m23['bgu']
+		proven = self.m23['learn']
 		proven.template_result = 'vulnerable'
 		proven.save()
-		Triage.objects.create(project=self.pa, domain=self.da, host='givinggrace.mybluegrace.com', kind='cve_match',
-							  match=self.m23['givinggrace'], status='triaged', classification='confirmed', validation_status='hit')
+		Triage.objects.create(project=self.pa, domain=self.da, host='donate.acme-site.com', kind='cve_match',
+							  match=self.m23['donate'], status='triaged', classification='confirmed', validation_status='hit')
 		body = self.get(type='cve', group='cve')
 		group = self.group_of(body, 'CVE-2020-11023')
 		self.assertEqual(group['findings'], 4)
 		self.assertNotIn(proven.id, group['member_ids'])
-		self.assertNotIn(self.m23['givinggrace'].id, group['member_ids'])
+		self.assertNotIn(self.m23['donate'].id, group['member_ids'])
 		singles = {r['id'] for r in body['results'] if not r.get('group')}
-		self.assertTrue({proven.id, self.m23['givinggrace'].id} <= singles)
+		self.assertTrue({proven.id, self.m23['donate'].id} <= singles)
 
 	def test_different_script_files_are_different_groups(self):
 		CVEMatch.objects.filter(pk__in=[self.m23[n].id for n in ('www', 'blog', 'info')]).update(
-			evidence={'source': 'tech', 'script_sha256': SHA_A, 'script_url': 'https://www.mybluegrace.com/js/jquery.js'})
-		CVEMatch.objects.filter(pk__in=[self.m23[n].id for n in ('careers', 'bgu')]).update(
+			evidence={'source': 'tech', 'script_sha256': SHA_A, 'script_url': 'https://www.acme-site.com/js/jquery.js'})
+		CVEMatch.objects.filter(pk__in=[self.m23[n].id for n in ('careers', 'learn')]).update(
 			evidence={'source': 'tech', 'script_sha256': SHA_B})
 		body = self.get(type='cve', group='cve')
 		by_identity = {tuple(sorted(r['group']['member_ids'])): r['group'] for r in self.groups(body) if r['title'] == 'CVE-2020-11023'}
 		self.assertIn(tuple(sorted(self.m23[n].id for n in ('www', 'blog', 'info'))), by_identity)
-		self.assertIn(tuple(sorted(self.m23[n].id for n in ('careers', 'bgu'))), by_identity)
+		self.assertIn(tuple(sorted(self.m23[n].id for n in ('careers', 'learn'))), by_identity)
 		self.assertEqual({g['identity'] for g in by_identity.values()}, {'sha256'})
-		# givinggrace has neither field: it stays on its own, it is not joined to either file
-		self.assertIn(self.m23['givinggrace'].id, {r['id'] for r in body['results'] if not r.get('group')})
+		# donate has neither field: it stays on its own, it is not joined to either file
+		self.assertIn(self.m23['donate'].id, {r['id'] for r in body['results'] if not r.get('group')})
 
 	def test_the_same_path_on_sibling_hosts_is_one_file_and_another_path_is_not(self):
 		for name in ('www', 'blog'):
-			CVEMatch.objects.filter(pk=self.m23[name].id).update(evidence={'source': 'tech', 'script_url': f'https://{name}.mybluegrace.com/js/jq.js?ver=6.1'})
-		CVEMatch.objects.filter(pk=self.m23['info'].id).update(evidence={'source': 'tech', 'script_url': 'https://info.mybluegrace.com/old/jq.js'})
+			CVEMatch.objects.filter(pk=self.m23[name].id).update(evidence={'source': 'tech', 'script_url': f'https://{name}.acme-site.com/js/jq.js?ver=6.1'})
+		CVEMatch.objects.filter(pk=self.m23['info'].id).update(evidence={'source': 'tech', 'script_url': 'https://info.acme-site.com/old/jq.js'})
 		body = self.get(type='cve', group='cve')
 		paths = {r['group']['script']: sorted(r['group']['member_ids']) for r in self.groups(body) if r['group']['identity'] == 'script_path'}
 		self.assertEqual(paths, {'/js/jq.js': sorted([self.m23['www'].id, self.m23['blog'].id])})
@@ -259,9 +259,9 @@ class GroupedFindingsTests(TestCase):
 		made = []
 		for product, version in products.items():
 			for name in ('wwwx', 'mailx'):
-				sub = Subdomain.objects.get_or_create(name=f'{name}.mybluegrace.com', target_domain=self.da)[0]
+				sub = Subdomain.objects.get_or_create(name=f'{name}.acme-site.com', target_domain=self.da)[0]
 				made.append(CVEMatch.objects.create(cve_entry=self.c23, subdomain=sub, matched_product=product, matched_version=version,
-													source='tech', evidence={'source': 'tech', 'script_url': 'https://wwwx.mybluegrace.com/x.js'}).id)
+													source='tech', evidence={'source': 'tech', 'script_url': 'https://wwwx.acme-site.com/x.js'}).id)
 		boot = []
 		for name in ('www', 'blog', 'info'):
 			boot.append(CVEMatch.objects.create(cve_entry=self.c22, subdomain=self.hosts[name], matched_product='bootstrap',
@@ -276,13 +276,13 @@ class GroupedFindingsTests(TestCase):
 	def test_every_member_status_is_sent_even_closed_ones(self):
 		CVEMatch.objects.filter(pk=self.m23['blog'].id).update(remediation_status='accepted_risk')
 		CVEMatch.objects.filter(pk=self.m23['info'].id).update(remediation_status='fixed')
-		CVEMatch.objects.filter(pk=self.m23['bgu'].id).update(ai_verdict='not_affected')
+		CVEMatch.objects.filter(pk=self.m23['learn'].id).update(ai_verdict='not_affected')
 		group = self.group_of(self.get(type='cve', group='cve', status='all'), 'CVE-2020-11023')
 		self.assertEqual(group['status_counts'], {'open': 3, 'accepted_risk': 1, 'fixed': 1, 'ruled out': 1})
 		self.assertEqual(group['member_status'][str(self.m23['blog'].id)], 'accepted_risk')
 		self.assertEqual(group['member_status'][str(self.m23['info'].id)], 'fixed')
 		self.assertEqual(len(group['member_status']), 6)
-		self.assertEqual(group['ruled_out_ids'], [self.m23['bgu'].id])
+		self.assertEqual(group['ruled_out_ids'], [self.m23['learn'].id])
 		# the default (actionable) list leaves the settled ones out of the group altogether
 		self.assertEqual(self.group_of(self.get(type='cve', group='cve'), 'CVE-2020-11023')['findings'], 3)
 
@@ -306,7 +306,7 @@ class GroupedFindingsTests(TestCase):
 		before = count()
 		extra = CVEEntry.objects.create(cve_id='CVE-2099-0002', cvss=6.1, title='t', published_at=NOW)
 		for i in range(30):
-			sub = Subdomain.objects.create(name=f'h{i}.mybluegrace.com', target_domain=self.da)
+			sub = Subdomain.objects.create(name=f'h{i}.acme-site.com', target_domain=self.da)
 			self.jq(self.c23, sub)
 			self.jq(extra, sub)
 			CVEMatch.objects.create(cve_entry=extra, subdomain=sub, matched_product='openssh', matched_version='8.0', source='port')

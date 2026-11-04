@@ -488,7 +488,8 @@ def store_card(supplier, res, now):
 
 def store_results(supplier, results, now=None):
     """Upsert the findings of ``results`` (``DomainResult``s of one supplier), and resolve the open or accepted ones that a check which could
-    decide them no longer finds. A resolved finding that is found again reopens. Returns ``{'new', 'reopened', 'resolved', 'open'}``."""
+    decide them no longer finds. A resolved finding that is found again reopens. One a person closed as a false positive is left as it is
+    (its evidence refreshed, never resolved, so never reopened). Returns ``{'new', 'reopened', 'resolved', 'open'}``."""
     from cveFeed.models import SupplierFinding
     now = now or timezone.now()
     counts = {'new': 0, 'reopened': 0, 'resolved': 0}

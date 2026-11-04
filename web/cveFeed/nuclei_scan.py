@@ -258,9 +258,116 @@ def host_of(line):
     return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
 
 
+def _target_host(target):
+    raw = str(target).strip()
+    if '://' in raw:
+        return urlparse(raw).hostname or raw
+    if raw.startswith('['):
+        return raw[1:].split(']', 1)[0]
+    return raw.rsplit(':', 1)[0] if raw.count(':') == 1 else raw
+
+
+def _has_port(target):
+    """Whether a nuclei target names its port (``host:25``, a URL with a port) rather than being a bare host or address."""
+    raw = str(target).strip()
+    if '://' in raw:
+        try:
+            return urlparse(raw).port is not None
+        except ValueError:
+            return False
+    if raw.startswith('['):
+        return ']:' in raw
+    return raw.count(':') == 1 and raw.rsplit(':', 1)[1].isdigit()
+
+
+def _target_ports(target):
+    """The ports a nuclei target names: its own port, or 80 and 443 for a bare host or address (the web templates' defaults)."""
+    raw = str(target).strip()
+    if '://' in raw:
+        parsed = urlparse(raw)
+        try:
+            return [parsed.port or (443 if parsed.scheme == 'https' else 80)]
+        except ValueError:
+            return []
+    if raw.count(':') == 1 or raw.startswith('['):
+        tail = raw.rsplit(':', 1)[1] if not raw.endswith(']') else ''
+        if tail.isdigit():
+            return [int(tail)]
+    return list(DEFAULT_PORTS)
+
+
 def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
     """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
-    reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter)."""
+    reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter).
+
+    A target on a port of the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``, ``host:25``) is left out of this server's run. A target on a
+    budgeted port (``host:25``: the egress governor, ``cveFeed.local_egress``) is asked of the governor as NUCLEI_TARGET_CONNECTIONS
+    connections, all or nothing; one not granted is left out of this run (logged as paced) and comes back with the host's next nuclei run,
+    and the rest of the run goes ahead. The run is counted in the egress ledger from its target list (an estimate: a network template may
+    connect to a port of its own, which is not governed)."""
+    from cveFeed import local_egress
+    try:
+        with open(targets_file) as f:
+            listed = [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        listed = None
+    path, scratch, kept = targets_file, [], None
+    if listed is not None:
+        skip = local_egress.skipped_ports()
+        kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
+        if len(kept) != len(listed):
+            local_egress.note_skipped('nuclei', skip, [_target_host(t) for t in listed if t not in kept])
+        if not kept:
+            return
+
+    def _write(targets):
+        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
+        handle.write('\n'.join(targets) + '\n')
+        handle.close()
+        scratch.append(handle.name)
+        return handle.name
+
+    def started():
+        """Once nuclei is let start (after its memory wait): each host:25 target is charged now, whole; one with no room is left out of this
+        run (logged paced; it comes back with the host's next nuclei run). Then the run is counted and logged. Returns the targets file to
+        run, or None when nothing is left."""
+        if kept is None:
+            return path
+        run = kept
+        rules = set(local_egress.budgets())
+        if rules:
+            explicit = lambda t: _target_ports(t) if _has_port(t) else []  # noqa: E731 - a bare host is a web target (80, 443)
+            governed = [t for t in kept if set(explicit(t)) & rules]
+            # oldest-admitted first, so every host:25 target gets its turn within a bounded number of runs (cveFeed.local_egress.rotation)
+            last = local_egress.last_admitted('nuclei', governed)
+            admitted = set()
+            for target in sorted(governed, key=lambda t: (last.get(t, 0), kept.index(t))):
+                if not any(local_egress.admit_one(p, 'nuclei', _target_host(target), weight=local_egress.NUCLEI_TARGET_CONNECTIONS,
+                                                  now=local_egress.launch_now()) for p in set(explicit(target)) & rules):
+                    admitted.add(target)
+            local_egress.note_admitted('nuclei', admitted)
+            run = [t for t in kept if t not in governed or t in admitted]
+        if not run:
+            return None
+        per_port = {}
+        for target in run:
+            for port in _target_ports(target):
+                per_port[port] = per_port.get(port, 0) + (local_egress.NUCLEI_TARGET_CONNECTIONS if _has_port(target) else 1)
+        local_egress.record('nuclei', sum(per_port.values()), per_port)
+        for port in local_egress.log_ports() & set(per_port):
+            local_egress.log_connections([_target_host(t) for t in run if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
+        return path if len(run) == len(listed) else _write(run)
+    try:
+        yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file, on_start=started)
+    finally:
+        for name in scratch:
+            try:
+                os.remove(name)
+            except OSError:
+                pass
+
+
+def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None, on_start=None):
     from targetApp.target_types import refuse_local
     refuse_local('nuclei')
     from reNgine import resources
@@ -275,6 +382,10 @@ def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', sever
     kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
     approved_dir, _, _ = approved_templates()
     with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
+        if on_start is not None:
+            targets_file = on_start()  # the egress governor's say at the start (cveFeed.local_egress): the targets to run, or None
+            if targets_file is None:
+                return
         proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)
@@ -336,7 +447,8 @@ def scan_targets(scan):
     from cveFeed.bounty_gate import Gate
     gate, project = Gate(blocked=()), scan.domain.project_id  # a bug bounty program's scope: a host it does not name, or an address it excludes, is never a target of any stage
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
-            if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)]
+            if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)
+            and (not scan.domain.exact_host_only() or scan.domain.includes_host(s.name))]  # =example.com: only that host is ever a target
     # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
     pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
     for sub in subs:
@@ -706,7 +818,7 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
     per_host = {}
     for m in CVEMatch.objects.filter(subdomain__in=subs).exclude(ai_verdict='not_affected').exclude(distro_status='patched') \
             .select_related('cve_entry', 'subdomain'):
-        tier = m.cve_entry.threat_tier
+        tier = m.cve_entry.attention_tier  # what is tested follows KEV, exploit, CVSS and EPSS under either heat policy
         if tier in HOT_TIERS:
             # at equal heat a match whose version is in the affected range outranks one with no version to check
             per_host.setdefault(m.subdomain.name, []).append(
@@ -738,7 +850,8 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
             ledger.record(service, failed_hosts, project, scan, 'failed')
             not_tested.update(failed_hosts)
         tested.update(done_hosts)
-        vulnerable += [(cve.cve_id, h) for h in done_hosts if results[h].get('vulnerable')]
+        from cveFeed.templategen import is_confirmed
+        vulnerable += [(cve.cve_id, h) for h in done_hosts if is_confirmed(results[h])]  # a version-class hit confirms nothing
     return {'cves': len(wanted), 'hosts': len(tested), 'not_tested': len(not_tested), 'vulnerable': vulnerable}
 
 

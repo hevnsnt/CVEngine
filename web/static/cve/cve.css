@@ -1045,6 +1045,18 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .cve-guidance .sub{margin:0;font-size:14px}
 .cve-guidance .guide-h{margin-top:12px;font-weight:600;color:var(--ink)}
 .cve-guidance .guide-list{margin:4px 0 0;padding-left:20px;display:grid;gap:3px;font-size:13.5px;line-height:1.45}
+.confirm-guide{margin-top:4px}
+.confirm-guide .sub{margin:0;font-size:14px}
+.confirm-guide .guide-h{margin-top:14px;font-weight:600;color:var(--ink)}
+.confirm-guide .guide-list{margin:4px 0 0;padding-left:20px;display:grid;gap:4px;font-size:13.5px;line-height:1.45}
+.confirm-guide .confirm-where a,.confirm-guide a.mono{word-break:break-all}
+.confirm-guide .confirm-steps{margin:4px 0 0;padding-left:22px;display:grid;gap:2px}
+.confirm-guide .confirm-step-h{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-weight:500}
+.confirm-guide .confirm-verdict .badge{margin-right:4px}
+.confirm-guide .confirm-look{margin-top:6px}
+.confirm-guide .untrusted{border-left:3px solid var(--smoke,#b45309)}
+.confirm-guide blockquote.confirm-quote{margin:4px 0 0;padding:6px 10px;background:var(--surface);border-radius:var(--r-s);font-size:13px}
+.confirm-generic{margin-top:14px}.confirm-generic>summary,.confirm-more>summary{cursor:pointer}
 
 /* ---- polish on develop: targets rows, compact filter groups in list panes, charts ---- */
 .table select{max-width:176px}@media (min-width:900px){.row-actions{flex-wrap:nowrap}.table td:has(.row-actions){white-space:nowrap}}
