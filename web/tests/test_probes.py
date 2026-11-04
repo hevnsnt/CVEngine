@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, TestCase
 
 from cveFeed import probes
 from cveFeed.models import ProbeObservation, ServiceRun
-from startScan.models import IpAddress, Port, Subdomain, Technology
+from startScan.models import Subdomain, Technology
 from tests.test_route_auth import RouteFixture
 
 
@@ -230,14 +230,39 @@ class PlanTests(RouteFixture, TestCase):
         self.assertLessEqual(len(plan), probes.MAX_PROBES_PER_HOST)
         self.assertTrue(all(urlsplit(p['target']['base']).hostname == 'www.rt.test' for p in plan if p['family'] == 'http'))
 
-    def test_a_version_found_removes_the_lead(self):
+    def test_a_version_found_removes_product_leads_but_not_an_unidentified_port(self):
         _scan, sub = self.host(technologies=('nginx:1.24.0',))
-        self.assertEqual(probes.plan_for_host(sub), [])
+        self.assertEqual(probes.leads_for(sub), [])
+        self.assertEqual([entry['target']['port'] for entry in probes.plan_for_host(sub)], [443])
 
     def test_a_port_lead_gets_the_nmap_probe_unless_an_edge_answers(self):
         _scan, sub = self.host(technologies=(), product='nginx')
         self.assertIn('nmap-version-all', [p['probe'] for p in probes.plan_for_host(sub)])
         self.assertNotIn('nmap-version-all', [p['probe'] for p in probes.plan_for_host(sub, edge_fronted=True)])
+
+    def test_an_unidentified_open_tcp_service_is_probed_after_known_product_leads(self):
+        _scan, sub = self.host(technologies=(), product='nginx')
+        ip = sub.ip_addresses.first()
+        ip.ports.create(number=5353, protocol='tcp', state='open', service_name='mdns',
+                        service_extra='generic dns response: REFUSED', extra={'method': 'table'})
+        ip.ports.create(number=5353, protocol='udp', state='open', service_name='mdns')
+        ip.ports.create(number=5354, protocol='tcp', state='open|filtered', service_name='domain')
+        ip.ports.create(number=5355, protocol='tcp', state='closed', service_name='domain')
+        ip.ports.create(number=5356, protocol='tcp', state='open', service_name='domain', version='9.11.3')
+        ip.ports.create(number=5357, protocol='tcp', state='open', service_name='domain', cpe='cpe:/a:isc:bind:9.11.3')
+        sub = Subdomain.objects.filter(pk=sub.pk).prefetch_related('technologies', 'ip_addresses__ports').get()
+        plan = probes.plan_for_host(sub, wanted=('nmap-version-all',))
+        self.assertEqual([entry['target']['port'] for entry in plan], [ip.ports.first().number, 5353])
+        self.assertEqual(plan[1]['target']['service'], 'mdns')
+        self.assertNotIn('BIND', str(plan))  # the port-table label must not become product evidence
+        self.assertEqual(probes.plan_for_host(sub, edge_fronted=True, wanted=('nmap-version-all',)), [])
+
+    def test_a_host_without_product_leads_still_plans_its_unidentified_tcp_port(self):
+        _scan, sub = self.host(technologies=())
+        self.assertEqual(probes.leads_for(sub), [])
+        plan = probes.plan_for_host(sub, wanted=('nmap-version-all',))
+        self.assertEqual([entry['target']['port'] for entry in plan], [443])
+        self.assertEqual(plan[0]['target']['service'], 'https')
 
     def test_the_display_command_is_something_a_person_can_repeat(self):
         text = probes.display_for('error-page', {'base': 'https://www.rt.test'})
@@ -325,6 +350,32 @@ class StageTests(RouteFixture, TestCase):
         asked = len(self.requests)
         again = self.stage()
         self.assertEqual((again['probes'], len(self.requests)), (0, asked))  # inside the TTL nothing is asked again
+
+    def test_the_stage_does_not_skip_a_host_with_only_an_unidentified_port(self):
+        sub = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
+        sub.technologies.clear()
+        sub.ip_addresses.first().ports.update(number=5353, service_name='mdns', product='', version='', cpe='')
+        with mock.patch('cveFeed.probes.run_one', return_value=[]) as run:
+            self.stage()
+        self.assertTrue(any(call.args[2].pk == sub.pk and call.args[3]['target'].get('port') == 5353
+                            for call in run.call_args_list))
+
+    def test_the_stage_eventually_probes_an_unknown_port_beyond_the_first_five(self):
+        sub = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
+        ip = sub.ip_addresses.first()
+        port = ip.ports.first()
+        port.product = 'nginx'
+        port.save()
+        ip.ports.create(number=81, protocol='tcp', state='open', service_name='http', product='Apache httpd')
+        ip.ports.create(number=5353, protocol='tcp', state='open', service_name='mdns', extra={'method': 'table'})
+        with mock.patch('cveFeed.probes.run_one', return_value=[]) as run:
+            self.stage()
+            first = [call.args[3]['target'].get('port') for call in run.call_args_list if call.args[2].pk == sub.pk]
+            self.stage()
+            later = [call.args[3]['target'].get('port') for call in run.call_args_list if call.args[2].pk == sub.pk]
+        self.assertNotIn(5353, first)
+        self.assertIn(5353, later)
+        self.assertLessEqual(len(first), probes.MAX_PROBES_PER_HOST)
 
     def test_force_ignores_the_ledger_for_a_lead_that_is_still_open(self):
         self.page_404 = NGINX_404_HIDDEN  # the version stays hidden, so the lead stays

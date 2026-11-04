@@ -171,10 +171,11 @@ def _lead_matches(probe, token, lead):
     return bool(re.search(pattern, token))
 
 
-def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None):
+def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None, limit: int | None = MAX_PROBES_PER_HOST):
     """``[{'probe', 'label', 'family', 'target', 'for'}]``: the probes that can find the version or identity of ``sub``'s leads, chosen
-    by rule, never by a model, at most MAX_PROBES_PER_HOST. A web probe targets the host's first web base URL, an nmap probe one
-    address and port (none when an edge answers there: an edge's own software is not the host's). ``wanted`` limits it to probe ids."""
+    by rule, never by a model, at most MAX_PROBES_PER_HOST by default. A web probe targets the host's first web base URL, an nmap probe
+    one address and port (none when an edge answers there: an edge's own software is not the host's). ``wanted`` limits it to probe ids.
+    ``limit=None`` lets the scan stage select due probes before applying its per-host budget, so later ports cannot starve."""
     from cveFeed import route_auth
     leads = leads_for(sub) if leads is None else leads
     bases = route_auth.web_bases(sub)
@@ -193,7 +194,20 @@ def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None):
                 entry = plan.setdefault((probe['id'], tuple(sorted(target.items()))),
                                         {'probe': probe['id'], 'label': probe['label'], 'family': probe['family'], 'target': target, 'for': []})
                 entry['for'].append(lead['name'])
-    return list(plan.values())[:MAX_PROBES_PER_HOST]
+    # A port-table service label is not product evidence. Ask only open TCP services that have no product, version or CPE,
+    # after the product leads so they cannot displace a known product under the per-host budget.
+    if not edge_fronted and (wanted is None or 'nmap-version-all' in wanted):
+        from startScan.models import open_ports
+        probe = BY_ID['nmap-version-all']
+        for ip in sub.ip_addresses.all():
+            for port in open_ports(ip):
+                if port.product or port.version or port.cpe or not 1 <= port.number <= 65535:
+                    continue
+                target = {'ip': ip.address, 'port': port.number, 'service': port.service_name or ''}
+                plan.setdefault((probe['id'], tuple(sorted(target.items()))),
+                                {'probe': probe['id'], 'label': probe['label'], 'family': 'nmap', 'target': target, 'for': []})
+    entries = list(plan.values())
+    return entries if limit is None else entries[:limit]
 
 
 def asset_key(host, entry):
@@ -1024,12 +1038,11 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     due = []
     for sub in subs.select_related('target_domain').order_by('name'):
         leads = leads_for(sub)
-        if not leads:
-            continue
-        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'])
+        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'], limit=None)
         assets = {asset_key(sub.name, e): e for e in plan}
         covered = set() if force else ledger.fresh(SERVICE, assets, project)
         todo = {a: e for a, e in assets.items() if ledger._norm(a) not in covered}
+        todo = dict(list(todo.items())[:MAX_PROBES_PER_HOST])
         if todo:
             due.append((sub, todo))
     # hosts with nothing due were dropped above, so the cap below cuts only work that is due: the never-probed and longest-waiting go first
