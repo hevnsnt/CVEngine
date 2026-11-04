@@ -232,6 +232,28 @@ def asker(zone, failing=()):
 	return ask
 
 
+class FakeResolver:
+	"""A dnspython resolver over ``zone``: a missing name is NXDOMAIN. ``asked`` lists the TXT names it was sent."""
+
+	def __init__(self, zone):
+		self.zone, self.asked, self.nameservers = zone, [], []
+
+	def resolve(self, name, rtype):
+		self.asked.append(name)
+		if name not in self.zone:
+			raise dns.resolver.NXDOMAIN()
+
+		class Rdata:
+			def __init__(self, text):
+				self.strings = [text.encode()]
+		return [Rdata(t) for t in self.zone[name]]
+
+
+def os_environ_without(key):
+	import os
+	os.environ.pop(key, None)
+
+
 class DnsConsensusTests(Base):
 	ZONE = {'example.com': ['v=spf1 include:_spf.example.net -all'], '_dmarc.example.com': ['v=DMARC1; p=reject; rua=mailto:d@example.com']}
 
@@ -308,6 +330,41 @@ class DnsConsensusTests(Base):
 		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoAnswer()), 'x.example.com')['result'], 'noanswer')
 		self.assertEqual(hy.ask_txt(Resolver(dns.exception.Timeout()), 'x.example.com')['result'], 'error')
 		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoNameservers()), 'x.example.com')['result'], 'error')
+
+	def real_dns_emailer(self, zone):
+		"""email_findings with the resolvers ``dns_askers()`` builds (the installation's setting), over fake DNS objects."""
+		return lambda name: hy.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=hy.dns_askers())
+
+	def test_by_default_no_third_party_resolver_is_asked_and_a_missing_record_needs_two_runs(self):
+		zone = {'example.com': ['v=spf1 -all']}
+		system = FakeResolver(zone)
+		with mock.patch.dict('os.environ', {}), mock.patch.object(hy, '_resolver', return_value=system), \
+				mock.patch('dns.resolver.Resolver', side_effect=AssertionError('no extra resolver may be built')) as extra:
+			os_environ_without('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
+			self.assertEqual(hy.confirm_resolvers(), ())
+			self.assertEqual([label for label, _ in hy.dns_askers()], ['system'])
+			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
+			self.assertEqual((row.status, [o['resolver'] for o in row.evidence['dns']]), (hy.PENDING, ['system']))
+			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
+			self.assertEqual((row.status, row.evidence['confirmed_by']), ('open', 'seen again on the next run'))
+		extra.assert_not_called()  # no client name was sent to any resolver but the system's
+		self.assertEqual(set(system.asked), {'example.com', '_dmarc.example.com'})
+
+	def test_configured_resolvers_confirm_an_absence_in_one_run(self):
+		zone = {'example.com': ['v=spf1 -all']}
+		system, built = FakeResolver(zone), []
+
+		def build(configure=True):
+			built.append(FakeResolver(zone))
+			return built[-1]
+		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': '192.0.2.53,198.51.100.53'}), \
+				mock.patch.object(hy, '_resolver', return_value=system), mock.patch('dns.resolver.Resolver', side_effect=build):
+			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
+		self.assertEqual((row.status, row.evidence['dns_confirmed']), ('open', True))
+		self.assertEqual([o['resolver'] for o in row.evidence['dns']], ['system', '192.0.2.53'])
+		self.assertEqual(built[0].nameservers, ['192.0.2.53'])
+		self.assertEqual(built[0].asked, ['_dmarc.example.com'])  # only the name whose record seemed missing
+		self.assertEqual(built[1].asked, [])  # two votes were enough
 
 	def test_the_confirming_resolvers_are_configurable(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': ''}):

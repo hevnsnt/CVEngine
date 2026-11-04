@@ -477,15 +477,17 @@ def fetch_records(name, rtype, resolver=None):
         return []
 
 
-# A DNS finding that says a record is missing opens only when two resolvers agree it is (or, when they cannot, when the next run sees
-# the same thing): a one-off timeout or SERVFAIL is not a missing record. The system resolver asks first; these are asked only to
-# confirm an absence. CVENGINE_HYGIENE_CONFIRM_RESOLVERS (comma-separated addresses, empty for none) replaces them.
-CONFIRM_RESOLVERS = ('1.1.1.1', '8.8.8.8')
+# A DNS finding that says a record is missing opens only when two resolvers agree it is, or when the next run sees the same thing: a
+# one-off timeout or SERVFAIL is not a missing record. By default only the system resolver is asked, so a missing record needs two
+# consecutive observations, and no client name leaves for a third party. CVENGINE_HYGIENE_CONFIRM_RESOLVERS (comma-separated resolver
+# addresses, e.g. "1.1.1.1,8.8.8.8") opts in to confirming in one run: those resolvers are then sent the names whose record seems missing.
+CONFIRM_RESOLVERS = ()
 CONFIRM_TIMEOUT = 3
 ABSENCE_CHECKS = ('spf_missing', 'dmarc_missing')
 
 
 def confirm_resolvers():
+    """The extra resolvers asked to confirm an absence: none unless CVENGINE_HYGIENE_CONFIRM_RESOLVERS lists some."""
     import os
     raw = os.environ.get('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
     return CONFIRM_RESOLVERS if raw is None else tuple(x.strip() for x in raw.split(',') if x.strip())
@@ -512,7 +514,8 @@ def ask_txt(resolver, name):
 
 
 def dns_askers():
-    """``[(label, ask(name) -> answer dict)]``: the system resolver, then the confirming resolvers."""
+    """``[(label, ask(name) -> answer dict)]``: the system resolver, then the confirming resolvers the installation opted in to (none by
+    default, when an absence is confirmed by the next run instead)."""
     import dns.resolver
     askers = [('system', functools.partial(ask_txt, _resolver()))]
     for address in confirm_resolvers():
@@ -570,8 +573,9 @@ def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None, askers=
     injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made.
 
     The records whose absence is a finding (SPF, the name's DMARC record and its organizational domain's) are read through
-    ``consensus_txt``: with real DNS a missing record must be missing at two resolvers (``askers``, default ``dns_askers()``), and the
-    answers are kept as the finding's evidence. An injected ``fetch`` is taken at its word unless ``askers`` is given too."""
+    ``consensus_txt``: with real DNS a missing record must be missing at two resolvers (``askers``, default ``dns_askers()``: the system
+    resolver alone unless confirming resolvers are configured, so by default the next run's sighting is the second), and the answers are
+    kept as the finding's evidence. An injected ``fetch`` is taken at its word unless ``askers`` is given too."""
     from cveFeed import mailfail
     real_dns = fetch is fetch_txt
     records = records or (fetch_records if real_dns else (lambda name, rtype: []))
