@@ -7,9 +7,6 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Upgrade notes
 
 - **No migration and no manual step.** The host watcher, which cron starts every minute, runs the new `scripts/update-watch.sh` within a minute of the update, and from then on carries out cvENGINE's gvmd restart requests (see Fixed). Sentinels get their half (hevnsnt/cvENGINE-sentinel#32) by their own self-update; a Sentinel that has not updated yet still reports a stale-cache run as before, and this server then reads it as before.
-
-### Upgrade notes
-
 - **An installation without a Redis password gets one during this update.** The updater writes `REDIS_PASSWORD` to `.env` (and the Compose env file the installation uses) and recreates Redis with it, then web and the workers as every update does; tasks queued at that moment are lost once. An installation that already has a password is unchanged.
 
 ### Security
