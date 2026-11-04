@@ -2,10 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.3.4 (2026-11-03)
 
 ### Upgrade notes
 
+- **No migration and no manual step.** The host watcher, which cron starts every minute, runs the new `scripts/update-watch.sh` within a minute of the update, and from then on carries out cvENGINE's gvmd restart requests (see Fixed). Sentinels get their half (hevnsnt/cvENGINE-sentinel#32) by their own self-update; a Sentinel that has not updated yet still reports a stale-cache run as before, and this server then reads it as before.
 - **An installation without a Redis password gets one during this update.** The updater writes `REDIS_PASSWORD` to `.env` (and the Compose env file the installation uses) and recreates Redis with it, then web and the workers as every update does; tasks queued at that moment are lost once. An installation that already has a password is unchanged.
 
 ### Security
@@ -20,6 +21,8 @@ A security review of everything changed since 1.3.0 (access control and tenancy,
 - **An overlong CVE id from a Sentinel is dropped**, instead of failing the whole nuclei stage or OpenVAS import of its project (CVE ids are bounded to seven digits, and the finding store skips one longer than its column).
 
 ### Fixed
+
+- **An update no longer stops because a busy worker answered the pause late.** The updater gave each worker one five-second window to confirm it had stopped taking new work, and stopped the update (rolling it back) when no answer came. A worker that has just started is busy with its correlation and template passes and can miss that window. It is now asked up to three times (5, 15 and 30 seconds).
 
 - **The gvmd restart request runs once on an add-on started by hand.** `scripts/openvas-sync.sh restart-gvmd` gave up before answering when `web/.openvas-wanted` did not exist (`make openvas-up`), so the watcher started it again every two seconds and gvmd was never restarted. It now restarts gvmd when it is running and the add-on is not switched off, and always answers.
 

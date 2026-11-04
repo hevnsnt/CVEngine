@@ -661,10 +661,16 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.work / 'docker-compose.vps.yml').write_text('services: {}\n')
         (self.work / '.env.vps').write_text('X=1\n')
         (self.work / '.env').write_text('CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.vps.yml\nCVENGINE_COMPOSE_ENV_FILE=.env.vps\n')
+        shutil.copy(SCRIPTS / 'redis-password.sh', self.work / 'scripts' / 'redis-password.sh')
         self.approve()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('docker compose --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml up -d --no-deps --force-recreate web celery celery-beat proxy', self.calls())
+        # no broker password yet: one is generated into .env AND the env file Compose reads, and Redis is recreated with it
+        password = [l for l in (self.work / '.env').read_text().splitlines() if l.startswith('REDIS_PASSWORD=')][-1]
+        self.assertRegex(password, r'^REDIS_PASSWORD=[A-Za-z0-9]{32}$')
+        self.assertIn(password, (self.work / '.env.vps').read_text().splitlines())
+        self.assertIn('docker compose --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml up -d --no-deps --force-recreate redis', self.calls())
 
     def test_an_overlay_that_nothing_says_to_use_stops_the_update_before_anything_is_recreated(self):
         (self.work / 'docker-compose.vps.yml').write_text('services: {}\n')  # untracked: this install's own file
