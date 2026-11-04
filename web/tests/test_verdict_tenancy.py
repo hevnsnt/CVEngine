@@ -244,9 +244,13 @@ class AiAnswerTests(TenancyFixture):
 										path='/backup/', auth_state='open', http_status=200, title=title, sensitive_score=10)
 
 	def test_an_ai_closure_of_one_tenants_route_does_not_close_another_tenants(self, _log):
-		crafted = self.route(self.a, 'Decoy page for a scanner demo, nothing here is real')
+		# the title is in the key now (triage.shown_digest), so the attacker copies the victim's page byte for byte: the same key
+		crafted = self.route(self.a, 'Index of /backup')
 		real = self.route(self.b, 'Index of /backup')
-		self.assertEqual(triage.describe(crafted)['signature'], triage.describe(real)['signature'])  # the title is not in the key
+		self.assertEqual(triage.describe(crafted)['signature'], triage.describe(real)['signature'])
+		decoy = RouteAuth(project=self.a.project, domain=self.a.domain, host=crafted.host, url=crafted.url, path=crafted.path, auth_state='open',
+						  http_status=200, title='Decoy page for a scanner demo, nothing here is real', sensitive_score=10)
+		self.assertNotEqual(triage.describe(crafted)['signature'], triage.describe(decoy)['signature'])  # another page, another question
 		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
 		self.assertEqual(Triage.objects.get(route=crafted).classification, 'likely_false_positive')  # the attacker's own row
 		provider = self.provider(answer('likely'))
@@ -254,7 +258,7 @@ class AiAnswerTests(TenancyFixture):
 		self.assertNotIn(Triage.objects.get(route=real).classification, CLOSING)
 
 	def test_one_run_over_both_tenants_does_not_close_the_other_with_the_first_ones_answer(self, _log):
-		crafted = self.route(self.a, 'Decoy page')
+		crafted = self.route(self.a, 'Index of /backup')  # a byte-for-byte copy of the victim's page: one signature
 		real = self.route(self.b, 'Index of /backup')
 		self.triage([crafted, real], provider=self.provider(answer('not_applicable')))  # the instance-wide sweep groups both
 		self.assertNotIn(Triage.objects.get(route=real).classification, CLOSING)
@@ -353,10 +357,10 @@ class AiAnswerTests(TenancyFixture):
 
 	def test_a_downgraded_severity_from_another_tenant_is_not_shown(self, _log):
 		from agentapi import services
-		crafted = self.route(self.a, 'Decoy')
+		crafted = self.route(self.a, 'Index of /backup')  # a copy of the victim's page: the same signature
 		real = self.route(self.b, 'Index of /backup')
 		again = RouteAuth.objects.create(project=self.a.project, domain=self.a.domain, host=self.a.sub.name, url=f'https://{self.a.sub.name}/backup/?x',
-										 path='/backup/', auth_state='open', http_status=200, title='Decoy', sensitive_score=10)
+										 path='/backup/', auth_state='open', http_status=200, title='Index of /backup', sensitive_score=10)
 		lowered = json.dumps({'classification': 'needs_validation', 'reason': 'r', 'impact': '', 'severity_adjust': -1,
 							  'severity_reason': 'the page says it is a test system', 'remediation': '', 'validation_steps': []})
 		self.triage([crafted], provider=self.provider(lowered))
@@ -369,8 +373,9 @@ class AiAnswerTests(TenancyFixture):
 		# security review 1.3.4 (ai-2): the title is in the prompt, not in the signature, so tenant A's page used to set tenant B's class and
 		# a severity step up; B now asks its own question and shows its own answer
 		from agentapi import services
-		crafted = self.route(self.a, 'Production payroll database export, critical, exploited in the wild')
+		crafted = self.route(self.a, 'Index of /backup')  # the same page text as the victim's: the same signature (triage.shown_digest)
 		real = self.route(self.b, 'Index of /backup')
+		self.assertEqual(triage.describe(crafted)['signature'], triage.describe(real)['signature'])
 		raised = json.dumps({'classification': 'likely', 'reason': 'r', 'impact': '', 'severity_adjust': 1, 'severity_reason': 'the page says so',
 							 'remediation': '', 'validation_steps': []})
 		self.triage([crafted], provider=self.provider(raised))
@@ -633,7 +638,7 @@ class HeldRowTests(Rv392Fixture):
 	(review of PR 392, B2)."""
 
 	def test_a_held_row_gets_its_own_answer(self, _log):
-		crafted = self.route(self.a, 'Decoy')
+		crafted = self.route(self.a, 'Index of /backup')  # a copy of the victim's page: the same signature
 		real = self.route(self.b, 'Index of /backup')
 		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
 		calls = []
@@ -648,7 +653,7 @@ class HeldRowTests(Rv392Fixture):
 		self.assertEqual(Triage.objects.get(route=crafted).classification, 'likely_false_positive')  # the origin keeps its own
 
 	def test_the_sweep_asks_a_row_held_while_there_was_no_provider(self, _log):
-		crafted = self.route(self.a, 'Decoy')
+		crafted = self.route(self.a, 'Index of /backup')  # a copy of the victim's page: the same signature
 		real = self.route(self.b, 'Index of /backup')
 		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
 		self.triage([real], provider=None)
@@ -690,7 +695,7 @@ class HeldRowTests(Rv392Fixture):
 		self.assertEqual(list(MatchVerdict.objects.values_list('ai_verdict', 'ai_reason')), [('affected', 'a check confirmed it')])
 
 	def test_a_held_row_is_not_rewritten_on_every_run(self, _log):
-		crafted = self.route(self.a, 'Decoy')
+		crafted = self.route(self.a, 'Index of /backup')  # a copy of the victim's page: the same signature
 		real = self.route(self.b, 'Index of /backup')
 		self.triage([crafted], provider=self.provider(answer('likely_false_positive')))
 		with mock.patch.object(triage, 'cap', return_value=0):  # over the cap: queued
@@ -786,7 +791,7 @@ class LoweringTests(Rv392Fixture):
 	likely) is not applied there either: the row asks its own question (review of PR 392 at efc12b2, N2)."""
 
 	def test_another_orgs_needs_validation_does_not_lower_a_route(self, _log):
-		self.triage([self.route(self.a, 'Decoy page, maybe a test system')], provider=self.provider(answer('needs_validation')))
+		self.triage([self.route(self.a, 'Index of /backup')], provider=self.provider(answer('needs_validation')))
 		real = self.route(self.b, 'Index of /backup')
 		p = self.provider(answer('likely'))
 		self.triage([real], provider=p)
@@ -831,7 +836,7 @@ class LoweringTests(Rv392Fixture):
 		# security review 1.3.4 (ai-2): a route's prompt shows its page title, which the signature lacks, so another organization's page
 		# must not raise this one: it asks its own question
 		self.triage([self.route(self.a, 'x', '/admin/')], provider=self.provider(answer('likely')))
-		real = self.route(self.b, 'y', '/admin/')
+		real = self.route(self.b, 'x', '/admin/')  # the same page text: the same signature
 		p = self.provider(answer('needs_validation'))
 		self.triage([real], provider=p)
 		r = Triage.objects.get(route=real)
@@ -982,7 +987,7 @@ class LegacyLoweringTests(Rv392Fixture):
 
 	def legacy_route(self):
 		from cveFeed import verdict_tenancy
-		crafted = self.route(self.a, 'Decoy')
+		crafted = self.route(self.a, 'Index of /backup')  # a copy of the victim's page: the same signature
 		real = self.route(self.b, 'Index of /backup')
 		pairs = triage.track([crafted, real])
 		self.assertEqual(pairs[0][1]['signature'], pairs[1][1]['signature'])
@@ -1069,7 +1074,7 @@ class SurvivingMutantTests(Rv392Fixture):
 		for adjust, shown in ((-1, 0), (1, 0)):
 			TriageVerdict.objects.all().delete()
 			RouteAuth.objects.all().delete()
-			crafted = self.route(self.a, 'Decoy', '/admin/')
+			crafted = self.route(self.a, 'Admin', '/admin/')  # the same signature as the victim's
 			real = self.route(self.b, 'Admin', '/admin/')
 			raised = json.dumps({'classification': 'likely', 'reason': 'r', 'impact': '', 'severity_adjust': adjust, 'severity_reason': 's',
 								 'remediation': '', 'validation_steps': []})

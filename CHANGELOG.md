@@ -2,6 +2,14 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **Identical findings get the same AI classification and severity step.** The stored answer of a scanner, route or hygiene finding was keyed on its evidence but not on everything its prompt showed (a page title, a path, the check's detail), so an answer that closed a finding or lowered its severity was kept to the host it was reached on: the identical finding on another host of the same project asked the model again (a hosted model's temperature is not pinned) or showed no step, and twins ended up at -1, 0 and +1. The key now carries exactly what the prompt shows, so one project's identical findings take one answer on every host, and when another organization's answer may not be used, the project asks one question for all its hosts instead of one per host. The rules between organizations are unchanged (an answer still never closes, lowers or, outside CVE matches, raises another organization's finding). After the update each such finding is asked again once under its new key, within the daily AI caps, and keeps its current classification until the answer lands.
+- **The AI reads an SPF record with its qualifiers.** The cleaning applied to host text dropped "?" and "~", so a record ending in `?all` reached the model as a bare `all` and was described as `+all`. The record is now parsed term by term and shown exactly as published, with its closing `all` term and what a receiver gets (neutral, soft fail, fail, pass).
+- **AI triage text no longer contradicts what cvENGINE parsed.** The prompt now carries parsed facts: the SPF record and its closing qualifier, the registrable domain of each name in a hygiene finding's evidence and whether it is the finding host's own (the host is redacted, so the model could not compare and called two different domains the same), and, for a medium or higher template finding, the products the host's fingerprint names (the model named a product from the template's tags). A sentence of the model's reason, impact or severity reason that contradicts one of these facts is removed, the reason says what was corrected, and a severity step given with it is dropped. The classification rules are unchanged.
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes
