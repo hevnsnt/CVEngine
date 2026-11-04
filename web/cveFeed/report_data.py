@@ -336,7 +336,7 @@ def _hosts(project, host, findings_by_host, cap):
     if host:
         qs = qs.filter(name__iexact=host)
     qs = svc._one_per_host(qs).select_related('target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
+        'ip_addresses__ports', 'cve_matches__cve_entry', svc.triage_prefetch('cve_matches__triage'), 'vulnerability_set', svc.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
         'technologies').order_by('-score', 'name')
     total, rows, page = qs.count(), [], 1
     while len(rows) < min(cap, total):
