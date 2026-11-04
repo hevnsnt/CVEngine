@@ -279,8 +279,9 @@ class FindingStateCarriesTests(CorrelationPerfTests):
 		save_vulnerability(name='Exposed panel', severity=3, subdomain=new_sub, target_domain=self.domain, scan_history=new_scan, source='nuclei',
 						   template_id='panel', http_url='https://web.perf.test/admin', matcher_name='')
 		again = Vulnerability.objects.get(scan_history=new_scan)
-		self.assertNotEqual(again.pk, first.pk)
-		self.assertEqual((again.remediation_status, again.remediation_note), ('fixed', 'patched'))
+		self.assertEqual(again.pk, first.pk)  # the same row, moved onto the new scan (1.3.5): one row per finding, not one per scan
+		self.assertEqual(Vulnerability.objects.filter(name='Exposed panel').count(), 1)
+		self.assertEqual((again.remediation_status, again.remediation_note, again.subdomain_id), ('fixed', 'patched', new_sub.id))
 
 	def test_a_scanner_finding_marked_false_positive_stays_closed_on_the_next_scan(self):
 		from reNgine.tasks import save_vulnerability

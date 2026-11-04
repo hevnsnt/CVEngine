@@ -6,7 +6,7 @@ import validators
 
 from urllib.parse import urlparse
 from celery.utils.log import get_task_logger
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from dotted_dict import DottedDict
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -531,21 +531,6 @@ VULNERABILITY_KEY = ('target_domain', 'scan_history', 'subdomain', 'endpoint', '
 					 'matcher_name')
 
 
-def _carry_finding_state(vuln, lookup):
-	"""A finding seen again on a later scan is a new row (rows are per scan); give it the remediation state a person set on the same
-	finding (same host, template, name, URL and matcher) in an earlier scan, so what was marked fixed or accepted does not reopen."""
-	subdomain, domain = lookup.get('subdomain'), lookup.get('target_domain')
-	if subdomain is None or domain is None:
-		return
-	same = {k: lookup[k] for k in ('source', 'template_id', 'name', 'http_url', 'matcher_name') if k in lookup}
-	earlier = (Vulnerability._base_manager.filter(target_domain=domain, subdomain__name=subdomain.name, **same)
-			   .exclude(pk=vuln.pk).exclude(remediation_status='open').order_by('-id').first())
-	if earlier is not None:
-		vuln.remediation_status, vuln.remediation_note = earlier.remediation_status, earlier.remediation_note
-		vuln.remediation_updated_at, vuln.remediation_by_id, vuln.assignee_id = (
-			earlier.remediation_updated_at, earlier.remediation_by_id, earlier.assignee_id)
-
-
 def _reference(url):
 	"""The stored VulnerabilityReference of ``url``: the first when duplicate rows exist (``url`` is not unique), made when there is none."""
 	return VulnerabilityReference.objects.filter(url=url).order_by('id').first() or VulnerabilityReference.objects.create(url=url)
@@ -562,30 +547,34 @@ def save_vulnerability(**vuln_data):
 	vuln_data = replace_nulls(vuln_data)
 
 	# One row per finding: the key is where and what (host, template, name, URL, matcher), never the response body, which
-	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again.
+	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again. A finding an
+	# earlier scan (or another target of the project) filed on the same host is that same row, moved onto this scan
+	# (cveFeed.finding_lifecycle): rescans update it instead of opening a copy, and its history, status and assignee stay with it.
+	from cveFeed import finding_lifecycle
 	lookup = {k: vuln_data[k] for k in VULNERABILITY_KEY if k in vuln_data}
 	defaults = {k: v for k, v in vuln_data.items() if k not in lookup}
-	defaults.setdefault('discovered_date', timezone.now())
-	try:
-		vuln, created = Vulnerability.objects.get_or_create(**lookup, defaults=defaults)
-	except (Vulnerability.MultipleObjectsReturned, IntegrityError):
-		vuln, created = Vulnerability.objects.filter(**lookup).order_by('id').first(), False
-	was_created = created
-	if created:
-		vuln.discovered_date = timezone.now()
-		vuln.open_status = True
-		_carry_finding_state(vuln, lookup)
-		vuln.save()
+	vuln = Vulnerability.objects.filter(**lookup).order_by('id').first()
+	created = False
+	if vuln is None:
+		earlier = finding_lifecycle.earlier_copy(lookup)
+		if earlier is not None and finding_lifecycle.move_onto(earlier, lookup, defaults):
+			vuln = earlier
+		else:
+			try:
+				with transaction.atomic():
+					vuln = Vulnerability.objects.create(**lookup, **{**defaults, 'discovered_date': timezone.now(), 'open_status': True})
+				created = True
+			except IntegrityError:  # filed meanwhile by a parallel save of the same finding
+				vuln = Vulnerability.objects.filter(**lookup).order_by('id').first()
 	else:
 		# seen again: keep the newest evidence, and it is evidently still there
 		changed = [k for k, v in defaults.items() if k != 'discovered_date' and getattr(vuln, k) != v]
 		for k in changed:
 			setattr(vuln, k, defaults[k])
-		if not vuln.open_status:
-			vuln.open_status = True
-			changed.append('open_status')
+		changed += finding_lifecycle.seen_again(vuln)
 		if changed:
 			vuln.save(update_fields=changed)
+	was_created = created
 
 	# Save vuln tags
 	for tag_name in tags or []:

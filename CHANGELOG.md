@@ -2,6 +2,24 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Upgrade notes
+
+- **Three backfill commands, each a dry run unless `--apply`** (run them after reading the counts; each prints one line per project, takes `--project <slug>` (repeatable), never merges across projects and is safe to run again): `manage.py dedupe_findings` merges the scanner and hygiene findings filed more than once, `manage.py fold_alias_findings` folds what redirect aliases share with their target host, and `manage.py close_fixed_findings` closes the WPScan findings the version WPScan last stored for the host is past the fix of. No migration.
+
+### Fixed
+
+- **A rescan updates a scanner finding instead of filing a copy.** Every scan filed a finding it saw again as a new row and left the earlier scans' rows open beside it, so one host could show the same WordPress advisories or the SSH Terrapin finding eight times, and a scan loaded twice doubled the list. A finding seen again (the same project, host name, source, template, name, URL and matcher) is now the same row, moved onto the scan that saw it: its first-seen date, status, note, assignee, comments, audit trail and AI triage stay with it. A status a person set still sticks. Existing copies are merged by `dedupe_findings`: the copy in the host's current scan stays, takes the earliest first-seen date, every copy's comments and audit trail and (when it has none of its own) a person's status and assignee, and each other live copy is closed with a note naming it; copies people worked differently are left open and counted, closed copies are never touched.
+- **A hygiene finding is filed once per host, not once per target.** A host covered by its apex's target and by a target of its own had each certificate or TLS finding twice. A second target's check now updates the row the first one filed (same project, host and check). `dedupe_findings` merges the existing pairs, keeping the oldest.
+- **A later WPScan that reads a version past an advisory's fix closes that finding as fixed, automatically.** The rows of WordPress core, plugin and theme advisories stayed open after a later scan of the same host read the fixed release (7.1.4). Now an open row whose advisory states a fixed version at or below the version just read is closed as fixed with `closed_automatically` true and a note giving the version, the host and the scan; an "outdated" row closes once the component is no longer outdated; an older-version copy of an advisory still open at the new version is folded into the new row. A row a person set (any status, or reopened by hand) is never touched, and a component whose version was not read proves nothing. An automatic closure is undone if a later scan reports the finding again; a person's fixed status is not. `close_fixed_findings` applies this to what is stored. (CVE matches already closed when the version left the affected range.)
+- **A host that only redirects to another host of the project is folded into it.** www, blog or careers names that answer every front page with a permanent redirect (301 or 308) to the apex had findings of their own that were the apex's. A finding such an alias shares with its target (the same scanner template, or the same hygiene check on the same port and, for a certificate, the same certificate) is now closed with a note naming the target's row, after each scan and hygiene check; a finding only the alias has stays open, a temporary redirect or a redirect out of the project is not an alias, and a host that serves its own page again gets its findings back. `fold_alias_findings` applies this to what is stored.
+- **A name that is a CNAME no longer gets mail findings of its own.** A CNAME cannot sit beside an MX record, so the MX a lookup returned for www (a CNAME to the apex) was the apex's, and the email checks (Direct Send and the rest) filed the apex's findings again under www. Such names are left out of the email review; the next hygiene check resolves their existing mail findings.
+
+### Changed
+
+- **Remediation work lists one item per upgrade.** CVEs on one host that the same upgrade of the same component fixes (CVE-2020-11022 and CVE-2020-11023 on jQuery 3.4.1, both fixed in 3.5.0) are one item of `get_remediation_work` / `GET /work`, carrying `cves`, `match_ids` and `upgrade_to`; `count` counts items and the new `matches` the matches behind them. Each match keeps its own row, status and triage.
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes

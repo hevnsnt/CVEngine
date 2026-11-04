@@ -497,35 +497,63 @@ def tls_targets(domain, hosts=None):
     return targets
 
 
-def email_domains(domain, mx=has_record):
-    """The target itself, plus discovered hosts that have their own MX record."""
+def email_domains(domain, mx=has_record, cname=None):
+    """The target itself, plus discovered hosts that have their own MX record. A name that is a CNAME has none of its own: a CNAME cannot
+    sit beside an MX, so the MX a lookup returns for it is its target's (www.example.com, a CNAME to example.com, answers with example.com's
+    MX). Its mail is its target's, reviewed under that name, and it is left out. ``cname(name)`` says whether a name is a CNAME; with an
+    injected ``mx`` (tests) it defaults to never."""
     from startScan.models import Subdomain
+    if cname is None:
+        cname = (lambda name: has_record(name, 'CNAME')) if mx is has_record else (lambda name: False)
     names = [] if is_ip(domain.name) else [domain.name]
     extra = [s.name for s in Subdomain.objects.filter(target_domain=domain).exclude(name=domain.name)[:100]
-             if not is_ip(s.name) and domain.includes_host(s.name) and mx(s.name, 'MX')]
+             if not is_ip(s.name) and domain.includes_host(s.name) and mx(s.name, 'MX') and not cname(s.name)]
     return names + extra
 
 
-def store_findings(domain, found, hosts=None, owns=lambda check: True):
+def store_findings(domain, found, hosts=None, owns=lambda check: True, across_targets=False):
     """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
     owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
-    Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone."""
+    Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone.
+
+    ``across_targets`` (the TLS and email sweep, ``run_hygiene``): a finding another target of the same project already filed for the same host
+    and check is that row, updated, not a second one. The other callers place their rows under a target of their own choosing (the tailnet's
+    anchor) and keep filing them there."""
     from django.utils import timezone
 
+    from cveFeed.finding_lifecycle import FOLDED
     from cveFeed.models import HygieneFinding
     keep = set()
+    # The same host and check filed under another target of this project (a host covered by its apex's target and by a target of its own):
+    # that row is this finding too, so it is updated instead of filed twice (cveFeed.finding_lifecycle). One query for the whole run.
+    elsewhere = {}
+    if across_targets and domain.project_id and found:
+        for row in (HygieneFinding.objects.filter(domain__project_id=domain.project_id, host__in={f.host or domain.name for f in found},
+                                                  check_name__in={f.check for f in found})
+                    .exclude(domain=domain).order_by('id')):
+            if not (row.status == 'resolved' and (row.remediation_note or '').startswith(FOLDED)):
+                elsewhere.setdefault((row.host, row.check_name), row)
     for f in found:
         keep.add((f.host or domain.name, f.check))
         defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
                     'status': 'open', 'resolved_at': None}
         before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
-        if before and before.status == 'resolved' and before.remediation_status == 'fixed':
+        if before is not None and before.status == 'resolved' and (before.remediation_note or '').startswith(FOLDED):
+            before = None  # the engine folded this copy into another row: it stays closed, and that row is the finding
+            folded_own = True
+        else:
+            folded_own = False
+        target = before or elsewhere.get((f.host or domain.name, f.check))
+        if target is not None and target.status == 'resolved' and target.remediation_status == 'fixed':
             # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
             defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
-                            remediation_note=(before.remediation_note + '\n' if before.remediation_note else '')
+                            remediation_note=(target.remediation_note + '\n' if target.remediation_note else '')
                             + 'Reopened: the check found this again after it was marked fixed.')
-        HygieneFinding.objects.update_or_create(
-            domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
+        if target is not None and target.domain_id != domain.id:
+            HygieneFinding.objects.filter(pk=target.pk).update(**defaults, last_seen=timezone.now())
+        elif not folded_own:
+            HygieneFinding.objects.update_or_create(
+                domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
     stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
              if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
              and (x.host, x.check_name) not in keep]  # a certificate finding's host is 'name:port', a host-only run is given the names
@@ -599,7 +627,11 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     found += cleartext_found
 
     stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_'))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
-                           and (cleartext_ok or not check.startswith('cleartext_')))
+                           and (cleartext_ok or not check.startswith('cleartext_')), across_targets=True)
+    if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
+        from cveFeed import finding_lifecycle
+        names = {finding_lifecycle.host_name(f.host or domain.name) for f in found} | {host for host, _port in targets}
+        finding_lifecycle.fold_aliases_quietly(project, names)
     try:  # the medium and worse findings are triaged (impact and a fix); never fatal to the check
         from cveFeed import triage
         triage.triage_hygiene(domain_id)

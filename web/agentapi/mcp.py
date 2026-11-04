@@ -313,7 +313,7 @@ TOOLS = [
     ('register_assets', 'Register the hosts, IPs or CIDRs you are responsible for (needs a token). get_remediation_work then defaults to them.',
      _schema({'assets': {'type': 'array', 'items': {'type': 'string'}}}, ['assets']),
      lambda c, a: svc.register_assets(c, a.get('assets')), True),
-    ('get_remediation_work', 'CVE-on-host items still to fix for your registered assets (or the assets arg), fire first, with fixed versions.',
+    ('get_remediation_work', 'CVE-on-host items still to fix for your registered assets (or the assets arg), fire first, with fixed versions. One item per upgrade: the CVEs one upgrade of one component on one host fixes are one item (cves, match_ids, upgrade_to); count counts items, matches the matches behind them.',
      _schema(_page_props({'project': SLUG, 'assets': {'type': 'string', 'description': 'comma separated hosts/IPs/CIDRs'}, 'tier': {'type': 'string'}}), ['project']),
      lambda c, a: svc.work_items(c, a.get('project'), a), False),
     ('update_remediation_status', f'Set a match to open, in_progress, fixed, accepted_risk or false_positive, with a note on why; {CLOSING}.',
