@@ -97,6 +97,21 @@ def settle_library_proven_answers(*args, **kwargs):
         logging.getLogger(__name__).exception('could not queue the library rule settle step')
 
 
+
+@worker_ready.connect()
+def run_pending_backfills(*args, **kwargs):
+    """Queue the backfills an update brought that this install has not run (cveFeed.upgrade_backfills: re-rating, merging and closing
+    stored findings for new rules), so a headless install needs nobody to run a command. The delay lets migrations finish and the other
+    workers start; nothing is queued once all are done. Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import upgrade_backfills
+        if upgrade_backfills.enabled() and upgrade_backfills.pending():
+            from cveFeed.tasks import run_upgrade_backfills
+            run_upgrade_backfills.apply_async(countdown=120)
+    except Exception:  # noqa: BLE001 - the database or the broker may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not queue the update backfills')
+
 @worker_ready.connect()
 def rescore_for_heat_cap(*args, **kwargs):
     """Host scores are stored: when the heat rule changed (the heat policy, CVENGINE_HEAT_POLICY or the Heat policy card, and under legacy
