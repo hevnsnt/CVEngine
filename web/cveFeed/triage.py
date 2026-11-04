@@ -741,7 +741,7 @@ TWIN_WINDOW = timedelta(days=30)  # a finding last judged longer ago than this i
 
 def _inherited_fields(twin, d, now):
     """The fields of a rescan's new Triage row, taken from the row of the same finding in the scan before it (see ``_twins``). The record
-    stays: verdict, classification, reason and the validation result with its time. When the signature moved only because the feed's
+    stays: verdict, classification, reason, the validation result with its time and a heat a person set. When the signature moved only because the feed's
     intelligence or the host context did (the asset evidence is the same), the row is queued for a fresh review, as ``_rereview_fields``
     does on one row, and keeps what it inherited until that review replaces it."""
     unchanged = twin.signature == effective_signature(d, twin.review_nonce)
@@ -752,7 +752,10 @@ def _inherited_fields(twin, d, now):
               # a "no check exists" answer carries no time of its own: the row it was first given on stands for it
               'validated_at': twin.validated_at or (twin.created_at if twin.validation_status == 'no_check' else None),
               'attempts': twin.attempts, 'next_attempt_at': twin.next_attempt_at, 'confidence_adjust': twin.confidence_adjust,
-              'carried_from': twin.match_id}
+              'carried_from': twin.match_id,
+              # a heat a person set stays with the finding across rescans of the same evidence (threat.manual_heat)
+              'heat_override': twin.heat_override, 'heat_override_reason': twin.heat_override_reason,
+              'heat_override_by_id': twin.heat_override_by_id, 'heat_override_at': twin.heat_override_at}
     if not unchanged:
         fields.update(status='pending', attempts=0, next_attempt_at=None)
     return fields
@@ -778,7 +781,7 @@ def _twins(pending):
     # every rescan adds a row per finding that nothing prunes. Measured with 500 findings and 60 scans kept: 30,000 rows sorted, an external
     # merge of 8 MB, about 250 ms per chunk, linear in the scans kept (sorting only the key columns and fetching the rows after it is about 85 ms,
     # in memory, and just as linear). Bounding it needs the finding's key on the Triage row (an index to seek the newest row by) or pruning.
-    rows = (Triage.objects.filter(Q(status='triaged') | ~Q(validation_status='none'), kind='cve_match', match__isnull=False,
+    rows = (Triage.objects.filter(Q(status='triaged') | ~Q(validation_status='none') | ~Q(heat_override=''), kind='cve_match', match__isnull=False,
                                   updated_at__gte=timezone.now() - TWIN_WINDOW,
                                   project_id__in={d['project_id'] for _, d in pending},
                                   host__in={d['host'][:500] for _, d in pending},
