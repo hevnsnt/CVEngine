@@ -81,7 +81,7 @@ class RuleTests(SimpleTestCase):
                      body='<meta name="generator" content="Drupal 10 (https://www.drupal.org)">')
         found = self.run_probe('headers-root', {'/': front})
         names = {(o['product'], o['version']) for o in found if o['kind'] == 'version'}
-        self.assertTrue({('Apache HTTP Server', '2.4.6'), ('PHP', '5.4.16'), ('ASP.NET', '4.0.30319')} <= names)
+        self.assertTrue({('Apache HTTP Server', '2.4.6'), ('PHP', '5.4.16'), ('.NET Framework CLR', '4.0.30319')} <= names)  # 1.3.5: not "ASP.NET"
         self.assertFalse([o for o in found if o['product'] == 'Drupal' and o['version']])  # "Drupal 10" states no version: a bare major is never evidence
         self.assertEqual([(o['product'], o['outcome']) for o in found if o['kind'] == 'edge'], [('Cloudflare', 'edge')])
 

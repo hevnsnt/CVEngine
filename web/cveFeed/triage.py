@@ -130,6 +130,33 @@ def ceiling(kind, facts):
     return '', ''
 
 
+def remote_limit(kind, facts):
+    """``(level, text)``: the highest classification the CVE's own detection strategy lets a check from outside give a CVE match
+    (``facts['max_remote_state']``, ``detection.max_remote_state``), or ``('', '')`` when it sets none. A JavaScript library read from the page,
+    a banner or a fingerprint cannot show whether the page or service is exploitable, and the strategy says so (``remote_determinable``
+    partial: likely at most); the rules never lift a match above it on such evidence (1.3.5). Evidence from the host itself is not a remote
+    check and is not held: the host's inventory report and the distribution's tracker listing the installed package release (``host_side``),
+    and a validation hit (the caller's test). A template hit or a runZero report that matched the flaw is held to likely at least, never down to
+    needs validation by this limit."""
+    state = facts.get('max_remote_state') if kind == 'cve_match' else ''
+    if state not in RANK or facts.get('host_side'):
+        return '', ''
+    if facts.get('remote_flaw_check') and rank(state) < rank('likely'):
+        state = 'likely'
+    return state, f"the CVE's detection strategy says a check from outside decides it {state.replace('_', ' ')} at most"
+
+
+def remote_facts(m):
+    """What ``remote_limit`` reads of a CVEMatch (``m.cve_entry`` loaded; its ``detection`` too, to save a query)."""
+    from cveFeed import detection
+    evidence = getattr(m, 'evidence', None) or {}
+    return {'max_remote_state': detection.max_remote_state(m.cve_entry),
+            'host_side': (getattr(m, 'source', '') == 'host' or match_policy.evidence_flag(evidence, 'host_reported')
+                          or (getattr(m, 'distro_status', '') or '') == 'vulnerable'),
+            'remote_flaw_check': ((getattr(m, 'template_result', '') or '') == 'vulnerable'
+                                  or match_policy.evidence_flag(evidence, 'runzero'))}
+
+
 def library_body_proven(source, evidence, version_in_range, distro_status=''):
     """Whether a CVE match's version was read by cvENGINE from the JavaScript library's own served file, for the copy the page runs, and is
     inside the affected range. The predicate is the library clause of ``match_policy.version_read_from_component``, the one the heat policy
@@ -204,11 +231,16 @@ def apply_rules(kind, facts, parsed):
 
     1. An unusable reply is needs_validation.
     2. ``confirmed`` from the model without hard evidence that confirms is likely: text alone never confirms.
-    3. The result is never below the floor the hard evidence sets, so the model cannot clear a finding the evidence supports."""
+    3. The result is never below the floor the hard evidence sets, so the model cannot clear a finding the evidence supports.
+
+    Before any of it, ``fact_check`` takes out the model's sentences that contradict what cvENGINE parsed (an SPF qualifier, a registrable
+    domain, a product) and says what it corrected at the head of the reason."""
     floor, evidence = hard_evidence(kind, facts)
+    parsed, corrections = fact_check(kind, facts, parsed)
     invalid = parsed is None
     said = 'needs_validation' if invalid else parsed['classification']
     reason = 'unparseable model reply' if invalid else parsed['reason']
+    corrected = f'Corrected by cvENGINE: {"; ".join(corrections)}. ' if corrections else ''
     final, prefix = said, ''
     if said == 'confirmed' and rank(floor) < rank('confirmed'):
         final = 'likely'
@@ -225,7 +257,10 @@ def apply_rules(kind, facts, parsed):
     if facts.get('version_unknown') and rank(floor) <= rank('needs_validation') and final != 'needs_validation':
         # nothing to test the version against: only a person, or a published range, moves it (the model cannot raise it either)
         prefix, final = f'AI said {said.replace("_", " ")} but the advisory gives no affected version range; kept as needs validation: ', 'needs_validation'
-    text = prefix + reason
+    remote, remote_text = remote_limit(kind, facts)
+    if remote and rank(final) > rank(remote):
+        prefix, final = f'AI said {said.replace("_", " ")} but {remote_text}; kept as {remote.replace("_", " ")}: ', remote
+    text = corrected + prefix + reason
     adjust = 0 if invalid else parsed['severity_adjust']
     return {
         'classification': final, 'reason': text[:700], 'overridden': (not invalid) and final != said,
@@ -234,6 +269,16 @@ def apply_rules(kind, facts, parsed):
         'severity_reason': '' if invalid else parsed['severity_reason'],
         'remediation': '' if invalid else parsed['remediation'],
         'validation_notes': [] if invalid else parsed['validation_steps'], 'invalid_output': invalid, 'hard_evidence': evidence}
+
+
+def overridden(verdict, row):
+    """Whether the rules changed what the model said for this row: its classification is not the model's own (or, for an unusable reply,
+    not the stored answer's). Read the same way everywhere a finding's "overridden" is shown, so a row the rules first lifted and the CVE's
+    ``remote_limit`` brought back to what the model said is not reported as overridden."""
+    if verdict is None or row is None:
+        return False
+    said = getattr(verdict, 'model_classification', '') or getattr(verdict, 'classification', '')
+    return bool(said) and (getattr(row, 'classification', '') or '') != said
 
 
 def version_unknown_outcome():
@@ -263,7 +308,7 @@ def signature_for(kind, fields):
 
 # Signature fields that are not evidence about the asset: advisory text and scores from the CVE feed. When only these, or the
 # decision scheme above, change, the finding is reviewed again but keeps what was proven about it until the new verdict lands.
-NON_ASSET_FIELDS = ('intelligence', 'context', 'closure_basis', 'host_text')  # what probes and edges said: a new probe result re-asks the question, it does not erase the record
+NON_ASSET_FIELDS = ('intelligence', 'context', 'closure_basis', 'host_text', 'shown')  # what probes and edges said: a new probe result re-asks the question, it does not erase the record
 
 
 def evidence_key_for(kind, fields, review_nonce=''):
@@ -387,6 +432,7 @@ def describe_cve_match(m):
     proof = library_proof_of(m, evidence, facts['distro_status'])
     if proof:
         facts['library_proof'] = proof
+    facts.update(remote_facts(m))
     payload = {
         'product': _s(m.matched_product, 120, names), 'version': _s(m.matched_version, 120, names),
         'version_in_range': m.version_in_range, 'source': _s(m.source, 20),
@@ -481,10 +527,11 @@ def _safe_url_port(url):
         return None
 
 
-def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
+def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None, products=None):
     """Facts, payload and signature fields of one Vulnerability row. ``cves``/``cwes``/``tags`` are the names of its M2M rows and
     ``port`` a ``(product, version)`` for a database exposure. Nothing from ``request``, ``response`` or ``curl_command`` is read
-    except the response's status code, parsed, never quoted."""
+    except the response's status code, parsed, never quoted. ``products`` (``fingerprint_products`` of its host, read for a template
+    finding of medium or higher) is what the host's fingerprint names: the prompt is given it as a fact (``nuclei_product_facts``)."""
     kind = kind_of_vulnerability(v)
     names = _vuln_names(v)
     values = list((v.extracted_results or [])[:5])
@@ -502,7 +549,7 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
         payload = {'service': _s(label, 40), 'port': number, 'server_reply': extracted[0] if extracted else '',
                    'product': _s((port or ('', ''))[0], 120, names), 'version': _s((port or ('', ''))[1], 120, names),
                    'name': _prose(v.name, 200, names)}
-        fields = {'label': label, 'port': number, 'reply': reply}
+        fields = {'label': label, 'port': number, 'reply': stable_text(reply, tokens=False)}
         priority = (1, 0)
     elif kind == 'bbot':
         facts = {}
@@ -520,8 +567,10 @@ def describe_vulnerability(v, cves=(), cwes=(), tags=(), port=None):
                    'description': _prose(redact_text(v.description), 1500, names), 'path': _path_only(v.http_url, names),
                    'http_status': _status_of(v.response), 'source': _s(source, 40)}
         fields = {'source': source, 'template_id': v.template_id or '', 'matcher': v.matcher_name or '', 'name': v.name,
-                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(signed)}
+                  'cves': sorted(cves), 'severity': severity, 'extracted': sorted(stable_text(e, tokens=False) for e in signed)}
         priority = (0, 0) if source == 'nuclei-cve' else (3, -severity)
+        if products is not None and severity >= MEDIUM:
+            payload['facts'] = facts['parsed'] = {'products': nuclei_product_facts(products, tags, v.template_id, v.name, names)}
     return {'kind': kind, 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': severity, 'priority': priority}
 
 
@@ -547,13 +596,212 @@ def describe_route(r, port=None):
 
 
 def describe_hygiene(f):
-    names = _names(f.host, getattr(getattr(f, 'domain', None), 'name', ''))
+    domain_name = getattr(getattr(f, 'domain', None), 'name', '')
+    names = _names(f.host, domain_name)
     evidence = {_s(k, 40): _s(v if not isinstance(v, (list, dict)) else json.dumps(v, default=str), 200, names)
                 for k, v in list((f.evidence or {}).items())[:20]}
+    parsed = hygiene_facts(f.host, domain_name, f.evidence, names)
+    if parsed.get('spf'):
+        # the strict cleaning keeps no "?" or "~": the record is shown as parsed, every SPF qualifier where the record has it
+        evidence = {k: (parsed['spf']['record'] if k == 'record' else v) for k, v in evidence.items()}
     payload = {'check': _s(f.check_name, 40), 'severity': SEVERITY_NAMES.get(f.severity), 'title': _prose(f.title, 300, names),
                'detail': _prose(f.detail, 600, names), 'evidence': evidence}
-    return {'kind': 'hygiene', 'facts': {}, 'payload': payload, 'signature_fields': {'check': f.check_name, 'severity': f.severity,
-            'evidence': evidence}, 'severity': f.severity, 'priority': (5, -f.severity)}
+    if parsed:
+        payload['facts'] = parsed
+    return {'kind': 'hygiene', 'facts': {'parsed': parsed} if parsed else {}, 'payload': payload,
+            'signature_fields': {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)},
+            'severity': f.severity,
+            'priority': (5, -f.severity)}
+
+
+# ----------------------------------------------------------------------------- parsed facts (pure): what cvENGINE reads, not the model
+#
+# A model infers badly what a parser reads exactly: an SPF record's closing qualifier (the strict cleaning of host text used to drop "?" and
+# "~", so "?all" reached the model as a bare "all"), whether two names share a registrable domain (the finding's own host is redacted, so
+# the model cannot compare), which product the host's fingerprint names (a template's tags name what the template was written for). These
+# are parsed here and put in the prompt as ``facts``; ``fact_check`` then repairs model text that contradicts them.
+
+SPF_QUALIFIERS = {'+': 'pass', '-': 'fail', '~': 'softfail', '?': 'neutral'}
+_SPF_MECHANISM = re.compile(r'^([+\-~?]?)(all|include|a|mx|ptr|ip4|ip6|exists)(?:[:/][A-Za-z0-9._:/%{}\-]{1,253})?$', re.I)
+_SPF_MODIFIER = re.compile(r'^(?:redirect|exp)=[A-Za-z0-9._%{}\-]{1,253}$', re.I)
+_DOMAIN_VALUE = re.compile(r'^(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}\.?$', re.I)
+
+
+def parse_spf(record, names=()):
+    """``{'record', 'all'...}`` of an SPF record (``v=spf1 ...``), or None when ``record`` is not one. The record is rebuilt from the terms
+    the SPF grammar allows (RFC 7208 mechanisms with their qualifiers, redirect= and exp=), so it keeps "?all" and "~all" exactly and can
+    carry no sentence; any other token is only counted. ``all`` is the closing term as written ("?all", "-all", "~all", "+all" or a bare
+    "all"), ``qualifier`` the qualifier it has ("+" when none is written: RFC 7208 4.6.2), ``result`` what a receiver gets."""
+    tokens = str(record or '').split()
+    if not tokens or tokens[0].lower() != 'v=spf1':
+        return None
+    terms, other, closing = ['v=spf1'], 0, None
+    for token in tokens[1:65]:
+        found = _SPF_MECHANISM.match(token)
+        if found:
+            terms.append(token)
+            if found.group(2).lower() == 'all':
+                closing = (found.group(1), token)
+        elif _SPF_MODIFIER.match(token):
+            terms.append(token)
+        else:
+            other += 1
+    out = {'record': clean_text(_redact(' '.join(terms), names), 400)}
+    if closing is not None:
+        written, token = closing
+        out.update({'all': token.lower(), 'qualifier': written or '+', 'qualifier_written': bool(written),
+                    'result': SPF_QUALIFIERS[written or '+']})
+    else:
+        out['all'] = 'none'
+    if other:
+        out['other_terms'] = other
+    return out
+
+
+def _bare_host(name):
+    name = str(name or '').strip().lower()
+    try:
+        return urlparse('//' + name).hostname or name
+    except ValueError:
+        return name
+
+
+def registrable_of(name):
+    """The registrable domain of ``name`` (public suffix list, bundled with tldextract, no network; leading _dmarc/_spf labels dropped), or ''."""
+    from cveFeed.mailfail import registrable
+    return registrable(_bare_host(name)) or ''
+
+
+def hygiene_facts(host, domain_name, evidence, names=()):
+    """The facts a hygiene finding's prompt is given as parsed: the SPF record (``parse_spf``) and, for each evidence value that is a domain
+    name, its registrable domain and whether it is the finding's own (the host is redacted from the prompt, so the model cannot compare)."""
+    out = {}
+    evidence = evidence if isinstance(evidence, dict) else {}
+    for value in evidence.values():
+        spf = parse_spf(value, names) if isinstance(value, str) else None
+        if spf:
+            out['spf'] = spf
+            break
+    own = registrable_of(host) or registrable_of(domain_name)
+    domains = []
+    for key, value in list(evidence.items())[:20]:
+        if not isinstance(value, str) or not _DOMAIN_VALUE.match(value.strip()) or not own:
+            continue
+        other = registrable_of(value)
+        if other:
+            domains.append({'field': _s(key, 40), 'registrable_domain': _s(other, 120, names),
+                            'same_registrable_domain_as_finding_host': other == own})
+    if domains:
+        out['domains'] = domains[:10]
+    return out
+
+
+def fingerprint_products(sub):
+    """What the host's fingerprint names (its technologies and the products of its open ports), raw and sorted, at most 10: '' versions off."""
+    if sub is None:
+        return []
+    found = set()
+    try:
+        for tech in sub.technologies.all():
+            name = str(tech.name or '').split(':', 1)[0].strip()
+            if name:
+                found.add(name)
+        for ip in sub.ip_addresses.all():
+            for port in ip.ports.all():
+                if (port.product or '').strip():
+                    found.add(port.product.strip())
+    except (AttributeError, ValueError):
+        return []
+    return sorted(found, key=str.lower)[:10]
+
+
+# Nuclei tags that name a kind of check, not a product: a model may use these words freely (fact_check never reads them as a product)
+GENERIC_TAGS = frozenset((
+    'cve', 'kev', 'vkev', 'edb', 'owasp', 'misconfig', 'misconfiguration', 'exposure', 'exposures', 'exposed', 'panel', 'panels', 'login',
+    'detect', 'detection', 'tech', 'ssl', 'tls', 'dns', 'http', 'https', 'header', 'headers', 'config', 'configuration', 'default', 'auth',
+    'authentication', 'unauth', 'token', 'tokens', 'oidc', 'oauth', 'openid', 'jwt', 'xss', 'sqli', 'rce', 'lfi', 'ssrf', 'redirect',
+    'takeover', 'disclosure', 'info', 'information', 'file', 'files', 'backup', 'debug', 'api', 'cloud', 'web', 'server', 'service',
+    'network', 'intrusive', 'vuln', 'generic', 'fuzz', 'cors', 'cookie', 'cookies', 'error', 'errors', 'log', 'logs', 'admin', 'password',
+    'secret', 'secrets', 'key', 'keys', 'listing', 'directory', 'install', 'installer', 'setup', 'unauthenticated', 'passive', 'discovery',
+    'signing', 'none', 'crypto', 'cert', 'certificate', 'injection', 'traversal', 'upload', 'bypass', 'leak', 'sensitive', 'devops', 'iot',
+    'storage', 'bucket', 'database', 'cms', 'framework', 'plugin', 'theme', 'wp-plugin', 'wp-theme', 'osint', 'creds', 'creds-stuffing',
+    'deserialization', 'xxe', 'ssti', 'csrf', 'idor', 'enum', 'version', 'workflow', 'smtp', 'ftp', 'ssh', 'mail', 'email', 'spf', 'dmarc',
+))
+
+
+def nuclei_product_facts(products, tags, template_id, name, names=()):
+    """The ``facts`` a scanner finding's prompt is given about the product: what the host's fingerprint names (``fingerprint_products``),
+    or that it names none, and which of the template's tags name products the template was written for (not what this host runs)."""
+    shown = [_s(p, 80, names) for p in products]
+    about = f'{template_id or ""} {name or ""}'.lower()
+    product_tags = sorted({str(t).lower() for t in tags if str(t).lower() not in GENERIC_TAGS and len(str(t)) >= 4
+                           and not str(t).lower().startswith('cve') and str(t).lower() not in about})[:10]
+    out = {'fingerprint_products': [p for p in shown if p] or 'none: the host fingerprint names no product'}
+    if product_tags:
+        out['template_tags_naming_products'] = [_s(t, 40) for t in product_tags]
+        out['note'] = 'Template tags name the products a template was written for, not what this host runs.'
+    return out
+
+
+_BARE_ALL = re.compile(r'\b(?:bare|unqualified|plain|naked)\s+["\'`“]?all\b|\bno\s+(?:\w+\s+)?qualifier\b|\bwithout\s+(?:a|any)\s+qualifier\b'
+                       r'|\ball["\'`”]?\s+with\s+no\s+(?:\w+\s+)?(?:qualifier|prefix)\b|\bimplicit\s+\+?all\b', re.I)
+_ENDS_IN = re.compile(r'\b(?:ends?|ending|terminates?|closes?|closing)\s+(?:in|with)\s+(?:a\s+|an\s+|the\s+)?["\'`“]?([+\-~?]?)all\b', re.I)
+_SAME_DOMAIN = re.compile(r'\bsame[- ](?:registrable[- ]|organi[sz]ational[- ]|parent[- ])?domain\b|\bin[- ]domain\b|\bits own domain\b'
+                          r'|\bthe domain (?:under test|being checked|itself)\b', re.I)
+TEXT_FIELDS = ('reason', 'impact', 'severity_reason')
+
+
+def _spf_contradiction(spf, sentence):
+    if not spf or spf.get('all') in (None, 'none'):
+        return False
+    actual = spf['qualifier']
+    if spf.get('qualifier_written') and actual != '+' and _BARE_ALL.search(sentence):
+        return True
+    return any((found.group(1) or '+') != actual for found in _ENDS_IN.finditer(sentence))
+
+
+def fact_check(kind, facts, parsed):
+    """``(parsed, corrections)``: the model's answer with every sentence of its reason, impact and severity reason that contradicts a parsed
+    fact (``facts['parsed']``) taken out, and the list of what was corrected, in cvENGINE's words. Cheap and narrow on purpose: an SPF
+    record read with another closing qualifier than it has ("a bare all" when it ends in ?all), two names called the same domain when their
+    registrable domains differ, a product named from the template's tags that the host's fingerprint does not name. A severity step given
+    with a contradicted answer is dropped (it was reasoned from the misread fact). The classification is never changed here."""
+    known = (facts or {}).get('parsed') or {}
+    if parsed is None or not known:
+        return parsed, []
+    spf = known.get('spf')
+    different = [d for d in known.get('domains') or [] if d.get('same_registrable_domain_as_finding_host') is False]
+    products = known.get('products') or {}
+    fingerprint = products.get('fingerprint_products')
+    fingerprint = ' '.join(fingerprint).lower() if isinstance(fingerprint, list) else ''
+    wrong_products = [t for t in products.get('template_tags_naming_products') or [] if t.lower() not in fingerprint]
+    corrections = set()
+
+    def contradicts(sentence):
+        hit = False
+        if _spf_contradiction(spf, sentence):
+            corrections.add(f'the published record ends in {spf["all"]} ({spf["result"]}), as parsed from the record')
+            hit = True
+        if different and _SAME_DOMAIN.search(sentence):
+            corrections.add('; '.join(f'{d["field"]} ({d["registrable_domain"]}) is a different registrable domain from the finding\'s host'
+                                      for d in different))
+            hit = True
+        for tag in wrong_products:
+            if re.search(rf'(?<![\w-]){re.escape(tag)}(?![\w-])', sentence, re.I):
+                corrections.add(f'the host fingerprint does not name {tag} (only the template\'s tags do)')
+                hit = True
+        return hit
+
+    out = dict(parsed)
+    for field in TEXT_FIELDS:
+        text = out.get(field) or ''
+        if not text:
+            continue
+        kept = [s for s in _SENTENCE_END.split(text) if not contradicts(s)]
+        out[field] = ' '.join(kept).strip()
+    if corrections:
+        out['severity_adjust'], out['severity_reason'] = 0, ''
+    return out, sorted(corrections)
 
 
 # ----------------------------------------------------------------------------- database side
@@ -695,17 +943,105 @@ def describe(finding):
         # extraction is only needed for DB exposures and malformed values must
         # not prevent AI review of an otherwise valid finding.
         number = _safe_url_port(finding.http_url) if finding.source == 'db_exposure' else None
+        template = kind_of_vulnerability(finding) == 'nuclei' and (finding.severity or 0) >= MEDIUM
         d = describe_vulnerability(
             finding, cves=[c.name for c in finding.cve_ids.all()], cwes=[c.name for c in finding.cwe_ids.all()],
-            tags=[t.name for t in finding.tags.all()], port=_port_for(sub, number) if finding.source == 'db_exposure' else None)
+            tags=[t.name for t in finding.tags.all()], port=_port_for(sub, number) if finding.source == 'db_exposure' else None,
+            products=fingerprint_products(sub) if template else None)
         domain = finding.target_domain
         base = {'project_id': domain.project_id if domain else None, 'domain_id': domain.pk if domain else None,
                 'host': sub.name if sub else '', 'first_seen': finding.discovered_date}
     d.update(base)
+    if d['kind'] != 'cve_match':
+        d['signature_fields']['shown'] = shown_digest(d)
     d['signature'] = signature_for(d['kind'], d['signature_fields'])
     d['evidence_key'] = evidence_key_for(d['kind'], d['signature_fields'])
     d['first_seen'] = d['first_seen'] or timezone.now()
     return d
+
+
+def shown_digest(d):
+    """The sha1 (16 hex) of what the prompt of a description shows the model (its payload and host context), with the values that change on
+    their own over time made stable (``stable``). Part of the signature of every kind but a CVE match (whose shown host text is bound by
+    ``bind_host_text``), so one signature is one question: the answer stored for it is the answer any finding of the project with the same
+    signature would get, on any host, and it is reused there instead of each host asking its own (``reached_here``). Before, the signature
+    of these kinds left out a page title, a path, a detail the prompt showed, so a closing answer or a step down was kept to the host it was
+    reached on and its twins on other hosts each asked again and could be answered differently. The prompt still shows the exact values
+    (15 days left, the expiry date); only the key ignores them, or keeps their bucket, so a day passing is not a new (paid) question."""
+    shown = [stable(d.get('payload')), stable(d.get('host_context'))]
+    return hashlib.sha1(json.dumps(shown, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+# ----------------------------------------------------------------------------- stable keys: what changes on its own is not new evidence
+#
+# A day count, a date or a time, a counter, a response time, a header that carries the clock (Date, Expires, Last-Modified, ETag,
+# Set-Cookie) or a nonce or session id in an excerpt changes from one scan to the next while the finding does not. In a signature it made
+# every rescan a new question: one AI call per finding per day for an expiring certificate. ``stable`` is what keys read instead; the
+# prompt is unchanged. A day count is kept as a bucket, because the bucket is what moves the answer (an expired certificate, a week left,
+# a month left).
+
+VOLATILE_KEYS = frozenset((
+    'not_after', 'not_before', 'notafter', 'notbefore', 'valid_from', 'valid_to', 'valid_until', 'expires', 'expiry', 'expires_at',
+    'last_seen', 'first_seen', 'checked_at', 'checked', 'observed_at', 'scanned_at', 'captured_at', 'validated_at', 'updated_at',
+    'created_at', 'date', 'last_modified', 'last-modified', 'etag', 'set-cookie', 'set_cookie', 'response_time', 'response_time_ms',
+    'elapsed', 'elapsed_ms', 'duration', 'latency', 'timestamp', 'time', 'uptime', 'uptime_in_seconds', 'sensitive_score', 'age',
+))
+DAY_KEYS = frozenset(('days_left', 'days_remaining', 'days_to_expiry', 'expires_in_days', 'days_ago', 'days_since', 'age_days'))
+_DAY_COUNT = re.compile(r'(?<![\w-])(-?\d{1,6})\s+days?\s+(left|remaining|ago)\b', re.I)
+_ISO_TIME = re.compile(r'\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b')
+_HTTP_DATE = re.compile(r'\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\d{1,2}[ -][A-Z][a-z]{2}[ -]\d{2,4}\s+\d{2}:\d{2}:\d{2}(?:\s+(?:GMT|UTC))?')
+_CLOCK = re.compile(r'\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b')
+_EPOCH = re.compile(r'\b1\d{9}(?:\d{3})?\b')
+_HEADER_CLOCK = re.compile(r'\b(Date|Expires|Last-Modified|ETag|Set-Cookie|Age)\s*:\s*[^\r\n]*', re.I)
+# a nonce, a session id, a CSRF or state value: a long run of letters and digits mixed (with - or _), or long hex
+_TOKEN = re.compile(r'(?<![\w.])(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{24,}(?![\w.])|\b[0-9a-fA-F]{16,}\b')
+
+
+def days_bucket(days):
+    """A day count in the bucket that changes what a finding means: expired, under 7 days, under 30 days, 30 days or more."""
+    try:
+        days = int(str(days).strip())
+    except (TypeError, ValueError):
+        return 'unknown'
+    return 'expired' if days < 0 else 'under 7 days' if days < 7 else 'under 30 days' if days < 30 else '30 days or more'
+
+
+def stable_text(text, tokens=True):
+    """``text`` with what changes on its own replaced: a day count by its bucket ("15 days left" -> "<under 30 days> left", "662 days ago"
+    -> "<expired>"), dates, times, epoch seconds and clock-bearing header values by a placeholder and, with ``tokens``, nonces and session
+    ids (``_TOKEN``). Without ``tokens`` for a value the signature keeps whole (an extracted secret must not share a key with another)."""
+    if not isinstance(text, str):
+        return text
+    text = _DAY_COUNT.sub(lambda m: f'<{"expired" if m.group(2).lower() == "ago" else days_bucket(m.group(1))}> {m.group(2).lower()}', text)
+    text = _HEADER_CLOCK.sub(lambda m: f'{m.group(1)}: <volatile>', text)
+    text = _HTTP_DATE.sub('<date>', _ISO_TIME.sub('<date>', text))
+    text = _EPOCH.sub('<time>', _CLOCK.sub('<time>', text))
+    return _TOKEN.sub('<token>', text) if tokens else text
+
+
+def stable(value, tokens=True, depth=0):
+    """``value`` (a payload, evidence) as keys read it: ``VOLATILE_KEYS`` left out, ``DAY_KEYS`` as their bucket, ``sensitive_types`` as the
+    types without their counts, every string through ``stable_text``."""
+    if isinstance(value, str):
+        return stable_text(value, tokens)
+    if depth > 8:
+        return value
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in VOLATILE_KEYS:
+                continue
+            if name in DAY_KEYS:
+                out[key] = days_bucket(item)
+            elif name == 'sensitive_types' and isinstance(item, dict):
+                out[key] = sorted(item)
+            else:
+                out[key] = stable(item, tokens, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [stable(item, tokens, depth + 1) for item in value]
+    return value
 
 
 def request_fresh_review(row, d, nonce):
@@ -943,7 +1279,9 @@ def with_cves(matches):
 
 
 def vulnerabilities(queryset, limit=None):
-    qs = queryset.select_related('subdomain', 'target_domain').prefetch_related('cve_ids', 'cwe_ids', 'tags').defer('request', 'curl_command')
+    qs = (queryset.select_related('subdomain', 'target_domain')
+          .prefetch_related('cve_ids', 'cwe_ids', 'tags', 'subdomain__technologies', 'subdomain__ip_addresses__ports')
+          .defer('request', 'curl_command'))
     return list(qs[:limit] if limit else qs)
 
 
@@ -1179,12 +1517,10 @@ def own_signature(kind, signature, row, per_host=True):
 
 
 def own_candidates(kind, signature, row):
-    """The keys ``row`` may take its answer from when the shared one may not be applied, in order: for a CVE match the project's own answer
-    first (one question per project, as the shared one is per instance: its shown host text is in the signature), then the host's own; for
-    every other kind the host's own (its prompt shows host text the signature does not carry). The host's own answer is always reusable
-    there, so the chain ends."""
-    keys = [own_signature(kind, signature, row, per_host=False)] if kind == 'cve_match' else []
-    return keys + [own_signature(kind, signature, row, per_host=True)]
+    """The keys ``row`` may take its answer from when the shared one may not be applied, in order: the project's own answer first (one
+    question per project, as the shared one is per instance: the signature carries what the prompt showed, ``shown_digest`` and
+    ``bind_host_text``), then the host's own. The host's own answer is always reusable there, so the chain ends."""
+    return [own_signature(kind, signature, row, per_host=False), own_signature(kind, signature, row, per_host=True)]
 
 
 def same_project(verdict, row):
@@ -1205,9 +1541,8 @@ def verdict_text(verdict, row):
 
 
 def closure_reusable(verdict, row, kind, match=None):
-    """Whether the stored closing answer ``verdict`` may close ``row`` (a Triage row): only in the project it was reached in, only on that
-    host for the kinds whose prompt carries host text the signature does not (a page title, a path, a response: every kind but a CVE match,
-    whose shown host text is in its signature, ``bind_host_text``), and never, from another host, a CVE match a person stands behind (assigned,
+    """Whether the stored closing answer ``verdict`` may close ``row`` (a Triage row): only in the project it was reached in (``reached_here``:
+    on any of its hosts with the same signature, which carries what the prompt showed), and never, from another host, a CVE match a person stands behind (assigned,
     or a remediation status other than open) or one with hard evidence (``match_policy.has_hard_evidence``). An answer with no recorded origin (stored before it was recorded) closes nothing more.
     The signature has no tenant, so without this one organization's host could close another's finding by showing the same evidence with a
     crafted page or banner beside it (task 256)."""
@@ -1236,9 +1571,9 @@ def answer_reusable(verdict, row, d, match=None):
     * A closing answer: ``closure_reusable``.
     * One a deterministic rule gave (no host text): anywhere.
     * An answer that raises attention (likely, confirmed): anywhere for a CVE match (the host text its prompt showed is in its signature,
-      ``bind_host_text``); for every other kind only in the project it was reached in, since that prompt showed host text the signature
-      does not carry (a bbot description, a nuclei path, a page title, a hygiene detail) and a host one organization controls must not
-      raise another organization's findings.
+      ``bind_host_text``); for every other kind only in the project it was reached in, since that prompt showed host text (a bbot
+      description, a nuclei path, a page title, a hygiene detail) and a host one organization controls must not raise another
+      organization's findings. (The signature now carries that text too, ``shown_digest``; the rule across organizations is kept.)
     * Needs validation from the model: where the row's own question could not do better either (its ceiling, or an advisory with no
       version range, holds it there); else only in the project it was reached in, and from another host there never on a CVE match with
       hard evidence the signature does not carry (``_unsigned_hard_evidence``: "uncertain" would keep it off the fire page).
@@ -1261,11 +1596,13 @@ def answer_reusable(verdict, row, d, match=None):
 
 
 def reached_here(verdict, row, kind):
-    """Whether the stored answer ``verdict`` was reached for ``row``'s own tenant: the same project, and the same host for the kinds whose
-    prompt shows host text the signature does not carry (every kind but a CVE match). An answer with no recorded origin never is."""
-    if verdict.project_id is None or verdict.project_id != row.project_id:
-        return False
-    return kind == 'cve_match' or (verdict.host or '') == (row.host or '')
+    """Whether the stored answer ``verdict`` was reached for ``row``'s own tenant: the same project. An answer with no recorded origin
+    never is. The signature of every kind but a CVE match carries exactly what the prompt showed (``shown_digest``), so another host of the
+    project with the same signature would have been asked the very same question: it takes the same answer, closing or a step down
+    included, instead of asking again and perhaps getting another one (item 28 of the 1.3.5 audit: identical findings got -1, 0 and +1).
+    A CVE match was already judged per project (its shown host text is bound by ``bind_host_text``; with a floor the model can only raise
+    it). ``kind`` is kept for the callers."""
+    return verdict.project_id is not None and verdict.project_id == row.project_id
 
 
 def shown_severity_adjust(verdict, row):
@@ -1278,13 +1615,32 @@ def shown_severity_adjust(verdict, row):
     return adjust if row.kind == 'cve_match' or same_project(verdict, row) else 0
 
 
-def _apply(verdict, group):
+def _remote_clamp(kind, facts, classification, reason, validation_status):
+    """``(classification, reason)`` held to ``remote_limit`` (a validation hit is not held)."""
+    limit, text = remote_limit(kind, facts)
+    if limit and validation_status != 'hit' and rank(classification) > rank(limit):
+        return limit, (f'{text[0].upper()}{text[1:]}; kept as {limit.replace("_", " ")}. ' + reason)[:700]
+    return classification, reason
+
+
+def _released(row, classification, held):
+    """Whether a CVE match's Triage row leaves a state that holds its heat at smoke (pending, or needs_validation: ``threat.triage_cap``)
+    for one that does not: its heat may turn fire now, so ``run_triage`` offers it to ``notify.fire_confirmed`` (which pages only a match
+    that is fire now and was never paged under the heat rule in force)."""
+    if not row.match_id or held or row.validation_status == 'hit':
+        return False
+    was_held = row.status == 'pending' or row.classification == 'needs_validation'
+    return was_held and classification not in ('needs_validation', *CLOSING)
+
+
+def _apply(verdict, group, released=None):
     """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A row of another project
     than the one the answer was reached in gets its classification with ``SHARED_REASON``, never the model's words. A closing verdict
     reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached and pending,
     and run_triage asks its own answer (``own_signature``). A row whose state does not change is not written. The legacy ``ai_verdict`` of
     a CVE match follows, and a verdict that does not close is stored (MatchVerdict, with ``SHARED_REASON``) for later correlations to
-    reuse. Returns the ids of the CVE matches whose legacy verdict was written."""
+    reuse. No row is classified above the CVE's ``remote_limit`` without a validation hit. Returns the ids of the CVE matches whose legacy
+    verdict was written; ``released`` (a list) gathers those whose triage stopped holding their heat (``_released``)."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
@@ -1331,11 +1687,15 @@ def _apply(verdict, group):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.REASON_VERSION_UNKNOWN
+        classification, reason = _remote_clamp(d['kind'], d['facts'], classification, reason, row.validation_status)
         legacy[row.pk] = classification  # what the legacy verdict is made from: never the library rule's confirmation below
         rule, rule_text = library_rule(d['kind'], d['facts'])
         if rule and not held and row.validation_status != 'hit' and classification not in CLOSING:
-            # the served library file proves the version: the rules' classification and reason, with this row's own script URL
-            classification, reason = rule, rule_text
+            # the served library file proves the version: the rules' classification and reason, with this row's own script URL, held to
+            # what the CVE's detection strategy lets a check from outside decide (a page's jQuery is likely at most, 1.3.5)
+            classification, reason = _remote_clamp(d['kind'], d['facts'], rule, rule_text, row.validation_status)
+        if released is not None and _released(row, classification, held):
+            released.append(row.match_id)
         target = (None if held else verdict.pk, 'pending' if held else 'triaged', classification, reason,
                   hard_evidence(d['kind'], d['facts'])[1])
         if (row.verdict_id, row.status, row.classification, row.reason, row.hard_evidence) == target:
@@ -1448,7 +1808,8 @@ def settle_library_proven(after=0, batch=SETTLE_BATCH):
     from cveFeed.models import CVEMatch, Triage
     rows = list(Triage.objects.filter(kind='cve_match', pk__gt=after).filter(library_body_proven_q('match__'))
                 .exclude(match__remediation_status__in=CLOSED).exclude(match__ai_verdict='not_affected')
-                .filter(latest_scan_q('match__subdomain__')).select_related('match__subdomain__target_domain').order_by('pk')[:batch])
+                .filter(latest_scan_q('match__subdomain__'))
+                .select_related('match__subdomain__target_domain', 'match__cve_entry__detection').order_by('pk')[:batch])
     if not rows:
         return 0, after, True
     readings = validation.library_readings([row.match for row in rows])
@@ -1458,11 +1819,13 @@ def settle_library_proven(after=0, batch=SETTLE_BATCH):
         proof = library_proof_of(m, m.evidence, m.distro_status)
         if not proof:
             continue
-        _rule, text = library_rule('cve_match', {'library_proof': proof})
+        rule, text = library_rule('cve_match', {'library_proof': proof})
+        # held to what the CVE's detection strategy lets a check from outside decide (1.3.5)
+        rule, text = _remote_clamp('cve_match', remote_facts(m), rule, text, row.validation_status)
         changed = False
         if (row.status == 'triaged' and row.verdict_id and row.validation_status != 'hit' and row.classification not in CLOSING
-                and (row.classification, row.reason) != ('confirmed', text)):
-            row.classification, row.reason = 'confirmed', text
+                and (row.classification, row.reason) != (rule, text)):
+            row.classification, row.reason = rule, text
             m.ai_reason, m.updated_at = text[:2000], now
             match_rows.append(m)
             changed = True
@@ -1556,6 +1919,7 @@ def run_triage(pairs, provider=False, scan_id=None):
     # waiting on it: it gets its own question (own_candidates: the project's own for a CVE match, else the host's), asked and budgeted like
     # any other, and is held at needs validation only until that answer is there (task 256).
     applied = []
+    released = []  # CVE matches whose triage stopped holding their heat at smoke (_released)
     refused = []
     for key in list(groups):
         verdict = known.get(key)
@@ -1595,7 +1959,7 @@ def run_triage(pairs, provider=False, scan_id=None):
                                                   (group[0][0].project_id, group[0][0].host))
         if verdict is not None:
             stats['cached'] += len(group)
-            applied += _apply(verdict, group)
+            applied += _apply(verdict, group, released)
             continue
         if scan_id is not None and resources.abort_requested(scan_id):
             stats['stopped'] = True
@@ -1620,7 +1984,7 @@ def run_triage(pairs, provider=False, scan_id=None):
             continue
         if admission == 'cached':
             stats['cached'] += len(group)
-            applied += _apply(claim, group)
+            applied += _apply(claim, group, released)
             continue
         if admission != 'reserved':
             stats['queued'] += len(group)
@@ -1657,7 +2021,7 @@ def run_triage(pairs, provider=False, scan_id=None):
                 continue
             known[key] = verdict
             stats['asked'] += 1
-            applied += _apply(verdict, group)
+            applied += _apply(verdict, group, released)
         except Exception:
             _finish_call(claim, 'failed')
             logger.exception('triage: could not save provider verdict')
@@ -1668,6 +2032,11 @@ def run_triage(pairs, provider=False, scan_id=None):
         from cveFeed.models import CVEMatch
         scoring.rescore_for_matches(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')
                                     .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
+    if released:
+        # triage no longer holds these at smoke (threat.triage_cap): one that is fire now and was never paged under the rule in force is
+        # paged once, as a confirmation (a template hit was paged when it landed and is left out there)
+        from cveFeed import notify
+        notify.fire_confirmed(released)
     return stats
 
 

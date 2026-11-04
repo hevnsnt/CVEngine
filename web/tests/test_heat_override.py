@@ -60,14 +60,16 @@ class Fixture(Policy, TestCase):
 		mk = lambda cve, product, **f: CVEMatch.objects.create(  # noqa: E731
 			cve_entry=cve, subdomain=self.sub, source='tech', matched_product=product, matched_version='1.2', version_in_range=True,
 			confidence=0.8, ai_verdict='uncertain', scan_history=self.scan, **f)
-		self.fire = mk(self.kev, 'lib-a', evidence=dict(PROVEN))         # on the KEV, version read from the file: fire
+		# on the KEV, version read from the file and a template hit (1.3.5: the version alone is smoke): fire
+		self.fire = mk(self.kev, 'lib-a', evidence=dict(PROVEN), template_result='vulnerable')
 		self.smoke = mk(self.kev, 'lib-b', evidence={'source': 'tech'})  # on the KEV, version only inferred: smoke
 		self.ice = mk(self.cold, 'lib-c', evidence=dict(PROVEN))         # not on the KEV, no exploit: ice
 		self.vuln = Vulnerability.objects.create(name='Exposed panel', severity=3, subdomain=self.sub, target_domain=self.domain,
 												 open_status=True, http_url='https://www.example.com/', source='nuclei')
 		self.hyg = HygieneFinding.objects.create(domain=self.domain, host='www.example.com', check_name='spf_missing', severity=2, title='No SPF')
 		self.foreign = CVEMatch.objects.create(cve_entry=self.kev, subdomain=self.other_sub, source='tech', matched_product='lib-a',
-											   matched_version='1.2', version_in_range=True, evidence=dict(PROVEN), confidence=0.8)
+											   matched_version='1.2', version_in_range=True, evidence=dict(PROVEN), confidence=0.8,
+											   template_result='vulnerable')
 
 	base = '/api/v1/projects/heat-proj'
 

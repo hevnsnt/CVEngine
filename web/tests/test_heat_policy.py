@@ -1,7 +1,8 @@
 """The owner's heat policy (CVENGINE_HEAT_POLICY=kev, the default).
 
-- On the KEV (or with a known exploit), and the version is PROVEN on the host => FIRE.
-- On the KEV (or with a known exploit), and we only THINK the version is there => SMOKE.
+- On the KEV (or with a known exploit), and the flaw is PROVEN on the host (hard evidence) => FIRE.
+- On the KEV (or with a known exploit), and only a version says it is there => SMOKE, even when the version itself is proven (read from the
+  component: 1.3.5, "a version-only match is smoke at most, KEV or not").
 - Not on the KEV and no known exploit => ICE, whatever its CVSS or EPSS, proven or not.
 
 The distribution's "patched" verdict and a CVE with no affected version range stay ice. ``CVENGINE_HEAT_POLICY=legacy`` (or the Heat policy
@@ -84,11 +85,19 @@ EVIDENCE = {
 }
 
 
-def owner_rule(cve, proven):
+# the evidence kinds that prove the flaw on the host (hard evidence), not only its version: what fire needs since 1.3.5
+HARD = {'template hit', 'distribution tracker: vulnerable', 'host inventory', 'runZero report', 'validation hit'}
+
+
+def owner_rule(cve, hard):
 	"""The owner's rule, written out independently of the code under test."""
 	if not HOT[cve]:
 		return ICE
-	return FIRE if proven else SMOKE
+	return FIRE if hard else SMOKE
+
+
+def rule_for(evidence, cve):
+	return owner_rule(cve, evidence in HARD)
 
 
 def fake(evidence, cve):
@@ -118,12 +127,24 @@ class OwnerRuleTests(Policy, SimpleTestCase):
 	"""The six rules, by the pure form."""
 
 	def test_hot_and_proven_is_fire(self):
-		for evidence in [e for e, v in EVIDENCE.items() if v[2]]:
+		for evidence in HARD:
 			for cve in ('kev, medium score', 'exploit only, low score'):
 				m = fake(evidence, cve)
 				self.assertTrue(match_policy.version_proven(m), evidence)
 				self.assertEqual(threat.match_heat(m), FIRE, (evidence, cve))
 				self.assertEqual(threat.validation_heat(m), FIRE, (evidence, cve))
+
+	def test_hot_with_only_its_version_proven_is_smoke(self):
+		"""1.3.5, item 1: a version read from the component itself (a jQuery file's banner, a probed vendor banner, a version-class template)
+		proves the version, not that the flaw is exploitable: smoke, validated first."""
+		for evidence in [e for e, v in EVIDENCE.items() if v[2] and e not in HARD]:
+			for cve in ('kev, medium score', 'exploit only, low score'):
+				m = fake(evidence, cve)
+				self.assertTrue(match_policy.version_proven(m), evidence)
+				self.assertTrue(match_policy.is_version_only(m), evidence)
+				self.assertEqual(threat.match_heat(m), SMOKE, (evidence, cve))
+				self.assertEqual(threat.validation_heat(m), FIRE, (evidence, cve))
+				self.assertIn('no check has shown the flaw', threat.heat_reason(m))
 
 	def test_hot_and_only_suspected_is_smoke(self):
 		for evidence in [e for e, v in EVIDENCE.items() if not v[2]]:
@@ -175,7 +196,8 @@ class OwnerRuleTests(Policy, SimpleTestCase):
 		for value in ('fire', 'ice', 'smoke'):
 			with mock.patch.dict(os.environ, {threat.VERSION_ONLY_MAX_HEAT_ENV: value}):
 				self.assertEqual(threat.match_heat(fake('technology detection (Wappalyzer)', 'kev, medium score')), SMOKE, value)
-				self.assertEqual(threat.match_heat(fake('library file banner', 'kev, medium score')), FIRE, value)
+				self.assertEqual(threat.match_heat(fake('library file banner', 'kev, medium score')), SMOKE, value)
+				self.assertEqual(threat.match_heat(fake('template hit', 'kev, medium score')), FIRE, value)
 
 	def test_the_setting_reads_kev_or_legacy_and_anything_else_is_the_default(self):
 		for raw, policy in (('kev', 'kev'), ('legacy', 'legacy'), (' LEGACY ', 'legacy'), ('', 'kev'), ('nonsense', 'kev'), ('0', 'legacy'),
@@ -189,17 +211,18 @@ class OwnerRuleTests(Policy, SimpleTestCase):
 			self.assertEqual(threat.heat_signature(), 'legacy:ice')
 
 	def test_the_reason_names_the_proof(self):
+		but = ', but no check has shown the flaw: smoke until one does'
 		self.assertEqual(threat.heat_reason(fake('library file banner', 'kev, medium score')),
-						 'on the KEV; version proven: read from the library file itself')
+						 'on the KEV; version proven: read from the library file itself' + but)
 		self.assertEqual(threat.heat_reason(fake('nmap probed service banner', 'kev, medium score')),
-						 'on the KEV; version proven: read from the service banner by nmap')
+						 'on the KEV; version proven: read from the service banner by nmap' + but)
 		self.assertEqual(threat.heat_reason(fake('template hit', 'exploit only, low score')), 'a public exploit is known; version proven: template hit')
 		self.assertEqual(threat.heat_reason(fake('version-class template hit', 'kev, medium score')),
-						 'on the KEV; version proven: a version check read it on the host')
+						 'on the KEV; version proven: a version check read it on the host' + but)
 
 	def test_version_proven_and_vulnerability_confirmed_are_two_notions(self):
 		m = fake('version-class template hit', 'kev, medium score')
-		self.assertTrue(match_policy.version_proven(m))  # the version is proven: fire on a KEV CVE
+		self.assertTrue(match_policy.version_proven(m))  # the version is proven (still smoke on a KEV CVE: 1.3.5)
 		self.assertFalse(match_policy.has_hard_evidence(m.source, m.evidence, m.template_result, m.distro_status, ''))  # the flaw is not shown
 		self.assertTrue(match_policy.is_version_only(m))  # so triage stays at needs validation
 		m.distro_status = 'patched'
@@ -235,7 +258,7 @@ class DatabaseFormTests(Policy, Fixture):
 		loaded = {m.pk: m for m in CVEMatch.objects.select_related('cve_entry', 'triage')}
 		proven = set(CVEMatch.objects.filter(match_policy.version_proven_q()).values_list('pk', flat=True))
 		for pk, (evidence, cve) in self.rows.items():
-			want = owner_rule(cve, EVIDENCE[evidence][2])
+			want = rule_for(evidence, cve)
 			with self.subTest(evidence=evidence, cve=cve):
 				self.assertEqual(pk in proven, EVIDENCE[evidence][2])
 				self.assertEqual(ranks[pk], HEAT_RANK[want])
@@ -254,7 +277,7 @@ class DatabaseFormTests(Policy, Fixture):
 		for obj in qs:
 			row = services._finding_row('cve', obj)
 			evidence, cve = self.rows[obj.id]
-			self.assertEqual(row['heat'], owner_rule(cve, EVIDENCE[evidence][2]), (evidence, cve))
+			self.assertEqual(row['heat'], rule_for(evidence, cve), (evidence, cve))
 			self.assertTrue(row['heat_reason'], (evidence, cve))
 		m = CVEMatch.objects.select_related('cve_entry', 'triage').get(pk=next(pk for pk, v in self.rows.items()
 																			   if v == ('technology detection (Wappalyzer)', 'kev, medium score')))
@@ -288,7 +311,7 @@ class DatabaseFormTests(Policy, Fixture):
 		self.assertTrue(paged)
 		for pk in paged:
 			evidence, cve = self.rows[pk]
-			self.assertEqual(owner_rule(cve, EVIDENCE[evidence][2]), FIRE, (evidence, cve))
+			self.assertEqual(rule_for(evidence, cve), FIRE, (evidence, cve))
 			self.assertTrue(HOT[cve])
 		self.assertIn('fire-tier', text)
 
@@ -307,9 +330,8 @@ class DatabaseFormTests(Policy, Fixture):
 		CVEMatch.objects.filter(pk=version).update(template_result='version_only')  # a version-class template proved the version
 		with mock.patch.object(notify, '_send', return_value=True) as sent:
 			notify.fire_confirmed([version])
-			notify.fire_confirmed([version])
-		self.assertEqual(sent.call_count, 1)  # proven by a version check: paged once as fire
-		self.assertIn('confirmed, now fire-tier', sent.call_args.args[0])
+		sent.assert_not_called()  # 1.3.5: a version check proves the version, not the flaw: still smoke, never paged as fire
+		self.assertTrue(threat.unproven(CVEMatch.objects.select_related('cve_entry', 'triage').get(pk=version)))
 		self.assertFalse(Vulnerability.objects.exists())  # and no finding: the flaw itself was not shown
 		cold = next(pk for pk, v in self.rows.items() if v == ('technology detection (Wappalyzer)', 'critical score and epss, not hot'))
 		CVEMatch.objects.filter(pk=cold).update(evidence={'source': 'tech', 'runzero': True})

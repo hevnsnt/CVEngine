@@ -160,6 +160,10 @@ class Domain(models.Model):
 	DISCOVERY_STANDARD, DISCOVERY_DEEP, DISCOVERY_PASSIVE, DISCOVERY_MANUAL = 'standard', 'deep', 'passive', 'manual'
 	DISCOVERY_MODES = ((DISCOVERY_STANDARD, 'standard'), (DISCOVERY_DEEP, 'deep'), (DISCOVERY_PASSIVE, 'passive'), (DISCOVERY_MANUAL, 'manual'))
 	discovery_mode = models.CharField(max_length=8, choices=DISCOVERY_MODES, default=DISCOVERY_STANDARD, db_default=DISCOVERY_STANDARD)
+	# The target's devices present certificates from their vendor's own private CA (an appliance, a camera, a controller): an untrusted
+	# or self-signed chain there is expected, so the hygiene check rates it information (cveFeed.hygiene_rating). Set with
+	# POST targets/<id>/private-ca or the MCP tool set_target_private_ca. The database default keeps older code able to insert.
+	expect_private_ca = models.BooleanField(default=False, db_default=False)
 
 	class Meta:
 		constraints = [

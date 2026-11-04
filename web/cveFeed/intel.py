@@ -788,6 +788,8 @@ def entry_from_cve5(doc, intel):
     affected = convert_affected(cna.get("affected"))
     if not any(item["ranges"] for item in affected):  # CISA's ADP enrichment often carries the CPE ranges the CNA left out
         affected += convert_affected([a for adp in adps for a in adp.get("affected") or []])
+    from cveFeed import range_corrections
+    affected, _corrected = range_corrections.apply(meta.get("cveId"), affected)  # a sourced correction of a too-narrow bound
     from cveFeed.models import _feed_time
     published = _feed_time(meta.get("datePublished"))
     return {"title": _clean(cna.get("title") or kev_name or description[:150], 500), "original_description": _clean(description, 20000),
@@ -871,6 +873,7 @@ def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
       * a block with no range of an entry whose record states its releases as the unaffected ranges of a default-affected product (Jenkins)
         takes the ranges the record gives
     An entry that changes is marked for re-correlation and its cached match verdicts are dropped, as a cve.now refresh does."""
+    from cveFeed import range_corrections
     from cveFeed.models import CVEEntry, IntelSource, MatchVerdict
     from django.core.cache import cache
     now = now or timezone.now()
@@ -924,6 +927,7 @@ def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
                         new, from_record = published, True
                     elif empty and uses_default_status(cna.get("affected")):
                         new, from_record = keep_published_ranges(affected, published), True
+        new, _corrected = range_corrections.apply(row.cve_id, new)  # a sourced correction of a too-narrow bound stays applied
         if new != row.affected:
             sources = list(row.sources or [])
             if from_record and "CVE List V5" not in sources:
