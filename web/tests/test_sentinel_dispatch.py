@@ -240,6 +240,21 @@ class NmapUdpDispatchTests(DispatchBase):
                         side_effect=_answer_queued_task({'outcome': 'done', 'xml': other_host_xml})):
             host = dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
         self.assertIsNone(host)
+        from agentapi.models import ScannerFallback
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('nmap_udp', 'partial_result')])
+
+    def test_a_host_absent_from_the_report_stays_due_when_udp_may_not_run_here(self):
+        # CVENGINE_LOCAL_FALLBACK without nmap_udp: the Sentinel answered but named no host, so the address waits for a scanner
+        # instead of being scanned here with -sU (the caller, cveFeed.udp_scan.scan_ip, reads ScannerUnavailable as "stays due")
+        from reNgine.resources import ScannerUnavailable
+        self.make_sentinel(['nmap_udp'])
+        other_host_xml = UDP_XML.replace('192.0.2.10', '192.0.2.99')
+        with mock.patch.dict(os.environ, {dispatch.LOCAL_FALLBACK_ENV: 'none'}), \
+                mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                           side_effect=_answer_queued_task({'outcome': 'done', 'xml': other_host_xml})):
+            with self.assertRaises(ScannerUnavailable) as caught:
+                dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
+        self.assertEqual(caught.exception.kind, 'nmap_udp')
 
 
 class NaabuDispatchTests(DispatchBase):

@@ -527,6 +527,9 @@ def scan_ip(ip, runner=None, pipeline=None):
             if project_obj is not None:
                 host = sentinel_dispatch.try_nmap_udp(project_obj, address)
         if host is None:
+            from agentapi import sentinel_dispatch
+            if not sentinel_dispatch.fallback_allowed('nmap_udp'):  # an address no project scans (or one with no Sentinel path) never runs -sU here
+                raise ScannerUnavailable('nmap_udp', 'nmap -sU may not run on this server (CVENGINE_LOCAL_FALLBACK)')
             xml = run([address], nmap_flags(), host_timeout())
             host = next((h for h in nmap_scan.parse_xml(xml) if h.get('ip') == address), None)
         if host is None:
