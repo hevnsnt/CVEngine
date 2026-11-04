@@ -322,6 +322,30 @@ class PagingTests(Base):
 		self.assertEqual(len(self.sends), 1)
 
 
+class ManualOverrideTests(Base):
+	"""A heat a person set (``Triage.heat_override``, PR #415) wins over every 1.3.5 cap, in Python and SQL, and the re-rating report does not
+	count it as a change."""
+
+	def test_the_override_beats_the_caps(self):
+		cve = self.entry('CVE-2020-11023', kev=True, exploit_db=True, cvss=6.9)
+		m = self.jquery(cve, ai_verdict='uncertain')
+		self.triaged(m, 'needs_validation', 'pending', 'clean')  # version-only, pending and clean: every cap applies
+		self.assertEqual(self.heat(m), (ICE, ICE))
+		Triage.objects.filter(match=m).update(heat_override=FIRE, heat_override_reason='reproduced by hand')
+		self.assertEqual(self.heat(m), (FIRE, FIRE))
+		v = Vulnerability.objects.create(name='unauth-psql', severity=3, source='nuclei', subdomain=self.sub, target_domain=self.domain,
+										 scan_history=self.scan, open_status=True)
+		Triage.objects.create(project=self.project, domain=self.domain, host=self.sub.name, kind='nuclei', vulnerability=v, status='pending',
+							  validation_status='none', heat_override=FIRE)
+		for policy in ({}, LEGACY):
+			with mock.patch.dict(os.environ, policy):
+				loaded = Vulnerability.objects.select_related('triage').get(pk=v.pk)
+				sql = Vulnerability.objects.annotate(h=threat.finding_heat_rank_expr()).get(pk=v.pk).h
+				self.assertEqual((threat.finding_heat(loaded, hot_names=set()), NAMES[sql]), (FIRE, FIRE), policy)
+		report = rerate.project_report(self.project)
+		self.assertEqual((sum(report['cve'].values()), sum(report['scanner'].values())), (0, 0))
+
+
 class RerateCommandTests(Base):
 	"""The Definition-of-done dry run: from -> to counts per project and overall; ``--apply`` only writes the stored follow-ups."""
 

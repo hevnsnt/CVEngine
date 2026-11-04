@@ -30,7 +30,10 @@ HEATS = (FIRE, SMOKE, ICE)
 def before_match_heat(match, policy):
     """The heat a CVEMatch showed under 1.3.4: under ``kev`` fire when hot and its version proven (``match_policy.version_proven``, a version
     read from the component counted), no Triage cap; under ``legacy`` the version-only cap alone (Exploit-DB could lift a version-only
-    match to fire when the cap allowed it)."""
+    match to fire when the cap allowed it). A heat a person set (``threat.manual_heat``) wins before and after alike."""
+    manual = threat.manual_heat(match)
+    if manual:
+        return manual
     cve = match.cve_entry
     if policy != LEGACY_POLICY:
         if match.distro_status == "patched" or match_policy.version_unknown(match) or not threat.is_hot(cve.kev, cve.exploit_db):
@@ -46,7 +49,10 @@ def before_match_heat(match, policy):
 
 def before_finding_heat(vuln, hot_names, policy):
     """The heat a scanner finding showed under 1.3.4: its severity, or under ``kev`` the CVE rule for one that names CVEs; no validation gate
-    and no Triage cap."""
+    and no Triage cap. A heat a person set wins before and after alike."""
+    manual = threat.manual_heat(vuln)
+    if manual:
+        return manual
     severity_heat = SEVERITY_HEAT.get(vuln.severity)
     if severity_heat is None or policy == LEGACY_POLICY:
         return severity_heat

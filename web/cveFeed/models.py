@@ -1191,6 +1191,14 @@ class Triage(models.Model):
     # the CVE match this row took its record from when a rescan made a new match for the same finding (cveFeed.triage._twins); its
     # validation jobs are this finding's job history (cveFeed.hot_validation.enqueue). A plain id: the older match may be pruned.
     carried_from = models.PositiveBigIntegerField(null=True, blank=True)
+    # A heat a person set by hand (agentapi.services.set_finding_heat): '' or fire, smoke or ice. It wins over the heat cvENGINE derives
+    # (cveFeed.threat: match_heat, finding_heat and their database forms) in every list, count, score, report, alert and API, until
+    # cleared. Only a CVE match or a scanner finding has one. Triage, re-triage and validation never write these fields; a rescan's new
+    # match takes them from its twin (triage._inherited_fields). db_default: old code still inserting rows during an update.
+    heat_override = models.CharField(max_length=8, blank=True, default="", db_default="")
+    heat_override_reason = models.TextField(blank=True, default="", db_default="")
+    heat_override_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    heat_override_at = models.DateTimeField(null=True, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1552,7 +1560,7 @@ class FindingAuditEvent(models.Model):
     when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
     never derived after the fact."""
 
-    EVENTS = ("status", "assignee", "comment")
+    EVENTS = ("status", "assignee", "comment", "heat")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
     finding_id = models.PositiveIntegerField()

@@ -28,6 +28,10 @@ reproduced it (``validation_gated``).
 ``validation_heat`` is the heat a match would have once proven: what orders validation (``hot_validation``), OpenVAS and agent validation
 work, so a known-exploited match whose version is not proven is validated first, in the fire lane.
 
+A heat a person set by hand (``Triage.heat_override``: ``agentapi.services.set_finding_heat``, the REST route and the MCP tool) wins over
+all of the above, under either policy, for a CVE match and a scanner finding alike: ``match_heat`` (capped and not, so ``validation_heat``
+too), ``finding_heat``, their database forms and the reasons ("set to smoke by alice: ..."), until it is cleared.
+
 What is only about *finding* and *testing* a CVE (auto-fire, which CVEs a host's CVE template pass tests, correlation's end-of-life branch
 rule) reads ``attention_tier``, the legacy rating, under either policy: the heat policy decides what a finding is worth, never what is
 looked for.
@@ -175,11 +179,46 @@ def feed_tier(cve, policy=None):
     return classify_threat_tier(kev=cve.kev, epss_reached=cve.epss_reached, exploit_db=cve.exploit_db, cvss=cve.cvss, policy=policy)
 
 
+def manual_heat(finding):
+    """The heat a person set on a CVE match or a scanner finding (``Triage.heat_override``), or '' when none is set. Reads the Triage row a
+    ``select_related``/``prefetch_related`` of ``triage`` loaded; otherwise one query (the heat functions read that row anyway)."""
+    from django.core.exceptions import ObjectDoesNotExist
+    try:
+        row = finding.triage
+    except (ObjectDoesNotExist, AttributeError):
+        return ""
+    value = getattr(row, "heat_override", "") or ""
+    return value if value in HEAT_RANK else ""
+
+
+def manual_heat_reason(finding):
+    """"set to smoke by alice: <their reason>" for a finding whose heat a person set (``manual_heat``), else ''. The user is
+    ``heat_override_by`` (load ``triage__heat_override_by`` with a list to save a query per overridden row)."""
+    heat = manual_heat(finding)
+    if not heat:
+        return ""
+    row = finding.triage
+    by = getattr(row, "heat_override_by", None) if getattr(row, "heat_override_by_id", None) else None
+    who = by.username if by is not None else "a user no longer here"
+    reason = (getattr(row, "heat_override_reason", "") or "").strip()
+    return f"set to {heat} by {who}" + (f": {reason}" if reason else "")
+
+
+def _manual_whens(prefix=""):
+    """The leading ``When``s of a heat rank expression: a heat a person set wins (``prefix`` reaches the finding's Triage row)."""
+    from django.db.models import Value, When
+    return [When(**{prefix + "triage__heat_override": heat}, then=Value(HEAT_RANK[heat])) for heat in (FIRE, SMOKE, ICE)]
+
+
 def match_heat(match, capped=True):
     """The heat a CVEMatch shows (its ``cve_entry`` loaded; load ``triage`` with it to save a query). Every list, count, score, map, report,
     alert and API reads a match's heat from here or from its database form ``match_heat_rank_expr``. ``capped=False`` is ``validation_heat``:
-    the heat the match would have once proven (``kev``), or without the version-only cap (``legacy``)."""
+    the heat the match would have once proven (``kev``), or without the version-only cap (``legacy``). A heat a person set
+    (``manual_heat``) wins over both."""
     from cveFeed import match_policy
+    manual = manual_heat(match)
+    if manual:
+        return manual
     cve = match.cve_entry
     policy = heat_policy()
     if policy != LEGACY_POLICY:
@@ -230,8 +269,12 @@ REASON_NOT_HOT = "not on the KEV and no known exploit"
 def heat_reason(match, heat=None):
     """One short sentence that says WHY a CVEMatch shows its heat, for tooltips, host reasons, the REST/MCP ``heat_reason`` field and the AI's
     context: "on the KEV; version proven (...)", "on the KEV; version not proven", "not on the KEV and no known exploit", "the host's
-    distribution has patched it", ... ``heat`` is ``match_heat(match)`` when the caller has it."""
+    distribution has patched it", ... ``heat`` is ``match_heat(match)`` when the caller has it. For a heat a person set: "set to smoke by
+    alice: <their reason>" (``manual_heat_reason``)."""
     from cveFeed import match_policy
+    manual = manual_heat_reason(match)
+    if manual:
+        return manual
     cve = match.cve_entry
     heat = heat or match_heat(match)
     if match.distro_status == "patched":
@@ -265,10 +308,12 @@ HEAT_RANK = {FIRE: 3, SMOKE: 2, ICE: 1}
 
 def match_heat_rank_expr(capped=True):
     """The database form of ``HEAT_RANK[match_heat(...)]`` over CVEMatch rows (3 fire, 2 smoke, 1 ice), so a list can filter, count and
-    order matches by how hot they are on the host without loading them. ``capped=False`` is the form of ``validation_heat``."""
+    order matches by how hot they are on the host without loading them. ``capped=False`` is the form of ``validation_heat``. A heat a
+    person set wins (the Triage row is joined, never read per row)."""
     from django.db.models import Case, IntegerField, Q, Value, When
     from cveFeed.match_policy import hard_evidence_q, version_only_q, version_unknown_q
-    whens = [When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
+    whens = [*_manual_whens(),
+             When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
              When(version_unknown_q(), then=Value(HEAT_RANK[ICE]))]
     if capped:
         whens.append(When(triage_clean_q(match=True), then=Value(HEAT_RANK[ICE])))
@@ -340,7 +385,11 @@ def finding_confirmed(vuln):
 def finding_heat(vuln, capped=True, hot_names=None, policy=None):
     """The heat a scanner finding (a ``startScan.Vulnerability``) shows on its host, or None when it has none (informational). ``hot_names``: the
     hot CVE ids among the findings' CVEs when the caller looked them up for many at once (``hot_cve_names``). ``capped=False`` is the heat once
-    confirmed (what OpenVAS orders hosts by). The database form is ``finding_heat_rank_expr``."""
+    confirmed (what OpenVAS orders hosts by). The database form is ``finding_heat_rank_expr``. A heat a person set (``manual_heat``) wins,
+    under either policy, capped or not."""
+    manual = manual_heat(vuln)
+    if manual:
+        return manual
     severity_heat = SEVERITY_HEAT.get(vuln.severity)
     legacy = (policy or heat_policy()) == LEGACY_POLICY
     if severity_heat is None or (legacy and not capped):
@@ -366,7 +415,11 @@ def finding_heat(vuln, capped=True, hot_names=None, policy=None):
 def finding_heat_reason(vuln, heat, hot_names=None):
     """Why a scanner finding has its heat: under the KEV policy for one that names CVEs, and for any finding a cap holds below its severity
     (a validation that came back clean, a triage still pending or needing validation, a template match no validation reproduced); else ''
-    (a finding without CVEs is rated by its severity)."""
+    (a finding without CVEs is rated by its severity). A heat a person set says who set it and why, under either policy
+    (``manual_heat_reason``)."""
+    manual = manual_heat_reason(vuln)
+    if manual:
+        return manual
     if heat is None:
         return ""
     names = [] if heat_policy() == LEGACY_POLICY else finding_cve_names(vuln)
@@ -390,7 +443,7 @@ def finding_heat_reason(vuln, heat, hot_names=None):
 def finding_heat_rank_expr(capped=True, prefix=""):
     """The database form of ``HEAT_RANK.get(finding_heat(...), 0)`` over Vulnerability rows (3 fire, 2 smoke, 1 ice, 0 none): what the Findings
     list, its heat facet, the reports and the graph read for scanner findings. ``prefix`` reaches the finding from another model
-    ("vulnerability__" from a Triage row: the validation lanes)."""
+    ("vulnerability__" from a Triage row: the validation lanes). A heat a person set wins, under either policy."""
     from django.db.models import CharField, Case, Exists, F, Func, IntegerField, OuterRef, Q, Value, When
     from django.db.models.functions import Upper
 
@@ -398,15 +451,16 @@ def finding_heat_rank_expr(capped=True, prefix=""):
     from startScan.models import CveId, VulnerabilityTags
     p = prefix
     severity = severity_heat_rank_expr(p + "severity")
+    manual = _manual_whens(p)
     legacy = heat_policy() == LEGACY_POLICY
     if legacy and not capped:
-        return severity
+        return Case(*manual, default=severity, output_field=IntegerField())
     # a finding rated by its severity alone: a template scanner's fire waits for a validation hit, and the Triage row caps it (1.3.5)
     severity_fire = Q(**{p + "severity__in": [s for s, h in SEVERITY_HEAT.items() if h == FIRE]})
     by_severity = [When(severity_fire & validation_gated_q(p) & ~Q(**{p + "triage__validation_status": "hit"}), then=Value(HEAT_RANK[SMOKE])),
                    When(severity_fire & triage_held_q(p), then=Value(HEAT_RANK[SMOKE]))]
     if legacy:
-        return Case(When(~Q(**{p + "severity__in": list(SEVERITY_HEAT)}), then=Value(0)),
+        return Case(*manual, When(~Q(**{p + "severity__in": list(SEVERITY_HEAT)}), then=Value(0)),
                     When(triage_clean_q(p), then=Value(HEAT_RANK[ICE])), *by_severity, default=severity, output_field=IntegerField())
     trimmed = Func(F("name"), Value(CVE_NAME_BLANKS), function="BTRIM", output_field=CharField())
     names = CveId.objects.filter(cve_ids=OuterRef(p + "pk")).annotate(upper=Upper(trimmed)).exclude(upper="")
@@ -415,7 +469,8 @@ def finding_heat_rank_expr(capped=True, prefix=""):
     unconfirmed = (Q(**{p + "source__in": VERSION_READ_SOURCES})
                    | Q(Exists(VulnerabilityTags.objects.filter(vuln_tags=OuterRef(p + "pk"), name=UNCONFIRMED_TAG))))
     confirmed = Q(**{p + "triage__validation_status": "hit"}) | ~unconfirmed
-    whens = [When(~Q(**{p + "severity__in": list(SEVERITY_HEAT)}), then=Value(0)), When(Q(carries) & ~Q(hot), then=Value(HEAT_RANK[ICE]))]
+    whens = [*manual, When(~Q(**{p + "severity__in": list(SEVERITY_HEAT)}), then=Value(0)),
+             When(Q(carries) & ~Q(hot), then=Value(HEAT_RANK[ICE]))]
     if capped:
         # (a hot CVE the scanner itself confirmed is not held by a pending triage; an unconfirmed one is smoke anyway)
         whens += [When(triage_clean_q(p) & ~(Q(hot) & confirmed), then=Value(HEAT_RANK[ICE])), When(Q(hot) & confirmed, then=Value(HEAT_RANK[FIRE])),
