@@ -192,7 +192,7 @@ ROUTES = [
      lambda r, c, slug, target_id, **k: svc.set_target_profile(c, slug, int(target_id), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/private-ca',
      'Say whether a target\'s devices use their vendor\'s own private CA: when true an untrusted or self-signed chain on it is rated information; body {expect_private_ca: true|false}',
-     lambda r, c, slug, target_id, **k: svc.set_target_private_ca(c, slug, int(target_id), _need(_body(r), 'expect_private_ca')[0])),
+     lambda r, c, slug, target_id, **k: svc.set_target_private_ca(c, slug, int(target_id), _body(r).get('expect_private_ca'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discovery-mode',
      'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}',
      lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
