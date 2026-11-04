@@ -397,13 +397,15 @@ class BugBountyOrgTests(BountyBase):
     def test_the_engagement_list_does_not_count_per_row(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from tests.steady import steady_caches
         bc = BountyProgram.objects.get(platform='bugcrowd')
-        self.create()
-        with CaptureQueriesContext(connection) as one:
-            self.assertEqual(len(call(self.c, 'GET', B + 'engagements')[1]['results']), 1)
-        self.create(program=bc)
-        with CaptureQueriesContext(connection) as two:
-            rows = call(self.c, 'GET', B + 'engagements')[1]['results']
+        with steady_caches():  # no clock-expiring cache is reloaded inside a measure (tests/steady.py)
+            self.create()
+            with CaptureQueriesContext(connection) as one:
+                self.assertEqual(len(call(self.c, 'GET', B + 'engagements')[1]['results']), 1)
+            self.create(program=bc)
+            with CaptureQueriesContext(connection) as two:
+                rows = call(self.c, 'GET', B + 'engagements')[1]['results']
         self.assertEqual((len(rows), len(two)), (2, len(one)))  # S08-10: a second engagement adds no query
         self.assertEqual([(r['targets'], r['reports']) for r in rows], [(0, 0), (0, 0)])
 
