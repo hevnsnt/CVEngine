@@ -32,6 +32,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | scope | `POST projects/{slug}/targets/{id}/scope` (`auto`, `host`, `parent`) | `set_target_scope` |
 | alias and note | `POST` or `PATCH projects/{slug}/targets/{id}/profile` (`alias`, `note`) | `set_target_profile` |
 | discovery mode | `POST projects/{slug}/targets/{id}/discovery-mode` (`discovery_mode`: `standard`, `deep`, `passive`, `manual`) | `set_target_discovery_mode` |
+| expected private CA | `POST projects/{slug}/targets/{id}/private-ca` (`expect_private_ca`: `true` or `false`): an untrusted or self-signed chain on the target is rated info | `set_target_private_ca` |
 | scans | `GET/POST projects/{slug}/scans`, `GET .../scans/{id}` | `list_scans`, `get_scan`, `start_scan` |
 | discover | `POST projects/{slug}/targets/{id}/discover` (`mode`) | `discover_target` |
 | rescan | `POST projects/{slug}/targets/{id}/rescan-hosts` (`hosts`) | `rescan_hosts` |
@@ -50,7 +51,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
 | triage | `GET projects/{slug}/triage`, `POST .../findings/{kind}/{id}/retriage` | `list_triage`, `retriage_finding` |
-| hygiene | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
+| hygiene (`?status=` `open`, the default, `resolved`, or `pending`: a missing SPF or DMARC record only one resolver saw, held back until two resolvers or the next run agree) | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
 | CVEs | `GET cves?tier=fire`, `GET cves/{id}`, `GET cves/{id}/detection` | `list_cves`, `get_cve`, `get_cve_detection` |
 | matches | `GET projects/{slug}/matches`, `PATCH .../matches/{id}` | `list_cve_matches`, `update_remediation_status` |
 | remediation status (`open`, `in_progress`, `fixed`, `accepted_risk`, `false_positive`) and the closure note | `PATCH projects/{slug}/findings/{match,vulnerability,hygiene}/{id}`, `POST .../findings/status` (bulk) | `update_finding_status`, `bulk_update_finding_status` |

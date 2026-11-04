@@ -1,0 +1,50 @@
+{
+ "_about": "Providers where an outsider can claim a dangling name, read by cveFeed.dangling_dns. Conservative on purpose: a provider is listed only when the public takeover references below document it as claimable ('Vulnerable'); an edge case, a provider that verifies ownership or one with no entry is not listed. A dangling record that points anywhere else is rated ice (see cveFeed.dangling_dns). Keep it as data: add a provider here, with its source, rather than in code.",
+ "_sources": {
+  "cname": "EdOverflow/can-i-take-over-xyz, README table and issues (status 'Vulnerable'), https://github.com/EdOverflow/can-i-take-over-xyz",
+  "nameservers": "indianajson/can-i-take-over-dns, README table (status 'Vulnerable'), https://github.com/indianajson/can-i-take-over-dns"
+ },
+ "cname": [
+  {"service": "Microsoft Azure", "suffixes": ["cloudapp.net", "cloudapp.azure.com", "azurewebsites.net", "blob.core.windows.net", "trafficmanager.net", "azure-api.net", "azurehdinsight.net", "azureedge.net", "azurecontainer.io", "database.windows.net", "azuredatalakestore.net", "search.windows.net", "azurecr.io", "redis.cache.windows.net", "servicebus.windows.net", "visualstudio.com"]},
+  {"service": "AWS Elastic Beanstalk", "suffixes": ["elasticbeanstalk.com"]},
+  {"service": "Agile CRM", "suffixes": ["agilecrm.com"]},
+  {"service": "Airee.ru", "suffixes": ["airee.ru"]},
+  {"service": "Anima", "suffixes": ["animaapp.io"]},
+  {"service": "Bitbucket", "suffixes": ["bitbucket.io"]},
+  {"service": "Campaign Monitor", "suffixes": ["createsend.com"]},
+  {"service": "Canny", "suffixes": ["canny.io"]},
+  {"service": "Cargo Collective", "suffixes": ["cargocollective.com"]},
+  {"service": "Discourse", "suffixes": ["trydiscourse.com"]},
+  {"service": "Gemfury", "suffixes": ["furyns.com"]},
+  {"service": "Getresponse", "suffixes": ["gr8.com"]},
+  {"service": "Ghost", "suffixes": ["ghost.io"]},
+  {"service": "GitHub Pages", "suffixes": ["github.io"]},
+  {"service": "Hatena Blog", "suffixes": ["hatenablog.com"]},
+  {"service": "Help Juice", "suffixes": ["helpjuice.com"]},
+  {"service": "Help Scout", "suffixes": ["helpscoutdocs.com"]},
+  {"service": "Helprace", "suffixes": ["helprace.com"]},
+  {"service": "JetBrains YouTrack", "suffixes": ["myjetbrains.com"]},
+  {"service": "Launchrock", "suffixes": ["launchrock.com"]},
+  {"service": "Ngrok", "suffixes": ["ngrok.io"]},
+  {"service": "Pantheon", "suffixes": ["pantheonsite.io"]},
+  {"service": "Pingdom", "suffixes": ["stats.pingdom.com"]},
+  {"service": "Readme.io", "suffixes": ["readme.io"]},
+  {"service": "Read the Docs", "suffixes": ["readthedocs.io"]},
+  {"service": "SmartJobBoard", "suffixes": ["smartjobboard.com"]},
+  {"service": "Strikingly", "suffixes": ["s.strikinglydns.com"]},
+  {"service": "Surge.sh", "suffixes": ["surge.sh"]},
+  {"service": "SurveySparrow", "suffixes": ["surveysparrow.com"]},
+  {"service": "Uberflip", "suffixes": ["read.uberflip.com"]},
+  {"service": "UptimeRobot", "suffixes": ["stats.uptimerobot.com"]},
+  {"service": "WordPress.com", "suffixes": ["wordpress.com"]},
+  {"service": "Worksites", "suffixes": ["worksites.net"]}
+ ],
+ "nameservers": [
+  {"service": "Google Cloud DNS", "patterns": ["^ns-cloud-[a-z][0-9]+\\.googledomains\\.com$"]},
+  {"service": "AWS Route 53", "patterns": ["^ns-[0-9]+\\.awsdns-[0-9]+\\.(com|net|org|co\\.uk)$"]},
+  {"service": "Azure DNS", "patterns": ["^ns[0-9]+-[0-9]+\\.azure-dns\\.(com|net|org|info)$"]},
+  {"service": "DigitalOcean", "patterns": ["^ns[1-3]\\.digitalocean\\.com$"]},
+  {"service": "Linode", "patterns": ["^ns[1-5]\\.linode\\.com$"]},
+  {"service": "Hurricane Electric", "patterns": ["^ns[1-5]\\.he\\.net$"]}
+ ]
+}
