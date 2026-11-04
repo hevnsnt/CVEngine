@@ -46,8 +46,10 @@ class HeaderFactsTests(SimpleTestCase):
             'Server': 'Microsoft-IIS/10.0', 'X-Powered-By': 'ASP.NET', 'X-AspNet-Version': '4.0.30319', 'X-AspNetMvc-Version': '5.2',
             'X-Nextjs-Cache': 'HIT', 'Via': '1.1 varnish (Varnish/6.0)'})}
         self.assertIn('Microsoft IIS:10.0', found)
-        self.assertIn('ASP.NET:4.0.30319', found)  # the version header names it; the bare "ASP.NET" is replaced
-        self.assertNotIn('ASP.NET', found)
+        # X-AspNet-Version names the .NET Framework's CLR line (1.3.5: it was stored as "ASP.NET:4.0.30319", which correlation read as
+        # ASP.NET Core); X-Powered-By's bare "ASP.NET" stays a lead
+        self.assertIn('.NET Framework CLR:4.0.30319', found)
+        self.assertNotIn('ASP.NET:4.0.30319', found)
         self.assertIn('ASP.NET MVC:5.2', found)
         self.assertIn('Next.js', found)
         self.assertIn('Varnish:6.0', found)

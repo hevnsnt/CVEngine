@@ -147,6 +147,9 @@ class CVEEntry(models.Model):
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
+        # a bound the structured record states narrower than public sources show (cveFeed.range_corrections, each with its sources)
+        from cveFeed import range_corrections
+        defaults["affected"], _corrected = range_corrections.apply(str(entry["id"])[:64], defaults["affected"])
         # a feed value longer than its column must never cost the whole CVE: clip text to what the column holds
         for field in cls._meta.get_fields():
             limit = getattr(field, "max_length", None)

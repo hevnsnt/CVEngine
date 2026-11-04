@@ -2962,6 +2962,9 @@ def _cve_description(c, limit=500):
     return text[:limit].rsplit(' ', 1)[0] + '…' if len(text) > limit and ' ' in text[:limit] else text[:limit]
 
 
+MAX_LISTED_RANGES = 60  # ranges of one affected block an advisory lists in full; more are counted (ranges_total), never cut silently
+
+
 def _cve_context(c):
     """Structured advisory context. Unknown feed signals stay unknown, not false."""
     from urllib.parse import urlparse
@@ -2987,8 +2990,14 @@ def _cve_context(c):
     for item in (c.affected if isinstance(c.affected, list) else [])[:30]:
         if isinstance(item, dict):
             part = {k: item.get(k) for k in ('vendor', 'product', 'package') if isinstance(item.get(k), str) and item.get(k)}
-            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))}
-                              for rng in prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)[:20]]
+            # every range matching reads, never a silent cut: a record with 25 release branches (WordPress' CVE-2026-119977, 4.7 through
+            # 7.1.3) read as if it stopped at the 20th (6.6.10) looked like a match made from the description
+            ranges = prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)
+            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))} for rng in ranges[:MAX_LISTED_RANGES]]
+            if len(ranges) > MAX_LISTED_RANGES:
+                part['ranges_total'] = len(ranges)  # the list above is the first MAX_LISTED_RANGES of them
+            if isinstance(item.get('range_corrections'), list) and item['range_corrections']:
+                part['range_corrections'] = item['range_corrections'][:5]  # a bound cvENGINE corrected, with its sources (range_corrections)
             affected.append(part)
     return {'description': (c.original_description or c.summary or c.title or '').strip()[:12000],
             'summary': (c.summary or '').strip()[:3000], 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],

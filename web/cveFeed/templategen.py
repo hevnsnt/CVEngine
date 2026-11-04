@@ -1105,12 +1105,14 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     for sub in Subdomain.objects.filter(name__in=list(by_host), target_domain__project_id=project) \
             .select_related("target_domain", "scan_history").order_by("-id"):
         latest.setdefault((sub.name, sub.target_domain_id), sub)
-    from cveFeed import threat
+    from cveFeed import template_gates, threat
+    # a template that matches patched releases too (template_gates.GATES): its hit on a host whose release is patched is no hit
+    gated = {name for (name, _d), sub in latest.items() if template_gates.out_of_range({cve.cve_id, template_id or ''}, sub)}
     now, saved, proved = timezone.now(), 0, []
     for name, outcome in by_host.items():
         # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
         result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
-                  else "vulnerable" if outcome["vulnerable"] else "no_match")
+                  else "vulnerable" if outcome["vulnerable"] and name not in gated else "no_match")
         rows = CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project)
         if result != "vulnerable":
             # a confirmation stands until a person or a confirming check says otherwise: a version read again, a miss or an error of a later
@@ -1125,7 +1127,7 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     for (name, _domain_id), sub in latest.items():
         outcome = by_host[name]
         hit = outcome.get("hit")
-        if not (is_confirmed(outcome) and hit):
+        if not (is_confirmed(outcome) and hit) or name in gated:
             continue  # only a hit that shows the flaw is a confirmed finding
         try:
             data = parse_nuclei_result(hit)

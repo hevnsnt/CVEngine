@@ -86,7 +86,9 @@ class CorrelationPerfTests(TestCase):
 			out = correlate_cves()
 		self.assertEqual(out['matches'], 30)
 		self.assertEqual(CVEMatch.objects.count(), 30)
-		self.assertLessEqual(len(ctx), small + 4)  # a few more statements for the new rows, nowhere near one per host
+		# a few more statements for the new rows, nowhere near one per host (1.3.5: one reads when the new KEV rows' hosts were fingerprinted,
+		# cveFeed.kev_freshness)
+		self.assertLessEqual(len(ctx), small + 5)
 		self.assertLess(len(ctx), 30)
 
 	def test_rerun_keeps_ai_verdict_and_does_not_touch_unchanged_rows(self):

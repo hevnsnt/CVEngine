@@ -113,8 +113,12 @@ def parse_server_header(value):
 _VIA = re.compile(r"\(([A-Za-z][A-Za-z0-9 ._-]{1,30})/(\d[\w.]{0,20})\)")
 _GENERATOR_HEADER = re.compile(r"^([A-Za-z][A-Za-z0-9 .!+_-]*?)(?:[ /]+(\d[\w.+-]*))?(?:\s|$|[-(,;])")
 # header -> (product, how the version is read). A header whose mere presence names the product has no version.
+# X-AspNet-Version is sent only by classic ASP.NET on the .NET Framework (ASP.NET Core never sends it), and its value is the CLR build line
+# (1.1.4322, 2.0.50727 for .NET 2.0 to 3.5, 4.0.30319 for every 4.x), not a Framework release or patch level: stored as ASP_NET_RUNTIME so
+# it is never read as "ASP.NET Core 2.1" (whose name contains "ASP.NET") nor matched against a .NET Framework release range it cannot place
+ASP_NET_RUNTIME = '.NET Framework CLR'
 HEADER_FACTS = (
-    ('x-aspnet-version', 'ASP.NET', 'value'),
+    ('x-aspnet-version', ASP_NET_RUNTIME, 'value'),
     ('x-aspnetmvc-version', 'ASP.NET MVC', 'value'),
     ('x-drupal-cache', 'Drupal', None),
     ('x-drupal-dynamic-cache', 'Drupal', None),
@@ -243,6 +247,17 @@ def generator_tags(html):
 # ----------------------------------------------------------------------------- technology names
 
 _CPE_PART = re.compile(r"^cpe:(?:/|2\.3:)a:([^:]*):([^:]*)(?::([^:]*))?", re.IGNORECASE)
+
+
+_CLR_VERSION = re.compile(r'^[124]\.\d\.\d{4,5}$')
+
+
+def legacy_aspnet(name, version):
+    """``(name, version)`` with a stored X-AspNet-Version reading of an earlier build ("ASP.NET:2.0.50727") renamed to what the header
+    states (ASP_NET_RUNTIME): a CLR build line is the .NET Framework's, never an ASP.NET Core release. Anything else is returned as it is."""
+    if str(name or '').strip().lower() == 'asp.net' and _CLR_VERSION.match(str(version or '').strip()):
+        return ASP_NET_RUNTIME, version
+    return name, version
 
 
 def normalize_technology(name):

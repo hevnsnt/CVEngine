@@ -121,13 +121,20 @@ ANGULAR_ATTR = re.compile(r"ng-version=[\"'](\d+\.\d+\.\d+)[\"']")
 
 def script_sources(body, page_url, limit=4):
     """``(all script URLs, same-host ones to read)`` of a page: absolute URLs, at most ``limit`` to fetch. A script on another
-    host (a CDN) is identified by its name only, never fetched."""
-    from urllib.parse import urljoin, urlsplit
+    host (a CDN) is identified by its name only, never fetched. The page is read the way a browser tokenizes it
+    (``js_libraries.parse_page``): a ``<script src>`` inside an HTML comment or inside another script's text (a ``<script>`` that never
+    closes swallows the rest of the page) is not a script the page loads, and a fallback written only when another script fails is not
+    either."""
+    from urllib.parse import urlsplit
+
+    from cveFeed import js_libraries
     page = urlsplit(page_url or "")
     every, local = [], []
-    for src in script_srcs(body):
+    for entry in js_libraries.parse_page(body, page_url):
+        absolute = entry.get("url")
+        if not absolute or entry.get("fallback"):
+            continue
         try:
-            absolute = urljoin(page_url, src.strip())
             parts = urlsplit(absolute)
         except ValueError:
             continue
@@ -176,7 +183,7 @@ def extend(found, pairs):
 
 
 CATEGORIES = {
-    "language": ("php", "python", "ruby", "java", "node.js", "asp.net", "perl"),
+    "language": ("php", "python", "ruby", "java", "node.js", "asp.net", ".net framework clr", "perl"),
     "web server": ("nginx", "apache http server", "apache", "microsoft iis", "openresty", "litespeed", "caddy", "gunicorn", "kestrel",
                    "apache tomcat", "jetty", "lighttpd", "envoy", "traefik", "haproxy", "google web server", "varnish"),
     "cdn": ("cloudflare", "amazon cloudfront", "akamai", "fastly"),
