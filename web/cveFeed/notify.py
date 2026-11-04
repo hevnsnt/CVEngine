@@ -121,7 +121,7 @@ def fire_matches(since, scan=None, cve_ids=None):
         from cveFeed import match_policy
         from cveFeed.counts import CLOSED
         from cveFeed.models import CVEEntry, CVEMatch
-        from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, fire_tier_q, heat_policy, match_heat_rank_expr
+        from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
         rows = rows.filter(scan_history=scan) if scan is not None else rows
         if cve_ids is not None:
