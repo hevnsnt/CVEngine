@@ -504,6 +504,20 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
+def _echo_ports(subs):
+    """``{(name or address, port)}`` of the ports nmap named ``echo`` on ``subs``' addresses: a protocol template that matched one of them
+    matched its own payload (cveFeed.nuclei_fp)."""
+    from startScan.models import IpAddress
+    ids = {ip.pk for sub in subs for ip in sub.ip_addresses.all()}
+    if not ids:
+        return set()
+    rows = set(IpAddress.objects.filter(pk__in=ids, ports__service_name__iexact='echo').values_list('address', 'ports__number'))
+    out = {(address, number) for address, number in rows if address and number}
+    for sub in subs:
+        out |= {(sub.name, number) for ip in sub.ip_addresses.all() for address, number in rows if address == ip.address and number}
+    return out
+
+
 def _chunk_size(stream, total):
     """Targets handed to ``stream`` per call. A local stream gets ``NUCLEI_CHUNK`` at a time (a memory kill then only repeats one chunk). The Sentinel
     wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) splits each call into 64-target chunk tasks and runs them side by side, so it is
@@ -524,7 +538,7 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
     inside the TTL are not scanned again (see cveFeed.ledger): their existing findings are copied into this scan instead.
     ``targets`` replaces the scan's whole target list (the targeted pass runs one group of hosts at a time) and
     ``severities`` narrows what is reported."""
-    from cveFeed import activity, ledger
+    from cveFeed import activity, ledger, nuclei_fp
     from cveFeed.models import DiscoveryEvent
     from reNgine.resources import MemoryKill
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -562,6 +576,28 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
         by_name.setdefault(sub.name, sub)
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
+    screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project)
+
+    def save(line):
+        nonlocal new
+        try:
+            data = parse_nuclei_result(line)
+        except (KeyError, TypeError):
+            return
+        host = host_of(line)
+        sub = by_name.get(host) or by_ip.get(host)
+        vuln, created = save_vulnerability(
+            target_domain=domain, scan_history=scan, subdomain=sub,
+            http_url=line.get('matched-at') or line.get('host') or host, **data)
+        sev = line.get('info', {}).get('severity', 'unknown')
+        counts[sev if sev in counts else 'unknown'] += 1
+        if created:
+            new += 1
+            DiscoveryEvent.objects.create(scan=scan, domain=domain, type='FINDING', label=f"{data['name']} ({sev})",
+                                          host=host, module='nuclei')
+            if NUCLEI_SEVERITY_MAP.get(sev, -1) >= 2:  # medium and up deserve a line in the AI feed
+                activity.log('validate', f"Nuclei confirmed {data['name']} ({sev}) on {host}",
+                             project=project, severity=sev)
 
     profiles = ['normal', 'light'] if stream is stream_nuclei else ['normal']  # injected test streams cannot be lightened
     scanned = []
@@ -592,25 +628,14 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
                         if profile != 'normal':
                             kwargs['profile'] = profile
                         try:
+                            screen.reset()  # a retried chunk sends its protocol matches again
                             for line in stream(path, **kwargs):
-                                try:
-                                    data = parse_nuclei_result(line)
-                                except (KeyError, TypeError):
+                                if not isinstance(line, dict):
                                     continue
-                                host = host_of(line)
-                                sub = by_name.get(host) or by_ip.get(host)
-                                vuln, created = save_vulnerability(
-                                    target_domain=domain, scan_history=scan, subdomain=sub,
-                                    http_url=line.get('matched-at') or line.get('host') or host, **data)
-                                sev = line.get('info', {}).get('severity', 'unknown')
-                                counts[sev if sev in counts else 'unknown'] += 1
-                                if created:
-                                    new += 1
-                                    DiscoveryEvent.objects.create(scan=scan, domain=domain, type='FINDING', label=f"{data['name']} ({sev})",
-                                                                  host=host, module='nuclei')
-                                    if NUCLEI_SEVERITY_MAP.get(sev, -1) >= 2:  # medium and up deserve a line in the AI feed
-                                        activity.log('validate', f"Nuclei confirmed {data['name']} ({sev}) on {host}",
-                                                     project=project, severity=sev)
+                                if screen.offer(line) == 'keep':  # an echo or a catch-all answer is set aside (cveFeed.nuclei_fp)
+                                    save(line)
+                            for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
+                                save(line)
                             break
                         except MemoryKill:
                             if profile == profiles[-1]:
@@ -627,11 +652,15 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
             ledger.record(service, [t for t in won_targets if t not in set(scanned)], project, scan, 'failed')
             activity.settle(running, 'failed', message=f'Nuclei failed for {domain.name}: {exc}')
             return {'targets': len(targets), 'findings': new, 'reused': reused, 'error': str(exc)}
+    set_aside = screen.summary()
     activity.settle(running, 'done', message=(
         f"Nuclei finished {domain.name}: {new} finding{'s' if new != 1 else ''} "
         f"({counts['critical']} critical, {counts['high']} high, {counts['medium']} medium, "
-        f"{counts['low']} low, {counts['info']} info)"), **counts)
-    return {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
+        f"{counts['low']} low, {counts['info']} info)" + (f'; set aside as scanner artefacts: {set_aside}' if set_aside else '')), **counts)
+    out = {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
+    if screen.dropped:
+        out['set_aside'] = dict(screen.dropped)
+    return out
 
 
 def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):

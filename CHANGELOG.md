@@ -2,6 +2,21 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **An echo port no longer reads as a database or message broker.** A port that sends back whatever it receives matched network templates such as `unauth-psql` and `apache-rocketmq-broker-unauth`, because their matcher words are in their own request. A protocol-template match is now set aside when its response equals or contains the request it sent, when nmap names the port `echo`, or when one port matched two or more unrelated protocol templates in one run. The run's activity line counts what was set aside and why.
+- **A match on the page a host returns for everything is set aside.** An open-proxy template fired on a load balancer with no backend, where every request gets the same "503 No server is available" page. An HTTP match above info is now set aside when the responses nuclei recorded for it are all the same body, or when its error response (4xx/5xx) is exactly what the host returns for a path no site serves (one control request, through the same safe-address gate as the other probes; a control that fails keeps the finding).
+- **FTP, Telnet and the r-services need a greeting to be reported.** A front end that accepts a connection on every port and closes it was reported as FTP and rlogin because nmap names ports 21 and 513 from its port table. A cleartext-service finding now needs a banner or nmap's fingerprint of the service, and on an address with 25 or more silent open ports (one that accepts everything) it needs a banner. Findings without one resolve at the next hygiene run.
+- **"No forward secrecy" on a listener that completes no handshake becomes "TLS listener does not negotiate".** When testssl.sh finds no protocol offered, its cipher results describe no handshake, not a weak setup: the port gets one low finding saying it does not negotiate instead, and its earlier cipher findings resolve.
+- **"No TLS_FALLBACK_SCSV" is no longer reported when the downgraded handshake never completes.** testssl.sh flags a server that refuses the downgrade with a handshake failure instead of the standard alert (and says only "likely"); no downgraded session can be established, so it is not a finding.
+
+### Changed
+
+- **Nuclei findings keep the matched request and response,** clipped to 8 KB each (local runs) and 4 KB each (a Sentinel's result), as evidence. A Sentinel may now send the optional `type`, `request` and `response` fields with each nuclei finding; a result without them is accepted and stored as before.
+- **The TLS 1.0 / 1.1 finding stores the legacy handshake as its evidence:** the old protocol version the server negotiated and the cipher, with the modern protocol alongside, instead of only the protocol the certificate was read over (which read "TLSv1.3").
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes

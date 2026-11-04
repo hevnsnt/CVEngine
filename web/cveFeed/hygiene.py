@@ -284,8 +284,24 @@ def evaluate_cert(info, now=None):
         findings.append(Finding('tls_weak_key', HIGH, f'{where} uses a {m.group(1)}-bit RSA key', 'Use at least 2048 bits.', where, {'key': key}))
     if info.get('protocol') in ('TLSv1', 'TLSv1.1', 'SSLv3') or info.get('legacy_tls'):
         findings.append(Finding('tls_legacy_protocol', MEDIUM, f'{where} still accepts TLS 1.0 / 1.1',
-                                'Disable TLS 1.0 and 1.1; keep TLS 1.2 and 1.3.', where, {'protocol': info.get('protocol')}))
+                                'Disable TLS 1.0 and 1.1; keep TLS 1.2 and 1.3.', where, legacy_evidence(info)))
     return findings
+
+
+def legacy_evidence(info):
+    """The evidence of a legacy-protocol finding: the TLS 1.0 / 1.1 handshake that completed (the version the server chose and the cipher),
+    not the modern handshake the certificate was read over. ``protocol`` is the legacy version; ``modern_protocol`` the one a current client
+    got, when it got one."""
+    legacy = info.get('legacy_handshake') if isinstance(info.get('legacy_handshake'), dict) else {}
+    protocol, cipher = legacy.get('protocol') or '', legacy.get('cipher') or ''
+    if not protocol and info.get('protocol') in ('TLSv1', 'TLSv1.1', 'SSLv3'):  # the certificate itself was read over the old protocol
+        protocol, cipher = info.get('protocol'), info.get('cipher') or ''
+    evidence = {'protocol': protocol or 'TLSv1.0 / 1.1', 'cipher': cipher,
+                'handshake': (f'{protocol} handshake completed' + (f' with {cipher}' if cipher else '')) if protocol else
+                             'a TLS 1.0 / 1.1 handshake completed'}
+    if info.get('protocol') and info.get('protocol') != protocol:
+        evidence['modern_protocol'] = info.get('protocol')
+    return evidence
 
 
 def _fetch_cert(host, port, timeout=TLS_TIMEOUT, legacy=False, addresses=None, project=None):
@@ -340,8 +356,9 @@ def _chain_error(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
 
 
 def _accepts_legacy_tls(host, port, timeout=TLS_TIMEOUT, addresses=None, project=None):
-    """True only if the server actually negotiated TLS 1.0 or 1.1 (a successful handshake alone proves nothing)."""
-    return legacy_tls.accepts(host, port, timeout, addresses=addresses, project=project)
+    """``{'protocol', 'cipher'}`` of the TLS 1.0 / 1.1 handshake the server completed (the evidence), or None: only a negotiated TLS 1.0 or
+    1.1 counts (a successful handshake alone proves nothing)."""
+    return legacy_tls.negotiated(host, port, timeout, addresses=addresses, project=project)
 
 
 CERT_TEXT_LIMITS = {'subject': 500, 'issuer': 500, 'signature_algorithm': 100, 'key_description': 100, 'protocol': 20, 'cipher': 100,
@@ -378,12 +395,16 @@ def probe_tls(host, port, project=None, addresses=None):
     info = _fetch_cert(host, port, addresses=addresses, **kw)
     if info:
         info['chain_error'] = _chain_error(host, port, addresses=addresses, **kw)
-        info['legacy_tls'] = _accepts_legacy_tls(host, port, addresses=addresses, **kw)
+        legacy = _accepts_legacy_tls(host, port, addresses=addresses, **kw)
+        info['legacy_tls'] = bool(legacy)
+        if isinstance(legacy, dict):
+            info['legacy_handshake'] = legacy
         return info
     info = _fetch_cert(host, port, legacy=True, addresses=addresses, **kw)  # a modern client cannot read servers that only speak TLS 1.0 / 1.1
     if info:
         info['chain_error'] = 'cannot be verified: the server only speaks TLS 1.0 / 1.1'
         info['legacy_tls'] = True
+        info['legacy_handshake'] = {'protocol': info.get('protocol') or '', 'cipher': info.get('cipher') or ''}
     return info
 
 
