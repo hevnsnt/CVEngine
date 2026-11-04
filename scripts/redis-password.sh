@@ -22,6 +22,14 @@ cvengine_redis_set() {  # cvengine_redis_set KEY VALUE FILE: replace or append, 
   rm -f -- "$tmp"
 }
 
+cvengine_compose_env_file() {  # cvengine_compose_env_file docker compose [ARGS...]: the --env-file a Compose command line names, if any
+  local prev='' arg
+  for arg in "$@"; do
+    if [ "$prev" = --env-file ]; then printf '%s\n' "$arg"; return 0; fi
+    prev=$arg
+  done
+}
+
 cvengine_ensure_redis_password() {
   local env_file=${1:-} effective password
   [ -f .env ] || return 1
