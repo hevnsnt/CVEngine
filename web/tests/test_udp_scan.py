@@ -618,6 +618,25 @@ class SweepTests(UdpBase):
 		self.assertEqual(Port.objects.count(), 0)
 
 
+class LocalFallbackPolicyTests(UdpBase):
+	"""``CVENGINE_LOCAL_FALLBACK`` without ``nmap_udp``: nmap -sU never runs on this server, whatever path led to it."""
+
+	def test_an_address_no_project_scans_waits_instead_of_running_here(self):
+		lonely = self.ip('192.0.2.11', name=False)  # attached to no host, so no project and no Sentinel path
+		runner = mock.Mock(return_value=ANSWERED)
+		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'none'}):
+			result = udp_scan.scan_ip(lonely, runner=runner)
+		runner.assert_not_called()
+		self.assertTrue(result.get('waiting'))
+		self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(lonely)]))
+
+	def test_the_default_policy_still_runs_it_here(self):
+		lonely = self.ip('192.0.2.11', name=False)
+		runner = mock.Mock(return_value=ANSWERED.replace('192.0.2.10', '192.0.2.11'))
+		udp_scan.scan_ip(lonely, runner=runner)
+		runner.assert_called_once()
+
+
 class GatingTests(UdpBase):
 	"""The same gate as the TCP sweep: nothing is scanned that a scanner may not touch."""
 

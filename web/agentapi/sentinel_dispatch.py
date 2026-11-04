@@ -713,7 +713,12 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     if result is None:
         return None
     from cveFeed.nmap_scan import parse_xml
-    return next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
+    host = next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
+    if host is None:
+        # the Sentinel finished but its report names no host for the address: a local -sU only when the kind may run here (recorded as a
+        # partial result, like the nmap stage's leftover), otherwise the address stays due (ScannerUnavailable)
+        _no_local('nmap_udp', 'a Sentinel scanned the address but its report named no host for it', 'partial_result', project)
+    return host
 
 
 # --- naabu: an injectable runner wrapping cveFeed.naabu_scan.discover's own seam, untouched otherwise ------------------
