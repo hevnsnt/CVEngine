@@ -588,3 +588,27 @@ class ProductChangeTests(TestCase):
 		nmap_scan.persist_inventory(self.rec(product='OpenSSH', version='7.4'))
 		nmap_scan.persist_inventory(self.rec(product='OpenSSH'))
 		self.assertEqual(IpAddress.objects.get(address='192.0.2.88').ports.get(number=22).version, '7.4')
+
+
+class ProbedServiceNameTests(TestCase):
+	"""#408: a soft match that did not finish (nmap reports it with method "table") still names the service; a later run that only knows the
+	port is open must not replace that name with the port table's guess."""
+
+	def test_a_port_table_guess_does_not_replace_a_soft_matched_name(self):
+		soft = {'number': 5353, 'protocol': 'tcp', 'state': 'open', 'service_name': 'domain', 'service_extra': 'generic dns response: REFUSED',
+			'method': 'table', 'confidence': '3'}
+		nmap_scan.persist_inventory([{'ip': '192.0.2.53', 'os_guess': '', 'os_accuracy': None, 'ports': [soft]}])
+		sweep = {'number': 5353, 'protocol': 'tcp', 'state': 'open', 'service_name': 'mdns', 'method': 'table', 'confidence': '3'}
+		nmap_scan.persist_inventory([{'ip': '192.0.2.53', 'os_guess': '', 'os_accuracy': None, 'ports': [sweep]}], source='fullscan')
+		port = IpAddress.objects.get(address='192.0.2.53').ports.get(number=5353)
+		self.assertEqual((port.service_name, port.service_extra, port.state), ('domain', 'generic dns response: REFUSED', 'open'))
+
+	def test_a_probed_answer_still_replaces_the_stored_guess(self):
+		Port.objects.create(number=5353, protocol='tcp', service_name='mdns', service_extra='generic dns response: REFUSED',
+			extra={'method': 'table', 'confidence': '3'})
+		IpAddress.objects.create(address='192.0.2.53').ports.add(Port.objects.get(number=5353))
+		probed = {'number': 5353, 'protocol': 'tcp', 'state': 'open', 'service_name': 'domain', 'service_extra': 'generic dns response: REFUSED',
+			'method': 'probed', 'confidence': '10'}
+		nmap_scan.persist_inventory([{'ip': '192.0.2.53', 'os_guess': '', 'os_accuracy': None, 'ports': [probed]}])
+		port = IpAddress.objects.get(address='192.0.2.53').ports.get(number=5353)
+		self.assertEqual((port.service_name, port.extra['method']), ('domain', 'probed'))

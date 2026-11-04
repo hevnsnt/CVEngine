@@ -2,6 +2,13 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **A service nmap could not name a product for is now probed again at full intensity.** An open TCP port with a service name but no product (for example a DNS server on 5353 that nmap's normal intensity only soft-matched as "generic dns response: REFUSED") was never followed up, so a product such as ISC BIND and its version were never found and none of its CVEs could match. Such a port is now a lead for the existing `nmap -sV --version-all` probe, behind the probes for products that have no version yet: it never takes their place under the per-host limit of five, and is probed at a later scan once theirs are done. Web ports (left to the web probes) and `tcpwrapped` ports are not included, and the probe keeps the same scope, exclusion and address checks (reported by camstork, #408).
+- **A port nmap had identified by probing no longer takes the port table's name from a later sweep.** When nmap's probing of a port ended with a soft match but did not finish, the service name it found (for example `domain` on 5353) was replaced by the port-number guess (`mdns`) at the next run that only saw the port open. The stored name and details are now kept (reported by camstork, #408).
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes
