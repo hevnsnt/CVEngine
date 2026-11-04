@@ -127,6 +127,10 @@ TOOLS = [
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'scope_mode': {'type': 'string', 'enum': ['auto', 'host', 'parent']}},
         ['project', 'target_id', 'scope_mode']),
      lambda c, a: svc.set_target_scope(c, a.get('project'), int(a['target_id']), a.get('scope_mode')), True),
+    ('set_target_private_ca', "Say whether a target's devices use their vendor's own private CA (an appliance, a camera, a controller). When true, an untrusted or self-signed certificate chain on the target is expected and rated information instead of medium, from the next hygiene run.", _schema(
+        {'project': SLUG, 'target_id': {'type': 'integer'}, 'expect_private_ca': {'type': 'boolean'}},
+        ['project', 'target_id', 'expect_private_ca']),
+     lambda c, a: svc.set_target_private_ca(c, a.get('project'), int(a['target_id']), a.get('expect_private_ca')), True),
     ('set_target_discovery_mode', "Set the mode a target is discovered in whenever discovery starts on its own (the work conductor's rescans, the weekly sweeps): standard, deep, passive (public sources only) or manual (never started automatically). Changing it starts nothing.", _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'discovery_mode': {'type': 'string', 'enum': ['standard', 'deep', 'passive', 'manual']}},
         ['project', 'target_id', 'discovery_mode']),

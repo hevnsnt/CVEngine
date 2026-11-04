@@ -524,7 +524,7 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
     inside the TTL are not scanned again (see cveFeed.ledger): their existing findings are copied into this scan instead.
     ``targets`` replaces the scan's whole target list (the targeted pass runs one group of hosts at a time) and
     ``severities`` narrows what is reported."""
-    from cveFeed import activity, ledger
+    from cveFeed import activity, ledger, template_gates
     from cveFeed.models import DiscoveryEvent
     from reNgine.resources import MemoryKill
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
@@ -599,6 +599,8 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
                                     continue
                                 host = host_of(line)
                                 sub = by_name.get(host) or by_ip.get(host)
+                                if template_gates.held_back(line, sub):
+                                    continue  # a template that matches patched releases too, on a host whose release is patched
                                 vuln, created = save_vulnerability(
                                     target_domain=domain, scan_history=scan, subdomain=sub,
                                     http_url=line.get('matched-at') or line.get('host') or host, **data)
@@ -674,8 +676,20 @@ def tech_name_from(line):
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     name = (name or '').strip()[:100]
-    version = next((str(v).lstrip('vV') for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or ''))), '')
-    return f'{name}:{version[:30]}' if name and version else name
+    # every version the template extracted, read the same way each run: nuclei hands several back in no fixed order, and taking the first
+    # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories)
+    found = {str(v).strip().lstrip('vV')[:30] for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or '').strip())}
+    version = max(found, key=_version_order) if found else ''
+    if name and version:
+        from cveFeed import js_libraries
+        # a JavaScript library's version is read from its own file (cveFeed.js_libraries), never from what a page template extracted
+        return js_libraries.unversioned(f'{name}:{version}')
+    return name
+
+
+def _version_order(text):
+    """A sort key for an extracted version string: its numeric parts, then the text (so equal numbers still order one way every run)."""
+    return ([int(p) for p in re.findall(r'\d+', text)[:8]], text)
 
 
 def reuse_technologies(scan, project, hosts):

@@ -158,25 +158,77 @@ def has_dmarc_record(records):
     return any(_txt_value(r).lower().startswith('v=dmarc1') for r in records)
 
 
-# the findings about the policy a name is held to; the rest (reports, pct, sp) belong to the record, so they are the owner's, not the name's
-INHERITED_DMARC_CHECKS = ('dmarc_none', 'dmarc_quarantine', 'dmarc_invalid', 'dmarc_multiple')
+def dmarc_policy(records, subdomain=False):
+    """The policy a receiver applies from a DMARC record set (``sp`` for a subdomain when it is valid, else ``p``), '' when there is no
+    single valid record or it covers less than all mail (pct below 100)."""
+    values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
+    if len(values) != 1:
+        return ''
+    tags = parse_tags(values[0])
+    policy, sp = tags.get('p', '').lower(), tags.get('sp', '').lower()
+    if subdomain and sp in ('none', 'quarantine', 'reject'):
+        policy = sp
+    pct = tags.get('pct', '100')
+    if policy not in ('none', 'quarantine', 'reject') or (pct.isdigit() and int(pct) < 100):
+        return ''
+    return policy
 
 
 def evaluate_inherited_dmarc(domain, apex, records, has_mx):
     """DMARC review of a name that publishes no record of its own: a receiver falls back to the organizational domain's record
-    (RFC 7489 section 6.6.3) and applies its ``sp`` tag to subdomains, so the apex's policy is the one the name has. Only what that
-    policy says about the name is reported here (the record's own details are the apex's finding)."""
+    (RFC 7489 section 6.6.3) and applies its ``sp`` tag to subdomains, so the apex's policy is the one the name has. When that policy is
+    weak the cause is the apex's record, so the finding is the apex's (host ``apex``, the same check the apex's own review raises),
+    listing the names it covers in ``evidence['covers']``: one row for the parent, not one per subdomain. An enforcing policy is no
+    finding for the name."""
     values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
-    tags = parse_tags(values[0])
-    sp = tags.get('sp', '').lower()
-    effective = [f'v=DMARC1; p={sp}; rua={tags.get("rua", "")}'] if len(values) == 1 and sp in ('none', 'quarantine', 'reject') else records
+    own = evaluate_dmarc(apex, records, has_mx)
+    if len(values) != 1:
+        wanted = {'dmarc_multiple'}
+    else:
+        tags = parse_tags(values[0])
+        policy, sp = tags.get('p', '').lower(), tags.get('sp', '').lower()
+        effective = sp if sp in ('none', 'quarantine', 'reject') else policy
+        if policy not in ('none', 'quarantine', 'reject'):
+            wanted = {'dmarc_invalid'}
+        elif effective == 'none':
+            wanted = {'dmarc_none'} if policy == 'none' else {'dmarc_subdomain_weak'}
+        else:
+            wanted = set()
     found = []
-    for f in evaluate_dmarc(domain, effective, has_mx):
-        if f.check in INHERITED_DMARC_CHECKS:
-            f.detail = f'{f.detail} (This name has no DMARC record of its own; it follows the policy of {apex}.)'.strip()
-            f.evidence = {**f.evidence, 'inherited_from': apex}
+    for f in own:
+        if f.check in wanted:
+            f.host = apex
+            f.evidence = {**f.evidence, 'inherited_from': apex, 'covers': [domain]}
             found.append(f)
     return found
+
+
+def merge_findings(found):
+    """One finding per (host, check): the subdomains that inherit a parent's DMARC policy each report the parent's finding, and the
+    parent may report it itself. The worst severity stands and ``evidence['covers']`` lists every name it was raised for."""
+    merged, order = {}, []
+    for f in found:
+        key = (f.host, f.check)
+        if key not in merged:
+            merged[key] = f
+            order.append(key)
+            continue
+        kept = merged[key]
+        covers = list(dict.fromkeys([*(kept.evidence or {}).get('covers', []), *(f.evidence or {}).get('covers', [])]))
+        if f.severity > kept.severity or ('inherited_from' in (kept.evidence or {}) and 'inherited_from' not in (f.evidence or {})):
+            merged[key] = kept = f
+        if covers:
+            kept.evidence = {**(kept.evidence or {}), 'covers': covers[:200]}
+    out = []
+    for key in order:
+        f = merged[key]
+        covers = (f.evidence or {}).get('covers') or []
+        if covers:
+            shown = ', '.join(covers[:5]) + (f' and {len(covers) - 5} more' if len(covers) > 5 else '')
+            note = f' Names with no DMARC record of their own follow this policy: {shown}.'
+            f.detail = (f.detail.split(' Names with no DMARC record')[0] + note).strip()
+        out.append(f)
+    return out
 
 
 # ----------------------------------------------------------------------------- DKIM
@@ -258,7 +310,8 @@ def evaluate_cert(info, now=None):
                 if limit and days >= 0:
                     title += f' ({days} days left)'
                 findings.append(Finding(code, severity, title, f'Valid until {info["not_after"]:%Y-%m-%d}.', where,
-                                        {'days_left': days, 'not_after': info['not_after'].isoformat()}))
+                                        {'days_left': days, 'not_after': info['not_after'].isoformat(),
+                                         **({'issuer': str(info['issuer'])[:200]} if info.get('issuer') else {})}))
                 break
     names = list(info.get('sans') or [])
     if info.get('subject') and info['subject'] not in names:
@@ -424,27 +477,143 @@ def fetch_records(name, rtype, resolver=None):
         return []
 
 
+# A DNS finding that says a record is missing opens only when two resolvers agree it is, or when the next run sees the same thing: a
+# one-off timeout or SERVFAIL is not a missing record. By default only the system resolver is asked, so a missing record needs two
+# consecutive observations, and no client name leaves for a third party. CVENGINE_HYGIENE_CONFIRM_RESOLVERS (comma-separated resolver
+# addresses, e.g. "1.1.1.1,8.8.8.8") opts in to confirming in one run: those resolvers are then sent the names whose record seems missing.
+CONFIRM_RESOLVERS = ()
+CONFIRM_TIMEOUT = 3
+ABSENCE_CHECKS = ('spf_missing', 'dmarc_missing')
+
+
+def confirm_resolvers():
+    """The extra resolvers asked to confirm an absence: none unless CVENGINE_HYGIENE_CONFIRM_RESOLVERS lists some."""
+    import os
+    raw = os.environ.get('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
+    return CONFIRM_RESOLVERS if raw is None else tuple(x.strip() for x in raw.split(',') if x.strip())
+
+
+def ask_txt(resolver, name):
+    """One resolver's answer for ``name`` TXT: ``{'result': answer|nxdomain|noanswer|error, 'records': [...], 'cname': ...}``. A CNAME is
+    followed (the answer is the target's records) and named, so an SPF record published by the platform a name points at is read."""
+    import dns.exception
+    import dns.resolver
+    try:
+        answer = resolver.resolve(name, 'TXT')
+    except dns.resolver.NXDOMAIN:
+        return {'result': 'nxdomain', 'records': []}
+    except dns.resolver.NoAnswer:
+        return {'result': 'noanswer', 'records': []}
+    except (dns.resolver.NoNameservers, dns.exception.Timeout, dns.exception.DNSException) as exc:
+        return {'result': 'error', 'records': [], 'error': type(exc).__name__}
+    out = {'result': 'answer', 'records': [b''.join(rdata.strings).decode('utf-8', 'replace') for rdata in answer]}
+    canonical = str(getattr(answer, 'canonical_name', '') or '').rstrip('.').lower()
+    if canonical and canonical != name.rstrip('.').lower():
+        out['cname'] = canonical
+    return out
+
+
+def dns_askers():
+    """``[(label, ask(name) -> answer dict)]``: the system resolver, then the confirming resolvers the installation opted in to (none by
+    default, when an absence is confirmed by the next run instead)."""
+    import dns.resolver
+    askers = [('system', functools.partial(ask_txt, _resolver()))]
+    for address in confirm_resolvers():
+        r = dns.resolver.Resolver(configure=False)
+        try:
+            r.nameservers = [address]
+        except ValueError:  # not an address: a typo in the setting never stops the review
+            logger.warning('ignoring confirming resolver %r: not an IP address', address)
+            continue
+        r.lifetime = r.timeout = CONFIRM_TIMEOUT
+        askers.append((address, functools.partial(ask_txt, r)))
+    return askers
+
+
+def consensus_txt(name, askers, prefix, votes=2):
+    """``(records, confirmed, observations)`` for the ``prefix`` record (v=spf1, v=DMARC1) at ``name``. The first resolver that has the
+    record wins. Otherwise the record is missing only when ``votes`` resolvers answered without it (NXDOMAIN, no answer, or other TXT
+    records); an error is no vote. ``observations`` is the evidence either way."""
+    observations, absent, first = [], 0, None
+    for label, ask in askers:
+        got = ask(name)
+        records = list(got.get('records') or [])
+        observations.append({'resolver': label, 'result': got.get('result', 'error'), 'records': [r[:300] for r in records[:5]],
+                             **({'cname': got['cname']} if got.get('cname') else {})})
+        if any(_txt_value(r).lower().startswith(prefix) for r in records):
+            return records, True, observations
+        if got.get('result') in ('answer', 'nxdomain', 'noanswer'):
+            absent += 1
+            first = records if first is None else first
+            if absent >= votes:
+                return first, True, observations
+    return first or [], False, observations
+
+
+def _injected(fetch):
+    """An injected TXT reader (tests, the supplier checks) as the one resolver: it is taken at its word."""
+    return [('dns', lambda name: {'result': 'answer', 'records': list(fetch(name) or [])})]
+
+
 def organizational_domain(name):
     from targetApp.target_types import apex_domain
     return apex_domain(name)
 
 
-def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None):
+def _observed(findings, check, observations, confirmed):
+    """Attach the DNS answers behind an absence finding, and whether two resolvers agreed on it (``store_findings`` holds an
+    unconfirmed one back until the next run sees it too)."""
+    for f in findings:
+        if f.check == check:
+            f.evidence = {**(f.evidence or {}), 'dns': observations, 'dns_confirmed': bool(confirmed)}
+
+
+def email_findings(domain, fetch=fetch_txt, mx=has_record, records=None, askers=None):
     """SPF, DMARC, DKIM and CAA review for one domain, plus the checks adapted from MailFail (cveFeed.mailfail), with
-    injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made."""
+    injectable DNS for tests. With injected DNS, other record types default to none and no outbound request is made.
+
+    The records whose absence is a finding (SPF, the name's DMARC record and its organizational domain's) are read through
+    ``consensus_txt``: with real DNS a missing record must be missing at two resolvers (``askers``, default ``dns_askers()``: the system
+    resolver alone unless confirming resolvers are configured, so by default the next run's sighting is the second), and the answers are
+    kept as the finding's evidence. An injected ``fetch`` is taken at its word unless ``askers`` is given too."""
     from cveFeed import mailfail
     real_dns = fetch is fetch_txt
     records = records or (fetch_records if real_dns else (lambda name, rtype: []))
-    has_mx = mx(domain, 'MX')
-    txt = fetch(domain)
-    findings = evaluate_spf(domain, txt, has_mx, count_spf_lookups(domain, fetch))
-    dmarc = fetch(f'_dmarc.{domain}')
-    apex = None if has_dmarc_record(dmarc) else organizational_domain(domain)
-    parent = fetch(f'_dmarc.{apex}') if apex and apex != domain else []
-    if has_dmarc_record(parent):  # no record of its own: the organizational domain's policy applies to this name
-        findings += evaluate_inherited_dmarc(domain, apex, parent, has_mx)
+    if askers is None:
+        askers, votes = (dns_askers(), 2) if real_dns else (_injected(fetch), 1)
     else:
+        votes = 2
+    has_mx = mx(domain, 'MX')
+    txt, spf_ok, spf_seen = consensus_txt(domain, askers, 'v=spf1', votes)
+    spf_fetch = lambda name: txt if name == domain else fetch(name)  # noqa: E731 - the agreed answer, not a second lookup
+    findings = evaluate_spf(domain, txt, has_mx, count_spf_lookups(domain, spf_fetch))
+    _observed(findings, 'spf_missing', spf_seen, spf_ok)
+    dmarc, own_ok, own_seen = consensus_txt(f'_dmarc.{domain}', askers, 'v=dmarc1', votes)
+    apex = organizational_domain(domain)
+    subdomain = bool(apex) and apex != domain
+    policy = dmarc_policy(dmarc)
+    if has_dmarc_record(dmarc):
         findings += evaluate_dmarc(domain, dmarc, has_mx)
+    elif subdomain:  # RFC 7489 6.6.3: no record of its own, so the organizational domain's record (and its sp=) applies
+        parent, parent_ok, parent_seen = consensus_txt(f'_dmarc.{apex}', askers, 'v=dmarc1', votes)
+        if has_dmarc_record(parent):
+            findings += evaluate_inherited_dmarc(domain, apex, parent, has_mx)
+            policy = dmarc_policy(parent, subdomain=True)
+        else:
+            missing = evaluate_dmarc(domain, dmarc, has_mx)
+            _observed(missing, 'dmarc_missing', own_seen + parent_seen, own_ok and parent_ok)
+            findings += missing
+    else:
+        missing = evaluate_dmarc(domain, dmarc, has_mx)
+        _observed(missing, 'dmarc_missing', own_seen, own_ok)
+        findings += missing
+    if subdomain and policy in ('quarantine', 'reject'):
+        for f in findings:  # spoofed mail from this name fails DMARC (no aligned SPF or DKIM) and is quarantined or rejected
+            if f.check == 'spf_missing':
+                f.severity = INFO
+                f.detail = (f'{f.detail} DMARC p={policy} already applies to this name, so mail spoofing it fails DMARC and is '
+                            f'{"rejected" if policy == "reject" else "quarantined"}; publish "v=spf1 -all" if it never sends mail.')
+                f.evidence = {**f.evidence, 'dmarc_policy': policy}
     selectors = DKIM_SELECTORS + mailfail.EXTRA_DKIM_SELECTORS
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         answers = pool.map(lambda selector: fetch(f'{selector}._domainkey.{domain}'), selectors)
@@ -511,18 +680,31 @@ def email_domains(domain, mx=has_record, cname=None):
     return names + extra
 
 
-def store_findings(domain, found, hosts=None, owns=lambda check: True, across_targets=False):
+PENDING = 'pending'  # HygieneFinding.status of a DNS absence seen once and not agreed by two resolvers: evidence, not an open finding
+
+
+def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnames=False, across_targets=False):
     """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
     owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
     Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone.
+
+    Every finding is rated for its endpoint first (``hygiene_rating.rate``: vendor-managed names, the vendor's own endpoints, an
+    expected private CA, BREACH without a session, managed certificates, dev hosts); ``live_cnames`` lets that look up a CNAME that
+    discovery did not store. A DNS absence that only one resolver saw (``evidence['dns_confirmed'] is False``) is stored as ``pending``,
+    which no list, count or heat reads, and opens when the next run sees it again.
 
     ``across_targets`` (the TLS and email sweep, ``run_hygiene``): a finding another target of the same project already filed for the same host
     and check is that row, updated, not a second one. The other callers place their rows under a target of their own choosing (the tailnet's
     anchor) and keep filing them there."""
     from django.utils import timezone
 
+    from cveFeed import hygiene_rating
     from cveFeed.finding_lifecycle import FOLDED
     from cveFeed.models import HygieneFinding
+    try:
+        found = hygiene_rating.rate(domain, merge_findings(list(found)), live=live_cnames)
+    except Exception:  # noqa: BLE001 - an unrated finding is better than a lost one
+        logger.exception('could not rate the hygiene findings of %s', domain.name)
     keep = set()
     # The same host and check filed under another target of this project (a host covered by its apex's target and by a target of its own):
     # that row is this finding too, so it is updated instead of filed twice (cveFeed.finding_lifecycle). One query for the whole run.
@@ -535,8 +717,6 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, across_ta
                 elsewhere.setdefault((row.host, row.check_name), row)
     for f in found:
         keep.add((f.host or domain.name, f.check))
-        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
-                    'status': 'open', 'resolved_at': None}
         before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
         if before is not None and before.status == 'resolved' and (before.remediation_note or '').startswith(FOLDED):
             before = None  # the engine folded this copy into another row: it stays closed, and that row is the finding
@@ -544,8 +724,17 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, across_ta
         else:
             folded_own = False
         target = before or elsewhere.get((f.host or domain.name, f.check))
-        if target is not None and target.status == 'resolved' and target.remediation_status == 'fixed':
-            # it was fixed, the sweep saw it gone, and now it is back: a regression must reappear in the actionable view
+        status = 'open'
+        if (f.evidence or {}).get('dns_confirmed') is False:
+            if target is not None and target.status == PENDING:
+                f.evidence = {**f.evidence, 'confirmed_by': 'seen again on the next run'}
+            elif not (target is not None and target.status == 'open'):
+                status = PENDING  # one resolver, once: kept with its evidence, opened only if the next run sees it too
+        defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
+                    'status': status, 'resolved_at': None}
+        if status == 'open' and target is not None and target.status in ('resolved', PENDING) and target.remediation_status == 'fixed':
+            # it was fixed, the sweep saw it gone, and now it is back (a DNS absence after a second look): a regression must reappear
+            # in the actionable view
             defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
                             remediation_note=(target.remediation_note + '\n' if target.remediation_note else '')
                             + 'Reopened: the check found this again after it was marked fixed.')
@@ -554,7 +743,7 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, across_ta
         elif not folded_own:
             HygieneFinding.objects.update_or_create(
                 domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
-    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status='open')
+    stale = [x for x in HygieneFinding.objects.filter(domain=domain, status__in=('open', PENDING))
              if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
              and (x.host, x.check_name) not in keep]  # a certificate finding's host is 'name:port', a host-only run is given the names
     for x in stale:
@@ -627,7 +816,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     found += cleartext_found
 
     stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_'))  # the tailnet, testssl.sh, cloud storage and UDP checks keep their own
-                           and (cleartext_ok or not check.startswith('cleartext_')), across_targets=True)
+                           and (cleartext_ok or not check.startswith('cleartext_')), live_cnames=True, across_targets=True)
     if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
         from cveFeed import finding_lifecycle
         names = {finding_lifecycle.host_name(f.host or domain.name) for f in found} | {host for host, _port in targets}

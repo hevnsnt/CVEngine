@@ -272,7 +272,8 @@ def list_engines(ctx, params=None):
 def _target(d):
     out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
-           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
+           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode,
+           'expect_private_ca': bool(d.expect_private_ca)}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
@@ -379,6 +380,26 @@ def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
         audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
         d.discovery_mode = discovery_mode
         d.save(update_fields=['discovery_mode'])
+    return _target(d)
+
+
+def set_target_private_ca(ctx, slug, target_id, expect_private_ca):
+    """Say whether a target's devices use their vendor's own private CA. When they do, an untrusted or self-signed certificate chain on
+    the target is expected and the hygiene check rates it information instead of medium. Applies from the next hygiene run."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    if isinstance(expect_private_ca, str) and expect_private_ca.strip().lower() in ('true', 'false', '1', '0', 'yes', 'no'):
+        expect_private_ca = expect_private_ca.strip().lower() in ('true', '1', 'yes')
+    if not isinstance(expect_private_ca, bool):
+        raise ApiError(400, 'expect_private_ca must be true or false')
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    if d.expect_private_ca != expect_private_ca:
+        audit(ctx.user, 'target.private_ca', d.name, project.org, project=slug, was=d.expect_private_ca, now=expect_private_ca)
+        d.expect_private_ca = expect_private_ca
+        d.save(update_fields=['expect_private_ca'])
     return _target(d)
 
 
@@ -2962,6 +2983,9 @@ def _cve_description(c, limit=500):
     return text[:limit].rsplit(' ', 1)[0] + '…' if len(text) > limit and ' ' in text[:limit] else text[:limit]
 
 
+MAX_LISTED_RANGES = 60  # ranges of one affected block an advisory lists in full; more are counted (ranges_total), never cut silently
+
+
 def _cve_context(c):
     """Structured advisory context. Unknown feed signals stay unknown, not false."""
     from urllib.parse import urlparse
@@ -2987,8 +3011,14 @@ def _cve_context(c):
     for item in (c.affected if isinstance(c.affected, list) else [])[:30]:
         if isinstance(item, dict):
             part = {k: item.get(k) for k in ('vendor', 'product', 'package') if isinstance(item.get(k), str) and item.get(k)}
-            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))}
-                              for rng in prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)[:20]]
+            # every range matching reads, never a silent cut: a record with 25 release branches (WordPress' CVE-2026-119977, 4.7 through
+            # 7.1.3) read as if it stopped at the 20th (6.6.10) looked like a match made from the description
+            ranges = prepared_ranges((item.get('ranges') if isinstance(item.get('ranges'), list) else [])[:MAX_RANGES_PER_ITEM], keep_unusable=True)
+            part['ranges'] = [{k: v for k, v in rng.items() if isinstance(v, (str, int, float))} for rng in ranges[:MAX_LISTED_RANGES]]
+            if len(ranges) > MAX_LISTED_RANGES:
+                part['ranges_total'] = len(ranges)  # the list above is the first MAX_LISTED_RANGES of them
+            if isinstance(item.get('range_corrections'), list) and item['range_corrections']:
+                part['range_corrections'] = item['range_corrections'][:5]  # a bound cvENGINE corrected, with its sources (range_corrections)
             affected.append(part)
     return {'description': (c.original_description or c.summary or c.title or '').strip()[:12000],
             'summary': (c.summary or '').strip()[:3000], 'affected': affected, 'references': list(dict.fromkeys(refs))[:40],
