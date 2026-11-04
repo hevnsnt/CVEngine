@@ -1118,6 +1118,16 @@ def finalize(strategy, cvss_vector=''):
     return out
 
 
+def max_remote_state(cve):
+    """The highest triage classification a check from outside can give a match of ``cve``: ``validation.max_remote_state`` of its stored
+    strategy (confirmed, likely or needs_validation), or '' when the CVE has no record yet. Safe to read on any CVEEntry."""
+    row = getattr(cve, 'detection', None)
+    strategy = (row.strategy if row is not None else None) or {}
+    profile = strategy.get('validation') if isinstance(strategy, dict) else None
+    state = profile.get('max_remote_state') if isinstance(profile, dict) else ''
+    return state if state in ('confirmed', 'likely', 'needs_validation') else ''
+
+
 def prompt_guidance(cve):
     """The record's own words, trimmed, for an AI prompt about a match of this CVE: a hint about what makes it apply and what makes it
     false, never evidence (what this host showed is). None when the CVE has no record yet. Safe to read on any CVEEntry."""

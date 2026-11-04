@@ -153,7 +153,8 @@ JENKINS = [{'product': 'jenkins', 'ranges': [{'introduced': '1.0', 'fixed': '2.4
 
 class KevFeedAnnouncementTests(FeedAnnouncementTests):
 	"""The same announcement plumbing under the KEV heat policy (the default): the host's evidence is a banner nmap probed from a vendor-built
-	service (Jenkins), which proves the version there, so a KEV CVE in its range is fire and paged; the cap of the legacy policy is not read."""
+	service (Jenkins) and runZero's report of the CVE on it (hard evidence: since 1.3.5 a proven version alone is smoke), so a KEV CVE in its
+	range is fire and paged; the cap of the legacy policy is not read."""
 
 	def setUp(self):
 		super().setUp()
@@ -161,14 +162,16 @@ class KevFeedAnnouncementTests(FeedAnnouncementTests):
 		kev.start()
 		self.addCleanup(kev.stop)
 		Port.objects.update(product='Jenkins', version='2.440', extra={'method': 'probed'})
+		IpAddress.objects.update(fingerprint={'runzero': {'vulns': [{'cve': f'CVE-2099-6{i}', 'port': 80} for i in range(5)]}})
 
 	def cve(self, affected=NGINX, cve_id='CVE-2099-60'):
 		affected = {id(NGINX): JENKINS, id(NO_RANGE): [{'product': 'jenkins'}]}.get(id(affected), affected)
 		return super().cve(affected, cve_id)
 
 	def test_with_the_default_cap_a_banner_version_alone_is_not_paged(self):
-		# under the KEV rule: a version nmap guessed from the port table is not proven, so the KEV match is smoke and not paged
+		# under the KEV rule: a version nmap guessed from the port table, and no report of the flaw, so the KEV match is smoke and not paged
 		Port.objects.update(extra={'method': 'table'})
+		IpAddress.objects.update(fingerprint={})
 		cve = self.cve()
 		auto_fire_new_cves([cve.pk])
 		match = CVEMatch.objects.get()
@@ -179,8 +182,8 @@ class KevFeedAnnouncementTests(FeedAnnouncementTests):
 		self.assertIn('1 new fire-tier CVE match on 1 host', self.slack()[0])
 
 	def test_a_match_the_ai_calls_a_false_positive_stays_open_but_is_not_announced(self):
-		# Under the KEV rule the AI's call does not hold back a match whose version is proven: nmap read it from the vendor's own banner, so a
-		# KEV CVE in range is fire (an AI verdict is no evidence either way); it is still tested, and announced once.
+		# The AI's call cannot close a match whose version is in range (it is held at needs validation), and since 1.3.5 needs validation holds
+		# the heat at smoke even with runZero's report: it stays open, is still tested, and is not announced until a check confirms it.
 		AIProviderSettings.objects.create(auto_fire=True, enabled=True)
 		cve = self.cve()
 		provider = mock.Mock(model='m')
@@ -191,7 +194,7 @@ class KevFeedAnnouncementTests(FeedAnnouncementTests):
 			out = auto_fire_new_cves([cve.pk])
 		self.assertEqual(out, {'fired': 1})
 		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'uncertain')
-		self.assertEqual(len(self.slack()), 1)
+		self.assertEqual(self.slack(), [])
 
 	def test_a_cve_that_is_neither_on_the_kev_nor_exploited_is_never_announced(self):
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-64', kev=False, exploit_db=False, cvss=10.0, epss_reached=True,

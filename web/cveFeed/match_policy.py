@@ -141,8 +141,8 @@ def _validation_status(match):
 
 def is_version_only(match):
     """Whether a CVEMatch is *version-only*: it has no hard evidence (``has_hard_evidence``). Triage never rates such a match above needs
-    validation (``triage.ceiling``). Heat reads ``version_proven`` under the ``kev`` heat policy (a version read from the component itself is
-    proof there) and this under ``legacy`` (``threat.version_only_max_heat``)."""
+    validation (``triage.ceiling``). Heat reads this under both heat policies (since 1.3.5): a version-only match is smoke at most, even when
+    its version is proven (``version_proven``), because a version is no proof the flaw is exploitable (``threat.match_heat``)."""
     return not has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
                                  getattr(match, 'distro_status', '') or '', _validation_status(match))
 
@@ -241,7 +241,7 @@ def _register_json_typeof():
 def version_read_from_component(evidence, distro_status='', template_result=''):
     """Whether a match's version was read from the component itself, at a confidence that proves it: "version proven", the second half of
     ``version_proven`` (the first, "vulnerability confirmed", is ``has_hard_evidence``). It proves the version is there, not that the flaw is,
-    so it never lifts triage, creates a finding or counts as a validation hit; it is what the heat rule needs. Three readings qualify:
+    so it never lifts triage, creates a finding or counts as a validation hit; and since 1.3.5 it no longer makes a match fire either. Three readings qualify:
 
       * a version-class template hit on this host (``template_result`` version_only): a template that only reads a static page or a banner
         read the version from the service or the file itself and found it inside the range;
@@ -329,8 +329,9 @@ def version_read_from_component_q(prefix=''):
 
 
 def version_proven(match, validation_status=None):
-    """Whether a CVEMatch PROVES the version is on the host, in the sense of the owner's heat policy ("we can PROVE that version is in our
-    environment": fire when its CVE is hot, ``threat.match_heat``). The one definition, with its database form ``version_proven_q``:
+    """Whether a CVEMatch PROVES the version is on the host ("we can PROVE that version is in our environment"). Since 1.3.5 it no longer makes
+    a match fire (``threat.match_heat`` needs hard evidence of the flaw, ``has_hard_evidence``): it is shown (``version_proven`` in the API, the
+    heat reason) and orders work. The one definition, with its database form ``version_proven_q``:
 
       * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, testssl), the distribution
         tracker listing the package as vulnerable, the host's own inventory report, runZero reporting the CVE, a validation hit; or

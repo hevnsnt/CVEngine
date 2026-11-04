@@ -106,12 +106,13 @@ def fire_matches(since, scan=None, cve_ids=None):
     new CVEs (``cve_ids``, when given) made on the inventory. A feed match belongs to the scan whose host row it sits on, so it is
     not filtered on the scan; the caller runs this after the AI has judged them.
 
-    A page needs the match to be fire on the host (``threat.match_heat``). Under the KEV heat policy that is a KEV or exploited CVE whose
-    version is proven (``match_policy.version_proven``: hard evidence, or the version read from the component itself); a version we only
-    infer is smoke and a CVE that is neither on the KEV nor exploited is ice, so neither is paged. Under ``legacy`` a version in the affected
+    A page needs the match to be fire on the host (``threat.match_heat``). Under the KEV heat policy that is a KEV or exploited CVE with
+    hard evidence of the flaw on the host (``match_policy.has_hard_evidence``; since 1.3.5 a version read from the component itself is not
+    enough), whose triage is neither pending nor needs_validation and whose validation did not come back clean; anything less is smoke or ice,
+    and neither is paged. Under ``legacy`` a version in the affected
     range alone is smoke (CVENGINE_VERSION_ONLY_MAX_HEAT), so only a match with hard evidence is paged. A match the AI left uncertain (the
     AI's false-positive call lands there when no hard evidence can close it, and triage never rates a version-only match higher) is not
-    announced unless a template hit, the distribution tracker or, under the KEV policy, a version read from the component proves it; it
+    announced unless a template hit or the distribution tracker proves it; it
     stays open, is tested, and a hit is announced by ``template_hits``. Matches the version rules out, the AI judged not affected or the
     host's distribution has patched are left out."""
     try:
@@ -120,14 +121,12 @@ def fire_matches(since, scan=None, cve_ids=None):
         from cveFeed import match_policy
         from cveFeed.counts import CLOSED
         from cveFeed.models import CVEEntry, CVEMatch
-        from cveFeed.threat import FIRE, HEAT_RANK, LEGACY_POLICY, fire_tier_q, heat_policy, match_heat_rank_expr
+        from cveFeed.threat import FIRE, HEAT_RANK, fire_tier_q, match_heat_rank_expr
         rows = CVEMatch.objects.filter(created_at__gte=since)
         rows = rows.filter(scan_history=scan) if scan is not None else rows
         if cve_ids is not None:
             rows = rows.filter(cve_entry_id__in=list(cve_ids))
         proven = Q(template_result='vulnerable') | Q(distro_status='vulnerable')
-        if heat_policy() != LEGACY_POLICY:
-            proven |= match_policy.version_read_from_component_q()  # the version is read from the component: fire on a KEV CVE
         rows = rows.exclude(version_in_range=False).exclude(ai_verdict='not_affected').exclude(distro_status='patched').exclude(
             remediation_status__in=CLOSED).filter(  # a closed decision carried onto the next scan's row is not news
             Q(version_in_range=True) | proven).exclude(Q(ai_verdict='uncertain') & ~proven).exclude(match_policy.version_unknown_q()).filter(

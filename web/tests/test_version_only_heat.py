@@ -64,26 +64,42 @@ FEED_TIER = {'kev, medium score': FIRE, 'critical score': FIRE, 'high score': SM
 CLASSES = {'': '', 'needs_validation': 'uncertain', 'likely': 'affected', 'confirmed': 'affected'}
 
 
-def expected(cve, classification, hard, cap=SMOKE):
-	"""The rule, written out independently of the code under test."""
+def expected(cve, classification, hard, cap=SMOKE, validation='', pending=False, state=True, template_hit=False):
+	"""The rule, written out independently of the code under test. Since 1.3.5 the finding's own Triage row caps it too: a validation that came
+	back clean is ice, a triage still pending or classified needs_validation is smoke at most (a validation hit or a template hit lifts both)."""
+	state = state and not template_hit
 	heat = FEED_TIER[cve]
 	if heat == SMOKE and CLASSES[classification] == 'affected':  # a confirmed high score reads as fire
 		heat = FIRE
 	if not hard and HEAT_RANK[heat] > HEAT_RANK[cap]:
 		heat = cap
+	if state and validation == 'clean':
+		return ICE
+	if state and validation != 'hit' and (classification == 'needs_validation' or pending) and heat == FIRE:
+		return SMOKE
 	return heat
 
 
+def want(evidence, cve, classification, cap=SMOKE):
+	"""``expected`` for a row of the tables below (a Triage row exists when it has a validation status or a classification; without a
+	classification it is still pending)."""
+	fields, validation, hard = EVIDENCE[evidence]
+	return expected(cve, classification, hard, cap=cap, validation=validation, pending=bool(validation) and not classification,
+					template_hit=fields.get('template_result') == 'vulnerable')
+
+
 def uncapped(cve, classification):
-	return expected(cve, classification, True)
+	return expected(cve, classification, True, state=False)
 
 
 def fake(evidence, cve, classification):
 	fields, validation, _hard = EVIDENCE[evidence]
 	entry = SimpleNamespace(epss_reached=False, exploit_db=False, **CVES[cve])
+	row = (SimpleNamespace(validation_status=validation or 'none', classification=classification, status='triaged' if classification else 'pending')
+		   if validation or classification else None)  # the same rows the database tables below make
 	return SimpleNamespace(cve_entry=entry, ai_verdict=CLASSES[classification], template_result=fields.get('template_result', ''),
 						   distro_status=fields.get('distro_status', 'no_data'), source=fields['source'], evidence=fields['evidence'],
-						   version_in_range=fields['version_in_range'], triage=SimpleNamespace(validation_status=validation))
+						   version_in_range=fields['version_in_range'], triage=row)
 
 
 class TruthTableTests(SimpleTestCase):
@@ -100,17 +116,17 @@ class TruthTableTests(SimpleTestCase):
 			m = fake(evidence, cve, classification)
 			hard = EVIDENCE[evidence][2]
 			with self.subTest(evidence=evidence, cve=cve, classification=classification):
-				self.assertEqual(threat.match_heat(m), expected(cve, classification, hard))
+				self.assertEqual(threat.match_heat(m), want(evidence, cve, classification))
 				self.assertEqual(threat.validation_heat(m), uncapped(cve, classification))
 
 	def test_kev_without_hard_evidence_is_never_fire_whatever_the_classification(self):
 		for evidence, classification in itertools.product([e for e, v in EVIDENCE.items() if not v[2]], CLASSES):
 			m = fake(evidence, 'kev, medium score', classification)
-			self.assertEqual(threat.match_heat(m), SMOKE, (evidence, classification))
+			self.assertEqual(threat.match_heat(m), ICE if EVIDENCE[evidence][1] == 'clean' else SMOKE, (evidence, classification))
 			self.assertEqual(threat.validation_heat(m), FIRE, (evidence, classification))  # still validated first
 
 	def test_the_setting(self):
-		m = fake('tech version in range', 'kev, medium score', 'needs_validation')
+		m = fake('tech version in range', 'kev, medium score', 'likely')  # (needs_validation is smoke at most whatever the setting: 1.3.5)
 		for value, heat in (('fire', FIRE), (' FIRE ', FIRE), ('smoke', SMOKE), ('ice', ICE), ('', SMOKE), ('nonsense', SMOKE)):
 			with mock.patch.dict(os.environ, {ENV: value}):
 				self.assertEqual(threat.match_heat(m), heat, value)
@@ -118,10 +134,10 @@ class TruthTableTests(SimpleTestCase):
 		with mock.patch.dict(os.environ, {ENV: 'ice'}):
 			for evidence, cve, classification in itertools.product(EVIDENCE, CVES, CLASSES):
 				self.assertEqual(threat.match_heat(fake(evidence, cve, classification)),
-								 expected(cve, classification, EVIDENCE[evidence][2], cap=ICE), (evidence, cve, classification))
+								 want(evidence, cve, classification, cap=ICE), (evidence, cve, classification))
 		with mock.patch.dict(os.environ, {ENV: 'fire'}):  # the behaviour before 1.3.2
 			for evidence, cve, classification in itertools.product(EVIDENCE, CVES, CLASSES):
-				self.assertEqual(threat.match_heat(fake(evidence, cve, classification)), uncapped(cve, classification))
+				self.assertEqual(threat.match_heat(fake(evidence, cve, classification)), want(evidence, cve, classification, cap=FIRE))
 
 	def test_patched_and_version_unknown_stay_ice(self):
 		m = fake('template hit', 'kev, medium score', 'confirmed')
@@ -170,10 +186,10 @@ class DatabaseTruthTableTests(Fixture):
 		loaded = {m.pk: m for m in CVEMatch.objects.select_related('cve_entry', 'triage')}
 		self.assertEqual(len(ranks), len(self.rows))  # the Triage join never multiplies a match
 		for pk, (evidence, cve, classification) in self.rows.items():
-			want = expected(cve, classification, EVIDENCE[evidence][2], cap=cap)
+			heat = want(evidence, cve, classification, cap=cap)
 			with self.subTest(cap=cap, evidence=evidence, cve=cve, classification=classification):
-				self.assertEqual(ranks[pk], HEAT_RANK[want])
-				self.assertEqual(threat.match_heat(loaded[pk]), want)
+				self.assertEqual(ranks[pk], HEAT_RANK[heat])
+				self.assertEqual(threat.match_heat(loaded[pk]), heat)
 				self.assertEqual(raw[pk], HEAT_RANK[uncapped(cve, classification)])
 				self.assertEqual(threat.validation_heat(loaded[pk]), uncapped(cve, classification))
 
@@ -317,9 +333,10 @@ class StoredJqueryMatchTests(Fixture):
 
 	def test_a_template_hit_makes_it_fire(self):
 		CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
-		self.assert_everywhere(FIRE, 1)
+		self.assert_everywhere(FIRE, 1)  # (its triage still says needs_validation: a template hit that showed the flaw is not held back)
 
 	def test_the_owner_can_restore_the_old_behaviour(self):
+		Triage.objects.filter(match=self.match).update(classification='likely')  # 1.3.5: needs_validation holds it at smoke whatever the cap
 		with mock.patch.dict(os.environ, {ENV: 'fire'}):
 			self.assert_everywhere(FIRE, 1)
 		with mock.patch.dict(os.environ, {ENV: 'ice'}):
@@ -431,6 +448,10 @@ class StoredJqueryMatchTests(Fixture):
 			gained = inventory_match._add_evidence({'k': [(match, row)]}, timezone.now())
 			self.assertEqual(gained, [match.pk])
 			notify.fire_confirmed(gained)
+			# 1.3.5: still classified needs_validation, so smoke and not paged; the page comes when triage stops holding it
+			self.assertEqual((send.call_count, threat.match_heat(self.fresh())), (0, SMOKE))
+			Triage.objects.filter(match=self.match).update(classification='likely')
+			notify.fire_confirmed(gained)
 		self.assertEqual(send.call_count, 1)
 		self.assertEqual(threat.match_heat(self.fresh()), FIRE)
 
@@ -505,6 +526,7 @@ class StoredJqueryMatchTests(Fixture):
 		self.assertEqual(services._finding_sources(self.project, {})['cve'].count(), 2)
 		row = services._finding_row('cve', sources['cve'].get())
 		self.assertEqual((row['heat'], row['kev'], row['heat_capped']), (SMOKE, True, True))
+		Triage.objects.filter(match=self.match).update(classification='likely')  # (needs_validation would hold it at smoke: 1.3.5)
 		with mock.patch.dict(os.environ, {ENV: 'fire'}):  # not capped: the tooltip must not say it shows below fire
 			self.assertFalse(services._finding_row('cve', services._finding_sources(self.project, {'kev': '1'})['cve'].get())['heat_capped'])
 		from django.contrib.auth.models import User
