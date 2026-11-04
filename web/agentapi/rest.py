@@ -374,6 +374,14 @@ ROUTES = [
      "body {items: [{kind, id}, ...], status, note}; returns {updated, failed: [{kind, id, error}]}",
      lambda r, c, slug, **k: svc.bulk_update_finding_status(c, slug, _body(r).get('items'), *_need(_body(r), 'status'),
                                                              note=_body(r).get('note'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/heat',
+     'Re-rate one finding by hand: body {heat: fire|smoke|ice, reason} sets the heat a CVE match or scanner finding shows everywhere (lists, counts, '
+     'host heat, reports, alerts), reason required (at most 1000 characters); {heat: null} clears it back to the derived heat. Audited; a match '
+     'raised to fire is paged once. A hygiene finding or a web route has no heat (400). Answers {kind, id, heat, heat_reason, heat_override, changed}',
+     lambda r, c, slug, kind, finding_id, **k: svc.set_finding_heat(c, slug, kind, int(finding_id), _body(r).get('heat'), _body(r).get('reason'))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/heat', 'Re-rate up to 500 findings by hand at once with one heat and one reason; '
+     "body {items: [{kind: match|vulnerability, id}, ...], heat: fire|smoke|ice or null to clear, reason}; each is audited on its own; returns {updated, unchanged, failed: [{kind, id, error}]}",
+     lambda r, c, slug, **k: svc.bulk_set_finding_heat(c, slug, _body(r).get('items'), _body(r).get('heat'), _body(r).get('reason'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/retriage',
      'Look at a finding again; CVE matches use the bounded per-match validation queue',
      lambda r, c, slug, kind, finding_id, **k: (svc.retriage_finding(c, slug, kind, int(finding_id)), 202)),

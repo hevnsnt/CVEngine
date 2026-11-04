@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Added
+
+- **Re-rate a finding's heat by hand.** cvENGINE derives a finding's heat (fire, smoke, ice) and had no way to change it when a person who reviewed the finding knew better. A CVE match or a scanner finding can now be set to fire, smoke or ice with a reason, and cleared back to the derived heat: on its detail pane (the **Heat** control under What to do, for anyone who may change its status), over REST (`POST projects/{slug}/findings/{kind}/{id}/heat`, and `POST projects/{slug}/findings/heat` for up to 500 findings with one heat and one reason) and over MCP (`set_finding_heat`, one finding or `items`). The heat set wins everywhere a heat is read: the Findings list, its heat facet and counts, host heat and scores, dashboards, reports, the graph, the validation and OpenVAS order and alerts; `heat_reason` says "set to smoke by alice: <reason>" and findings carry `heat_override` `{heat, reason, by, at}`. Each change is in the finding's audit trail (`event: heat`). A match a change makes fire is paged once like any match that turns fire; a closed one never, and lowering never pages. Triage, AI review and validation never undo it, and a rescan keeps it while the match's evidence is the same. Migration `cveFeed.0142` adds the columns with database defaults, so the previous version keeps working during the update.
+
 ### Fixed
 
 - **An echo port no longer reads as a database or message broker.** A port that sends back whatever it receives matched network templates such as `unauth-psql` and `apache-rocketmq-broker-unauth`, because their matcher words are in their own request. A protocol-template match is now set aside when its response equals or contains the request it sent, when nmap names the port `echo`, or when one port matched two or more unrelated protocol templates in one run. The run's activity line counts what was set aside and why.
