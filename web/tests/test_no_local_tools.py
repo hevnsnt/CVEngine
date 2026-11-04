@@ -237,6 +237,7 @@ ALLOWED = {
         'cveFeed/tasks.py',
         'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): reads the WordPress version WPScan stored, runs nothing
         'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
+        'cveFeed/upgrade_backfills.py',  # 1.3.5 automatic update steps (develop): a comment names WPScan findings, runs nothing
         'cveFeed/wp_correlation.py',
         'cveFeed/wpscan_scan.py',
         'reNgine/input_guard.py',

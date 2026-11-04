@@ -162,8 +162,41 @@ def leads_for(sub):
     return unversioned_products(sub)
 
 
+# services the unidentified-port lead leaves to the web probes (httpx and the front page already read what a web port says about itself),
+# and nmap's name for a port that accepted the connection and never answered
+_NOT_UNIDENTIFIED = re.compile(r'^(?:ssl/)?(?:https?|http-.*|tcpwrapped)$')
+
+
+def unidentified_leads(ports):
+    """Leads for the nmap probe from ``ports`` (pairs of ``(ip address, Port)``): open TCP ports a fingerprinting pass named a service on
+    (a port-table guess, or a soft match such as "generic dns response: REFUSED") but no product. nmap's lower intensities stop at a soft
+    match, so a DNS server on 5353 is never identified; ``--version-all`` (the ``nmap-version-all`` probe) sends the probes they skipped.
+    Only that probe follows these leads, and a port the probe already answered for (source ``nmap-probe``) waits for the next fingerprinting
+    pass. Kept apart from the unversioned products: a port with no product names nothing for the host page or an AI to reason about. Pure."""
+    from startScan.models import OPEN_PORT_STATES, TCP_PROTOCOLS
+    leads, listed = [], set()
+    for ip, port in ports:
+        service = (port.service_name or '').strip()
+        if ((port.product or '').strip() or (port.cpe or '').strip() or not (service or (port.service_extra or '').strip())
+                or port.state not in OPEN_PORT_STATES or port.protocol not in TCP_PROTOCOLS or port.source == 'nmap-probe'
+                or _NOT_UNIDENTIFIED.match(service.lower()) or (ip, port.number) in listed):
+            continue
+        listed.add((ip, port.number))
+        leads.append({'name': f'unidentified {service or "service"} on {port.number}', 'source': 'port', 'source_id': port.id, 'ip': ip,
+                      'port': port.number, 'protocol': 'tcp', 'cpe': '', 'service': service, 'unidentified': True})
+    return leads
+
+
+def unidentified_port_leads(sub):
+    """``unidentified_leads`` for one host (a ``Subdomain``)."""
+    from startScan.models import open_ports
+    return unidentified_leads([(ip.address, port) for ip in sub.ip_addresses.all() for port in open_ports(ip)])
+
+
 def _lead_matches(probe, token, lead):
     pattern = probe['leads']
+    if lead.get('unidentified'):  # a port with no product: only the full-intensity nmap probe can say what answers there
+        return pattern == '*port' and lead.get('port') is not None
     if pattern == WEB:
         return lead.get('source') == 'tech' or lead.get('port') is not None
     if pattern == '*port':
@@ -171,14 +204,16 @@ def _lead_matches(probe, token, lead):
     return bool(re.search(pattern, token))
 
 
-def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None):
+def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None, limit=MAX_PROBES_PER_HOST):
     """``[{'probe', 'label', 'family', 'target', 'for'}]``: the probes that can find the version or identity of ``sub``'s leads, chosen
-    by rule, never by a model, at most MAX_PROBES_PER_HOST. A web probe targets the host's first web base URL, an nmap probe one
-    address and port (none when an edge answers there: an edge's own software is not the host's). ``wanted`` limits it to probe ids."""
+    by rule, never by a model, at most ``limit`` (MAX_PROBES_PER_HOST; None for no cut, when the caller cuts after the ledger). A web probe
+    targets the host's first web base URL, an nmap probe one address and port (none when an edge answers there: an edge's own software is not
+    the host's). ``wanted`` limits it to probe ids. The leads are the unversioned products and then the unidentified ports; the products'
+    probes come first (at most MAX_PROBES_PER_HOST of them, as before) and an unidentified port's probe only takes a place they leave."""
     from cveFeed import route_auth
-    leads = leads_for(sub) if leads is None else leads
+    leads = leads_for(sub) + unidentified_port_leads(sub) if leads is None else leads
     bases = route_auth.web_bases(sub)
-    plan = {}
+    plan, unidentified = {}, {}
     for probe in PROBES:
         if wanted is not None and probe['id'] not in wanted:
             continue
@@ -190,10 +225,13 @@ def plan_for_host(sub, leads=None, edge_fronted=False, wanted=None):
             else:
                 target = None if edge_fronted else {'ip': lead.get('ip'), 'port': lead.get('port'), 'service': lead.get('service', '')}
             if target:
-                entry = plan.setdefault((probe['id'], tuple(sorted(target.items()))),
-                                        {'probe': probe['id'], 'label': probe['label'], 'family': probe['family'], 'target': target, 'for': []})
+                key = (probe['id'], tuple(sorted(target.items())))
+                entry = plan.setdefault(key, {'probe': probe['id'], 'label': probe['label'], 'family': probe['family'], 'target': target, 'for': []})
                 entry['for'].append(lead['name'])
-    return list(plan.values())[:MAX_PROBES_PER_HOST]
+                unidentified[key] = unidentified.get(key, True) and bool(lead.get('unidentified'))
+    known = [entry for key, entry in plan.items() if not unidentified[key]][:MAX_PROBES_PER_HOST]
+    ordered = known + [entry for key, entry in plan.items() if unidentified[key]]
+    return ordered if limit is None else ordered[:limit]
 
 
 def asset_key(host, entry):
@@ -1009,8 +1047,8 @@ def summarize(found):
 
 
 def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sleep):
-    """The pipeline stage: for each host of the scan with unversioned products, run the probes ``plan_for_host`` picks, inside the ledger TTL
-    and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
+    """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
+    (at most MAX_PROBES_PER_HOST that are due), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
     from cveFeed.nuclei_scan import scan_targets
     from reNgine import resources
@@ -1023,13 +1061,15 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     subs = Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports', 'waf')
     due = []
     for sub in subs.select_related('target_domain').order_by('name'):
-        leads = leads_for(sub)
+        leads = leads_for(sub) + unidentified_port_leads(sub)
         if not leads:
             continue
-        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'])
+        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'], limit=None)
         assets = {asset_key(sub.name, e): e for e in plan}
         covered = set() if force else ledger.fresh(SERVICE, assets, project)
-        todo = {a: e for a, e in assets.items() if ledger._norm(a) not in covered}
+        # the cap counts what is due, in plan order: a port no product was named on is probed once the products' probes are fresh in the
+        # ledger, never in their place
+        todo = dict(itertools.islice(((a, e) for a, e in assets.items() if ledger._norm(a) not in covered), MAX_PROBES_PER_HOST))
         if todo:
             due.append((sub, todo))
     # hosts with nothing due were dropped above, so the cap below cuts only work that is due: the never-probed and longest-waiting go first
