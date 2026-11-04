@@ -2,6 +2,29 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Upgrade notes
+
+- **Migration `targetApp.0008_domain_expect_private_ca`** adds one column with a database default (`false`), so the previous release keeps working against the new schema.
+- **Re-rating stored hygiene findings is a separate, opt-in step.** New and refreshed hygiene findings are rated by the new rules at once. To re-rate the open ones stored before this release, run `python3 manage.py rerate_hygiene` (a dry run: it lists per project how many open rows would be lowered or resolved and how their heat would move) and then `python3 manage.py rerate_hygiene --apply`. It never changes a person's remediation status. Per-subdomain DMARC rows and one-off "missing record" rows are cleared by the next hygiene run itself.
+
+### Changed
+
+- **Microsoft 365 discovery and enrolment names are rated as Microsoft's.** msoid, enterpriseenrollment, enterpriseregistration, autodiscover, lyncdiscover and sip names that point at Microsoft (by CNAME, or by a certificate that only names Microsoft) serve Microsoft's own certificate by design: the name mismatch is now info instead of high, and nothing else is reported about such an endpoint (it is not the client's asset; a finding already open on one resolves at the next check).
+- **Vendor-managed endpoints are tagged and rated ice or info.** A name that points by CNAME at a vendor platform (Zendesk, Squarespace, Microsoft 365, Palantir, Listrak, GoDaddy Payments, Azure VPN gateway, Railway, Netlify, Vercel and others; the list is data in `cveFeed/data/vendor_platforms.json`) gets the host label `vendor-managed`, and its TLS and SPF findings are rated low at most (certificate trust and name findings info), because the configuration is the vendor's.
+- **A target can say its devices use their vendor's private CA.** `POST projects/{slug}/targets/{id}/private-ca` (`expect_private_ca`) and the MCP tool `set_target_private_ca`; when set, an untrusted or self-signed chain on that target is rated info instead of medium. Every target record carries `expect_private_ca`.
+- **BREACH is smoke only where there is a secret to steal.** It stays medium when the host sets a session or auth cookie or serves a sign-in or session-protected page (from the route probes); otherwise (static sites, platform error pages) it is low.
+- **Certificates on auto-renewing managed platforms with a week or more left are low**, and an expired certificate on a development or test host (dev, test, qa, uat, staging and similar names) is medium instead of critical.
+- **A DMARC report-authorisation gap under p=quarantine or p=reject is info**: the policy still stops spoofed mail, only the reports are lost. It stays medium under p=none.
+- **Missing SPF on a subdomain under an enforcing DMARC policy is info.** When the name's own policy, or its organizational domain's (`sp=` first), is quarantine or reject, spoofed mail from it already fails DMARC.
+- **A parent's weak DMARC policy is one finding on the parent, not one per subdomain.** Subdomains with no record of their own that inherit p=none (or a weak `sp=`) now report it once, on the organizational domain, listing the names it covers (`evidence.covers`).
+
+### Fixed
+
+- **A one-off DNS failure no longer opens a "missing record" finding.** "No SPF record" and "No DMARC record" (also the organizational domain's DMARC lookup) now need two resolvers to agree the record is missing (the system resolver, then 1.1.1.1 and 8.8.8.8; `CVENGINE_HYGIENE_CONFIRM_RESOLVERS` changes them, empty turns them off). When they cannot agree (a timeout, SERVFAIL, no outbound DNS), the finding is stored as `pending` with each resolver's answer and opens only if the next run sees it again; a timeout is never read as "no record". Every such finding now carries the DNS answers as its evidence (`evidence.dns`), and `GET .../hygiene?status=pending` lists the held-back ones.
+- **SPF behind a CNAME is no longer reported missing after one failed lookup.** The SPF record of a name that is an alias (a help-desk or mail vendor's host) is the alias target's, read through the CNAME by each resolver; the alias is now kept in the evidence, and one resolver's failure no longer opens "No SPF record" (see above).
+
 ## v1.3.4 (2026-11-03)
 
 ### Upgrade notes
