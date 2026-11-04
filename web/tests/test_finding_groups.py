@@ -302,15 +302,17 @@ class GroupedFindingsTests(TestCase):
 			with CaptureQueriesContext(connection) as ctx:
 				self.get(type='cve', group='cve', page_size=50)
 			return len(ctx.captured_queries)
-		count()  # warm the per-process caches (access rules, internal ranges) so both measures see the same
-		before = count()
-		extra = CVEEntry.objects.create(cve_id='CVE-2099-0002', cvss=6.1, title='t', published_at=NOW)
-		for i in range(30):
-			sub = Subdomain.objects.create(name=f'h{i}.acme-site.com', target_domain=self.da)
-			self.jq(self.c23, sub)
-			self.jq(extra, sub)
-			CVEMatch.objects.create(cve_entry=extra, subdomain=sub, matched_product='openssh', matched_version='8.0', source='port')
-		self.assertEqual(count(), before)
+		from tests.steady import steady_caches
+		with steady_caches():  # no clock-expiring cache is reloaded inside a measure (tests/steady.py)
+			count()  # warm the per-process caches (access rules, internal ranges) so both measures see the same
+			before = count()
+			extra = CVEEntry.objects.create(cve_id='CVE-2099-0002', cvss=6.1, title='t', published_at=NOW)
+			for i in range(30):
+				sub = Subdomain.objects.create(name=f'h{i}.acme-site.com', target_domain=self.da)
+				self.jq(self.c23, sub)
+				self.jq(extra, sub)
+				CVEMatch.objects.create(cve_entry=extra, subdomain=sub, matched_product='openssh', matched_version='8.0', source='port')
+			self.assertEqual(count(), before)
 
 	def test_mcp_list_findings_takes_group(self):
 		error, body = tool_call(self.token, 'list_findings', {'project': 'fg-a', 'type': 'cve', 'group': 'cve'})
