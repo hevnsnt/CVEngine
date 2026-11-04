@@ -21,7 +21,7 @@ from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
-from cveFeed import versions
+from cveFeed import js_libraries, versions
 
 """
 Celery tasks.
@@ -87,6 +87,8 @@ def persist_bbot_result(result, ctx):
 		if not subdomain:
 			continue
 		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
+		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
 		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
