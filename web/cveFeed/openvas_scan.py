@@ -604,7 +604,7 @@ def host_heat(project_id, names):
     if not wanted:
         return {}
     rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
-            .prefetch_related('cve_matches__cve_entry', 'cve_matches__triage', 'vulnerability_set', 'vulnerability_set__triage', 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
+            .prefetch_related('cve_matches__cve_entry', services.triage_prefetch('cve_matches__triage'), 'vulnerability_set', services.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
     out = {}
     for sub in rows:
         reasons = services._heat_reasons(sub, capped=False)
