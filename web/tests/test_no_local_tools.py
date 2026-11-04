@@ -159,6 +159,7 @@ ALLOWED = {
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
+        'cveFeed/reviewer.py',  # AI reviewer: names nuclei as a finding kind and the template refresh task, runs nothing
         'cveFeed/safeyaml.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
@@ -303,6 +304,7 @@ ALLOWED = {
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
+        'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing
         'cveFeed/route_auth.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing

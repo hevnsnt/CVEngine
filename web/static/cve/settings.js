@@ -110,6 +110,43 @@ const card = (title, ...kids) => {
   return c;
 };
 
+// The AI reviewer (docs/AI-REVIEWER.md): its own container, with a model per job. Plain text everywhere; nothing here renders HTML.
+async function reviewerCard() {
+  const r = await api("GET", "reviewer");
+  const on = check("Review findings and check operations with the AI reviewer", r.enabled);
+  const close = check("Close the findings it finds to be false positives (off: record its verdicts only)", r.auto_close);
+  const reviewModel = text(r.review_model, { placeholder: `default: ${r.default_models.review} on Anthropic, else the provider's model` });
+  const opsModel = text(r.ops_model, { placeholder: `default: ${r.default_models.ops} on Anthropic, else the provider's model` });
+  const daily = text(r.review_daily_max, { type: "number", min: "0", max: "20000" });
+  const hours = text((r.ops_hours || []).join(", "), { placeholder: (r.default_ops_hours || []).join(", ") });
+  const status = el("p", "note");
+  const container = r.container || {};
+  status.textContent = !r.env_enabled ? "Turned off on the server (CVENGINE_REVIEWER=0)."
+    : !container.token ? "Waiting for the server to hand the reviewer container its token."
+    : `${r.working ? "Working" : "Not working (see the AI model above, or a pause)"}. Models in force: ${(r.models_in_force || {}).review || "none"} for findings, `
+      + `${(r.models_in_force || {}).ops || "none"} for operations. Reviewed today: ${r.reviews_today}. `
+      + `Last call from the container: ${container.last_seen || "never"}. Last operations check: ${r.last_ops_at || "never"}.`;
+  return card(
+    "AI reviewer",
+    el("p", "note", "A separate, locked-down container reviews every open finding once (again only when its host or evidence changes) and checks the server's operations a few times a day, raising admin alerts. It closes a false positive only when the server finds no hard evidence, nobody worked the finding, and no text aimed at AI agents in its evidence."),
+    status,
+    on.wrap,
+    close.wrap,
+    field("Model for finding review", reviewModel, "Leave empty for the default."),
+    field("Model for the operations check", opsModel, "Leave empty for the default."),
+    field("Findings reviewed per day at most", daily),
+    field("Operations check hours (UTC, comma separated)", hours),
+    button("Save", async () => {
+      const list = hours.value.split(",").map((h) => h.trim()).filter(Boolean).map(Number);
+      await api("PUT", "reviewer", {
+        enabled: on.box.checked, auto_close: close.box.checked, review_model: reviewModel.value.trim(), ops_model: opsModel.value.trim(),
+        review_daily_max: Number(daily.value), ops_hours: list,
+      });
+      toast("Saved");
+    }),
+  );
+}
+
 // --- sections ------------------------------------------------------------------
 const sections = {
   async ai(m) {
@@ -410,6 +447,7 @@ const sections = {
         }),
       ),
     );
+    m.append(el("div", "", null, { style: "height:16px" }), await reviewerCard());
   },
 
   async updates(m) {

@@ -59,6 +59,7 @@ services:
       - static_volume:/usr/src/app/staticfiles/
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
       - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
+      - reviewer_bootstrap:/var/lib/cvengine-reviewer  # where the server leaves the AI reviewer container's token (agentapi/builtin_reviewer.py)
       - openvas_gvmd_socket_vol:/run/gvmd:ro  # the optional openvas profile's gvmd (GMP) socket (docs/OPENVAS.md); an empty directory without it, and only celery mounts it
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
@@ -312,6 +313,42 @@ services:
     volumes:
       - scanner_bootstrap:/bootstrap:ro
       - scanner_state:/var/lib/cvengine-sentinel
+    depends_on:
+      - web
+    networks:
+      - rengine_network
+
+  # The AI reviewer (docs/AI-REVIEWER.md): reviews every open finding once and checks the server's operations a few times a day, with the
+  # provider and models chosen in Settings > AI model. It is boxed in on purpose: its own small image (./reviewer) with no cvENGINE source,
+  # no database or Redis credentials, a read-only filesystem, no capabilities, an unprivileged user. It talks to the server only over
+  # /api/v1/reviewer/* with a reviewer-scope token the server writes to reviewer_bootstrap, and to the AI provider. It idles until an AI
+  # provider is configured; CVENGINE_REVIEWER=0 in .env turns it off.
+  reviewer:
+    build:
+      context: ./reviewer
+    image: cvengine-reviewer-local:latest
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "10002:10002"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: "${REVIEWER_MEM_LIMIT:-256m}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # a local model server (LM Studio, Ollama, vLLM) on this machine, as Settings > AI model allows
+    environment:
+      CVENGINE_REVIEWER_SERVER: "http://web:8000"
+      CVENGINE_REVIEWER_TOKEN_FILE: "/bootstrap/token"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-web,localhost,127.0.0.1}"
+    volumes:
+      - reviewer_bootstrap:/bootstrap:ro
     depends_on:
       - web
     networks:
@@ -582,6 +619,7 @@ volumes:
   tailscale_state:
   tailscale_status:
   scanner_bootstrap:
+  reviewer_bootstrap:
   scanner_state:
   openvas_gpg_data_vol:
   openvas_scap_data_vol:

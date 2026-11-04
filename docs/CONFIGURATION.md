@@ -208,6 +208,17 @@ The built-in scanner is a Sentinel that runs next to the server as the `scanner`
 | `CVENGINE_SCANNER_SOURCE` | a pinned commit of `https://github.com/hevnsnt/cvENGINE-sentinel.git` | The build context of the built-in scanner image, read by compose: a pinned commit by default, never a branch. A git URL with `#<commit>`, or a path to a checkout, builds from that instead. Quote a value that has a `#`. |
 | `SCANNER_MEM_LIMIT` | `2g` | Memory limit of the `scanner` container, read by compose. The workers' own limit is `CELERY_MEM_LIMIT`. |
 
+## AI reviewer
+
+The AI reviewer is its own container, the `reviewer` compose service, which reviews open findings and checks the server's operations ([AI-REVIEWER.md](AI-REVIEWER.md)). Its models, daily cap and schedule are set in Settings, AI model. It does nothing until an AI provider is configured there.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_REVIEWER` | `1` | `0` (or `false`, `no`, `off`) turns the reviewer off: the server revokes its token and removes the token file, and the container idles. Read by the server containers. |
+| `CVENGINE_REVIEWER_BOOTSTRAP_DIR` | `/var/lib/cvengine-reviewer` | Where the server writes the reviewer's token, inside the `reviewer_bootstrap` volume. Read by the server containers. |
+| `CVENGINE_REVIEWER_UID` | `10002` | The user the token file is handed to: the user the reviewer image runs as. Read by the server containers. |
+| `REVIEWER_MEM_LIMIT` | `256m` | Memory limit of the `reviewer` container, read by compose. |
+
 ## AI limits
 
 | Variable | Default | Purpose |

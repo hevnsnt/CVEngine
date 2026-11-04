@@ -2190,3 +2190,90 @@ class InternalRange(models.Model):
 
     def __str__(self):
         return f"{self.cidr} (project {self.project_id})"
+
+
+class ReviewerSettings(models.Model):
+    """Single-row settings of the AI reviewer (docs/AI-REVIEWER.md), the separate container that reviews every open finding once and checks
+    the server's operations a few times a day. The provider and its key are the ones in Settings > AI model (``AIProviderSettings``); this row
+    chooses a model per job ('' = ``claude-sonnet-5-5`` / ``claude-haiku-5-5`` on Anthropic, else the provider's own model), whether a false
+    positive is closed or only recorded, the daily review cap and the UTC hours of the operations check. Instance-wide."""
+
+    enabled = models.BooleanField(default=True)
+    review_model = models.CharField(max_length=100, blank=True, default="")
+    ops_model = models.CharField(max_length=100, blank=True, default="")
+    auto_close = models.BooleanField(default=True)
+    review_daily_max = models.PositiveIntegerField(default=300)
+    ops_hours = models.JSONField(default=list, blank=True)  # UTC hours; [] = the default (3, 9, 15, 21)
+    last_ops_at = models.DateTimeField(null=True, blank=True)  # when the operations job last reported
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return "AI reviewer settings"
+
+
+class FindingReview(models.Model):
+    """One review of one finding by the AI reviewer (cveFeed.reviewer). ``review_key`` is the finding's evidence key and its host's state
+    fingerprint together: a finding is reviewed once per key, and a new port, version or piece of evidence is a new key. ``outcome`` is what
+    the server did with the verdict: ``closed`` (closed as a false positive), ``recorded`` (kept as the reviewer's opinion), ``disputed`` (a
+    false positive the server would not close because the finding has hard evidence) or ``held`` (a false positive it would not close for
+    another reason, in ``held_reason``). Kept as history: the newest row of a finding is its current review."""
+
+    VERDICTS = ("false_positive", "true_open", "true_in_progress", "true_fixed", "true_accepted_risk", "uncertain")
+    OUTCOMES = ("closed", "recorded", "disputed", "held")
+    triage = models.ForeignKey(Triage, on_delete=models.CASCADE, related_name="reviews")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    review_key = models.CharField(max_length=40)
+    verdict = models.CharField(max_length=20)
+    confidence = models.CharField(max_length=8, default="low")
+    reason_code = models.CharField(max_length=32, blank=True, default="")
+    note = models.TextField(blank=True, default="")
+    model = models.CharField(max_length=100, blank=True, default="")
+    outcome = models.CharField(max_length=10, default="recorded")
+    held_reason = models.CharField(max_length=200, blank=True, default="")
+    injection = models.JSONField(default=list, blank=True)  # the families of AI-directed text found in the evidence (cveFeed.injection_guard)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["triage", "-created_at"], name="findingreview_triage_idx"),
+                   models.Index(fields=["review_key"], name="findingreview_key_idx"),
+                   models.Index(fields=["created_at"], name="findingreview_created_idx")]
+
+    def __str__(self):
+        return f"review of triage {self.triage_id}: {self.verdict} ({self.outcome})"
+
+
+class AdminAlert(models.Model):
+    """A problem with the server itself that an App Admin should read: a banner on every page for App Admins until it is resolved or
+    dismissed (cveFeed.reviewer: the operations checks raise and resolve them, and the AI reviewer's operations job adds its diagnosis).
+    One row per ``code`` while it is open; a resolved problem that comes back opens a new row. ``detail`` is the deterministic description,
+    ``ai_detail`` the reviewer's diagnosis and next steps; both are plain text and are only ever rendered as text."""
+
+    SEVERITIES = ("info", "warning", "critical")
+    code = models.CharField(max_length=40)
+    severity = models.CharField(max_length=8, default="warning")
+    title = models.CharField(max_length=200)
+    detail = models.TextField(blank=True, default="")
+    ai_detail = models.TextField(blank=True, default="")
+    ai_model = models.CharField(max_length=100, blank=True, default="")
+    facts = models.JSONField(default=dict, blank=True)
+    digest = models.CharField(max_length=40, blank=True, default="")  # the facts that make it this problem: a dismissed alert returns when they change
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    dismissed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    dismissed_digest = models.CharField(max_length=40, blank=True, default="")
+
+    class Meta:
+        indexes = [models.Index(fields=["code", "resolved_at"], name="adminalert_code_open_idx")]
+        ordering = ["-last_seen", "-id"]
+
+    def __str__(self):
+        return f"{self.code}: {self.title}"

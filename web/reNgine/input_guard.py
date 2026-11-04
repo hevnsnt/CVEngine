@@ -87,6 +87,10 @@ INVENTORY_PATH = re.compile(r'^/api/v1/projects/[-\w]+/inventory/?$')
 # string and cap every list, and nothing in it reaches a shell, a query or a template. Its address and query string are still checked, and
 # so is every other Sentinel route (registration and bootstrap carry what a person typed).
 SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/result|heartbeat)/?$')
+# The AI reviewer's verdicts and operations report are the same kind of machine data: a model's note about a finding quotes what the scanned
+# host served (a script tag, an SQL fragment, a template expression) as a matter of course. cveFeed.reviewer accepts only enums and one note,
+# which it strips of markup and links and stores as text; nothing in it reaches a shell, a query or a template.
+REVIEWER_MACHINE_PATH = re.compile(r'^/api/v1/reviewer/(?:findings/t\d{1,12}/verdict|ops/report)/?$')
 BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
@@ -188,7 +192,7 @@ def _request_pairs(request):
         length = 0
     data = None
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY and not INVENTORY_PATH.match(request.path) \
-            and not SENTINEL_MACHINE_PATH.match(request.path):
+            and not SENTINEL_MACHINE_PATH.match(request.path) and not REVIEWER_MACHINE_PATH.match(request.path):
         if ctype == 'application/json':
             try:
                 data = json.loads(request.body.decode('utf-8', 'replace'))

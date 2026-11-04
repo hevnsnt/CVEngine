@@ -2,6 +2,23 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased (1.4)
+
+### Added
+
+- **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
+  - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
+  - **Operations check** (Haiku 5.5 by default). It runs four times a day and covers idle Sentinels, scanning that ran on the server instead of the Sentinels, nuclei template freshness, Sentinel and scan failures, the server's own problems, AI-written templates waiting for review, and failing AI calls. Problems become admin alerts, a banner for App Admins; the server raises and resolves them every 30 minutes even without an AI. The reviewer adds a diagnosis to each alert and may give idle Sentinels work or fetch new nuclei templates, only when a check offers that.
+
+  The container is boxed in:
+  - it has no source, no database or Redis credentials, and no capabilities;
+  - it runs on a read-only filesystem as an unprivileged user;
+  - it reaches the server only through `/api/v1/reviewer/*`, with a token of the new scope `reviewer`;
+  - the model has no tools;
+  - every answer is an enum plus one note that is cleaned of markup and links, refused if it repeats a marker planted in the evidence, and shown only as text.
+
+  The defences follow the attacks SpikeStrip and wraith describe. Settings, AI model has the switches (`GET/PUT /cve/api/settings/reviewer`); `CVENGINE_REVIEWER=0` turns it off. Migrations `cveFeed.0144` and `cveFeed.0145` add the review, alert and settings tables and the two schedules.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes
