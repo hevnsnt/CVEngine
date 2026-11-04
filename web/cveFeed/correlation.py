@@ -891,6 +891,8 @@ def signature_of(obj):
 DIFFERENT_PRODUCT = 'Closed automatically: different product'
 # a validation's fresh read of the page's scripts (cveFeed.validation.library_outcome): the library is fixed, or the host is an alias
 SCRIPT_READ = 'Closed automatically: fresh script read'
+# CVEMatch.source of an OpenVAS NVT result (cveFeed.openvas_scan.SOURCE): reported by a test of the product, not correlated from its name
+OPENVAS_SOURCE = 'openvas'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
                match_policy.NO_EVIDENCE, SCRIPT_READ)
@@ -1012,6 +1014,11 @@ def invalid_identity_reason(match):
     reason = library_provenance_reason(match)
     if reason:
         return reason
+    if match.source == OPENVAS_SOURCE:
+        # Not a correlation: the NVT that reported the CVE tested this product on this port itself, whatever its confidence. Its stored
+        # name is the NVT and port ("OpenVAS NVT <oid> on 22/tcp"), never an advisory product, so a name comparison would close every
+        # OpenVAS match below a hard QoD as "different product" (#414). Its quality of detection is weighed by triage instead.
+        return ''
     # The sighting the match was made from, not the product the advisory names: a match in range stores the advisory's own name, which
     # always matches itself, so only the original sighting can show that a different product was linked (an "nginx" fingerprint
     # against ingress-nginx's ranges).

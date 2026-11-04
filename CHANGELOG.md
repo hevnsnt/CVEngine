@@ -2,6 +2,19 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Upgrade notes
+
+- **Reopening the OpenVAS matches closed as "different product" is a separate, opt-in step.** New imports are no longer closed that way. To reopen the ones already closed, run `python3 manage.py reopen_openvas_identity_closures` (a dry run: it lists, per project, the OpenVAS CVE matches the identity check closed automatically as "different product") and then `python3 manage.py reopen_openvas_identity_closures --apply`. `--project <slug>` (repeatable) limits it. Only automatic closures on matches nobody has worked are reopened; a reopened match is unjudged again and the next triage pass rates it. No migration (reported by camstork, #414).
+
+### Fixed
+
+- **OpenVAS CVE matches no longer close themselves as "different product".** An OpenVAS match is stored under its NVT and port ("OpenVAS NVT <oid> on 22/tcp"), and the product-identity check compared that name with the advisory's products, so every match an NVT did not confirm with a hard quality of detection (most of an unauthenticated scan: remote banner results at QoD 30) was closed as not affected minutes after the import, with a reason that was not true. The NVT tested that product itself, so OpenVAS matches are no longer compared by name (reported by camstork, #414).
+- **An OpenVAS match records what the NVT identified.** The version the NVT printed ("Installed version:") is now the match's version, and the detected product's CPE, the product, the installed and the fixed version are kept in its evidence beside the OID and port (reported by camstork, #414).
+- **Triage sees the scanner's evidence for an OpenVAS match.** The AI review is given the NVT's name, the port, the quality of detection and its type, the product and versions it identified and the start of its result text (at most 600 characters, cleaned like any other host text: the host's names redacted, secrets masked, sentences of instructions dropped), instead of only the opaque "OpenVAS NVT <oid> on <port>" (reported by camstork, #414).
+- **A confirmed OpenVAS match is attributed to OpenVAS.** Its triage reason said "a nuclei template check matched this host"; it now says which check confirmed it, for example "an OpenVAS check (QoD 98, remote_vul) confirmed it on this host" (reported by camstork, #414).
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes
