@@ -1,0 +1,38 @@
+{
+ "_comment": "Platforms a customer points a name at by CNAME and the vendor runs: the TLS and HTTP configuration of such an endpoint is the vendor's, not the client's. Read by cveFeed.hygiene_rating. 'suffixes' match the CNAME target (or the certificate names) on a label boundary. 'discovery_labels' are names Microsoft 365 asks a customer to publish that point at Microsoft's own service: the endpoint is Microsoft's, not a client asset.",
+ "platforms": [
+  {"vendor": "Microsoft", "suffixes": ["outlook.com", "office365.com", "office.com", "office.net", "microsoftonline.com", "microsoftonline-p.net",
+                                       "microsoftonline-p.com", "manage.microsoft.com", "microsoft.com", "lync.com", "windows.net", "msidentity.com",
+                                       "sharepoint.com"]},
+  {"vendor": "Azure VPN gateway", "suffixes": ["vpn.azure.com"]},
+  {"vendor": "Zendesk", "suffixes": ["zendesk.com", "zdusercontent.com", "zdassets.com"]},
+  {"vendor": "Squarespace", "suffixes": ["squarespace.com", "sqsp.net"]},
+  {"vendor": "Palantir", "suffixes": ["palantirfoundry.com", "palantir.com", "palantircloud.com"]},
+  {"vendor": "Listrak", "suffixes": ["listrak.com", "listrakbi.com", "listrak.net"]},
+  {"vendor": "GoDaddy Payments", "suffixes": ["poynt.net", "poynt.com", "godaddypayments.com"]},
+  {"vendor": "Railway", "suffixes": ["railway.app", "railway.com"]},
+  {"vendor": "Netlify", "suffixes": ["netlify.app", "netlify.com", "netlifyglobalcdn.com"]},
+  {"vendor": "Vercel", "suffixes": ["vercel.app", "vercel-dns.com"]},
+  {"vendor": "GitHub Pages", "suffixes": ["github.io"]},
+  {"vendor": "Heroku", "suffixes": ["herokuapp.com", "herokudns.com"]},
+  {"vendor": "Shopify", "suffixes": ["myshopify.com", "shops.myshopify.com"]},
+  {"vendor": "Wix", "suffixes": ["wixdns.net"]},
+  {"vendor": "Webflow", "suffixes": ["webflow.io", "proxy-ssl.webflow.com"]},
+  {"vendor": "HubSpot", "suffixes": ["hubspot.net", "hs-sites.com"]},
+  {"vendor": "Freshdesk", "suffixes": ["freshdesk.com"]},
+  {"vendor": "Atlassian Statuspage", "suffixes": ["statuspage.io"]},
+  {"vendor": "Salesforce", "suffixes": ["my.salesforce.com", "force.com", "exacttarget.com"]},
+  {"vendor": "Okta", "suffixes": ["okta.com", "oktapreview.com"]},
+  {"vendor": "Firebase Hosting", "suffixes": ["firebaseapp.com", "web.app"]},
+  {"vendor": "Render", "suffixes": ["onrender.com"]},
+  {"vendor": "Fly.io", "suffixes": ["fly.dev"]},
+  {"vendor": "Cloudflare Pages", "suffixes": ["pages.dev"]},
+  {"vendor": "Mailgun", "suffixes": ["mailgun.org"]},
+  {"vendor": "SendGrid", "suffixes": ["sendgrid.net"]}
+ ],
+ "discovery": {
+  "vendor": "Microsoft",
+  "labels": ["msoid", "enterpriseenrollment", "enterpriseregistration", "autodiscover", "lyncdiscover", "sip"]
+ },
+ "auto_renew_issuers": ["Amazon"]
+}

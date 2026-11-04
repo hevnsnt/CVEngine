@@ -255,7 +255,7 @@ def store(domain, host, port, result, where):
     from cveFeed.hygiene import Finding, store_findings
     found = [Finding(f['check'], f['severity'], f['title'], f['detail'], where, f['evidence']) for f in result.findings]
     skip = result.inconclusive
-    return store_findings(domain, found, hosts={where}, owns=lambda check: check.startswith('tlsa_') and check not in skip)
+    return store_findings(domain, found, hosts={where}, owns=lambda check: check.startswith('tlsa_') and check not in skip, live_cnames=True)
 
 
 # ----------------------------------------------------------------------------- CVE evidence

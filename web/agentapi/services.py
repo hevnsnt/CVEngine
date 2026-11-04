@@ -272,7 +272,8 @@ def list_engines(ctx, params=None):
 def _target(d):
     out = {'id': d.id, 'name': d.name, 'alias': d.alias, 'note': d.note, 'description': d.description,
            'created': _iso(d.insert_date), 'last_scan': _iso(d.start_scan_date),
-           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode}
+           'scope_mode': d.scope_mode, 'host_scoped': d.is_host_scoped(), 'discovery_mode': d.discovery_mode,
+           'expect_private_ca': bool(d.expect_private_ca)}
     if hasattr(d, 'n_hosts'):  # list view: how big the target is and how much of it is exposed
         out['hosts'], out['exposed'] = d.n_hosts, d.n_exposed
     return out
@@ -379,6 +380,26 @@ def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
         audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
         d.discovery_mode = discovery_mode
         d.save(update_fields=['discovery_mode'])
+    return _target(d)
+
+
+def set_target_private_ca(ctx, slug, target_id, expect_private_ca):
+    """Say whether a target's devices use their vendor's own private CA. When they do, an untrusted or self-signed certificate chain on
+    the target is expected and the hygiene check rates it information instead of medium. Applies from the next hygiene run."""
+    from cveFeed.admin_api import audit
+    from targetApp.models import Domain
+    project, _ = get_project(ctx, slug, write=True)
+    if isinstance(expect_private_ca, str) and expect_private_ca.strip().lower() in ('true', 'false', '1', '0', 'yes', 'no'):
+        expect_private_ca = expect_private_ca.strip().lower() in ('true', '1', 'yes')
+    if not isinstance(expect_private_ca, bool):
+        raise ApiError(400, 'expect_private_ca must be true or false')
+    d = Domain.objects.filter(project=project, id=target_id).first()
+    if not d:
+        raise ApiError(404, 'target not found')
+    if d.expect_private_ca != expect_private_ca:
+        audit(ctx.user, 'target.private_ca', d.name, project.org, project=slug, was=d.expect_private_ca, now=expect_private_ca)
+        d.expect_private_ca = expect_private_ca
+        d.save(update_fields=['expect_private_ca'])
     return _target(d)
 
 
