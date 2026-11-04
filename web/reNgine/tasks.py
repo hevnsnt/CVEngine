@@ -200,10 +200,25 @@ def _persist_bbot_findings(result, ctx, subdomains):
 			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.bbot)
 			record_label(domain.project_id, domain.id, f['host'], label_for(f['name']), detail=f['description'])
 			continue
+		severity, description = f['severity'], f['description']
+		if f['module'] == 'baddns':
+			# rated by what an outsider can claim, at the client's own zone cut (cveFeed.dangling_dns); a provider's DNS reached through a
+			# CNAME, or a "not found" page the provider shows for every host, is not a finding
+			from cveFeed import dangling_dns
+			rating = dangling_dns.assess(f)
+			if rating is not None and rating.drop:
+				logger.info(f'bbot baddns finding on {f["host"]} dropped: {rating.note}')
+				continue
+			if rating is not None:
+				severity = rating.severity if rating.severity is not None else severity
+				description = dangling_dns.with_note(description, rating)
 		sub = subdomains.get(f['host']) or Subdomain.objects.filter(scan_history=scan, name=f['host']).first()
+		if sub is None and f['module'] == 'baddns' and f['host']:
+			# a dangling name often does not resolve, so no host row exists for it yet: the finding is still about that name ("Matched at")
+			sub, _ = save_subdomain(f['host'], ctx=ctx)
 		save_vulnerability(
 			target_domain=domain, scan_history=scan, subdomain=sub, http_url=f['url'] or f['host'], name=f['name'],
-			severity=f['severity'], description=f['description'], source='bbot', type='bbot', template_id=f['module'],
+			severity=severity, description=description, source='bbot', type='bbot', template_id=f['module'],
 			matcher_name=finding_key(f['description']),
 			request=f"bbot {f['module']} event on {f['host']}" + (f" at {f['url']}" if f['url'] else ''),
 			extracted_results=[x[:5000] for x in (f['host'], f['url']) if x])
