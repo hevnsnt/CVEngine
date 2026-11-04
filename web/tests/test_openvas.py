@@ -11,7 +11,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from gvm.connections import UnixSocketConnection
 from lxml import etree
@@ -68,6 +68,25 @@ class ParseTests(SimpleTestCase):
 
     def test_a_result_without_a_host_or_an_oid_is_unusable(self):
         self.assertIsNone(ov.parse_result(etree.fromstring('<result><nvt oid="1.2.3"/></result>')))
+
+    def test_an_overlong_cve_id_from_a_sentinel_is_dropped_not_stored(self):
+        # security review 1.3.4 (sentinel-2): CveId.name holds 100 characters; a longer id failed the save and with it the whole stage
+        from agentapi.sentinel_broker import _clean_findings, _clean_openvas_result
+        long_id = 'CVE-2024-' + '1' * 200
+        self.assertIsNone(ov.CVE_RE.match(long_id))
+        self.assertTrue(ov.CVE_RE.match('CVE-2024-1234567'))
+        found, _ = _clean_findings([{'template_id': 't', 'host': 'h', 'cve_ids': [long_id, 'CVE-2021-41773']}])
+        self.assertEqual(found[0]['cve_ids'], ['CVE-2021-41773'])
+        body = _clean_openvas_result({'results': [{'oid': '1.3.6.1.4.1.25623.1.0.1', 'address': '93.184.216.5', 'cves': [long_id]}]})
+        self.assertEqual(body['results'][0]['cves'], [])
+
+    def test_cert_references_without_a_cve_reference_mean_gvmds_nvt_cache_is_stale(self):
+        # camstork, #394: gvmd 26.43 sent only the CERT-Bund / DFN-CERT references (database) and none of the NVT cache's own cve / url ones
+        stale = etree.fromstring(etree.tostring(result_xml(cves=())).replace(b'<refs/>', b'<refs><ref type="cert-bund" id="WID-SEC-2023-1801"/>'
+                                                                                         b'<ref type="dfn-cert" id="DFN-CERT-2023-1665"/></refs>'))
+        self.assertEqual((ov.parse_result(stale)['cves'], ov.parse_result(stale)['stale_refs']), ([], True))
+        self.assertFalse(ov.parse_result(result_xml())['stale_refs'])  # a CVE reference: the cache has the NVT
+        self.assertFalse(ov.parse_result(result_xml(cves=()))['stale_refs'])  # no reference at all: an NVT with no CVE, like OS detection
         self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host><nvt oid="not an oid"/></result>')))
         self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host></result>')))
 
@@ -780,6 +799,35 @@ class ImportTests(Fixture, TestCase):
         match.refresh_from_db()
         self.assertEqual((match.template_result, match.remediation_status, match.ai_verdict), ('no_match', 'in_progress', ''))
 
+    def test_results_whose_cves_gvmd_left_out_close_nothing_and_ask_for_a_gvmd_restart(self):
+        # camstork, #394: a stale NVT cache sends every result without its CVE references. Read as "no CVE", the host looked scanned clean
+        # and every earlier OpenVAS finding on it was closed.
+        import tempfile
+        self.run_scan([APACHE, BANNER])
+        stale = [{**APACHE, 'cves': [], 'certs': ['WID-SEC-2021-2161']}, {**BANNER, 'cves': [], 'certs': ['WID-SEC-2019-0001']}]
+        with tempfile.TemporaryDirectory() as tmp, override_settings(BASE_DIR=tmp):  # ``self.settings`` is the OpenVAS row here
+            out = self.run_scan(stale)
+            self.assertEqual(Path(tmp, '.openvas-restart').read_text(), 'gvmd\n')
+        self.assertEqual((out['status'], out['nvt_cache_stale'], out['partial'], out['resolved']), ('done', 2, True, 0))
+        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}').open_status)
+        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', product=OID_BANNER).outcome, 'found')
+        run = OpenvasRun.objects.order_by('-pk').first()
+        self.assertIn('restart gvmd (docker compose restart openvas-gvmd)', run.error)
+        self.assertIn('kept_task_until', run.summary)
+        self.assertIn(run.task_id, self.gvmd.tasks)  # kept in gvmd: after the restart its report reads in full
+        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())  # asked again in three days
+        self.assertFalse(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test').exists())
+
+    def test_a_restart_is_asked_for_at_most_once_in_six_hours(self):
+        import tempfile
+        from cveFeed import openvas_admin
+        with tempfile.TemporaryDirectory() as tmp, override_settings(BASE_DIR=tmp):
+            self.assertTrue(openvas_admin.request_gvmd_restart())
+            self.assertFalse(openvas_admin.request_gvmd_restart())
+            old = Path(tmp, '.openvas-restart').stat().st_mtime - openvas_admin.RESTART_EVERY_SECONDS - 1
+            os.utime(Path(tmp, '.openvas-restart'), (old, old))
+            self.assertTrue(openvas_admin.request_gvmd_restart())
+
     def test_a_host_gvmd_did_not_scan_is_not_resolved(self):
         self.run_scan([APACHE])
         ServiceRun.objects.all().delete()
@@ -938,6 +986,24 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertTrue(CVEMatch.objects.filter(cve_entry=self.cve, source='openvas', template_result='vulnerable').exists())
         self.assertTrue(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test').exists())
         self.assertEqual(OpenvasRun.objects.get().status, 'done')
+
+    def test_a_sentinel_whose_gvmd_left_out_the_cves_closes_nothing(self):
+        from agentapi.sentinel_broker import _clean_openvas_result
+        self.run_scan([APACHE, BANNER])  # found earlier, by the local sidecar
+        self.make_sentinel()
+        ServiceRun.objects.all().delete()
+        self.tick()
+        run = OpenvasRun.objects.get(status='running')
+        body = _clean_openvas_result({'results': [{'address': '93.184.216.5', 'port': '443/tcp'}], 'scanned_addresses': ['93.184.216.5'],
+                                      'without_cve': 1, 'unusable': 0, 'nvt_cache_stale': 1})
+        self.assertEqual((body['partial'], body['nvt_cache_stale']), (True, 1))
+        run.sentinel_task.result, run.sentinel_task.status = body, 'done'
+        run.sentinel_task.save(update_fields=['result', 'status'])
+        out = self.tick()
+        self.assertEqual((out['status'], out['nvt_cache_stale'], out['resolved']), ('done', 1, 0))
+        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}').open_status)
+        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', product=OID_BANNER).outcome, 'found')
+        self.assertIn("the Sentinel's gvmd sent 1 result(s) without their CVE references", OpenvasRun.objects.get(pk=run.pk).error)
 
     def test_a_failed_sentinel_task_marks_the_run_failed_and_the_hosts_stay_due_again(self):
         self.make_sentinel()
@@ -1729,6 +1795,16 @@ class HostWatcherTests(SimpleTestCase):
         watch = (ROOT / 'scripts' / 'update-watch.sh').read_text()
         self.assertIn('scripts/openvas-sync.sh', watch)
         self.assertIn('web/.openvas-wanted', (ROOT / '.gitignore').read_text())
+        # a gvmd restart request (stale NVT cache) restarts openvas-gvmd only, while the add-on is on, and is answered so it runs once
+        self.assertIn('scripts/openvas-sync.sh restart-gvmd', watch)
+        self.assertIn('web/.openvas-restart -nt web/.openvas-restarted', watch)
+        self.assertIn('--profile openvas restart openvas-gvmd', script)
+        self.assertIn('ps --status running -q openvas-gvmd', script)  # only a running gvmd, also one started by hand (no web/.openvas-wanted)
+        self.assertIn('[ "$want" != off ]', script)
+        # the restart is handled before the on/off gate, which exits without an answer when web/.openvas-wanted is missing (make openvas-up)
+        self.assertLess(script.index('restart-gvmd ]'), script.index('case $want in on | off) ;; *) exit 0 ;; esac'))
+        self.assertIn('update-state.py openvas-restarted', script)
+        self.assertIn('web/.openvas-restart', (ROOT / '.gitignore').read_text())
 
     def test_the_page_has_nothing_to_type_and_builds_no_markup(self):
         js = (ROOT / 'web' / 'static' / 'cve' / 'openvas-panel.js').read_text()

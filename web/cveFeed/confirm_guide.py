@@ -547,10 +547,10 @@ def _client_library(match, cve, strategy, host, bases, key):
     if script_url:
         steps.append(_step(f'Open the {product} file the page loads', 'Its first comment line states the version.', run_in='browser', url=script_url))
         steps.append(_step('Or read its first line from a shell', 'Prints the start of the file, where the banner is.',
-                           f'curl -sS --max-time 20 {_q(script_url)} | head -c 300; echo'))
+                           f'curl -gsS --max-time 20 {_q(script_url)} | head -c 300; echo'))
     elif page:
         steps.append(_step(f'List the {product} scripts the page loads', 'Each src that names the library is a copy to open.',
-                           f"curl -sS --max-time 20 {_q(page)} | grep -oiE '<script[^>]+src=[^>]+>' | grep -i {_q(key.split('-')[0])}"))
+                           f"curl -gsS --max-time 20 {_q(page)} | grep -oiE '<script[^>]+src=[^>]+>' | grep -i {_q(key.split('-')[0])}"))
     console = console_expression(key, version)
     if console and page and runs:
         steps.append(_step('Ask the page which version runs', f'Open the page, open the browser\'s developer console (F12) and run the '
@@ -644,7 +644,7 @@ def _web_product(match, cve, strategy, host, bases):
                                                                     f'names {product} {version}.'})
         if url:
             steps.append(_step('Fetch that page and find the version', f'Look for "{version}" in the footer or title.',
-                               f'curl -sS --max-time 15 {_q(url)} | grep -n -F -e {_q(version)}' if version else f'curl -sS --max-time 15 {_q(url)}'))
+                               f'curl -gsS --max-time 15 {_q(url)} | grep -n -F -e {_q(version)}' if version else f'curl -gsS --max-time 15 {_q(url)}'))
     else:
         name = header or 'Server (or X-Powered-By for a runtime)'
         token = next((t for pattern, t in HEADER_TOKENS if pattern.search(product)), '')
@@ -652,7 +652,7 @@ def _web_product(match, cve, strategy, host, bases):
                          'text': f'{name.split(" ")[0]}: {token}/{version}' if token and version else f'{name} header naming {product} {version}'.strip()})
         if url:
             steps.append(_step(f'Read the {name.split(" ")[0]} header', 'HEAD request only; the header line states the product and version.',
-                               f'curl -sS -I --max-time 15 {_q(url)}' + (f" | grep -i -e {_q('^' + header + ':')}" if header else '')))
+                               f'curl -gsS -I --max-time 15 {_q(url)}' + (f" | grep -i -e {_q('^' + header + ':')}" if header else '')))
     local = []
     version_cmd = _host_version_step(product)
     if version_cmd:
@@ -706,7 +706,7 @@ def _network_service(match, cve, strategy, host):
             scheme = 'https' if port in (443, 8443) else 'http'
             url = _url(_base(scheme, host or ip, port) + '/')
             if url:
-                steps.append(_step('Or read the Server header', 'HEAD request only.', f'curl -sS -I --max-time 15 {_q(url)}'))
+                steps.append(_step('Or read the Server header', 'HEAD request only.', f'curl -gsS -I --max-time 15 {_q(url)}'))
     local = []
     version_cmd = _host_version_step(product)
     if version_cmd:
@@ -755,7 +755,7 @@ def _cms(match, cve, strategy, host, bases):
     if url:
         steps.append(_step(f'Open the {kind}\'s {"style.css" if kind == "theme" else "readme.txt"}', f'The "{field}:" line states the version '
                            'WPScan read.', run_in='browser', url=url))
-        steps.append(_step('Or read that line from a shell', '', f"curl -sS --max-time 15 {_q(url)} | grep -i -m1 -E {_q('^[[:space:]]*' + field + ':')}"))
+        steps.append(_step('Or read that line from a shell', '', f"curl -gsS --max-time 15 {_q(url)} | grep -i -m1 -E {_q('^[[:space:]]*' + field + ':')}"))
     local = []
     if slug:
         local.append({'title': 'On the WordPress server (WP-CLI, read-only)', 'commands': [
@@ -780,9 +780,9 @@ def _wordpress_core(match, cve, strategy, host, bases):
     steps = []
     if front:
         steps.append(_step('Read the generator tag of the front page', 'WordPress states its version there unless a plugin removes it.',
-                           f"curl -sS --max-time 15 {_q(front)} | grep -o -i -E {_q('<meta name=.generator. content=.WordPress [0-9.]+')}"))
+                           f"curl -gsS --max-time 15 {_q(front)} | grep -o -i -E {_q('<meta name=.generator. content=.WordPress [0-9.]+')}"))
     if feed:
-        steps.append(_step('Or read the feed\'s generator line', '', f"curl -sS --max-time 15 {_q(feed)} | grep -o -E {_q('wordpress.org/[?]v=[0-9.]+')}"))
+        steps.append(_step('Or read the feed\'s generator line', '', f"curl -gsS --max-time 15 {_q(feed)} | grep -o -E {_q('wordpress.org/[?]v=[0-9.]+')}"))
     return {'class': 'cms_core', 'class_label': 'WordPress core', 'headline': f'Confirm WordPress {version} on {host}',
             'where': [{'label': 'The site', 'url': front}] if front else [],
             'look_for': [{'label': 'What states the version', 'text': f'<meta name="generator" content="WordPress {version or "x.y.z"}" /> '

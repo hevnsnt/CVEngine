@@ -75,10 +75,16 @@ if [ "$(mode)" = overlay ]; then
   ! grep -q '0.0.0.0:443' <<<"$ports" || bad "the proxy took port 443"
 fi
 
+# The base was installed without a broker password (install-base.sh): the update must have generated one and recreated Redis with it
 if grep -qE '^REDIS_PASSWORD=.+' .env; then
   password=$(grep -E '^REDIS_PASSWORD=' .env | tail -n1 | cut -d= -f2-)
   dc exec -T redis redis-cli ping 2>&1 | grep -q NOAUTH || bad "Redis answers without the password"
   dc exec -T redis redis-cli -a "$password" --no-auth-warning ping | grep -q PONG || bad "Redis does not answer with the password"
+  if [ "$(mode)" = overlay ]; then
+    grep -qxF "REDIS_PASSWORD=$password" .env.vps || bad "the overlay's env file (.env.vps) does not carry the broker password"
+  fi
+else
+  bad "the update left the Redis broker without a password"
 fi
 
 [ "$fail" = 0 ] && echo "The updated install is healthy." || exit 1

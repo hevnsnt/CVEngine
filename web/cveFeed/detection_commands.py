@@ -52,12 +52,12 @@ def render_remote(check):
                 'decide': f"{p['product']} is a distribution release, not a product a banner states: on a host of that release, check the "
                           "installed package the advisory names against the distribution's own fixed build."}
     if kind == 'version_banner' and reading == 'header':
-        return {'tool': 'curl', 'invocation': f'curl -sS -I --max-time 15 https://{TARGET}/',
+        return {'tool': 'curl', 'invocation': f'curl -gsS -I --max-time 15 https://{TARGET}/',
                 'decide': f"Read the Server header (X-Powered-By for a runtime such as PHP or ASP.NET): the reported {p['product']} version is "
                           f"inside {_range_text(p['ranges'])}. A Linux distribution keeps the upstream version in the header after a backported "
                           'fix, and a proxy or CDN in front may answer with its own: the host\'s package release decides.'}
     if kind == 'version_banner' and reading == 'technology':
-        return {'tool': 'technology fingerprint', 'invocation': f'curl -sS -i --max-time 15 https://{TARGET}/',
+        return {'tool': 'technology fingerprint', 'invocation': f'curl -gsS -i --max-time 15 https://{TARGET}/',
                 'decide': f"cvENGINE's technology fingerprint (headers, page markers, a generator tag, a readme) names {p['product']} at a "
                           f"version inside {_range_text(p['ranges'])}. That names the product, rarely the exact version of a dependency: the "
                           "application's lockfile, package manager or the component's own files decide."}
@@ -74,7 +74,7 @@ def render_remote(check):
             expected += f" and the body contains {p['expect_contains']!r}"
         if p.get('expect_absent'):
             expected += f" and the body does not contain {p['expect_absent']!r}"
-        return {'tool': 'curl', 'invocation': f'curl {flags}{method} --max-time 15 {shlex.quote(url)}',
+        return {'tool': 'curl', 'invocation': f'curl -g {flags}{method} --max-time 15 {shlex.quote(url)}',
                 'decide': f'Vulnerable when the response has {expected}.'}
     if kind == 'nuclei_template':
         return {'tool': 'nuclei', 'invocation': f"nuclei -duc -id {shlex.quote(p['template_id'])} -u {TARGET}",
@@ -106,7 +106,7 @@ def _render_script_read(p):
     from cveFeed.js_libraries import MAX_SCRIPT_BYTES, MAX_SCRIPTS_PER_HOST
     product = _script_product({'kind': 'script_version', 'params': p})
     return {'tool': 'html-libraries probe',
-            'invocation': f'curl -sS --max-time 15 https://{TARGET}/',
+            'invocation': f'curl -gsS --max-time 15 https://{TARGET}/',
             'decide': (f"cvENGINE's html-libraries read (Validate now) fetches the page and up to {MAX_SCRIPTS_PER_HOST} of the scripts it loads; "
                        f'by hand, fetch each script the page names (curl -sS <script URL>; cvENGINE reads up to {MAX_SCRIPT_BYTES // 1024} KB '
                        'of each). Vulnerable version when the '

@@ -79,7 +79,8 @@ EXCLUDED_FAMILIES = ('Denial of Service', 'Brute force attacks')
 DEFAULT_LOGIN = ('admin', 'admin')  # what Greenbone's community containers create; replaced by ``bootstrap``
 
 ACTIVE = ('New', 'Requested', 'Queued', 'Running', 'Processing', 'Stop Requested')
-CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,}$')
+CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$')  # bounded: CveId.name holds 100 characters
+CERT_REF_TYPES = ('cert-bund', 'dfn-cert')  # references gvmd reads from its database through the NVT's CVEs (``parse_result``)
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _TAILNET = [ipaddress.ip_network(n) for n in ('100.64.0.0/10', 'fd7a:115c:a1e0::/48')]
 
@@ -983,6 +984,14 @@ def per_host_text(run, minutes):
 
 
 INCONCLUSIVE = 'OpenVAS ran but reported no scanned host'
+RESTART_GVMD = 'docker compose restart openvas-gvmd'
+SENTINEL_GVMD = "the Sentinel's gvmd"
+
+
+def stale_cache_error(count, where='gvmd'):
+    """What a run says when ``count`` of its results came without their CVE references because gvmd's NVT cache is out of date (``parse_result``)."""
+    return (f'{where} sent {count} result(s) without their CVE references: its NVT cache is out of date (greenbone/gvmd#3220). Imported as partial, '
+            f'so nothing earlier is resolved by it; restart gvmd ({RESTART_GVMD}) and the next scan of these hosts reads them')
 READ_MISMATCH = 'gvmd counts results for the task but none could be read'
 DEFAULT_KEEP_DAYS = 7  # how long the GVM task and report of an inconclusive run stay in gvmd for a person to look at
 
@@ -1127,6 +1136,11 @@ def parse_result(result):
     urls = [clean(r.get('id'), 500) for r in refs if r.get('type', '').lower() == 'url' and re.match(r'^https?://', r.get('id', ''))][:20]
     tags = _tags(_text(nvt, 'tags'))
     port, number_port = _port(_text(result, 'port'))
+    # gvmd prints an NVT's own references (cve, url) from its in-memory NVT cache, and the CERT-Bund / DFN-CERT ones from its database, where
+    # they are linked to the NVT through its CVEs. CERT references with no CVE reference therefore mean the cache lacks this NVT: gvmd 26.35 and
+    # later reload it only in their periodic-jobs process, so the cache stays empty after the first feed load and misses NVTs a later feed sync
+    # added, until gvmd restarts (greenbone/gvmd#3220). Such a result is not "without a CVE": its CVEs exist and were not sent.
+    stale = not cves and any(r.get('type', '').lower() in CERT_REF_TYPES for r in refs)
     return {
         'id': result.get('id', ''), 'oid': oid, 'name': clean(_text(nvt, 'name') or _text(result, 'name'), 300), 'family': clean(_text(nvt, 'family'), 100),
         'address': address, 'hostname': clean(_text(host_el, 'hostname'), 255), 'port': port, 'port_number': number_port,
@@ -1135,7 +1149,7 @@ def parse_result(result):
         'result': clean(_text(result, 'description'), 2000), 'summary': clean(tags.get('summary'), 1500),
         'insight': clean(tags.get('insight'), 1500), 'impact': clean(tags.get('impact'), 1500), 'affected': clean(tags.get('affected'), 800),
         'solution': clean(_text(nvt, 'solution') or tags.get('solution'), 1500), 'solution_type': clean(tags.get('solution_type'), 30),
-        'cvss_vector': clean(tags.get('cvss_base_vector'), 200), 'cves': cves, 'urls': urls,
+        'cvss_vector': clean(tags.get('cvss_base_vector'), 200), 'cves': cves, 'urls': urls, 'stale_refs': stale,
     }
 
 
@@ -1175,6 +1189,7 @@ def _parse_into(elements, out):
             out['unusable'] += 1
         elif not parsed['cves']:
             out['no_cve'] += 1
+            out['stale'] = out.get('stale', 0) + bool(parsed.get('stale_refs'))
             out['items'].append({**parsed, 'cves': []})  # kept for the scanned-host set only; never stored
         else:
             out['items'].append(parsed)
@@ -1496,6 +1511,10 @@ def import_results(run, gmp, status_xml):
                 got['gvm_count'] if got['gvm_count'] is not None else 'no', run.task_id, got['report_id'] or 'unknown', len(items) + unusable,
                 len(got['hosts']))
     extra = {'gvm_results': got['gvm_count'], 'report_id': got['report_id'] or '', 'host_minutes': host_minutes(got['hosts'])}
+    if got.get('stale'):  # results whose CVEs gvmd did not send: imported as partial, so nothing an earlier scan found is closed by their absence
+        extra['nvt_cache_stale'] = got['stale']
+        logger.warning('OpenVAS run %s: %s result(s) came with CERT references but no CVE reference: gvmd\'s NVT cache is out of date; imported as '
+                       'partial', run.pk, got['stale'])
     if got.get('short'):  # gvmd counts more than it gave: what was read is kept, and nothing earlier is resolved by it
         extra['short_read'] = {'read': len(items) + unusable, 'count': got['count']}
         logger.warning('OpenVAS run %s: read %s of the %s result(s) gvmd counts in the report; imported as partial', run.pk, len(items) + unusable,
@@ -1507,7 +1526,8 @@ def import_results(run, gmp, status_xml):
     scanned = scanned_addresses(gmp, status_xml, items, hosts=got['hosts'] if got['report_id'] else None)
     # Results come highest severity first and stop at MAX_RESULTS: a scan that hit the cap says nothing about what lies beyond it, so it is
     # partial (nothing earlier is resolved by it) rather than a complete answer. So is a read that ended before the count gvmd gives.
-    summary, names = _apply_import(run, items, scanned, no_cve, unusable, partial=len(items) + unusable >= MAX_RESULTS or 'short_read' in extra)
+    summary, names = _apply_import(run, items, scanned, no_cve, unusable,
+                                   partial=len(items) + unusable >= MAX_RESULTS or 'short_read' in extra or 'nvt_cache_stale' in extra)
     return {**summary, **extra}, names
 
 
@@ -1619,23 +1639,28 @@ def poll_sentinel(run):
         entry = activity.log('run_check', f'{run_label(run)}: importing the Sentinel-reported results', project=run.project_id, status='running',
                              **run_detail(run))
         try:
+            stale = result.get('nvt_cache_stale') or 0
             summary, names = _apply_import(run, result.get('results') or [], set(result.get('scanned_addresses') or []),
-                                           result.get('without_cve', 0), result.get('unusable', 0), partial=bool(result.get('partial')))
+                                           result.get('without_cve', 0), result.get('unusable', 0), partial=bool(result.get('partial') or stale))
         except Exception as exc:  # noqa: BLE001
             finish(run, 'failed', f'the Sentinel-reported results could not be imported ({type(exc).__name__})')
             ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
             activity.settle(entry, 'done', message=activity.diagnostic('OpenVAS Sentinel result import', exc))
             return {'run': run.pk, 'status': 'failed'}
         gone = [h for h in run.hosts.values() if h not in names]
-        ledger.record(SERVICE, names, run.project_id)
+        if stale:
+            summary['nvt_cache_stale'] = stale
+        ledger.record(FAILED_SERVICE if stale else SERVICE, names, run.project_id)  # see ``poll``: asked again once gvmd is restarted
         ledger.record(FAILED_SERVICE, gone, run.project_id)
         empty = inconclusive(summary)
-        finish(run, 'done', error=(INCONCLUSIVE if empty else 'stopped at its time budget; the results found so far were kept' if summary['partial'] else ''), summary=summary)
+        finish(run, 'done', error=(INCONCLUSIVE if empty else stale_cache_error(stale, SENTINEL_GVMD) if stale
+                                   else 'stopped at its time budget; the results found so far were kept' if summary['partial'] else ''), summary=summary)
         if empty:
             activity.settle(entry, 'done', message=f'{run_label(run)}: {INCONCLUSIVE} ({len(run.hosts)} host(s) asked); none is marked scanned')
             return {'run': run.pk, 'status': 'done', **summary}
-        activity.settle(entry, 'done', message=(f'{run_label(run)}{" stopped at its time budget" if summary["partial"] else ""}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
-                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')))
+        activity.settle(entry, 'done', message=(f'{run_label(run)}{" stopped at its time budget" if summary["partial"] and not stale else ""}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
+                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')
+                                                + (f'; {stale_cache_error(stale, SENTINEL_GVMD)}' if stale else '')))
         return {'run': run.pk, 'status': 'done', **summary}
     # failed or expired: the Sentinel never finished it. A later tick retries, locally or on a Sentinel. The hosts are marked failed (asked again in
     # three days) only when the scan itself ran and failed: a Sentinel that went away, or whose gvmd was not ready, says nothing about them.
@@ -1798,18 +1823,24 @@ def poll(run, gmp, now=None):
                             + f'; the GVM task and its report are kept for {keep_days()} days')
             return {'run': run.pk, 'status': 'failed'}
         gone = [h for h in run.hosts.values() if h not in names]
-        ledger.record(SERVICE, names, run.project_id)
+        stale = summary.get('nvt_cache_stale')
+        # A read whose CVEs gvmd left out is not a scan of these hosts: they are asked again in three days, by then with a restarted gvmd.
+        ledger.record(FAILED_SERVICE if stale else SERVICE, names, run.project_id)
         ledger.record(FAILED_SERVICE, gone, run.project_id)  # gvmd found no live host: asked again in three days
+        if stale:
+            from cveFeed import openvas_admin
+            openvas_admin.request_gvmd_restart()
         empty = inconclusive(summary)
-        if empty:  # nothing to show for the run: the task and its report stay in gvmd for a person to look at (removed after keep_days())
+        if empty or stale:  # the task and its report stay in gvmd for a person to look at (removed after keep_days())
             summary['kept_task_until'] = keep_until().isoformat()
         short = summary.get('short_read')
         error = (READ_MISMATCH if summary.get('read_mismatch') else INCONCLUSIVE if empty
+                 else stale_cache_error(stale) if stale
                  else f'only {short["read"]} of the {short["count"]} results gvmd counts could be read: imported as partial, nothing earlier is '
                       'resolved by it' if short
                  else f'more than {MAX_RESULTS} results: the lowest-severity ones were not imported' if summary['partial'] else '')
         finish(run, 'done', error=error, summary=summary)
-        if not empty:
+        if not (empty or stale):
             _delete_task(gmp, run)
         label = run_label(run)
         if empty:
@@ -1822,7 +1853,8 @@ def poll(run, gmp, now=None):
                             gvm_results=gvm, host_minutes=summary.get('host_minutes') or {}, report_id=summary.get('report_id') or '')
             return {'run': run.pk, 'status': 'done', **summary}
         activity.settle(entry, 'done', message=(f'{label}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
-                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')),
+                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')
+                                                + (f'; {stale_cache_error(stale)}' if stale else '')),
                         gvm_results=summary.get('gvm_results'), results=summary['results'])
         return {'run': run.pk, 'status': 'done', **summary}
     # Stopped, Interrupted, a delete in progress or a word this version does not know: not a result. An interrupted task (gvmd or its scanner

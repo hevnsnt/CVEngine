@@ -86,7 +86,15 @@ deploy_steps() {
   maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" up -d --no-recreate db redis || return 1
+  # Compose reads ${REDIS_PASSWORD} from the --env-file it is given (an overlay's .env.vps), so the password goes there too
+  if . scripts/redis-password.sh && cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"; then
+    # an installation without a broker password gets one: Redis is recreated with it now, and every client below with the new address
+    log "the Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once"
+    "${compose[@]}" up -d --no-recreate db || return 1
+    "${compose[@]}" up -d --no-deps --force-recreate redis || return 1
+  else
+    "${compose[@]}" up -d --no-recreate db redis || return 1
+  fi
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1

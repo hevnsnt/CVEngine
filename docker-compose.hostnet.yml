@@ -11,6 +11,9 @@
 # container reaches Redis and PostgreSQL on the host's loopback, where this file publishes them. The optional tailscale profile joins the
 # celery container's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead). If something
 # on the host already uses port 6379, set CVENGINE_REDIS_HOST_PORT in .env to another one.
+#
+# The published broker must have a password (on the host's loopback any local user or process could otherwise queue work the workers run
+# as root): `make up` and every update generate REDIS_PASSWORD when it is empty (scripts/redis-password.sh) and recreate Redis with it.
 services:
   celery:
     network_mode: host

@@ -78,8 +78,8 @@ DB_EQUIVALENT = {
     'memcached': "printf 'version\\r\\n' | nc -w 3 {ip} {port}",
     'postgres': 'psql "host={ip} port={port} dbname=postgres user=postgres connect_timeout=3" -w -c "select 1"',
     'postgresql': 'psql "host={ip} port={port} dbname=postgres user=postgres connect_timeout=3" -w -c "select 1"',
-    'elastic': 'curl -s --max-time 3 http://{ip}:{port}/',
-    'couchdb': 'curl -s --max-time 3 http://{ip}:{port}/_all_dbs',
+    'elastic': 'curl -gs --max-time 3 http://{ip}:{port}/',
+    'couchdb': 'curl -gs --max-time 3 http://{ip}:{port}/_all_dbs',
 }
 
 
@@ -357,7 +357,7 @@ def _http_check(url, signature):
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https') or not _safe_host(parsed.hostname or ''):
         return None
-    argv = ['curl', '-I', '-k', '--max-time', '6', url]
+    argv = ['curl', '-g', '-I', '-k', '--max-time', '6', url]  # -g: brackets and braces in a URL are not curl ranges
     return _check('http_head', 'HTTP banner check (HEAD, GET only if HEAD is refused)', argv, shlex.join(argv), url, url, signature, 15, url=url)
 
 
@@ -1406,7 +1406,7 @@ def library_step(match, reading=None):
     span = triage.range_text(evidence.get('range'))
     read_at = reading.get('read_at') or match.created_at
     return {'kind': LIBRARY_READ, 'label': f'Library body read: the {product} version its served file states', 'target': url,
-            'display': f'curl -s {quote(url)} | head -c {js_libraries.HEAD}', 'ran_at': read_at.isoformat() if read_at else '',
+            'display': f'curl -gs {quote(url)} | head -c {js_libraries.HEAD}', 'ran_at': read_at.isoformat() if read_at else '',
             'result': 'reaffirmed', 'error': '', 'output_excerpt': '',
             'summary': _trim(f'Fetched {url}: {stated}; it is the copy {"the page " + page if page else "the page"} runs. {version} is '
                              f'inside the affected range{" " + span if span else ""}.', 300),

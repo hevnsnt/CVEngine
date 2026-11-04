@@ -60,6 +60,10 @@ while :; do
   if [ -f web/.openvas-wanted ] && [ web/.openvas-wanted -nt web/.openvas-applied ]; then
     setsid nohup scripts/openvas-sync.sh >>"$STATE/openvas.log" 2>&1 </dev/null &
   fi
+  # gvmd's NVT cache found out of date by an import (web/.openvas-restart newer than its answer): restart gvmd, nothing else
+  if [ -f web/.openvas-restart ] && [ ! -L web/.openvas-restart ] && [ web/.openvas-restart -nt web/.openvas-restarted ]; then
+    setsid nohup scripts/openvas-sync.sh restart-gvmd >>"$STATE/openvas.log" 2>&1 </dev/null &
+  fi
   pause=2
   if [ -e web/.update-approved ] || [ -L web/.update-approved ]; then
     # In the background, so the heartbeat goes on for the minutes an update takes: the app says "nothing is listening" after three silent ones.

@@ -570,6 +570,9 @@ class ReviewProbeTests(NoCache, SimpleTestCase):
 
     def test_the_reviews_hostile_inputs_stay_fast(self):
         import time
+        # A pathological (quadratic or worse) scan of these 256-300 KB inputs takes seconds to minutes; a linear one takes a few hundred ms.
+        # 2 s keeps that line clear on a busy shared CI runner, where 0.5 s failed at 0.504 s and 0.513 s with nothing wrong.
+        limit = 2.0
         n = 300 * 1024
         bodies = [('a' * 30 + '.fn=').ljust(40) * (n // 40), ('abc.fn=abc.prototype={' + ' ' * 5000) * (n // 5000), ' ' * n, '*' * n,
                   '\n *' * (n // 3), ('jQuery UI ' + 'A' * 20 + ' ') * (n // 31), ('.extend( ' + 'a' * 30 + '.ui ,{ version : ') * (n // 60),
@@ -581,14 +584,14 @@ class ReviewProbeTests(NoCache, SimpleTestCase):
         for body in bodies:
             started = time.monotonic()
             js_libraries.read_body(body)
-            self.assertLess(time.monotonic() - started, 0.5, body[:40])
+            self.assertLess(time.monotonic() - started, limit, body[:40])
         for page in pages:
             started = time.monotonic()
             js_libraries.parse_page(page, PAGE_URL)
-            self.assertLess(time.monotonic() - started, 0.5, page[:40])
+            self.assertLess(time.monotonic() - started, limit, page[:40])
         started = time.monotonic()
         js_libraries.identify('https://x.com/' + 'a/' * 5000 + 'jquery' + '.min' * 1000 + '.js?' + 'v=1&' * 10000)
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLess(time.monotonic() - started, limit)
 
 
 class BudgetTests(NoCache, SimpleTestCase):

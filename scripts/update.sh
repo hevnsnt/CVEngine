@@ -192,6 +192,19 @@ web_python() {
     "${compose[@]}" exec -T "$@" web python3 manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
 }
 
+# consumer_control add_consumer|cancel_consumer WORKER QUEUE. A worker busy with CPU work (the correlation and template passes right
+# after it starts) can miss a short reply window, so it is asked up to three times with a longer wait each time. Both commands are safe
+# to repeat: a worker that already stopped (or started) consuming the queue just says so.
+consumer_control() {
+    local verb=$1 worker=$2 queue=$3 wait
+    for wait in 5 15 30; do
+        "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t "$wait" -d "$worker" "$verb" "$queue" \
+            >/dev/null 2>>"${diagnostic_log:-/dev/null}" && return 0
+        echo "No reply from $worker to $verb $queue within ${wait}s." >>"${diagnostic_log:-/dev/null}"
+    done
+    return 1
+}
+
 scan_count_code=$(cat <<'PY'
 from startScan.models import ScanHistory
 print("SCANS", ScanHistory.objects.filter(scan_status=1).count(), ScanHistory.objects.filter(scan_status=-1).count())
@@ -591,8 +604,7 @@ restore_dispatch() {
         fi
         for pair in "${consumer_pairs[@]}"; do
             worker=${pair%%|*}; queue=${pair#*|}
-            "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 5 -d "$worker" add_consumer "$queue" \
-                >/dev/null 2>&1 || echo "Could not restore consumer $worker/$queue; inspect worker queues." >&2
+            consumer_control add_consumer "$worker" "$queue" || echo "Could not restore consumer $worker/$queue; inspect worker queues." >&2
         done
         if [[ -n $beat_was_running ]]; then
             "${compose[@]}" start celery-beat >/dev/null 2>&1 || echo 'Could not restart Celery Beat.' >&2
@@ -641,8 +653,7 @@ for pair in "${consumer_pairs[@]}"; do
         echo "Pausing queue consumers on $worker..."
         last_consumer_worker=$worker
     fi
-    if ! "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 5 -d "$worker" cancel_consumer "$queue" \
-            >/dev/null 2>>"$diagnostic_log"; then
+    if ! consumer_control cancel_consumer "$worker" "$queue"; then
         (( force )) || die "Could not pause $worker/$queue."
         echo "Force: could not pause $worker/$queue; continuing." >&2
     fi
@@ -720,8 +731,7 @@ except (ValueError, TypeError, KeyError):
                 fi
                 # a restarted worker resumes its queues: pause them again
                 for pair in ${drain_state#CONSUMING|}; do
-                    "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t 10 -d "${pair%%|*}" cancel_consumer "${pair#*|}" \
-                        >/dev/null 2>>"$diagnostic_log" || die "Could not pause ${pair%%|*}/${pair#*|} again."
+                    consumer_control cancel_consumer "${pair%%|*}" "${pair#*|}" || die "Could not pause ${pair%%|*}/${pair#*|} again."
                 done
                 sleep "$poll_seconds"; continue;;
         esac
@@ -747,7 +757,14 @@ stop_grace=$(( force ? 10 : 60 ))
 workers_stopped=1
 
 step 'Applying migrations; the broker container stays in place (the database container is recreated only when its compose definition changed)'
-"${compose[@]}" up -d --no-recreate db redis
+if . scripts/redis-password.sh && cvengine_ensure_redis_password "$compose_env_file"; then
+    # an installation without a broker password gets one: Redis is recreated with it now, and every client below with the new address
+    echo 'The Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once.'
+    "${compose[@]}" up -d --no-recreate db
+    "${compose[@]}" up -d --no-deps --force-recreate redis
+else
+    "${compose[@]}" up -d --no-recreate db redis
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db

@@ -2,6 +2,32 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## v1.3.4 (2026-11-03)
+
+### Upgrade notes
+
+- **No migration and no manual step.** The host watcher, which cron starts every minute, runs the new `scripts/update-watch.sh` within a minute of the update, and from then on carries out cvENGINE's gvmd restart requests (see Fixed). Sentinels get their half (hevnsnt/cvENGINE-sentinel#32) by their own self-update; a Sentinel that has not updated yet still reports a stale-cache run as before, and this server then reads it as before.
+- **An installation without a Redis password gets one during this update.** The updater writes `REDIS_PASSWORD` to `.env` (and the Compose env file the installation uses) and recreates Redis with it, then web and the workers as every update does; tasks queued at that moment are lost once. An installation that already has a password is unchanged.
+
+### Security
+
+A security review of everything changed since 1.3.0 (access control and tenancy, the Sentinel channel and the host scripts, outbound requests and the screenshot browser, commands and templates, AI and secrets, the browser side). Fixed:
+
+- **Every installation's broker gets a password by itself.** An installation set up before `REDIS_PASSWORD` existed kept an open Redis broker until someone ran `make redis-auth`, and `docker-compose.hostnet.yml` publishes that broker on the host's loopback for the celery container, where any local user or process on the Docker host could queue work the workers run as root. The update (in-app, `scripts/update.sh`, automatic deployment) and `make up` now generate `REDIS_PASSWORD` when it is empty (`scripts/redis-password.sh`: written to `.env` and to the installation's Compose env file) and recreate Redis with it together with the services that use it. Nothing to do by hand; headless installations are covered.
+- **The updater no longer reads `web/.commit` through a link.** `scripts/apply-update.sh` read the running build's commit with `head`, which follows a symlink a compromised web container could plant there, and copied the first line of the file it pointed at (any root-readable host file) into the update log the app shows. It is now read through `scripts/update-state.py` (no links, a regular file, a commit id or nothing).
+- **One organization's page can no longer raise another organization's findings.** A stored AI answer that raises attention (likely, a severity step up) was shared with every organization's finding of the same signature; for every kind but a CVE match the prompt showed host text the signature does not carry (a page title, a bbot description, a nuclei path), so a host one organization controls could steer another organization's routes and scanner findings up a step. Such an answer is now shared only within its project; elsewhere the finding asks its own question. A CVE match is unchanged (its shown host text is part of its signature). Answers already applied are shown without the borrowed severity step at once and are replaced at the finding's next review.
+- **Copied curl commands make one request.** curl expands `[1-100000]` and `{a,b}` in a URL even inside quotes, so a page whose script address carried such a pattern turned the "read the file" command in Confirm it yourself into thousands of requests from the tester's machine. Every curl cvENGINE shows a person now passes `-g` (no URL globbing).
+- **The daily operating-system path probe respects scope.** It chose up to eight recently fingerprinted addresses from every organization and sent each two raw packets, including addresses excluded or archived since, held only by manual-only or passive targets, or outside a bug bounty program's scope. It now picks only an address some project may still have probed (a scanning target's host, not excluded or archived, and within the project's own scope).
+- **An overlong CVE id from a Sentinel is dropped**, instead of failing the whole nuclei stage or OpenVAS import of its project (CVE ids are bounded to seven digits, and the finding store skips one longer than its column).
+
+### Fixed
+
+- **An update no longer stops because a busy worker answered the pause late.** The updater gave each worker one five-second window to confirm it had stopped taking new work, and stopped the update (rolling it back) when no answer came. A worker that has just started is busy with its correlation and template passes and can miss that window. It is now asked up to three times (5, 15 and 30 seconds).
+
+- **The gvmd restart request runs once on an add-on started by hand.** `scripts/openvas-sync.sh restart-gvmd` gave up before answering when `web/.openvas-wanted` did not exist (`make openvas-up`), so the watcher started it again every two seconds and gvmd was never restarted. It now restarts gvmd when it is running and the add-on is not switched off, and always answers.
+
+- **OpenVAS: results whose CVEs gvmd left out no longer close earlier findings** (reported by camstork, #394). gvmd 26.35 and later reload the NVT cache their GMP answers are built from only in their periodic-jobs process (greenbone/gvmd#3220), so after the first feed load, and for NVTs a later feed sync adds, every result came without its CVE references. cvENGINE read that as "no CVE", counted the host as scanned clean and closed what earlier OpenVAS scans had found on it. A result with CERT-Bund or DFN-CERT references (which gvmd links to an NVT through its CVEs) and no CVE reference now marks the run as read from a stale cache: it is imported as partial (nothing earlier is resolved), the GVM task and report are kept, the hosts are asked again in three days, and the run says to restart gvmd. With the host's watcher installed, cvENGINE asks it to restart `openvas-gvmd` (at most once in six hours; `scripts/openvas-sync.sh restart-gvmd`, answered in `web/.openvas-restarted`). A Sentinel reports the same count (`nvt_cache_stale`), and its run is treated the same way.
+
 ## v1.3.3 (2026-11-03)
 
 ### Thanks

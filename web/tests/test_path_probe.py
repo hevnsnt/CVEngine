@@ -58,6 +58,12 @@ class SurveyTests(SimpleTestCase):
 
 
 class CandidateTests(TestCase):
+	def setUp(self):
+		# which project may still have an address probed is path_probe.in_scope's own test (tests/test_local_egress.py, PathProbeScopeTests)
+		patcher = mock.patch.object(path_probe, 'in_scope', return_value=True)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
 	def make(self, address, port, days=1):
 		import datetime
 		fingerprint = {'closed_tcp': port, 'closed_tcp_at': (timezone.now() - datetime.timedelta(days=days)).isoformat()} if port else {}
