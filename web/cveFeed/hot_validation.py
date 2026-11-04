@@ -124,11 +124,16 @@ def _candidate_rows(lane):
         # whatever its CVSS or EPSS; no CVE match is in the smoke lane (smoke is "hot, not proven", and proof is what validation adds)
         cve_fire = cve_hot = hot_q('match__cve_entry__')
         cve_smoke = Q(pk__in=[])
+    # a heat a person set is the match's validation heat too (threat.match_heat, tier_for): it moves the match into that lane, and out of the others
+    manual = ~Q(heat_override='')
+    cve_fire = (cve_fire & ~manual) | Q(heat_override=FIRE)
+    cve_smoke = (cve_smoke & ~manual) | Q(heat_override=SMOKE)
+    cve_cold = (~cve_hot & ~manual) | Q(heat_override=ICE)
     unknown = match_policy.version_unknown_q('match__')  # waits for a person or a published range: never validated automatically
     if lane == ICE:
         # every other current CVE match, whatever its confidence or score (an unscored CVE too); one the AI ruled out or the distro
         # patched is not a finding to validate
-        cold = (Q(match__isnull=False) & ~cve_hot & ~unknown & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
+        cold = (Q(match__isnull=False) & cve_cold & ~unknown & ~Q(match__ai_verdict='not_affected') & ~Q(match__distro_status='patched')
                 & ~Q(match__source=HOST_REPORTED) & latest_scan_q('match__subdomain__') & match_scope)
         return Triage.objects.filter(cold).select_related('match__cve_entry', 'match__subdomain__target_domain').order_by('pk')
     severity = 3 if lane == FIRE else 2
