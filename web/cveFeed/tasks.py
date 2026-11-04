@@ -177,6 +177,32 @@ def sync_tailscale_link(link_id):
     return tailscale_sync.sync_link(link_id)
 
 
+def _follow_signal_changes(changes):
+    """After cve.now rewrote stored CVEs (``changes``: ``(cvss, kev, epss_reached, exploit_db)`` as they were, or None for a CVE that was not
+    stored, and the CVEEntry now): the hosts of a CVE whose score or exploitation signals moved are rescored (the heat of its matches moved), and
+    the proven matches of a CVE that joined the KEV or gained an exploit are paged once (``notify.cves_turned_hot``). Never raises."""
+    from cveFeed.threat import is_hot
+    moved, turned_hot = [], []
+    for before, obj in changes:
+        if before is None or not getattr(obj, 'pk', None):
+            continue
+        after = (obj.cvss, obj.kev, obj.epss_reached, obj.exploit_db)
+        if tuple(before) != after:
+            moved.append(obj.pk)
+            if is_hot(obj.kev, obj.exploit_db) and not is_hot(before[1], before[3]):
+                turned_hot.append(obj.pk)
+    if not moved:
+        return
+    try:
+        from cveFeed import notify, scoring
+        from cveFeed.models import CVEMatch
+        for ids in scoring._chunks(moved, scoring.CHUNK):
+            scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=ids).select_related('subdomain__target_domain'))
+        notify.cves_turned_hot(turned_hot)
+    except Exception:  # noqa: BLE001 - the CVEs are stored; scores catch up at the daily pass
+        logger.exception('could not follow up %d CVEs whose signals changed', len(moved))
+
+
 def _known_in_batches(summaries, size=100):
     """Yield (summary, ids already stored) with one lookup per ``size`` summaries instead of one per entry."""
     from itertools import islice
@@ -244,6 +270,7 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
     due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
         .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
+    signals = []
     for old in list(due):
         try:
             entry = client.get_entry(old.cve_id)
@@ -255,9 +282,11 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
                 changed += 1
                 CVEEntry.objects.filter(pk=obj.pk).update(needs_recorrelation=True)
                 MatchVerdict.objects.filter(cve_entry_id=obj.pk).delete()
+            signals.append((before[1:5], obj))
         except Exception as exc:
             failed += 1
             logger.warning('cve.now: failed to refresh %s: %s', old.cve_id, exc)
+    _follow_signal_changes(signals)
     result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed, "changed": changed, "failed": failed}
     logger.info(f"cve.now sync complete: {result}")
     tiers = [e.threat_tier for e in new_entries]
@@ -417,12 +446,17 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             return result
     result['wanted'] = len(wanted)
     created_rows, refused = [], []
+    # an entry already stored (a forced walk, or ids given) is rewritten: what its signals were, to follow up a change (_follow_signal_changes)
+    stored = {c: (cvss, kev, epss, exploit) for c, cvss, kev, epss, exploit in CVEEntry.objects.filter(cve_id__in=wanted[:max_new])
+              .values_list('cve_id', 'cvss', 'kev', 'epss_reached', 'exploit_db')}
+    signals = []
     for entry_id in wanted[:max_new]:
         try:
             entry = client.get_entry(entry_id)
             if isinstance(entry, dict) and first_seen.get(entry_id):
                 entry.setdefault('firstSeenAt', first_seen[entry_id])
             obj, _ = CVEEntry.from_api(entry)
+            signals.append((stored.get(obj.cve_id), obj))
             created_rows.append(obj)
             result['created'] += 1
             failures.pop(entry_id, None)
@@ -477,6 +511,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['continues'] = True
         elif failures_changed:
             row.save(update_fields=['failures', 'updated_at'])
+    _follow_signal_changes(signals)
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
@@ -544,6 +579,9 @@ def sync_threat_intel():
             scoring.rescore_for_matches(CVEMatch.objects.filter(cve_entry_id__in=cve_ids)
                                         .select_related('subdomain__target_domain')
                                         .order_by('subdomain__target_domain__project_id', 'subdomain__name'), rescored)
+    if result.get('signals_turned_hot'):  # a CVE that joined the KEV or gained an exploit: its proven matches turned fire, paged once
+        from cveFeed import notify
+        notify.cves_turned_hot(result['signals_turned_hot'])
     if created:
         auto_fire_new_cves.delay([c.pk for c in created])
     if result.get('ranges_repaired'):  # entries whose ranges were re-derived are correlated again (cveFeed.intel.repair_ranges)
@@ -598,6 +636,10 @@ def correlate_cves(scan_history_id=None, project_slug=None, min_confidence=0.4, 
     from cveFeed import activity, match_policy
 
     close_rejected()  # a CVE rejected since the last run stops being a finding
+    from cveFeed import verdict_tenancy
+    verdict_tenancy.release_once()  # once after the upgrade: findings closed by another tenant's stored verdict are reopened (task 256)
+    from cveFeed import library_reopen
+    library_reopen.reopen_once()  # once after the upgrade: library matches an earlier build closed on the page's own files are reopened
     from cveFeed import locality
     locality.refresh()  # new or changed CVEs: which are only usable from the host itself
     locality.close_local_matches()  # ...never a finding, so any open match on one is closed
@@ -714,12 +756,13 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             provider = None
         outcome = run_cve_tests(cve, hosts, provider=provider, project=project_id)
         logger.info("template test %s: %s on %d hosts", cve.cve_id, outcome["source"], len(hosts))
-        vulnerable = [r["host"] for r in outcome["results"] if r["vulnerable"]]
+        from cveFeed.templategen import is_confirmed
+        vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
         pairs = [(cve.cve_id, host) for host in vulnerable]
         if batch:
-            hit_batch.record(batch, pairs)
+            hit_batch.record(batch, pairs, project=project_id)  # the run's one message checks each hit against its own project
         else:
-            notify.template_hits(pairs)  # one message per CVE test, never per host
+            notify.template_hits(pairs, project=project_id)  # one message per CVE test, never per host
         return {"cve": cve.cve_id, "source": outcome["source"], "vulnerable": vulnerable}
     finally:
         if batch:
@@ -738,6 +781,9 @@ def validate_findings(project_id, triage_ids, scan_id=None):
         return {"error": str(exc)[:200]}
 
 
+HOST_ONLY_SCOPE_TEXT = 'its target is set to this host only: a name under it is not validated'  # targetApp.models.narrowed_names
+
+
 def _skip_on_demand_validation(job, progress, cve_id, reason):
     """A queued request whose match is no longer the host's current finding is superseded work: it spends no attempt, schedules no retry
     and is not logged as a failure (the automatic path does the same, ``_skip_automatic_validation``)."""
@@ -746,7 +792,9 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
     from cveFeed.models import OnDemandValidation
 
     text = {'historical': 'the match was replaced by a newer scan before the request ran',
-            'out_of_scope': 'the host is outside the scannable project scope'}[reason]
+            'out_of_scope': 'the host is outside the scannable project scope',
+            'host_only_scope': HOST_ONLY_SCOPE_TEXT,
+            'bounty_not_confirmed': 'the bug bounty engagement has not confirmed automated testing: only a person\'s own request runs'}[reason]
     result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason, 'next_action': text}
     OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
         status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
@@ -786,12 +834,21 @@ def validate_match_on_demand(request_id):
             return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         if not match.subdomain or not scannable_hosts([match.subdomain.name], project=job.project_id):
             return _skip_on_demand_validation(job, progress, cve_id, 'out_of_scope')
-        invalid_reason = correlation.invalid_identity_reason(match)
+        from targetApp.models import narrowed_names
+        if narrowed_names(job.project_id, [match.subdomain.name]):  # held only under a target that is now exactly one host
+            return _skip_on_demand_validation(job, progress, cve_id, 'host_only_scope')
+        from cveFeed.conductor import bounty_blocked_projects
+        if job.source != 'manual' and job.project_id in bounty_blocked_projects():  # only a person's own request runs in a bug bounty project that has not confirmed automated testing
+            return _skip_on_demand_validation(job, progress, cve_id, 'bounty_not_confirmed')
+        # a match an earlier script read closed is read again (the page may have changed back): Validate now re-checks it, and a read that
+        # finds an affected copy running reopens it (validation._reopen_on_script_read)
+        invalid_reason = '' if validation.closed_by_script_read(match) else correlation.invalid_identity_reason(match)
         if invalid_reason:
             correlation.close_invalid_correlation(match, invalid_reason)
+            note = 'The product recorded for this host is not the software this advisory covers.'
             result = {'check_state': 'no_check', 'checks': {'ran': 0, 'reused': 0}, 'ai_state': 'not_needed',
                       'assessment_status': 'closed_not_applicable', 'assessment_reason': invalid_reason,
-                      'check_notes': ['The product recorded for this host is not the software this advisory covers.']}
+                      'check_notes': [note]}
             OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
                 status='completed', result=result, finished_at=timezone.now())
             activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(invalid_reason)})',
@@ -801,7 +858,8 @@ def validate_match_on_demand(request_id):
         triage.request_fresh_review(row, described, str(job.pk))
         row, _ = triage.track(triage.with_cves([match]))[0]
         OnDemandValidation.objects.filter(pk=job.pk, status='running').update(evidence_signature=row.signature)
-        subject = validation.subject_for(row, match)
+        unattended = job.source != 'manual'  # the bug bounty gate holds a run the system started to the project's confirmation
+        subject = validation.subject_for(row, match, unattended=unattended)
         template = validation.resolve_template(match.cve_entry.cve_id)
         available_checks, plan_notes = validation.plan_checks(subject, row.signature, template)
         available_checks = [check for check in available_checks if check]
@@ -831,7 +889,7 @@ def validate_match_on_demand(request_id):
             plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
         if not checks:
             plan_notes.append(plan['reason'])
-        if not any(check['kind'] == 'fact_probe' for check in available_checks):
+        if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
             from cveFeed import probes
             plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
                               'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
@@ -841,7 +899,20 @@ def validate_match_on_demand(request_id):
         row.validation_status, row.attempts, row.next_attempt_at = 'pending', 0, None
         row.save(update_fields=['validation_status', 'attempts', 'next_attempt_at', 'updated_at'])
         require_authority(job)
-        check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected)
+        check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected, unattended=unattended)
+        match.refresh_from_db()
+        if validation.closed_by_script_read(match):
+            # the script read showed the library fixed or the host an alias, and closed the match through the guarded closure: the
+            # AI review has nothing left to judge, as for a different-product closure above
+            result = {'check_state': 'checked', 'checks': check_result, 'ai_state': 'not_needed', 'plan': plan, 'plans': plans,
+                      'assessment_status': 'closed_not_applicable', 'assessment_reason': match.ai_reason[:700],
+                      'check_notes': plan_notes + ['A fresh read of the page\'s scripts closed this match.'],
+                      'classification': 'not_applicable', 'validation_status': Triage.objects.filter(pk=row.pk).values_list(
+                          'validation_status', flat=True).first()}
+            OnDemandValidation.objects.filter(pk=job.pk, status='running').update(status='completed', result=result, finished_at=timezone.now())
+            activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(match.ai_reason)})',
+                            check_state='checked', ai_state='not_needed', assessment_status='closed_not_applicable')
+            return result
         # One bounded second decision uses observations from the first checks. A banner cannot end
         # the request while another already-approved, scoped check remains available.
         remaining = [check for check in available_checks if check['kind'] not in selected]
@@ -868,7 +939,8 @@ def validate_match_on_demand(request_id):
                 if check['kind'] in next_kinds:
                     ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
             require_authority(job)
-            next_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=next_kinds) if next_kinds else {}
+            next_result = (validation.run_validation(job.project_id, [row.pk], selected_kinds=next_kinds, unattended=unattended)
+                           if next_kinds else {})
             for key in ('ran', 'reused', 'failed', 'blocked', 'capped', 'hits', 'no_check'):
                 check_result[key] = check_result.get(key, 0) + next_result.get(key, 0)
             check_result['stopped'] = check_result.get('stopped') or next_result.get('stopped')
@@ -902,6 +974,8 @@ def validate_match_on_demand(request_id):
                         f'Validation request #{job.pk}: AI review {ai_state} for {cve_id}', ai_status=row.status)
         check_state = ('no_check' if no_check else 'not_run' if no_execution else
                        'observed' if row.validation_status == 'observed' else 'checked')
+        if check_state in ('no_check', 'observed') and validation.library_read_step(row.validation_steps):
+            check_state = 'checked'  # cvENGINE read the library's served file itself: shown as a completed check (validation.library_step)
         if check_state == 'observed':
             plan_notes.append('The external checks observed service metadata only. They cannot identify software behind a frontend '
                               'or verify the affected product without specific evidence.')
@@ -978,9 +1052,12 @@ def validate_match_on_demand(request_id):
 
 @app.task(name='reconcile_invalid_correlations', bind=False, queue='cve_feed_queue')
 def reconcile_invalid_correlations(limit=50):
-    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls."""
+    """Bounded, durable backfill of legacy product matches without running scans or spending AI calls: every project's current matches,
+    ``limit`` (at most 100) a run in id order from a stored cursor, so the whole table is walked in turn with no long lock. It closes a
+    wrong product link (``correlation.invalid_identity_reason``) and a JavaScript library match the host's own page contradicts
+    (``correlation.library_provenance_reason``), and logs how many it closed for each reason."""
     from django.db import transaction
-    from cveFeed import correlation
+    from cveFeed import correlation, js_libraries
     from cveFeed.models import BackgroundCursor, CVEMatch
 
     batch_size = max(1, min(int(limit), 100))
@@ -992,14 +1069,124 @@ def reconcile_invalid_correlations(limit=50):
         if not batch:
             cursor.last_pk = 0
             batch = list(base[:batch_size])
-        closed = 0
+        closed, by_reason = 0, {}
         for match in batch:
-            if correlation.invalid_identity_reason(match):
-                closed += int(correlation.close_invalid_correlation(match))
+            reason = correlation.invalid_identity_reason(match)
+            if reason and correlation.close_invalid_correlation(match, reason):
+                closed += 1
+                kind = js_libraries.closure_kind(reason) or 'identity'
+                by_reason[kind] = by_reason.get(kind, 0) + 1
         if batch:
             cursor.last_pk = batch[-1].pk
         cursor.save(update_fields=['last_pk', 'updated_at'])
-    return {'reviewed': len(batch), 'closed': closed, 'last_match_id': cursor.last_pk}
+    if closed:
+        logger.info('reconcile_invalid_correlations closed %d of %d matches: %s', closed, len(batch),
+                    ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    library = reconcile_library_provenance()
+    return {'reviewed': len(batch), 'closed': closed, 'closed_by_reason': by_reason, 'last_match_id': cursor.last_pk, 'library': library}
+
+
+SETTLE_LANE = 'library_body_settle'           # BackgroundCursor: where settle_library_proven_task resumes
+SETTLE_DONE_LANE = 'library_body_settle_done'  # BackgroundCursor: present once every row has been looked at
+SETTLE_SECONDS = 60  # one run of settle_library_proven_task works this long, then queues the next run to resume from the cursor
+
+
+@app.task(name='settle_library_proven', bind=False, queue='cve_feed_queue')
+def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
+    """Bring the CVE matches judged before the library rule in line with it (``triage.settle_library_proven``), once per install, off the
+    worker's start: queued by ``reNgine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
+    UPDATE SKIP LOCKED``: another run that finds it held returns at once), works batches in pk order for ``seconds``, saves the cursor after
+    each batch and queues the next run to resume from it; the last batch records the done lane, and any later run returns at once.
+    Idempotent: a batch that is run twice writes nothing the second time. Returns the counts."""
+    import time as _time
+
+    from django.db import transaction
+
+    from cveFeed import triage
+    from cveFeed.models import BackgroundCursor
+    clock = clock or _time.monotonic
+    if BackgroundCursor.objects.filter(lane=SETTLE_DONE_LANE).exists():
+        return {'state': 'done'}
+    started, changed, batches, done = clock(), 0, 0, False
+    BackgroundCursor.objects.get_or_create(lane=SETTLE_LANE)
+    with transaction.atomic():
+        cursor = BackgroundCursor.objects.select_for_update(skip_locked=True).filter(lane=SETTLE_LANE).first()
+        if cursor is None:
+            return {'state': 'held'}  # another worker runs it
+        while not done and clock() - started < seconds:
+            count, last, done = triage.settle_library_proven(after=cursor.last_pk)
+            changed, batches = changed + count, batches + 1
+            cursor.last_pk = last
+            cursor.save(update_fields=['last_pk', 'updated_at'])
+        if done:
+            BackgroundCursor.objects.get_or_create(lane=SETTLE_DONE_LANE)
+    if not done:
+        transaction.on_commit(lambda: settle_library_proven_task.apply_async(countdown=5))
+    if changed:
+        logger.info('settle_library_proven: %d CVE matches proven by the served library file brought in line (%d batches)', changed, batches)
+    return {'state': 'done' if done else 'resumed', 'changed': changed, 'batches': batches}
+
+
+LIBRARY_SWEEP_BATCH = 500   # open technology-scan matches looked at per run of the reconcile sweep (every five minutes)
+LIBRARY_SWEEP_SECONDS = 120  # and at most this long
+
+
+def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEEP_SECONDS, clock=None):
+    """Re-check stored JavaScript library matches against their host's own page (``correlation.library_closure``) without a rescan, in
+    every project: the OPEN technology-scan matches of the current inventory, ``limit`` a run in id order from a cursor of their own
+    (claimed, then worked outside the lock), at most ``seconds`` long. One query loads the batch, one the sightings' names, and each host's
+    page is read once (``HostLibraries.for_subdomain``) for all its matches. Closes with the stored reason (never shared, never one a person
+    or a check vouches for) and logs how many it closed for each reason. Returns the counts."""
+    import time as _time
+
+    from django.db import transaction
+    from cveFeed import correlation, js_libraries
+    from cveFeed.models import BackgroundCursor, CVEMatch
+    from startScan.models import Subdomain, Technology
+    clock = clock or _time.monotonic
+    started = clock()
+    size = max(1, min(int(limit), 2000))
+    base = (CVEMatch.objects.filter(correlation.latest_scan_q('subdomain__'), source='tech').exclude(ai_verdict='not_affected')
+            .order_by('pk'))
+    with transaction.atomic():
+        cursor, _ = BackgroundCursor.objects.select_for_update().get_or_create(lane='library_provenance')
+        batch = list(base.filter(pk__gt=cursor.last_pk).select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if not batch:
+            cursor.last_pk = 0
+            batch = list(base.select_related('cve_entry', 'subdomain__target_domain')[:size])
+        if batch:
+            cursor.last_pk = batch[-1].pk
+        cursor.save(update_fields=['last_pk', 'updated_at'])
+    names = dict(Technology.objects.filter(pk__in={(m.evidence or {}).get('source_id') for m in batch if isinstance(m.evidence, dict)}
+                                                   - {None}).values_list('pk', 'name'))
+    candidates = []
+    for m in batch:
+        source_id = (m.evidence or {}).get('source_id') if isinstance(m.evidence, dict) else None
+        name = correlation.split_name_version(names[source_id])[0] if source_id in names else m.matched_product
+        if js_libraries.is_library(name) or js_libraries.is_library(m.matched_product):
+            candidates.append((m, name if js_libraries.is_library(name) else m.matched_product))
+    hosts = {sub.pk: sub for sub in Subdomain.objects.filter(pk__in={m.subdomain_id for m, _ in candidates})
+             .select_related('target_domain').prefetch_related('ip_addresses__ports', 'technologies')}
+    pages, closed, by_reason, looked = {}, 0, {}, 0
+    for m, name in candidates:
+        if clock() - started > seconds:  # out of time: the next run starts at the first match this one did not look at
+            BackgroundCursor.objects.filter(lane='library_provenance').update(last_pk=m.pk - 1)
+            break
+        looked += 1
+        sub = hosts.get(m.subdomain_id)
+        if sub is None:
+            continue
+        if sub.pk not in pages:
+            pages[sub.pk] = (js_libraries.HostLibraries.for_subdomain(sub), correlation.host_library_versions(sub))
+        reason, _hold = correlation.library_closure(m, pages[sub.pk][0], name=name, present=pages[sub.pk][1])
+        if reason and correlation.close_invalid_correlation(m, reason):
+            closed += 1
+            kind = js_libraries.closure_kind(reason)
+            by_reason[kind] = by_reason.get(kind, 0) + 1
+    if closed:
+        logger.info('reconcile_library_provenance closed %d of %d library matches (%d open tech matches looked at): %s', closed, looked,
+                    len(batch), ', '.join(f'{kind} {count}' for kind, count in sorted(by_reason.items())))
+    return {'reviewed': len(batch), 'libraries': looked, 'closed': closed, 'closed_by_reason': by_reason}
 
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')
@@ -1016,6 +1203,7 @@ def _skip_automatic_validation(job, progress, reason):
 
     result = {'check_state': 'not_run', 'ai_state': 'not_run', 'reason': reason,
               'next_action': 'current evidence is eligible for the next validation sweep' if reason == 'evidence_changed'
+                             else HOST_ONLY_SCOPE_TEXT if reason == 'host_only_scope'
                              else 'validation requires an open eligible finding'}
     AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
         status='skipped', result=result, error='', next_attempt_at=None, finished_at=timezone.now())
@@ -1065,6 +1253,9 @@ def automatic_validate_finding(job_id):
         stage = 'scope_check'
         if row.host and not scannable_hosts([row.host], project=job.project_id):
             return _skip_automatic_validation(job, progress, 'out_of_scope')
+        from targetApp.models import narrowed_names
+        if row.host and narrowed_names(job.project_id, [row.host]):  # held only under a target that is now exactly one host
+            return _skip_automatic_validation(job, progress, 'host_only_scope')
         # This is a new automatic assessment of the current evidence. A prior shared verdict
         # must not short circuit its AI review, while later sweeps still deduplicate this job.
         triage.request_fresh_review(row, described, str(job.pk))
@@ -1077,7 +1268,7 @@ def automatic_validate_finding(job_id):
             activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
                          project=job.project_id, job_id=job.pk, finding_id=row.pk)
             require_authority(job)
-            checks = validation.run_validation(job.project_id, [row.pk])
+            checks = validation.run_validation(job.project_id, [row.pk], unattended=job.source != 'manual')
             row.refresh_from_db()
             check_state = ('no_check' if checks.get('no_check') and not checks.get('ran') else
                            'observed' if row.validation_status == 'observed' else
@@ -1261,7 +1452,8 @@ def watch_certificates_all():
     # nor on a bare shared provider domain (jfrog.com): a tenant's host under it is watched, the provider's whole tree is not
     from cveFeed.conductor import bounty_blocked_projects
     blocked = bounty_blocked_projects()  # a bug bounty project that has not confirmed automated testing is not watched on its own
-    rows = [r for r in Domain.objects.values_list("id", "name", "project_id")
+    # nor on a target added as exactly one host (=example.com, scope_mode 'host'): no name under it would be taken, so there is nothing to look for
+    rows = [r for r in Domain.objects.exclude(scope_mode=Domain.SCOPE_HOST).values_list("id", "name", "project_id")
             if classify_target(r[1]) != IP and not is_provider_domain(r[1]) and r[2] not in blocked]
     due = ledger.stale_first('ct-watch', rows)
     failed = ct_queue.recently_failed(due)
@@ -1299,8 +1491,9 @@ def run_internal_scan(self, scan_id):
     """Scan an internal target through a Sentinel inside its network, never from this server (see cveFeed.internal_scan)."""
     from cveFeed import internal_scan
     from startScan.models import ScanHistory
-    if self.request.id:
-        ScanHistory.objects.filter(pk=scan_id).update(celery_ids=[self.request.id])
+    from cveFeed.discovery import FAILED, SUCCESS
+    if self.request.id:  # a redelivered message for a scan that already ended keeps the id of the task that ran it
+        ScanHistory.objects.filter(pk=scan_id).exclude(scan_status__in=(FAILED, SUCCESS)).update(celery_ids=[self.request.id])
     return internal_scan.run(scan_id)
 
 
@@ -1606,10 +1799,19 @@ def weekly_deep_nuclei():
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan, udp_scan
+    from cveFeed import fullscan, local_egress, udp_scan
     result = fullscan.run()
     udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
+    local_egress.kick_catch_up()  # and so does the paced pass over ports the egress governor held back (only when one is owed)
     return result
+
+
+@app.task(name='egress_catch_up', bind=False, queue='cve_feed_queue')
+def egress_catch_up():
+    """Queued by the background full scan's firing when a port is owed: probe the ports the egress governor held back (port 25 over its
+    hourly budget, by default), paced by the same budget (see ``cveFeed.local_egress``)."""
+    from cveFeed import local_egress
+    return local_egress.catch_up()
 
 
 @app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')
@@ -1753,6 +1955,7 @@ def build_cve_seed():
         while detection_author.author_rules(batch=5000):
             pass
         detection_author.refresh_rules(batch=5000)
+        detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
         os.makedirs(seed_dir(), exist_ok=True)
         manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
         activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")
@@ -1802,6 +2005,13 @@ def report_resources():
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     from cveFeed import autotune
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
+    from cveFeed import scoring
+    scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
+    try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)
+        from cveFeed import notify
+        notify.baseline_heat_policy()
+    except Exception:  # noqa: BLE001 - the next tick tries again
+        logger.exception('could not baseline the fire pages for the heat rule')
     return {}
 
 

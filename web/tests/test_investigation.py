@@ -288,7 +288,7 @@ class ValidationIntegrationTests(ContextFixture, TestCase):
         facts = [c for c in checks if c['kind'] == 'fact_probe']
         self.assertEqual(len(facts), 2)
         self.assertEqual(len({c['target'] for c in facts}), 2)  # one step per probe, even on one base URL
-        self.assertIn('curl -sS -i', facts[0]['display'])
+        self.assertIn('curl -gsS -i', facts[0]['display'])
         self.assertEqual(facts[0]['params']['host'], 'www.rt.test')
 
     def test_a_local_only_advisory_plans_no_probe_and_says_so(self):

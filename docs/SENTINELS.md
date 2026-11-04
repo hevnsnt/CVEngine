@@ -111,6 +111,12 @@ Two exceptions never run locally: targets inside an internal network, and OpenVA
 
 The message says why a kind has nowhere to go: **disabled** (a live Sentinel has it and the capability policy keeps it off), **offline** (a Sentinel that has it is not heard from), **withheld** (it keeps failing the kind, or its client is too old), **inactive** (pending or suspended) or **never** (no Sentinel declares it), for example "OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it but is offline); the targets stay due". A kind turned off on every Sentinel that has it also shows on the page strip as "OpenVAS is turned off on every Sentinel that has it", not as an offline scanner.
 
+What runs locally (only the kinds `CVENGINE_LOCAL_FALLBACK` leaves on the server, see [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md)) is governed: on a cloud server, connections to port 25 are counted and paced (`CVENGINE_LOCAL_PORT_BUDGETS`, never more than 400 charged in any 60 minutes by default, never skipped), at most 30 nmap and 10 naabu stages in each UTC clock hour fall back to the server (the rest run when that target is next scanned; a project whose Sentinels are all offline counts as falling back, one that never had a Sentinel does not), and when Sentinel tasks keep falling back the activity log and `get_system_status` say so and name the Sentinels that are offline or full ([Cloud hosts and port 25](CONFIGURATION.md#cloud-hosts-and-port-25)). Sentinels themselves are never paced: they run on other networks. For SMTP checks on a provider that blocks or throttles port 25, put a Sentinel on a network that allows it.
+
+### Future: Sentinel egress capabilities
+
+Not built yet (planned for 1.4's capability-aware placement): a Sentinel would declare which egress ports it can reach, found by itself with a canary connection at start-up (for example, whether outbound port 25 works from its network), and the server would route the stages that need port 25 only to Sentinels that can reach it, instead of to any Sentinel with the tool. Today any eligible Sentinel takes the work, and a Sentinel whose own network blocks port 25 reports that port as filtered.
+
 ## Security model
 
 A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md)).

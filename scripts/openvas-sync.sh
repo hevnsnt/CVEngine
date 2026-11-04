@@ -4,6 +4,7 @@
 # the answer this script leaves (JSON, read by Settings > OpenVAS and Administration > OpenVAS). It never runs anything the file does not name: the
 # only words it accepts are on and off, and the services are the ones listed here (keep the list equal to OPENVAS_SERVICES in the Makefile).
 #   scripts/openvas-sync.sh        (also: make openvas-up / make openvas-down do the same by hand)
+#   scripts/openvas-sync.sh restart-gvmd   restarts gvmd only, when the app asked through web/.openvas-restart (its NVT cache was out of date)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 # root (cron, systemd) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named
@@ -13,12 +14,25 @@ SERVICES=(openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gv
 
 # This runs as root, and ./web is writable by the web container: everything read from or written to it goes through scripts/update-state.py, which
 # never follows a link planted there.
-want=$(python3 scripts/update-state.py openvas-wanted) || exit 0
-case $want in on | off) ;; *) exit 0 ;; esac
+want=$(python3 scripts/update-state.py openvas-wanted) || want=''
 
 STATE=$(python3 scripts/update-state.py directory) || exit 1
 exec 9>"$STATE/openvas.lock"
 flock -n 9 || exit 0  # the previous request is still being carried out
+
+if [ "${1:-}" = restart-gvmd ]; then
+  # gvmd 26.35 and later reload their NVT cache only in the periodic-jobs process, so the GMP answers miss the CVE references of NVTs loaded
+  # after gvmd started (greenbone/gvmd#3220) until gvmd restarts. Only a gvmd that is running is restarted (an add-on started by hand with
+  # make openvas-up has no web/.openvas-wanted), never one switched off; the answer is written either way, so the request runs once.
+  . scripts/compose-layout.sh
+  result=failed
+  if [ "$want" != off ] && cvengine_compose_layout && [ -n "$("${COMPOSE[@]}" --profile openvas ps --status running -q openvas-gvmd 2>/dev/null)" ] \
+      && "${COMPOSE[@]}" --profile openvas restart openvas-gvmd; then result=ok; fi
+  echo "$(date -u +%FT%TZ) restart of openvas-gvmd (NVT cache out of date): $result"
+  python3 scripts/update-state.py openvas-restarted "$result" || true
+  exit 0
+fi
+case $want in on | off) ;; *) exit 0 ;; esac
 
 # The watcher sends this script's output to $STATE/openvas.log (host-private); the end of it is published as web/.openvas-log.
 LOG=$STATE/openvas.log
@@ -53,5 +67,12 @@ if [ "${free:-0}" -lt "$floor" ]; then
   report failed "only $free MB of memory is free and OpenVAS needs $floor MB; free some and switch it on again"
   exit 1
 fi
+# the first start needs about 60 GB of Docker's disk (the gvmd database, the feeds and the images): refuse before a feed load fills it up
+if ! disk=$(bash scripts/openvas-disk-check.sh); then
+  echo "$disk"
+  report failed "$disk"
+  exit 1
+fi
+[ -z "$disk" ] || echo "$disk"
 report applying
 if "${COMPOSE[@]}" --profile openvas up -d "${SERVICES[@]}"; then report ok; else report failed "starting the containers failed, see web/.openvas-log"; fi

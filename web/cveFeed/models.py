@@ -85,8 +85,16 @@ class CVEEntry(models.Model):
         return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
 
     @property
+    def attention_tier(self):
+        """The legacy fire / smoke / ice rating (KEV, exploit, CVSS, EPSS): what decides which CVEs are looked for and tested, under either
+        heat policy (cveFeed.threat.attention_tier)."""
+        from cveFeed.threat import attention_tier
+
+        return attention_tier(kev=self.kev, epss_reached=self.epss_reached, exploit_db=self.exploit_db, cvss=self.cvss)
+
+    @property
     def threat_tier(self):
-        """CVEngine fire / smoke / ice tier (see cveFeed.threat)."""
+        """CVEngine fire / smoke / ice tier of the CVE in general, under the heat policy (see cveFeed.threat.classify_threat_tier)."""
         from cveFeed.threat import classify_threat_tier
 
         return classify_threat_tier(
@@ -194,8 +202,9 @@ class CVEMatch(models.Model):
     ai_reason = models.TextField(blank=True, default="")
     ai_model = models.CharField(max_length=128, blank=True, default="")
 
-    # What a nuclei template test said about this host for this CVE: vulnerable | no_match | error, or "" when untested.
-    TEMPLATE_RESULTS = ("vulnerable", "no_match", "error")
+    # What a nuclei template test said about this host for this CVE: vulnerable | no_match | error, or "" when untested. version_only: a
+    # version-class template (cveFeed.templategen.template_evidence) matched, which reads the version again and is not hard evidence.
+    TEMPLATE_RESULTS = ("vulnerable", "no_match", "error", "version_only")
     template_result = models.CharField(max_length=12, blank=True, default="")
     template_id = models.CharField(max_length=128, blank=True, default="")
     template_tested_at = models.DateTimeField(null=True, blank=True)
@@ -208,12 +217,16 @@ class CVEMatch(models.Model):
     # What the match rests on, so a reviewer need not redo the correlation: {source: "port"|"tech", source_id, raw_version,
     # service_extra, cpe, method, affected_index, range, distro}. Written by correlation.
     evidence = models.JSONField(default=dict, blank=True)
-    # When this match was announced as fire on the host (cveFeed.notify.fire_matches when it was made fire, or fire_confirmed when hard
-    # evidence turned a version-only match fire later): each match is paged as fire at most once.
+    # When this match was announced as fire on the host (cveFeed.notify: fire_matches when it was made fire, fire_confirmed when evidence turned
+    # it fire later, cves_turned_hot when its CVE joined the KEV), or marked as announced without a message (notify.baseline_heat_policy), and
+    # under which heat rule (threat.heat_signature: "kev", "legacy:smoke", ...). A match is paged as fire at most once PER RULE: a mark made under
+    # one rule never holds back a page that is new under another (notify.unannounced_q).
     fire_notified_at = models.DateTimeField(null=True, blank=True)
+    fire_notified_rule = models.CharField(max_length=24, blank=True, default="", db_default="")  # db_default: old code still inserting during an update
 
-    # Remediation workflow, driven by people or agents through the API / MCP.
-    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk")
+    # Remediation workflow, driven by people or agents through the API / MCP. fixed, accepted_risk and false_positive close a finding
+    # (cveFeed.closure.CLOSED); remediation_note is the note on why, with who (remediation_by) and when (remediation_updated_at).
+    REMEDIATION_STATUSES = ("open", "in_progress", "fixed", "accepted_risk", "false_positive")
     remediation_status = models.CharField(max_length=16, default="open")
     remediation_note = models.TextField(blank=True, default="")
     remediation_updated_at = models.DateTimeField(null=True, blank=True)
@@ -334,6 +347,9 @@ class MatchVerdict(models.Model):
     Fifty hosts running the same nginx 1.18 for one CVE are one question, not fifty: the verdict is asked once per
     (CVE, product, version, in-range, source), applied to every CVEMatch with that signature, and reused by later
     correlations so a re-run never asks again.
+
+    It has no tenant, so it only ever holds and seeds answers that raise attention (affected, uncertain): a closing answer may rest on
+    what one organization's host said and is never stored here or seeded from here (``correlation._seedable``, task 256).
     """
 
     cve_entry = models.ForeignKey(CVEEntry, on_delete=models.CASCADE, related_name="+")
@@ -998,8 +1014,16 @@ class TriageVerdict(models.Model):
 
     ``signature`` is the sha1 of the evidence the answer depends on (see cveFeed.triage.signature_for), never a hostname: fifty hosts
     with the same evidence are one question. ``model_classification`` / ``model_reason`` are what the model said; ``classification`` /
-    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). Holds only text
-    derived from cleaned fingerprints and feed data, so it is not tenant data and has no project (like ServiceRun)."""
+    ``reason`` are what the rules kept (they differ when ``overridden``, i.e. hard evidence outranked the model). The model's words may
+    quote what the host it was asked about showed (a page title, a certificate, a banner, a path).
+
+    ``project`` and ``host`` record where the answer was reached (the finding the model was asked about). An answer that raises attention is
+    reused by every host with the same signature, and so is a needs-validation one where the finding's own question could not do better
+    (``triage.answer_reusable``), but only its classification and severity step up: its words are shown only in that project
+    (``triage.verdict_text``). A closing one (likely_false_positive, not_applicable) is reused only
+    within that project, and for the kinds whose prompt shows host text the signature does not carry (every kind but a CVE match) only on
+    that host; elsewhere the finding asks its own question, stored under ``triage.own_candidates`` (task 256). An answer whose origin could not
+    be proven (stored before it was recorded: migration 0140) has none: it closes no other finding and its words are shown nowhere."""
 
     CLASSIFICATIONS = ("confirmed", "likely", "needs_validation", "likely_false_positive", "not_applicable")
     kind = models.CharField(max_length=16)
@@ -1016,6 +1040,8 @@ class TriageVerdict(models.Model):
     validation_notes = models.JSONField(default=list, blank=True)  # advisory [{kind, note}] from the model, text only
     model = models.CharField(max_length=128, blank=True, default="")
     invalid_output = models.BooleanField(default=False)  # the reply failed validation: stored as needs_validation
+    project = models.ForeignKey("dashboard.Project", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # where it was reached
+    host = models.CharField(max_length=500, blank=True, default="", db_default="")  # db_default: old code still inserting during an update
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = models.Manager()
@@ -1056,7 +1082,9 @@ class TriageCall(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx")]
+        indexes = [models.Index(fields=["project", "started_at"], name="triagecall_project_day_idx"),
+                   # who asked for a signature: the origin of a stored answer (migration 0140, cveFeed.verdict_tenancy)
+                   models.Index(fields=["signature", "status"], name="triagecall_signature_idx")]
         constraints = [models.UniqueConstraint(fields=["kind", "signature"],
                                                condition=models.Q(status="running"), name="one_running_triage_signature")]
 
@@ -2095,10 +2123,12 @@ class SupplierHostCard(models.Model):
 class SupplierFinding(models.Model):
     """One thing a supplier's public face got wrong, as seen from outside: a "supplier posture" item. One row per (supplier, domain,
     check). ``status`` is ``open`` while the check still finds it, ``resolved`` (by the sweep) when a later check no longer does, and
-    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence). ``ask`` says what to ask the supplier.
-    Never validated by exploitation: nothing here is ever tested beyond what the supplier's service announces."""
+    ``accepted`` when an admin decided to live with it (the sweep then only refreshes its evidence), or ``false_positive`` when an admin found
+    the check got it wrong (the sweep leaves it as it is: never resolved, so never reopened). ``status_note`` says why, ``status_by`` and
+    ``status_at`` who and when. ``ask`` says what to ask the supplier. Never validated by exploitation: nothing here is ever tested beyond
+    what the supplier's service announces."""
 
-    STATUSES = ("open", "accepted", "resolved")
+    STATUSES = ("open", "accepted", "false_positive", "resolved")  # cveFeed.closure.SUPPLIER_STATUSES
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="findings")
     domain = models.CharField(max_length=255)
     check_name = models.CharField(max_length=60)
@@ -2108,12 +2138,13 @@ class SupplierFinding(models.Model):
     detail = models.TextField(blank=True, default="")
     ask = models.TextField(blank=True, default="")  # plain text: what to ask the supplier to do or confirm
     evidence = models.JSONField(default=dict, blank=True)
-    status = models.CharField(max_length=10, default="open")
+    status = models.CharField(max_length=16, default="open")
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     resolved_at = models.DateTimeField(null=True, blank=True)
     status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
-    status_note = models.CharField(max_length=500, blank=True, default="")
+    status_note = models.CharField(max_length=2000, blank=True, default="")
+    status_at = models.DateTimeField(null=True, blank=True)  # when a person last set the status (None before 1.3.3, or never set)
 
     class Meta:
         ordering = ["-severity", "domain", "check_name"]

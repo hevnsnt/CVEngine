@@ -14,6 +14,12 @@ every sub-resource before a byte leaves; a job without a proxy is refused. A pag
 downloads are refused, no permission is granted, service workers are blocked, dialogs and pop-ups are dismissed. HTTPS errors are ignored on
 purpose: an expired or self-signed certificate is exactly the kind of host this is for. Nothing here is a scan; it loads a page once, the way a
 person would, and takes a picture of it.
+
+Chromium's own sandbox is on (``settings.sandbox``, which the parent sets from ``CVENGINE_SCREENSHOT_SANDBOX``): every launch is checked before the
+first page is opened (the renderer must be in a user namespace and a PID namespace of its own, under a seccomp filter of its own, and the browser
+must not carry ``--no-sandbox``), and a browser whose sandbox cannot start or did not engage loads nothing: the child answers ``fatal`` with a
+reason that starts with ``sandbox: ``. ``shot_worker.py --probe`` runs only that check (one ``result`` line with ``engaged``), loads nothing from
+anywhere and needs no proxy.
 """
 import json
 import os
@@ -38,6 +44,12 @@ LAUNCH_ARGS = ('--disable-dev-shm-usage', '--disable-gpu', '--mute-audio', '--no
                '--renderer-process-limit=1', '--js-flags=--max-old-space-size=512')
 LOCAL_SCHEMES = ('data', 'blob', 'about')
 NETWORK_SCHEMES = ('http', 'https')
+SANDBOX_PREFIX = 'sandbox: '  # a fatal reason that starts with this: Chromium's sandbox could not start or did not engage, so nothing was loaded
+NO_USERNS = ("Chromium's sandbox could not start: this container may not create the user namespaces it needs. The celery service needs the seccomp "
+             "profile config/seccomp/playwright-chromium.json (docker-compose.yml applies it when the container is recreated), and the host kernel must "
+             "allow unprivileged user namespaces.")
+AS_ROOT = ("Chromium's sandbox cannot run as root: the screenshot browser must run as an unprivileged account (CVENGINE_SCREENSHOT_USER, nobody by "
+           "default).")
 
 
 def classify_error(message):
@@ -171,6 +183,128 @@ def _title(page):
         return ''
 
 
+# ----------------------------------------------------------------------------- Chromium's sandbox
+
+class SandboxError(Exception):
+    """Chromium's sandbox could not start, or the browser runs without it: the message says why in plain words."""
+
+
+def _proc_text(pid, name):
+    try:
+        with open(f'/proc/{pid}/{name}', 'rb') as handle:
+            return handle.read().decode('utf-8', 'replace')
+    except OSError:
+        return ''
+
+
+def _seccomp_filters(status):
+    """How many seccomp filters a process is under (``Seccomp_filters`` of /proc/<pid>/status, Linux 5.9 and later), or None."""
+    for line in status.splitlines():
+        if line.startswith('Seccomp_filters:'):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def _descendants(root):
+    """The pids below ``root``, by parent pid (Chromium starts processes of its own session and namespaces, so the process group says nothing)."""
+    parents = {}
+    for name in os.listdir('/proc'):
+        if name.isdigit():
+            try:
+                parents[int(name)] = int(_proc_text(name, 'stat').rsplit(')', 1)[1].split()[1])
+            except (IndexError, ValueError):
+                continue
+    found, frontier = set(), {root}
+    while frontier:
+        frontier = {pid for pid, parent in parents.items() if parent in frontier and pid not in found}
+        found |= frontier
+    return found
+
+
+def browser_processes(root=None):
+    """``[{'cmdline', 'nspid', 'userns', 'filters'}]`` of every process below ``root`` (this one), as /proc shows them, and the same of ``root``."""
+    root = root or os.getpid()
+
+    def read(pid):
+        status = _proc_text(pid, 'status')
+        nspid = next((line.split()[1:] for line in status.splitlines() if line.startswith('NSpid:')), [])
+        try:
+            userns = os.readlink(f'/proc/{pid}/ns/user')
+        except OSError:
+            userns = ''
+        return {'pid': pid, 'cmdline': _proc_text(pid, 'cmdline').replace('\0', ' '), 'nspid': nspid, 'userns': userns, 'filters': _seccomp_filters(status)}
+    return [read(pid) for pid in sorted(_descendants(root))], read(root)
+
+
+def judge_sandbox(processes, own):
+    """'' when the browser's renderers run inside Chromium's sandbox, else why not. A renderer must exist, be in a user namespace and a PID
+    namespace other than this process's (the namespace sandbox), and be under more seccomp filters than this process (the sandbox's own system
+    call filter on top of whatever the container has); and no process may carry --no-sandbox."""
+    if any('--no-sandbox' in p['cmdline'] for p in processes):
+        return 'the browser was started with --no-sandbox'
+    renderers = [p for p in processes if '--type=renderer' in p['cmdline']]
+    if not renderers:
+        return 'no renderer process was found to check'
+    for renderer in renderers:
+        if len(renderer['nspid']) < 2:
+            return 'the renderer shares the PID namespace of the browser'
+        if not renderer['userns'] or not own['userns']:
+            return 'the user namespace of the renderer could not be read'
+        if renderer['userns'] == own['userns']:
+            return 'the renderer shares the user namespace of the browser'
+        if renderer['filters'] is not None and own['filters'] is not None and renderer['filters'] <= own['filters']:
+            return 'the renderer has no seccomp filter of its own'
+    return ''
+
+
+def verify_sandbox(browser, inspect=browser_processes):
+    """Open a blank page (nothing is loaded from anywhere: a context without a proxy of its own has only the browser's placeholder) so a renderer
+    exists, then check it is sandboxed. Returns '' or why not."""
+    context = browser.new_context()
+    try:
+        page = context.new_page()
+        page.set_content('<!doctype html><title>sandbox check</title>')
+        return judge_sandbox(*inspect())
+    finally:
+        _quietly(context.close)
+
+
+def _sandbox_words(message):
+    """The plain reason for a launch that failed because of the sandbox, or '' for any other failure."""
+    low = str(message or '').lower()
+    if 'running as root without --no-sandbox' in low:
+        return AS_ROOT
+    if 'no usable sandbox' in low or ('sandbox' in low and ('namespace' in low or 'zygote' in low or 'clone' in low)):
+        return NO_USERNS
+    return ''
+
+
+def launch(playwright, sandbox=True, verify=verify_sandbox):
+    """The browser, started with Chromium's sandbox when ``sandbox`` (Playwright's own default is without it) and checked before it is used.
+    Raises ``SandboxError`` when the sandbox could not start or did not engage; a browser that runs without it is closed, never handed back."""
+    try:
+        # 'per-context': every page's context names its own proxy (and credentials), see Capturer._context; nothing goes direct
+        browser = playwright.chromium.launch(args=list(LAUNCH_ARGS), proxy={'server': 'per-context'}, chromium_sandbox=bool(sandbox))
+    except Exception as exc:  # noqa: BLE001 - the sandbox's own failures are told apart from the rest
+        words = _sandbox_words(exc) if sandbox else ''
+        if words:
+            raise SandboxError(words) from exc
+        raise
+    if sandbox:
+        try:
+            why = verify(browser)
+        except Exception as exc:  # noqa: BLE001 - a check that could not run is not a pass
+            detail = re.sub(r'\s+', ' ', str(exc))[:120] or type(exc).__name__
+            why = f'the check could not run ({detail})'
+        if why:
+            _quietly(browser.close)
+            raise SandboxError(f"Chromium's sandbox did not engage: {why}.")
+    return browser
+
+
 # ----------------------------------------------------------------------------- the child process
 
 def _emit(stream, obj):
@@ -178,10 +312,36 @@ def _emit(stream, obj):
     stream.flush()
 
 
-def main(stdin=None, stdout=None):
-    stdin = stdin or sys.stdin
+def probe(stdout, sandbox=True):
+    """``--probe``: start the browser with its sandbox, check it engaged, and answer one ``result`` line (``engaged``, ``reason``, ``version``)."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _emit(stdout, {'op': 'fatal', 'reason': 'Playwright is not installed.'})
+        return 2
+    try:
+        with sync_playwright() as playwright:
+            browser = launch(playwright, sandbox=sandbox)
+            version = browser.version
+            _quietly(browser.close)
+    except SandboxError as exc:
+        _emit(stdout, {'op': 'result', 'key': 'sandbox', 'engaged': False, 'reason': str(exc)})
+        _emit(stdout, {'op': 'done'})
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the browser did not start for another reason: not a verdict on the sandbox
+        _emit(stdout, {'op': 'fatal', 'reason': re.sub(r'\s+', ' ', str(exc))[:300] or type(exc).__name__})
+        return 2
+    _emit(stdout, {'op': 'result', 'key': 'sandbox', 'engaged': True, 'reason': '', 'version': version})
+    _emit(stdout, {'op': 'done'})
+    return 0
+
+
+def main(stdin=None, stdout=None, argv=()):
     stdout = stdout or os.fdopen(os.dup(1), 'w', buffering=1)
     sys.stdout = sys.stderr  # whatever a library prints is not the protocol
+    if '--probe' in argv:
+        return probe(stdout)
+    stdin = stdin or sys.stdin
     job = json.loads(stdin.readline() or '{}')
     settings = dict(job.get('settings') or {})
     settings['proxy'] = job.get('proxy') or {}
@@ -195,8 +355,11 @@ def main(stdin=None, stdout=None):
         return 2
     try:
         with sync_playwright() as playwright:
-            # 'per-context': every page's context names its own proxy (and credentials), see Capturer._context; nothing goes direct
-            browser = playwright.chromium.launch(args=list(LAUNCH_ARGS), proxy={'server': 'per-context'})
+            try:
+                browser = launch(playwright, sandbox=settings.get('sandbox', True) is not False)
+            except SandboxError as exc:
+                _emit(stdout, {'op': 'fatal', 'reason': SANDBOX_PREFIX + str(exc)})
+                return 4
             try:
                 if not settings.get('user_agent'):
                     settings['user_agent'] = f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{browser.version} Safari/537.36'
@@ -216,4 +379,4 @@ def main(stdin=None, stdout=None):
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(main(argv=sys.argv[1:]))

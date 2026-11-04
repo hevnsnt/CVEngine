@@ -747,7 +747,14 @@ stop_grace=$(( force ? 10 : 60 ))
 workers_stopped=1
 
 step 'Applying migrations; the broker container stays in place (the database container is recreated only when its compose definition changed)'
-"${compose[@]}" up -d --no-recreate db redis
+if . scripts/redis-password.sh && cvengine_ensure_redis_password "$compose_env_file"; then
+    # an installation without a broker password gets one: Redis is recreated with it now, and every client below with the new address
+    echo 'The Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once.'
+    "${compose[@]}" up -d --no-recreate db
+    "${compose[@]}" up -d --no-deps --force-recreate redis
+else
+    "${compose[@]}" up -d --no-recreate db redis
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db

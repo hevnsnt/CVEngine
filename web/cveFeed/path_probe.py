@@ -122,6 +122,33 @@ def verdict(results):
     return 'unknown', len(conclusive), lost
 
 
+def in_scope(ip):
+    """Whether some project may still have ``ip`` probed: a name of one of its targets that scans by itself (not manual only, not passive)
+    resolves there, that name and the address are not excluded or archived, and the address passes the project's own scope
+    (``scannable_hosts`` with the project: exclusions, archives, a bug bounty program's scope). The fingerprint that made the address a
+    candidate says nothing about whether anyone may still be probed (security review 1.3.4, ssrf-1)."""
+    from cveFeed.archive_rediscovery import archived_names
+    from cveFeed.exclusions import excluded_names
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    from targetApp.target_types import scannable_hosts
+    held = (Domain.DISCOVERY_MANUAL, Domain.DISCOVERY_PASSIVE)
+    holders = {}
+    rows = (Subdomain._base_manager.filter(ip_addresses__address=ip)
+            .values_list('target_domain__project_id', 'target_domain__discovery_mode', 'scan_history__domain__project_id',
+                         'scan_history__domain__discovery_mode', 'name')[:200])
+    for project, mode, scan_project, scan_mode, name in rows:
+        # the row's own target, else the target its scan ran for (a row stored before it had one)
+        project, mode = (project, mode) if project else (scan_project, scan_mode)
+        if project and mode not in held:
+            holders.setdefault(project, set()).add(str(name).lower().rstrip('.'))
+    for project, names in holders.items():
+        banned = excluded_names(project) | archived_names(project)
+        if ip not in banned and names - banned and scannable_hosts([ip], project=project):
+            return True
+    return False
+
+
 def candidates(limit=MAX_TARGETS, days=14):
     """``[(ip, closed_port)]`` for up to ``limit`` addresses this server fingerprinted lately and that name a closed port, each from a
     different /16 (a path problem shows on any host; several networks rule out one host's own firewall). Only addresses the scanners
@@ -146,8 +173,12 @@ def candidates(limit=MAX_TARGETS, days=14):
         if not isinstance(port, int) or not 0 < port < 65536 or ':' in str(ip):
             continue
         network = '.'.join(str(ip).split('.')[:2])
-        if network in seen or not is_scannable_ip(ip):
+        if network in seen or not is_scannable_ip(ip) or not in_scope(ip):
             continue
+        from cveFeed import local_egress
+        if local_egress.admit_one(port, 'path-probe', ip):  # the opt-in skip list or the egress governor holds this port: another address is asked instead
+            continue
+        local_egress.record_one(port, 'path-probe', address=ip)
         seen.add(network)
         out.append((ip, port))
         if len(out) >= limit:

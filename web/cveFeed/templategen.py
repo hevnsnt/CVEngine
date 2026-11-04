@@ -304,6 +304,312 @@ def static_check(yaml_text, expected_cve_id=None):
     return True, ""
 
 
+# ----------------------------------------------------------------------------- what a hit shows: the flaw, or a version string
+
+# A template may detect a CVE "by version" (the writer is told so, and the gate accepts a version regex): a hit of such a template is the
+# version read once more, the same evidence correlation already had, never a demonstration of the flaw. ``template_evidence`` sorts a
+# template into one of the two, deterministically. It is an allowlist: a template is VERSION_EVIDENCE only when every part of it is one
+# this classifier positively recognises as a plain read decided by a version; anything else, anything it cannot read, every ssl, dns,
+# flow or unknown block is BEHAVIOR_EVIDENCE, so a genuine hit is never downgraded.
+VERSION_EVIDENCE, BEHAVIOR_EVIDENCE = "version", "behavior"
+# what a version-class hit is recorded as on the CVE match (template_result): it is not "vulnerable", so it is not hard evidence
+# (match_policy.has_hard_evidence), does not lift the heat, confirm the triage row, record a nuclei-cve finding or page
+VERSION_ONLY_RESULT = "version_only"
+_TEMPLATE_KEYS = {"id", "info", "http", "requests", "tcp", "network", "variables", "stop-at-first-match", "self-contained"}
+_PLAIN_PATH = re.compile(r"^(?:\{\{(?:BaseURL|RootURL)\}\})?(?:/[A-Za-z0-9_.~+-]*)*$")  # a static path: no query, no escapes, no variables
+_HOST_VALUE = "{{Hostname}}"  # the one request header a version check may set: any other header value can carry a payload
+_PLAIN_HTTP_KEYS = {"method", "path", "raw", "headers", "matchers", "matchers-condition", "extractors", "host-redirects", "max-redirects",
+                    "redirects", "stop-at-first-match", "max-size", "id", "name", "read-all", "disable-cookie"}
+_PLAIN_NETWORK_KEYS = {"host", "address", "port", "read-size", "read-all", "matchers", "matchers-condition", "extractors", "id", "name"}
+_MATCHER_KEYS = {"type", "part", "words", "regex", "dsl", "status", "condition", "name", "case-insensitive", "internal", "match-all"}
+_CONTENT_PARTS = {"", "body", "header", "content_type", "all", "response", "raw", "data"}
+# a version number inside a regex: digits (or a digit class) on both sides of an escaped dot ("3\.4", "\d+\.\d", "[0-4]\.", "(49|50)\.")
+_REGEX_VERSION = re.compile(r"(?:\d|\\d|\]|\))(?:[+*?]|\{\d{1,3}(?:,\d{0,3})?\})?\\\.(?:\d|\\d|\[|\()")
+# ... but an address (four dotted numbers) is a disclosure's own marker, not a version
+_REGEX_ADDRESS = re.compile(r"(?:(?:\d{1,3}|\\d(?:[+*]|\{\d(?:,\d)?\})?|\[[^\]]{1,10}\](?:[+*]|\{\d(?:,\d)?\})?)\\\.){3}")
+_REGEX_GROUP_SYNTAX = re.compile(r"\(\?P?<(?:[=!]|[A-Za-z_]\w{0,30}>)")
+_WORD_CHARS = re.compile(r"^[A-Za-z0-9 ._/-]{1,80}$")  # a product and version token: no markup, quotes or payload characters
+_IDENTITY_WORD = re.compile(r"^[A-Za-z0-9 ._/-]{1,80}:?$")
+_IDENTITY_ATTRIBUTE = re.compile(r"""^(?:class|id)=(?:"[A-Za-z0-9 _-]{1,40}"|'[A-Za-z0-9 _-]{1,40}')$""")
+_WORD_VERSION = re.compile(r"(?<![\d.])\d{1,4}\.\d{1,4}(?:\.\d{1,4})?(?![\d.]*\.\d)")
+_MIME = re.compile(r"^(?:application|text)/[a-z0-9.+-]{1,40}$")
+# what a product's own name never contains: a word with one of these is a marker of what a response disclosed, not an identity
+_SENSITIVE = re.compile(r"(?i)pass|secret|token|key|private|root|admin|uid|credential|session|cookie|config|user|ssh-|begin |aws|db_|env")
+_CONSTRAINT = re.compile(r"""^\s*(?:'\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s*'|"\s*(?:[<>]=?|==?|!=)?\s*v?\d[\w.+-]{0,40}\s*")\s*$""")
+_COMPARE = re.compile(r"compare_versions\(\s*([A-Za-z_]\w{0,40})\s*((?:,\s*(?:'[^'\n]{1,60}'|\"[^\"\n]{1,60}\")\s*){1,6})\)")
+_CONTAINS = re.compile(r"""^\s*(?:i?contains|contains_all|contains_any)\(\s*(?:body|header|all|response|content_type)\s*((?:,\s*(?:'[^'\n]{1,80}'|"[^"\n]{1,80}")\s*){1,8})\)\s*$""")
+_STATUS_DSL = re.compile(r"^\s*status_code\s*==\s*2\d\d\s*$")
+# "HTTP/1.1 200", and its regex forms with or without the slash ("HTTP\/1\.1", "HTTP[/]1\.1", "^HTTP.1\.0 200", "HTTP/\d", "HTTP\S1\.1",
+# "HTTP\x2F1\.1"): a status line, never a product's version. "HTTP" then up to eight marks (a slash, a dot, a class bracket, an escaped
+# character, a character class such as \S or \s, a hex, unicode or octal escape) and a protocol digit; a product
+# word after it ("Apache HTTP Server 2.4", "IBM_HTTP_Server/8.5", "HTTPd/2.4") is no status line
+_STATUS_LINE = re.compile(r"(?i)HTTP(?:[^A-Za-z0-9\\]|\\(?:[^A-Za-z0-9]|[sw]|x[0-9a-f]{2}|u[0-9a-f]{4}|u\{[0-9a-f]{1,6}\}|[0-7]{3})){0,8}"
+                          r"(?:[0-3]|\\d|\[)")
+
+
+# a page whose answer is itself the exposure (status pages, configuration and backup files, the process table, a Java app's descriptors,
+# metrics, environment and diagnostic endpoints, password and key files, API descriptions, a registry's catalogue, CGI scripts, error
+# logs): a version read there is read from a disclosure, so the hit is the disclosure's
+_EXPOSURE_PATH = re.compile(r"(?i)server-(?:status|info)|application\.(?:properties|ya?ml)|(?:^|/)\.(?:env|git|svn|hg|ds_store)|actuator|phpinfo"
+                            r"|info\.php|backup|\.(?:bak|old|orig|swp|sql|zip|tar|gz|tgz|7z|rar|ya?ml|ini|conf|config|log|properties|env)$"
+                            r"|web\.config|wp-config|(?:^|/)(?:config|configuration|debug|console|admin|proc|etc|sys|dev|boot|windows|winnt)(?:/|$)"
+                            r"|(?:^|/)(?:config|settings|appsettings|credentials|secrets?)\.json|web-inf|meta-inf|jolokia|\.axd(?:/|$)"
+                            r"|(?:^|/)(?:env|metrics|prometheus|health|trace|dump|heapdump|threaddump|mappings|beans|configprops|loggers)(?:/|$|\.)"
+                            r"|(?:^|/)\.ht[a-z]{1,10}$|(?:^|/)(?:swagger|openapi|api-docs)(?:\.json|\.ya?ml|/|$)|(?:^|/)\.(?:npmrc|aws|docker|ssh|kube)(?:/|$)"
+                            r"|(?:^|/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$|(?:^|/)v2/_catalog|(?:^|/)(?:nginx|fpm|php-fpm|apc|haproxy)[_-]?status"
+                            r"|(?:^|/)status(?:/|$|\.)|cgi-bin/|(?:^|/)error[_.-]?log")
+
+
+def _plain_path(value):
+    text = str(value or "").strip()
+    rest = re.sub(r"^\{\{(?:BaseURL|RootURL)\}\}", "", text)
+    return bool(_PLAIN_PATH.match(text)) and ".." not in text and "//" not in rest and not _EXPOSURE_PATH.search(rest)
+
+
+def _plain_header(name, value):
+    """The one header a version check may send: Host naming the host itself. Any other header (a User-Agent, an Accept-Language, a
+    Connection list) can carry an injection, a file name or a hop-by-hop trick."""
+    return str(name or "").strip().lower() == "host" and str(value if value is not None else "").strip() == _HOST_VALUE
+
+
+def _plain_raw(raw):
+    """A raw request that only reads: GET or HEAD of a static path, the ordinary headers with ordinary values, no body."""
+    lines = str(raw or "").replace("\r\n", "\n").strip("\n").split("\n")
+    fields = lines[0].split() if lines else []
+    if len(fields) != 3 or fields[0].upper() not in ("GET", "HEAD") or not _plain_path(fields[1]) or not re.match(r"^HTTP/[12](?:\.[01])?$", fields[2]):
+        return False
+    host = False
+    for index, line in enumerate(lines[1:], 1):
+        if not line.strip():
+            return host and not any(rest.strip() for rest in lines[index + 1:])  # a body is something sent
+        if ":" not in line or not _plain_header(*line.split(":", 1)):
+            return False
+        host = True
+    return host  # a request with no Host header is not an ordinary read
+
+
+def _plain_requests(proto, block):
+    """Whether one protocol block only reads (nothing a hit could owe to a payload)."""
+    if proto in ("http", "requests"):
+        if set(map(str, block)) - _PLAIN_HTTP_KEYS:
+            return False
+        if str(block.get("method", "GET")).upper() not in ("GET", "HEAD"):
+            return False
+        headers = block.get("headers")
+        if headers is not None and not (isinstance(headers, dict) and all(_plain_header(k, v) for k, v in headers.items())):
+            return False
+        paths, raws = block.get("path") or [], block.get("raw") or []
+        if not isinstance(paths, list) or not isinstance(raws, list) or not (paths or raws):
+            return False
+        return all(_plain_path(p) for p in paths) and all(_plain_raw(r) for r in raws)
+    if proto in ("network", "tcp"):
+        return not (set(map(str, block)) - _PLAIN_NETWORK_KEYS)  # no inputs: a banner read, nothing sent
+    return False
+
+
+def _strings(text):
+    return re.findall(r"""'([^'\n]*)'|"([^"\n]*)\"""", text)
+
+
+def _compare_only(expr, names):
+    """Whether a DSL expression is only ``compare_versions`` calls over extracted versions (``names``) with version constraints, joined by
+    ``&&``, ``||``, ``!`` and parentheses."""
+    used = []
+
+    def one(found):
+        constraints = re.findall(r"""'[^'\n]*'|"[^"\n]*\"""", found.group(2))
+        if found.group(1) not in names or not constraints or not all(_CONSTRAINT.match(c) for c in constraints):
+            used.append(False)
+        else:
+            used.append(True)
+        return " X "
+    rest = _COMPARE.sub(one, str(expr))
+    return bool(used) and all(used) and bool(re.fullmatch(r"(?:\s|X|\(|\)|&&|\|\||!)*", rest))
+
+
+def _tokens(text):
+    return {t for t in re.findall(r"[a-z0-9]+", str(text or "").lower()) if len(t) >= 2}
+
+
+_TITLE_DASH = re.compile(r"\s[-\u2013\u2014]\s")  # "Product 1.2 - Vulnerability title": the product is what comes before the first dash
+
+
+def _identity_tokens(doc):
+    """The words the template itself names its product with: info.name's product part (what comes before the first `` - ``; the rest is the
+    vulnerability's title, "Email Address Disclosure", "Directory Listing", and a name with no dash names no product apart from its
+    title), metadata vendor and product, and the classification CPE's product."""
+    info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
+    metadata = info.get("metadata") if isinstance(info.get("metadata"), dict) else {}
+    classification = info.get("classification") if isinstance(info.get("classification"), dict) else {}
+    cpe = str(classification.get("cpe") or "").split(":")
+    name = _TITLE_DASH.split(str(info.get("name") or ""), 1)
+    product = name[0] if len(name) > 1 else ""
+    return _tokens(" ".join([product, str(metadata.get("vendor") or ""), str(metadata.get("product") or ""), cpe[4] if len(cpe) > 4 else ""]))
+
+
+def _identity_word(word, identity):
+    """A word that only names the product: plain text (a trailing colon allowed, ``SH Version:``) or a class or id attribute
+    (``class="ncentral"``) whose every word the template's own product identity (``_identity_tokens``) has, with nothing a secret or a
+    disclosure would contain. Any other word (``email``, ``Index of /``, ``"role":"admin"``) may be a disclosure's marker."""
+    word = str(word).strip()
+    attribute = _IDENTITY_ATTRIBUTE.match(word)
+    if not (_IDENTITY_WORD.match(word) or attribute) or _SENSITIVE.search(word):
+        return False
+    value = word.split("=", 1)[1] if attribute else word
+    tokens = _tokens(value)
+    return bool(tokens) and tokens <= identity
+
+
+def _part_ok(matcher, names):
+    part = str(matcher.get("part", "") or "").strip().lower()
+    return part in _CONTENT_PARTS or part in names
+
+
+def _matcher_kind(matcher, names, identity=frozenset()):
+    """``version`` (decides on a version), ``identity`` (names the product: a plain product word, a MIME type), ``status`` (a 2xx status)
+    or ``other``. Only the first three may make a template version-class."""
+    if not set(map(str, matcher)) <= _MATCHER_KEYS or matcher.get("negative") or not _part_ok(matcher, names):
+        return "other"
+    kind = str(matcher.get("type", "")).lower()
+    if kind == "status":
+        codes = matcher.get("status") or []
+        return "status" if codes and all(isinstance(c, int) and 200 <= c < 300 for c in codes) else "other"
+    if kind == "dsl":
+        exprs = [str(e) for e in matcher.get("dsl") or []]
+        if exprs and all(_compare_only(e, names) for e in exprs):
+            return "version"
+        if exprs and all(_STATUS_DSL.match(e) for e in exprs):
+            return "status"
+        if exprs and all(_CONTAINS.match(e) and all(_identity_word(a or b, identity) for a, b in _strings(_CONTAINS.match(e).group(1)))
+                         for e in exprs):
+            return "identity"
+        return "other"
+    if kind == "regex":
+        patterns = [str(p) for p in matcher.get("regex") or []]
+        if patterns and all(_REGEX_VERSION.search(p) and not _REGEX_ADDRESS.search(p) and not re.search(r"[<>'\"]", _REGEX_GROUP_SYNTAX.sub("", p))
+                            and not _STATUS_LINE.search(p) and len(p) <= 200 for p in patterns):
+            return "version"
+        return "other"
+    if kind == "word":
+        words = [str(w) for w in matcher.get("words") or []]
+        if not words:
+            return "other"
+        if all(_WORD_CHARS.match(w) and _WORD_VERSION.search(w) and not _STATUS_LINE.search(w) for w in words):
+            return "version"
+        if str(matcher.get("part", "")).lower() in ("header", "content_type") and all(_MIME.match(w.strip().lower()) for w in words):
+            return "identity"
+        if all(_identity_word(w, identity) for w in words):
+            return "identity"
+    return "other"
+
+
+def _decided_by_version(block, names, identity=frozenset()):
+    matchers = block.get("matchers")
+    if not isinstance(matchers, list) or not matchers or not all(isinstance(m, dict) for m in matchers):
+        return False
+    kinds = [_matcher_kind(m, names, identity) for m in matchers]
+    if "other" in kinds or "version" not in kinds:
+        return False
+    if str(block.get("matchers-condition", "or")).lower() == "and":
+        return True  # every matcher must hold: one decides on the version, the rest only name the product or want a 2xx answer
+    return all(k == "version" for k in kinds)  # any matcher can fire alone: each must be a version
+
+
+_CAPTURE = re.compile(r"\((?!\?)([^()]{1,120})\)")
+
+
+# a capture group of digits and dots only: digit classes (``\d``, ``[0-9]``, ``[0-9.]``, ``[\d.]``), escaped dots and quantifiers. An
+# unescaped dot (any character), a letter or anything else is not a version: ``(.+\d.+)`` captures whatever the response held
+_VERSION_GROUP = re.compile(r"(?:\\d|\[(?:0-9|\\d|\\?\.|_|-){1,6}\]|\\\.|[+*?]|\{\d{1,3}(?:,\d{0,3})?\})+")
+
+
+def _version_shaped(pattern):
+    """Whether a regex extractor captures a version: a group made of digits and dots only (``([0-9.]+)``, ``(\\d+\\.\\d+)``)."""
+    return any(_VERSION_GROUP.fullmatch(group) and ("\\d" in group or "0-9" in group) and "." in group
+               for group in _CAPTURE.findall(str(pattern)))
+
+
+def _extractor_names(doc):
+    """The extractors whose value is a version: a regex extractor every pattern of which captures digits and dots. ``compare_versions``
+    or a version word over anything else (a JSON field, a DSL value, ``(.*?)``) is a comparison of whatever the response held."""
+    names = set()
+    for proto in ("http", "requests", "network", "tcp"):
+        for block in doc.get(proto) or []:
+            for extractor in (block.get("extractors") or []) if isinstance(block, dict) else []:
+                if (isinstance(extractor, dict) and extractor.get("name") and str(extractor.get("type", "")).lower() == "regex"
+                        and isinstance(extractor.get("regex"), list) and extractor["regex"]
+                        and all(_version_shaped(p) for p in extractor["regex"])):
+                    names.add(str(extractor["name"]))
+    return names
+
+
+def template_evidence(text):
+    """VERSION_EVIDENCE when a hit of this template (its YAML ``text``) shows only a version string, else BEHAVIOR_EVIDENCE. Pure, and an
+    allowlist. A template is version-class only when:
+
+      * its top-level keys are ones this reads (id, info, http/requests, tcp/network, variables, stop-at-first-match, self-contained
+        false): ssl, dns, flow, websocket, headless, code and anything unknown are behaviour;
+      * it has ONE request block, and it only reads: GET or HEAD of a static path (no query, no ``..``, no empty segment, no escapes, no
+        variable but ``{{BaseURL}}``, not a page that is itself an exposure: a status page, a configuration, backup or log file, the
+        process table), no request header but ``Host: {{Hostname}}`` (a raw request must send it), no body; or a network banner read
+        with nothing sent;
+      * it is decided by a version: ``compare_versions`` over a regex extractor that captures digits and dots, a regex that spells a version
+        number, or product-and-version words (never an HTTP status line). With ``matchers-condition: and`` the other matchers may only name
+        the product with words the template's own name, vendor, product or CPE has, match a MIME type or want a 2xx status; with ``or``
+        every matcher must be a version.
+
+    A template it cannot parse is behaviour, so a genuine hit is never read as a version."""
+    try:
+        return _template_evidence(text)
+    except Exception:  # noqa: BLE001 - a field of an unexpected shape: never downgrade
+        return BEHAVIOR_EVIDENCE
+
+
+def _template_evidence(text):
+    try:
+        doc = load_template(text) if text else None
+    except Exception:  # noqa: BLE001 - unreadable: never downgrade
+        return BEHAVIOR_EVIDENCE
+    if not isinstance(doc, dict) or set(map(str, doc)) - _TEMPLATE_KEYS or doc.get("self-contained"):
+        return BEHAVIOR_EVIDENCE
+    names, identity = _extractor_names(doc), frozenset(_identity_tokens(doc))
+    blocks = []
+    for proto in ("http", "requests", "network", "tcp"):
+        found = doc.get(proto) or []
+        if not isinstance(found, list):
+            return BEHAVIOR_EVIDENCE
+        blocks += [(proto, block) for block in found]
+    if len(blocks) != 1:  # one read, decided by its own answer: a later request may owe its answer to an earlier one
+        return BEHAVIOR_EVIDENCE
+    proto, block = blocks[0]
+    if not isinstance(block, dict) or not _plain_requests(proto, block) or not _decided_by_version(block, names, identity):
+        return BEHAVIOR_EVIDENCE
+    return VERSION_EVIDENCE
+
+
+def evidence_of_template(path):
+    """``template_evidence`` of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read: never a downgrade)."""
+    try:
+        from cveFeed.validation import approved_template
+        text, problem = approved_template(path)
+    except Exception:  # noqa: BLE001
+        return BEHAVIOR_EVIDENCE
+    try:
+        return BEHAVIOR_EVIDENCE if problem else template_evidence(text)
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        return BEHAVIOR_EVIDENCE
+
+
+def is_confirmed(outcome):
+    """Whether a template test outcome demonstrates the flaw: it matched, and the template is not a version-class one."""
+    return bool(outcome.get("vulnerable")) and outcome.get("template_evidence") != VERSION_EVIDENCE
+
+
+def is_version_hit(outcome):
+    """Whether a template test outcome matched only a version string (a version-class template)."""
+    return bool(outcome.get("vulnerable")) and outcome.get("template_evidence") == VERSION_EVIDENCE
+
+
 _TEMPLATE_INDEX = {}  # roots -> (signature, {cve_id_lower: [paths]})
 
 
@@ -776,7 +1082,15 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     """Persist what the template test found, so it shows in the findings, host heat and graph rather than only in the activity
     log: a vulnerable host gets a Vulnerability (source 'nuclei-cve', linked to the CVE, with the matched request and response as
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
-    tested). Only hosts of ``project`` are touched: without one nothing is guessed. Returns the number of findings saved."""
+    tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
+    the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
+    testssl): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
+    one nothing is guessed.
+
+    A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or
+    exploited match it turns from smoke to fire is rescored and paged once (``scoring.evidence_arrived``, ``notify.fire_confirmed``: once per
+    heat rule), the state read before the write (``threat.unproven``) so a match that was already fire is not paged again. It is still no
+    confirmed finding (no Vulnerability, no "template test confirmed" message). Returns the number of findings saved."""
     from django.utils import timezone
 
     from cveFeed.models import CVEMatch
@@ -791,16 +1105,28 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     for sub in Subdomain.objects.filter(name__in=list(by_host), target_domain__project_id=project) \
             .select_related("target_domain", "scan_history").order_by("-id"):
         latest.setdefault((sub.name, sub.target_domain_id), sub)
-    now, saved = timezone.now(), 0
+    from cveFeed import threat
+    now, saved, proved = timezone.now(), 0, []
     for name, outcome in by_host.items():
-        result = "error" if outcome.get("error") else ("vulnerable" if outcome["vulnerable"] else "no_match")
-        CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project).update(
-            template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
+        result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
+                  else "vulnerable" if outcome["vulnerable"] else "no_match")
+        rows = CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project)
+        if result != "vulnerable":
+            # a confirmation stands until a person or a confirming check says otherwise: a version read again, a miss or an error of a later
+            # run (a timeout, a WAF that answered this time, a template that changed) never lowers it, whichever tester made it
+            rows = rows.exclude(template_result="vulnerable")
+        unproven = ({m.pk for m in rows.select_related("cve_entry", "triage") if threat.unproven(m)}
+                    if result == VERSION_ONLY_RESULT and threat.heat_policy() != threat.LEGACY_POLICY else set())
+        rows.update(template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        if unproven:  # read before the write: only a real smoke-to-fire change is rescored and paged
+            proved += [m.pk for m in CVEMatch.objects.filter(pk__in=unproven).select_related("cve_entry", "triage")
+                       if not threat.unproven(m) and threat.match_heat(m) == threat.FIRE]
     for (name, _domain_id), sub in latest.items():
         outcome = by_host[name]
         hit = outcome.get("hit")
-        if not (outcome["vulnerable"] and hit):
-            continue
+        if not (is_confirmed(outcome) and hit):
+            continue  # only a hit that shows the flaw is a confirmed finding
         try:
             data = parse_nuclei_result(hit)
         except (KeyError, TypeError, AttributeError):
@@ -817,6 +1143,9 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
         save_vulnerability(target_domain=sub.target_domain, scan_history=sub.scan_history, subdomain=sub,
                            http_url=hit.get("matched-at") or hit.get("host") or name, **data)
         saved += 1
+    if proved:
+        from cveFeed import scoring
+        scoring.evidence_arrived(proved, confirmed=proved)
     return saved
 
 
@@ -844,6 +1173,7 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
         return {"source": "candidate" if tmpl.status == tmpl.STATUS_DRAFT else "none",
                 "template": tmpl.template_id, "results": [], "reason": tmpl.validation_output}
     results = []
+    evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
     from targetApp.target_types import scannable_hosts
     hosts = scannable_hosts(hosts, project=project)  # whatever called us, nothing that resolves to a blocked address is ever tested
     for start in range(0, len(hosts), CHUNK_HOSTS):
@@ -854,17 +1184,22 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
             outcomes = _run_template_with_retry(path, chunk)
             from cveFeed import auth_nuclei  # a stored sign-in adds a signed-in run for the hosts it covers
             outcomes = auth_nuclei.merge_template_outcomes(path, chunk, outcomes, project)
+            for outcome in outcomes:
+                outcome['template_evidence'] = evidence
             errors = sum(bool(o.get('error')) for o in outcomes)
             handle.done_message = (f'{errors} of {len(outcomes)} checks failed for {cve.cve_id}' if errors else
-                                   f'{sum(o["vulnerable"] for o in outcomes)} of {len(outcomes)} hosts matched {cve.cve_id}')
+                                   f'{sum(o["vulnerable"] for o in outcomes)} of {len(outcomes)} hosts matched {cve.cve_id}'
+                                   + (' (a version check: the version only)' if evidence == VERSION_EVIDENCE else ''))
         results.extend(outcomes)
     for outcome in results:
         host = outcome['host']
         activity.log('validate', (f'Check failed for {host} and {cve.cve_id}: {outcome["error"]}' if outcome.get('error')
+                                  else f'Template matched only the version string for {cve.cve_id} on {host}: the version is in range, '
+                                       'the flaw itself was not shown' if is_version_hit(outcome)
                                   else f'Template matched {cve.cve_id} on {host}' + (', seen while authenticated' if outcome.get('authenticated') else '')
                                   if outcome['vulnerable']
                                   else f'Template did not match {cve.cve_id} on {host}'),
-                     project=project, cve_id=cve.cve_id, vulnerable=outcome['vulnerable'])
+                     project=project, cve_id=cve.cve_id, vulnerable=is_confirmed(outcome))
     try:
         record_outcomes(cve, results, project=project, template_id=tmpl.template_id if tmpl else os.path.basename(path)[:-5])
     except Exception:  # noqa: BLE001 - failing to record a result must not lose the test that ran

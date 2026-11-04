@@ -26,6 +26,8 @@ import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
+import * as CL from "/staticfiles/cve/closure-logic.js";
+import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -68,13 +70,21 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
-// a CVE listed as exploited in the wild, shown on its row whatever the heat: a match that rests on its version alone is held at
-// smoke (CVENGINE_VERSION_ONLY_MAX_HEAT) until a check confirms it, and KEV must still be visible at a glance
+// a CVE listed as exploited in the wild, shown on its row whatever the heat: under the KEV heat policy a KEV match is fire only when its
+// version is proven on the host (otherwise smoke until a check proves it), and KEV must still be visible at a glance
 const kevBadge = (heatCapped) => {
   const b = badge("KEV", "critical");
   b.title = heatCapped
-    ? "Listed as exploited in the wild. The match rests on a version alone, so it shows below fire until a check confirms it; it is validated first."
+    ? "Listed as exploited in the wild. On the KEV; version not proven on this host, so it shows smoke until a check proves it; it is validated first."
     : "Listed as exploited in the wild";
+  return b;
+};
+// why a CVE finding has its heat, from the server (threat.heat_reason): "on the KEV; version not proven", "not on the KEV and no known
+// exploit", "on the KEV; version proven: template hit". Text only (el() sets textContent).
+const heatWhy = (reason) => (reason ? el("span", "note heat-why", reason, { title: `Why this heat: ${reason}` }) : null);
+const heatBadge = (heat, reason) => {
+  const b = badge(heat, heat);
+  if (reason) b.title = `Why ${heat}: ${reason}`;
   return b;
 };
 // a hostname printed anywhere (except the host page itself) links to that host's page
@@ -1220,7 +1230,8 @@ const excerpt = (label, text) => {
   box.append(el("div", "note", label), el("pre", "banner", text));
   return box;
 };
-const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows", debian: "Debian / Ubuntu", rhel: "RHEL / Fedora", alpine: "Alpine" };
+const OS_LABEL = { linux: "Linux", windows: "Windows", any: "Linux or Windows", debian: "Debian / Ubuntu", rhel: "RHEL / Fedora", alpine: "Alpine",
+  app: "In the application's code" };
 // When no external check can settle a finding, the model suggests short, read-only local commands a host owner
 // can run themselves (cveFeed.triage.suggest_local_checks). Unverified by this tool: shown as a suggestion, not evidence.
 const localChecksBox = (local) => {
@@ -1243,9 +1254,142 @@ const localChecksBox = (local) => {
   return box;
 };
 
+// How to confirm THIS match by hand (cveFeed.confirm_guide): the real script URL, page, host and port, what to look for, the read-only steps
+// with those values filled in, how to read the answer and what makes it exploitable. Every command was built by the server from validated
+// values; a "quote" is text from the scanned host or a feed, shown as data. Links open only http(s) URLs.
+const RUN_IN = { shell: "Shell", browser_console: "Browser console", browser: "Browser", host: "On the host" };
+const safeHref = (url) => (typeof url === "string" && /^https?:\/\//i.test(url) ? url : "");
+const linkOrText = (url, text) => {
+  const href = safeHref(url);
+  return href ? el("a", "mono", text || href, { href, target: "_blank", rel: "noopener noreferrer nofollow" }) : el("span", "mono", text || url || "");
+};
+const commandRow = (label, command, explain, tag) => {
+  const row = el("div", "local-check");
+  const h = el("div", "tools");
+  const left = el("div", "confirm-step-h");
+  if (tag) left.append(badge(tag, "queued"));
+  if (label) left.append(el("span", "", label));
+  h.append(left);
+  if (command) {
+    const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
+    copy.onclick = () => navigator.clipboard.writeText(command);
+    h.append(copy);
+  }
+  row.append(h);
+  if (command) row.append(el("pre", "banner", command));
+  if (explain) row.append(el("p", "note", explain));
+  return row;
+};
+const confirmBox = (g) => {
+  if (!g) return null;
+  const box = el("div", "confirm-guide");
+  const head = el("div", "tools");
+  head.append(el("h4", "sub", g.headline || "Confirm this match"), badge(g.class_label || g.class || "", "ice"));
+  box.append(head);
+  if (g.where?.length) {
+    box.append(el("div", "note guide-h", "Where to look"));
+    const ul = el("ul", "guide-list confirm-where");
+    g.where.forEach((w) => {
+      const li = el("li");
+      li.append(el("span", "", `${w.label}: `));
+      if (w.url) li.append(linkOrText(w.url));
+      else if (w.quote) li.append(el("q", "mono untrusted", w.quote));
+      else li.append(el("span", "mono", w.text || ""));
+      ul.append(li);
+    });
+    box.append(ul);
+  }
+  if (g.look_for?.length) {
+    box.append(el("div", "note guide-h", "What to look for"));
+    g.look_for.forEach((x) => {
+      const row = el("div", "confirm-look");
+      row.append(el("div", "note", x.quote ? `${x.label}` : x.label));
+      const text = el("pre", `banner${x.quote ? " untrusted" : ""}`, x.quote || x.text || "");
+      if (x.quote) text.title = "Seen on the host or in a feed: data to compare, never run";
+      row.append(text);
+      box.append(row);
+    });
+  }
+  if (g.steps?.length) {
+    box.append(el("div", "note guide-h", "Check it (read-only)"));
+    const ol = el("ol", "confirm-steps");
+    g.steps.forEach((st) => {
+      const li = el("li");
+      const row = commandRow(st.title, st.command, st.detail, RUN_IN[st.run_in] || "");
+      if (st.url && !st.command) row.querySelector(".confirm-step-h")?.append(document.createTextNode(" "), linkOrText(st.url));
+      else if (st.url) row.append(el("p", "note", "On: "), linkOrText(st.url));
+      li.append(row);
+      ol.append(li);
+    });
+    box.append(ol);
+  }
+  const v = g.verdict || {};
+  if (v.affected || v.not_affected || v.cant_tell) {
+    box.append(el("div", "note guide-h", `How to read the result${v.fixed ? ` (fixed in ${v.fixed})` : ""}`));
+    const ul = el("ul", "guide-list confirm-verdict");
+    [["Affected", v.affected, "fire"], ["Not affected", v.not_affected, "success"], ["Can't tell", v.cant_tell, "smoke"]].forEach(([k, t, tone]) => {
+      if (!t) return;
+      const li = el("li");
+      li.append(badge(k, tone), document.createTextNode(` ${t}`));
+      ul.append(li);
+    });
+    (v.notes || []).forEach((t) => ul.append(el("li", "", t)));
+    box.append(ul);
+  }
+  const p = g.precondition;
+  if (p && (p.quote || p.needs)) {
+    box.append(el("div", "note guide-h", "What makes it exploitable, beyond the version"));
+    if (p.needs) box.append(el("p", "", p.needs));
+    if (p.quote) {
+      const q = el("blockquote", "untrusted confirm-quote", p.quote);
+      q.title = "The advisory's own words (feed text)";
+      box.append(el("div", "note", "The advisory says:"), q);
+    }
+  }
+  const t = g.template;
+  if (t) {
+    box.append(el("div", "note guide-h", "The nuclei template that ran"));
+    const line = el("p", "");
+    line.append(el("span", "", `Template ${t.template_id}, result ${String(t.result || "").replaceAll("_", " ")}. `));
+    if (t.template_url) line.append(linkOrText(t.template_url, "Open the template"));
+    else if (t.template_search_url) line.append(linkOrText(t.template_search_url, "Find the template"));
+    else if (t.generated) line.append(el("span", "note", "Generated by cvENGINE for this CVE (reviewed before use)."));
+    box.append(line);
+    // not a read-only step: a CVE template may send its exploit-check requests, so it is labelled as an active check, apart from the steps above
+    if (t.command) box.append(commandRow("Active check: run the same template against this host", t.command, t.active || "Sends the template's own requests to this host.", "Active"));
+    if (t.matched_at) { const m = el("p", "note", "Matched at: "); m.append(linkOrText(t.matched_at)); box.append(m); }
+    if (t.matcher) box.append(el("p", "note", `Matcher: ${t.matcher}`));
+    if (t.extracted?.length) box.append(el("pre", "banner untrusted", t.extracted.join("\n")));
+    if (t.request) box.append(el("div", "note", "The request it sent (excerpt)"), el("pre", "banner untrusted", t.request));
+  }
+  (g.local || []).forEach((section) => {
+    if (!section.commands?.length) return;
+    const rows = section.commands.map((c) => commandRow(c.label || "", c.command, c.explain, OS_LABEL[c.platform] || c.platform));
+    if (rows.length <= 2) {
+      box.append(el("div", "note guide-h", section.title), ...rows);
+      return;
+    }
+    // a long list (every packaging of a library): folded, so the steps above stay the first thing read
+    const more = el("details", "confirm-more");
+    more.append(el("summary", "note guide-h", `${section.title} (${rows.length} commands)`), ...rows);
+    box.append(more);
+  });
+  if (g.links?.length) {
+    box.append(el("div", "note guide-h", "Distribution trackers"));
+    const ul = el("ul", "guide-list");
+    g.links.forEach((l) => { const li = el("li"); li.append(linkOrText(l.url, l.label)); ul.append(li); });
+    box.append(ul);
+  }
+  if (g.fix) box.append(el("div", "note guide-h", "Fix it"), el("p", "", g.fix));
+  if (g.notice) box.append(el("p", "note", g.notice));
+  return box;
+};
+
 // What a person needs to confirm one CVE, from the shared per-CVE record (cveFeed.detection): the same for every match of that CVE.
 const GUIDE_SOURCE = { rules: "Written by rules from the CVE record", ai: "Written by AI", manual: "Written by a person" };
-const guidanceBox = (det, cveId) => {
+// the general steps name <TARGET> and <PORT>; on a match whose host and port are known (validated by the server) they are filled in
+const fillIn = (text, fill) => (fill ? String(text || "").replace(/<(TARGET|PORT)>/g, (m, k) => fill[k] || m) : text);
+const guidanceBox = (det, cveId, fill = null) => {
   const strategy = det && det.strategy;
   if (!strategy) return null;
   const box = el("div", "cve-guidance");
@@ -1266,7 +1410,8 @@ const guidanceBox = (det, cveId) => {
   };
   const profile = strategy.validation || {};
   if (profile.remote_determinable) {
-    const text = { yes: "cvENGINE can decide this from outside.", partial: "From outside cvENGINE can only see the reported version or the exposed service; a backported fix can fool it.", no: "This cannot be decided from outside; it needs a check on the host." }[profile.remote_determinable];
+    // a client-side library's record says how its version is read (from the page's script files) and what a hit means
+    const text = profile.remote_note || { yes: "cvENGINE can decide this from outside.", partial: "From outside cvENGINE can only see the reported version or the exposed service; a backported fix can fool it.", no: "This cannot be decided from outside; it needs a check on the host." }[profile.remote_determinable];
     box.append(el("p", "note", `${text}${profile.recommended_tools?.length ? ` Tools: ${profile.recommended_tools.join(", ")}.` : ""}`));
   }
   const remote = strategy.remote_checks || [];
@@ -1278,10 +1423,11 @@ const guidanceBox = (det, cveId) => {
       h.append(badge(c.how?.tool || c.kind, "queued"), el("span", "note", c.description));
       row.append(h);
       if (c.how?.invocation) {
+        const invocation = fillIn(c.how.invocation, fill);
         const copy = el("button", "btn ghost sm", "Copy", { type: "button" });
-        copy.onclick = () => navigator.clipboard.writeText(c.how.invocation);
+        copy.onclick = () => navigator.clipboard.writeText(invocation);
         h.append(copy);
-        row.append(el("pre", "banner", c.how.invocation));
+        row.append(el("pre", "banner", invocation));
       }
       if (c.how?.decide) row.append(el("p", "note", c.how.decide));
       box.append(row);
@@ -1422,8 +1568,12 @@ function renderFinding(d, cfg, row) {
   };
   const excerpts = Object.entries(d.how_found.excerpts || {}).filter(([, v]) => v);
   if (excerpts.length) {
-    requestFold = fold("Request and response", "The exact exchange the scanner matched (excerpts)");
-    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(k === "request" ? "Request (excerpt)" : "Response (excerpt)", v)));
+    const scriptOnly = excerpts.every(([k]) => k === "script_url" || k === "banner");
+    requestFold = scriptOnly
+      ? fold("Script read", "The library file cvENGINE fetched and read itself")
+      : fold("Request and response", "The exact exchange the scanner matched (excerpts)");
+    const EXCERPT_LABEL = { request: "Request (excerpt)", response: "Response (excerpt)", script_url: "Script fetched", banner: "Banner (excerpt)" };
+    excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(EXCERPT_LABEL[k] || k, v)));
   }
 
   const seenFold = fold("Seen and history", `First seen ${shortDate(d.first_seen)}, last seen ${shortDate(d.last_seen)}${d.history.length ? `, ${d.history.length} change${d.history.length === 1 ? "" : "s"} on this host` : ""}`);
@@ -1476,7 +1626,9 @@ function renderFinding(d, cfg, row) {
     if (!ALL) fix.append(cfg.statusControl(d));
     else {
       const ro = el("div", "tools");
-      ro.append(el("span", "note", "Remediation status"), badge((d.remediation.status || "open").replace(/_/g, " ")));
+      const chip = badge(CL.statusLabel(d.remediation.status || "open").toLowerCase());
+      chip.title = CL.closureText(d.remediation);
+      ro.append(el("span", "note", "Remediation status"), chip);
       fix.append(ro, openInProject(row, cfg.kind === "match" ? "matches" : "vulns", `#${row.id}`));
     }
   }
@@ -1522,10 +1674,17 @@ function renderFinding(d, cfg, row) {
   }
 
 
-  const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}How to verify it by hand, and every check that ran`);
+  const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}${d.confirm?.where?.length ? "Where to look on this host, what to look for, " : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
-  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId) : null;
-  if (guide) check.append(guide);
+  const mine = d.kind === "match" ? confirmBox(d.confirm) : null;
+  if (mine) check.append(mine);
+  const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId, d.confirm?.fill) : null;
+  if (guide && mine) {
+    // the generic record is the same for every host: folded under this match's own guidance
+    const more = el("details", "confirm-generic");
+    more.append(el("summary", "note", `General guidance for ${cveId || "this CVE"} (the same for every host)`), guide);
+    check.append(more);
+  } else if (guide) check.append(guide);
   const v = d.validation;
   const none = {
     no_check: "No validated check exists for this finding yet.",
@@ -1574,32 +1733,56 @@ function agentLine(task) {
 }
 const agentTag = (task) => (task ? badge(task.agent ? `agent: ${task.agent}` : "queued for agent", "info") : null);
 
-// A CVE match's remediation status, set in its detail pane with the fix (the CVE matches and Findings pages)
-function matchStatusControl(d) {
-  const s = select(
-    "Remediation status",
-    [
-      ["open", "Open"],
-      ["in_progress", "In progress"],
-      ["fixed", "Fixed"],
-      ["accepted_risk", "Accepted risk"],
-    ],
-    async () => {
-      try {
-        await api("PATCH", `${base}/matches/${d.id}`, { status: s.value }); // no note: the route leaves the stored one alone, and ours may be stale
-        d.remediation.status = s.value;
-        toast("Status updated");
-      } catch (err) {
+// A finding's remediation status (a CVE match, scanner or hygiene finding), set in its detail pane with the fix (the CVE matches and
+// Findings pages). Closing it (fixed, accepted risk, false positive) asks why first (closure-note.js); a false positive needs the answer.
+// The closure line under it says who closed it, when and why, or the reason the engine closed it on its own.
+function findingStatusControl(d) {
+  const kind = d.kind || "match";
+  const why = el("p", "note closure-note");
+  const paint = () => {
+    const r = d.remediation || {};
+    why.textContent = CL.closureText(r) || r.note || "";
+    why.hidden = !why.textContent;
+  };
+  const s = select("Remediation status", CL.STATUS_OPTIONS, async () => {
+    const value = s.value;
+    let body = { status: value }; // no note when not closing: the route leaves the stored one alone, and ours may be stale
+    if (CL.asksForNote(value)) {
+      const answer = await askClosureNote(value, 1);
+      if (!answer) {
         s.value = d.remediation.status;
-        toast(err.message, true);
+        return;
       }
-    },
-  );
+      body = { status: value, note: answer.note };
+    }
+    try {
+      const r = await api("PATCH", `${base}/findings/${kind}/${d.id}`, body);
+      Object.assign(d.remediation, {
+        status: r.remediation_status, note: r.remediation_note, closure_note: r.closure_note, closed_by: r.closed_by,
+        closed_at: r.closed_at, closed_automatically: r.closed_automatically,
+      });
+      paint();
+      toast(`Marked ${CL.statusLabel(value).toLowerCase()}`);
+    } catch (err) {
+      s.value = d.remediation.status;
+      toast(err.message, true);
+    }
+  });
   s.value = d.remediation.status;
   const box = el("div", "tools");
-  box.append(el("span", "note", "Remediation status"), s);
-  if (d.remediation.note) box.append(el("p", "note", d.remediation.note));
+  box.append(el("span", "note", "Remediation status"), s, why);
+  paint();
   return box;
+}
+
+// A row's status chip when it is not open, its tooltip the closure line (who, when, why). null for an open finding.
+function statusBadge(item) {
+  const status = item.status ?? item.remediation_status;
+  if (!status || ["open", "actionable"].includes(status)) return null;
+  const chip = badge(CL.statusLabel(status).toLowerCase(), status === "false_positive" ? "fp" : "");
+  const why = CL.closureText(item);
+  if (why) chip.title = why;
+  return chip;
 }
 
 // Group a detail pane into sections (a heading and what follows it) and fold the ones that have nothing to say into a
@@ -1755,7 +1938,7 @@ function findingPage(mount, cfg) {
   // (POST findings/status, up to 200 items per request, per-item results). A server without that route still handles CVE
   // matches one at a time through PATCH matches/<id>; that older route replaces the note, so the fallback sends the old one back.
   const BULK_KINDS = ["match", "vulnerability", "hygiene"];
-  const STATUS_LABELS = [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]];
+  const STATUS_LABELS = CL.STATUS_OPTIONS;
   const BULK_MAX = 200;
   const itemKind = (item) => (cfg.kindOf ? cfg.kindOf(item) : cfg.kind);
   const isBulkable = (item) => BULK_KINDS.includes(itemKind(item));
@@ -1764,12 +1947,14 @@ function findingPage(mount, cfg) {
   const resultKey = (i) => `${itemKind(i)}-${i.id}`;
   // A group sends only the members the change applies to: by default the open and in progress ones whose status it changes (fixed,
   // accepted and ruled-out hosts are left as they are unless `includeClosed`). The summary counts findings and sites, not rows.
-  async function setStatusBatch(items, value, opts = {}) {
+  // `detail`: the closing note ({note}) asked for before the change, put on every finding it changes
+  async function setStatusBatch(items, value, opts = {}, detail) {
+    const note = detail ? detail.note : undefined;
     if (!items.some(FG.isGroup)) {
-      const r = await setStatusEach(items, value);
+      const r = await setStatusEach(items, value, note);
       return { ...r, summary: FG.doneSummary(r.ok) };
     }
-    const r = FG.foldResults(items, await setStatusEach(FG.expandForBulk(items, value, opts), value), resultKey);
+    const r = FG.foldResults(items, await setStatusEach(FG.expandForBulk(items, value, opts), value, note), resultKey);
     return { ...r, summary: FG.doneSummary(r.ok) };
   }
   // Undo: every finding (every member of a group) back to its own earlier status
@@ -1782,7 +1967,11 @@ function findingPage(mount, cfg) {
     }
     return out;
   }
-  async function setStatusEach(items, value) {
+  // How many findings a change to `value` touches (a group row stands for the members it changes), for the note dialog's words
+  const changeCount = (items, value, opts) => items.reduce((n, i) => n + (FG.isGroup(i) ? FG.targetsOf(i.group, value, opts).ids.length : 1), 0);
+  const askNote = (value, items, opts = {}) => (CL.asksForNote(value) ? askClosureNote(value, changeCount(items, value, opts) || 1) : Promise.resolve(undefined));
+  async function setStatusEach(items, value, note) {
+    const noteField = note === undefined ? {} : { note }; // left out: each finding keeps its own stored note (Undo, reopening)
     const ok = [];
     const failed = [];
     const groups = new Map(); // one request series per project (the all-projects view mixes them)
@@ -1796,7 +1985,7 @@ function findingPage(mount, cfg) {
       for (let at = 0; at < group.length; at += BULK_MAX) {
         const chunk = group.slice(at, at + BULK_MAX);
         try {
-          const r = await api("POST", `${where}/findings/status`, { items: chunk.map((i) => ({ kind: itemKind(i), id: i.id })), status: value });
+          const r = await api("POST", `${where}/findings/status`, { items: chunk.map((i) => ({ kind: itemKind(i), id: i.id })), status: value, ...noteField });
           const bad = new Map((r.failed || []).map((f) => [`${f.kind}-${f.id}`, f.error || "not updated"]));
           chunk.forEach((i) => (bad.has(`${itemKind(i)}-${i.id}`) ? failed.push({ item: i, error: bad.get(`${itemKind(i)}-${i.id}`) }) : ok.push(i)));
         } catch (err) {
@@ -1808,7 +1997,7 @@ function findingPage(mount, cfg) {
                 continue;
               }
               try {
-                await api("PATCH", `${where}/matches/${i.id}`, { status: value }); // the note stays as it is
+                await api("PATCH", `${where}/matches/${i.id}`, { status: value, ...noteField }); // without a note the stored one stays
                 ok.push(i);
               } catch (e) {
                 failed.push({ item: i, error: e.message });
@@ -1837,15 +2026,17 @@ function findingPage(mount, cfg) {
         afterRun: () => list.reload(),
         actions: [
           {
-            select: { label: "Mark as", options: [["open", "Open"], ["in_progress", "In progress"], ["fixed", "Fixed"], ["accepted_risk", "Accepted risk"]] },
+            select: { label: "Mark as", options: CL.STATUS_OPTIONS },
             label: "Change status",
             verb: "Updating",
             done: "Updated",
             // a selection holding a group asks first, saying how many hosts change and how many settled ones are left alone
             confirm: (n, items, value) => FG.confirmText(items, value),
             confirmTitle: (items) => `Change ${items.filter(FG.isGroup).length === 1 ? "a group of hosts" : "groups of hosts"}?`,
-            runBatch: setStatusBatch,
-            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk); the unified list
+            // closing asks why first (a false positive must say), and the note goes on every finding the change touches
+            detail: (value, items) => askNote(value, items),
+            runBatch: (items, value, detail) => setStatusBatch(items, value, {}, detail),
+            // Undo only where the earlier status is one the server can set back (open, in progress, fixed, accepted risk, false positive); the unified list
             // says status, the matches list remediation_status, and a group row each member's own (FG.priorOf)
             prior: FG.priorOf,
             restoreBatch: restoreStatuses,
@@ -2012,7 +2203,9 @@ function findingPage(mount, cfg) {
                   label: group ? FG.menuLabel(item, value, label, opts) : `Mark as ${label}`,
                   disabled: group ? hosts === 0 : was === value,
                   run: async () => {
-                    const r = await setStatusBatch([item], value, opts);
+                    const detail = await askNote(value, [item], opts);
+                    if (detail === null) return; // the note dialog was cancelled
+                    const r = await setStatusBatch([item], value, opts, detail);
                     if (r.failed.length) return toast(r.failed[0].error, true);
                     list.reload();
                     if (prior !== undefined) {
@@ -2232,12 +2425,12 @@ const pages = {
       const box = el("div", "scope-cell");
       const note = el("span", "note", "");
       const show = () => {
-        note.textContent = t.host_scoped ? "provider domain: scanning this host only" : "";
+        note.textContent = t.scope_mode === "host" ? "exactly this host: no subdomains" : t.host_scoped ? "provider domain: scanning this host only" : "";
       };
       const pick = el("select", "", null, { "aria-label": `Scope of ${t.name}` });
       for (const [value, label] of [
         ["auto", "Scope: auto"],
-        ["host", "Scope: this host only"],
+        ["host", "Scope: this host only (no subdomains)"],
         ["parent", "Scope: include parent domain"],
       ]) {
         const o = el("option", "", label, { value });
@@ -3354,7 +3547,7 @@ const pages = {
           const label = r.id
             ? el("a", "", text, { href: `/cve/${encodeURIComponent(projectOf(h))}/${r.finding === "match" ? "matches" : "vulns"}/#${r.id}` })
             : el("span", "", text);
-          line.append(badge(r.temp, r.temp), label, el("span", "note", r.detail));
+          line.append(heatBadge(r.temp, r.heat_reason), label, el("span", "note", r.detail));
           if (r.kev) line.append(kevBadge(r.heat_capped));
           if (r.kind === "cve") line.append(el("span", "note host-why", r.description || "Description unavailable in the CVE feed."));
           if (r.id) line.append(aiBadge({ classification: r.classification, status: r.classification ? "triaged" : "pending" }, { project: projectOf(h), kind: r.finding === "match" ? "match" : "vulnerability", id: r.id }));
@@ -3688,7 +3881,7 @@ const pages = {
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
     const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
-    // KEV whatever the heat: a match that rests on its version alone is smoke at most, so heat alone no longer finds every exploited CVE
+    // KEV whatever the heat: a KEV match whose version is not proven is smoke, so heat alone does not find every exploited CVE
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
     kev.value = wanted.get("kev") === "1" ? "1" : "";
     const type = picker(
@@ -3715,13 +3908,14 @@ const pages = {
       countOf((key) => ({ severity: key })),
       () => reload(),
     );
+    // closed: fixed, accepted risk and false positive together; false positive alone, to review those decisions
     const status = picker(
       "Status",
-      [["actionable", "Actionable"], ["all", "Everything"]],
+      [["actionable", "Actionable"], ["closed", "Closed"], ["false_positive", "False positive"], ["all", "Everything"]],
       countOf((key) => ({ status: key })),
       () => reload(),
     );
-    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "all"] };
+    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", "all"] };
     const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
@@ -3812,11 +4006,14 @@ const pages = {
           { label: "CVSS", value: (f) => f.cvss },
           { label: "Detected", value: (f) => f.detected },
           { label: "Note", value: (f) => f.note },
+          { label: "Closure note", value: (f) => f.closure_note || "" },
+          { label: "Closed by", value: (f) => (f.closed_by ? f.closed_by.username : f.closed_automatically ? "cvENGINE" : "") },
+          { label: "Closed at", value: (f) => f.closed_at || "" },
         ],
       },
       kind: "vulnerability",
       kindOf: (item) => item.kind,
-      forKind: (kind) => (kind === "match" ? { kind, statusControl: matchStatusControl } : { kind }),
+      forKind: (kind) => (["match", "vulnerability", "hygiene"].includes(kind) ? { kind, statusControl: findingStatusControl } : { kind }),
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
@@ -3848,9 +4045,10 @@ const pages = {
             icon: "shield",
             tone: "calm",
             title: "Nothing needs action",
-            body: "Every finding is fixed, accepted, info only or ruled out by the AI. Scans keep looking.",
+            body: "Every finding is fixed, accepted, a false positive, info only or ruled out by the AI. Scans keep looking.",
             actions: [{ label: "Show everything", run: () => { setPicker(status, "status", "all"); reload(); } }],
           };
+        if (status.value !== "all") return { icon: "search", title: status.value === "false_positive" ? "No finding is marked a false positive" : "No closed findings" };
         return { icon: "bug", title: "No findings yet", body: "Findings appear as scans finish and new CVEs match your hosts." };
       },
       onLoaded: (data, reset) => {
@@ -3859,8 +4057,8 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
-               !FG.isGroup(f) && f.status && !["open", "actionable"].includes(f.status) ? badge(String(f.status).replace(/_/g, " ")) : null, agentTag(f.agent_task), projChip(f)],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+               !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
           : [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
@@ -3906,13 +4104,7 @@ const pages = {
     );
     const status = picker(
       "Remediation status",
-      [
-        ["", "All"],
-        ["open", "Open"],
-        ["in_progress", "In progress"],
-        ["fixed", "Fixed"],
-        ["accepted_risk", "Accepted risk"],
-      ],
+      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"]],
       async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );
@@ -3920,13 +4112,13 @@ const pages = {
       status.refresh();
       list.reload();
     });
-    // KEV whatever the heat: a match that rests on its version alone is smoke at most
+    // KEV whatever the heat: a KEV match whose version is not proven is smoke
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => {
       status.refresh();
       list.reload();
     });
     kev.value = urlq.get("kev") === "1" ? "1" : "";
-    const statusControl = matchStatusControl;
+    const statusControl = findingStatusControl;
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "matches",
@@ -3950,7 +4142,7 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [badge(m.cve.tier, m.cve.tier), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), agentTag(m.agent_task), projChip(m)],
+        meta: [heatBadge(m.cve.tier, m.heat_reason), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

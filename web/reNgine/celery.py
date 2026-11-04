@@ -19,6 +19,16 @@ app.conf.worker_autoscaler = 'reNgine.gevent_autoscale:GeventAutoscaler'
 # After a broker reconnect celery lowers the prefetch and restores it toward pool.num_processes, which on gevent is the greenlets running, not the
 # ceiling: acks_late tasks then ran one at a time until a restart. The prefetch stays at the ceiling (set at start and by the autoscaler).
 app.conf.worker_enable_prefetch_count_reduction = False
+# An ack that hits a dropped broker connection still frees its delivery: otherwise it holds one prefetch slot, so one task slot of acks_late
+# work, until the worker restarts (reNgine/broker_acks.py)
+from reNgine import broker_acks
+
+broker_acks.install()
+# On a gevent worker, remote control (ping, inspect, autoscale, revoke) reconnects after a dropped broker connection instead of ending for good
+# (reNgine/gevent_pidbox.py)
+from reNgine import gevent_pidbox
+
+gevent_pidbox.install()
 app.autodiscover_tasks()
 
 
@@ -73,16 +83,44 @@ def recap_version_only_answers(*args, **kwargs):
 
 
 @worker_ready.connect()
+def settle_library_proven_answers(*args, **kwargs):
+    """Queue, once per install, the step that gives the CVE matches judged before the library rule the rules' classification and records
+    their body read (cveFeed.tasks.settle_library_proven_task: a task of its own, in batches, one worker at a time, resumable). Nothing is
+    queued once it has finished. Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed.models import BackgroundCursor
+        from cveFeed.tasks import SETTLE_DONE_LANE, settle_library_proven_task
+        if not BackgroundCursor.objects.filter(lane=SETTLE_DONE_LANE).exists():
+            settle_library_proven_task.apply_async(countdown=30)
+    except Exception:  # noqa: BLE001 - the database or the broker may not be reachable yet; the next worker start tries again
+        logging.getLogger(__name__).exception('could not queue the library rule settle step')
+
+
+@worker_ready.connect()
 def rescore_for_heat_cap(*args, **kwargs):
-    """Host scores are stored: when the version-only heat cap changed (the 1.3.2 upgrade, or CVENGINE_VERSION_ONLY_MAX_HEAT), one full
-    rescore is queued so a score never counts a version-only match as fire after its heat stopped saying so (cveFeed.scoring.
-    rescore_if_heat_cap_changed). Never stops the worker from starting."""
+    """Host scores are stored: when the heat rule changed (the heat policy, CVENGINE_HEAT_POLICY or the Heat policy card, and under legacy
+    CVENGINE_VERSION_ONLY_MAX_HEAT; the upgrade that introduced the policy too), one full rescore is queued so a score never counts a match
+    at a heat it no longer shows (cveFeed.scoring.rescore_if_heat_cap_changed). Never stops the worker from starting."""
     import logging
     try:
         from cveFeed import scoring
         scoring.rescore_if_heat_cap_changed()
     except Exception:  # noqa: BLE001 - the next worker start or the daily rescore tries again
-        logging.getLogger(__name__).exception('could not check the version-only heat cap')
+        logging.getLogger(__name__).exception('could not check the heat rule')
+
+
+@worker_ready.connect()
+def baseline_heat_pages(*args, **kwargs):
+    """When the heat rule changed (the heat policy or, under legacy, the version-only cap), every CVE match that is fire under the new rule is
+    marked as announced without a message, so the switch never pages the backlog (cveFeed.notify.baseline_heat_policy; the update itself is
+    baselined by migration 0139). Never stops the worker from starting."""
+    import logging
+    try:
+        from cveFeed import notify
+        notify.baseline_heat_policy()
+    except Exception:  # noqa: BLE001 - the 30 second tick tries again
+        logging.getLogger(__name__).exception('could not baseline the fire pages for the heat rule')
 
 
 @worker_ready.connect()

@@ -23,6 +23,8 @@ jobs:
         run: |
           python3 scripts/check_tool_versions.py --json > "$RUNNER_TEMP/tools.json"
           python3 scripts/check_tool_versions.py | tee "$RUNNER_TEMP/tools.md"
+          # advisory rows (the Chromium Playwright bundles against Chrome stable) are a warning on the run, never the issue or a gate
+          python3 -c "import json; [print('::warning::' + r['tool'] + ': ' + str(r['pinned']) + ' in the image, ' + str(r['latest']) + ' is current. Rebuild the image after the next Playwright release that moves it.') for r in json.load(open('$RUNNER_TEMP/tools.json')) if r.get('ahead')]"
           if python3 -c "import json,sys; sys.exit(0 if any(r['behind'] for r in json.load(open('$RUNNER_TEMP/tools.json'))) else 1)"; then
             echo "behind=true" >> "$GITHUB_OUTPUT"
           fi

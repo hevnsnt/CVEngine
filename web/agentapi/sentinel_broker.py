@@ -1824,6 +1824,10 @@ def _clean_naabu_result(body):
 _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0}
 
 
+MAX_CVE_IDS = 20
+_CVE_ID = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)  # bounded: a longer one would overflow CveId.name and fail the whole stage
+
+
 def _clean_findings(findings):
     """``(findings, dropped)`` for a nuclei result: at most ``MAX_FINDINGS`` findings, strongest first. A pass over many hosts can legitimately
     report more than that (most of them informational), and rejecting the whole result for it lost every finding and sent the stage back to run
@@ -1848,7 +1852,11 @@ def _clean_findings(findings):
                     'description': _clip(item.get('description'), 'description'),
                     'matcher_name': _clip(item.get('matcher_name'), 'matcher_name'),
                     'extracted_results': [_text(v, 300) for v in extracted[:MAX_EXTRACTED] if isinstance(v, str)],
-                    'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)]})
+                    'tags': [_clip(v, 'tag') for v in tags[:MAX_TAGS] if isinstance(v, str)],
+                    # the CVEs the template names (nuclei's ``classification.cve-id``), when the client reports them: optional, and only
+                    # well-formed ids are kept, so a client that does not send them is unchanged
+                    'cve_ids': list(dict.fromkeys(v.strip().upper() for v in (item.get('cve_ids') or [])[:MAX_CVE_IDS]
+                                                  if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))})
     return out, dropped
 
 
@@ -1988,8 +1996,10 @@ def _clean_openvas_result(body):
     scanned_addresses = scanned_addresses + sorted(str(a) for a in seen if str(a) not in scanned_addresses)[:MAX_ADDRESSES]
     without_cve = _ov_num(body.get('without_cve'), 0, MAX_OPENVAS_RESULTS, int, 0)
     unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
+    # results whose CVE references the Sentinel's gvmd left out (a stale NVT cache, ``cveFeed.openvas_scan.parse_result``): the run is partial
+    stale = _ov_num(body.get('nvt_cache_stale'), 0, MAX_OPENVAS_RESULTS, int, 0)
     return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
-            'partial': body.get('partial') is True}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
+            'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
 def _clean_waf_result(body):

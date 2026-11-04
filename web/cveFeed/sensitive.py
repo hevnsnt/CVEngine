@@ -1,6 +1,6 @@
 """Sensitive data in a web response: which kinds of secrets and personal data a route serves, never the values.
 
-``scan_text`` reads the body already sampled by the route auth probe (at most 64 KB) and returns, per type, how many
+``scan_text`` reads the body already sampled by the route auth probe (at most 64 KB of a route, 300 KB of a front page) and returns, per type, how many
 distinct values it saw and ONE sample: a credential shows only its type, length and public prefix, personal data a partial mask. Raw matches never leave this module: nothing here logs, stores or returns a
 value, only counts and masked samples. All functions are pure.
 """

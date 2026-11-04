@@ -103,15 +103,17 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
     """Whether a CVE match rests on evidence about *this host* beyond a version string. The one definition, used by triage's ceiling, the
     match heat (``threat.match_heat``) and its database form (``hard_evidence_q``). Hard evidence is any of:
 
-      * a template hit (``template_result`` vulnerable: a nuclei CVE template, or a confirmed OpenVAS test);
+      * a template hit (``template_result`` vulnerable: a nuclei CVE template that shows the flaw, or a confirmed OpenVAS test; a template
+        that only matches a version string records ``version_only`` instead, ``templategen.template_evidence``, and is not one);
       * the distribution's tracker listing the host's package as vulnerable (``distro_status`` vulnerable);
       * the host's own inventory report: the match was made from it (source ``host``) or it confirmed an external match
         (``evidence.host_reported``);
       * a runZero report of the same CVE on the host (``evidence.runzero``);
       * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
 
-    Everything else is *version-only*: a version read by nmap or a banner, by technology detection (a script name, a page generator), by
-    WPScan, an OpenVAS test below its quality bar, or a CVE's version range read against any of those. An AI verdict is not evidence
+    Everything else is *version-only* (for triage: an AI verdict on it stays needs validation): a version read by nmap or a banner, by
+    technology detection (a script name, a page generator), by WPScan, an OpenVAS test below its quality bar, a template that matched a version
+    string, or a CVE's version range read against any of those. An AI verdict is not evidence
     (text never confirms), and a version re-read by another tool is the same evidence again."""
     return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
             or evidence_flag(evidence, 'host_reported') or evidence_flag(evidence, 'runzero') or validation_status == 'hit')
@@ -138,8 +140,9 @@ def _validation_status(match):
 
 
 def is_version_only(match):
-    """Whether a CVEMatch is *version-only*: it has no hard evidence (``has_hard_evidence``). Such a match never shows the highest heat by
-    default (``threat.version_only_max_heat``), KEV or not; validation is how it earns it."""
+    """Whether a CVEMatch is *version-only*: it has no hard evidence (``has_hard_evidence``). Triage never rates such a match above needs
+    validation (``triage.ceiling``). Heat reads ``version_proven`` under the ``kev`` heat policy (a version read from the component itself is
+    proof there) and this under ``legacy`` (``threat.version_only_max_heat``)."""
     return not has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
                                  getattr(match, 'distro_status', '') or '', _validation_status(match))
 
@@ -147,6 +150,228 @@ def is_version_only(match):
 def version_only_q(prefix=''):
     """The database form of ``is_version_only``."""
     return ~hard_evidence_q(prefix)
+
+
+# ----------------------------------------------------------------------------- proof: what turns a KEV match fire (the heat policy)
+
+PROVEN_LIBRARY_CONFIDENCE = 0.8  # js_libraries.CONFIDENCE: a file's comment banner 0.9, a code signature 0.8; a file name 0.4
+# the template_result a version-class template hit is recorded as (``templategen.VERSION_ONLY_RESULT``): a template that only reads a static
+# page or a banner matched the version string on the host. It proves the version, not the flaw.
+from cveFeed.templategen import VERSION_ONLY_RESULT as VERSION_TEMPLATE_RESULT  # noqa: E402
+
+# The products whose service banner proves the version that runs (a positive list, so it fails safe: a product cvENGINE does not know is no
+# proof). They are vendor-built and self-contained: an appliance's or a vendor's own server, shipped and updated as one build by its vendor, so
+# the version it prints is the build that runs; that is where KEV entries concentrate (VPN gateways, firewalls, file-transfer servers,
+# Jenkins, Confluence, ActiveMQ). Read as normalized prefixes of the scanner's product name ("Apache ActiveMQ" -> apacheactivemq). Everything
+# else is no proof by its banner, in particular what a distribution packages and patches by backporting with the upstream version unchanged,
+# often without printing a marker of itself (OpenSSH, Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, Postfix, BIND, Dovecot, PowerDNS,
+# Asterisk, Kerberos, Erlang, libssh, Tomcat, Jetty, Traffic Server, ...), and what the operating system services (IIS, HTTP.sys, Microsoft
+# ESMTP and ftpd): only the distribution's tracker or hard evidence proves those.
+VENDOR_PRODUCT_PREFIXES = (
+    # network appliances and remote access
+    'fortigate', 'fortinet', 'fortios', 'fortiweb', 'fortimail', 'fortimanager', 'fortianalyzer', 'fortiproxy', 'fortisiem', 'forticlientems',
+    'citrix', 'netscaler', 'ivanti', 'pulsesecure', 'pulseconnectsecure', 'paloalto', 'panos', 'globalprotect', 'sonicwall', 'f5bigip', 'bigip',
+    'ciscoasa', 'ciscoadaptivesecurity', 'ciscoise', 'barracuda', 'zyxel', 'sophos', 'watchguard', 'checkpoint', 'mikrotik', 'ubiquiti',
+    'qnap', 'synology', 'hikvision', 'dahua', 'mitel',
+    # vendor servers shipped as one build
+    'jenkins', 'atlassian', 'confluence', 'jira', 'bitbucket', 'bamboo', 'gitlab', 'teamcity', 'jetbrainsteamcity', 'zimbra', 'progressmoveit',
+    'moveit', 'goanywhere', 'fortragoanywhere', 'crushftp', 'wingftp', 'servu', 'solarwinds', 'manageengine', 'zohomanageengine', 'veeam',
+    'kaseya', 'screenconnect', 'connectwise', 'papercut', 'openfire', 'oracleweblogic', 'weblogic', 'coldfusion', 'adobecoldfusion',
+    'vmwarevcenter', 'vmwareesxi', 'vmwarehorizon', 'vmwareworkspace', 'sapnetweaver', 'grafana', 'kibana', 'elasticsearch',
+    # Apache projects shipped as the project's own build (not a distribution's)
+    'apacheactivemq', 'activemq', 'apachesolr', 'solr', 'apachespark', 'apacheds', 'apacheofbiz', 'apacheairflow', 'apachesuperset',
+    'apachedruid', 'apacheflink', 'apacheapisix', 'apacherocketmq', 'rocketmq', 'apachenifi', 'apachecouchdb', 'couchdb',
+    'apacheopenmeetings', 'apacheunomi', 'apachehugegraph',
+)
+
+
+def vendor_built(product):
+    """Whether a service banner of ``product`` (the scanner's product name) states the version that runs: a vendor-built product on
+    ``VENDOR_PRODUCT_PREFIXES``. Anything else, an empty name included, is no proof by its banner (correlation records the answer as
+    ``evidence.vendor_banner``)."""
+    token = re.sub(r'[^a-z0-9]', '', (product or '').lower())
+    return bool(token) and token.startswith(VENDOR_PRODUCT_PREFIXES)
+
+
+def provenance_recorded(evidence):
+    """Whether a match's evidence was written by the code that records everything ``version_read_from_component`` reads: a port row needs
+    ``vendor_banner`` (recorded since the heat policy's review; a row from before reads as no proof until the next correlation writes it). The
+    first correlation after the update therefore turns some old rows fire by recording what was already true, which is no news: it is not paged
+    (``correlation.save_matches``, ``correlation._carry_remediation``)."""
+    if not isinstance(evidence, dict) or evidence.get('source') != 'port':
+        return True
+    return 'vendor_banner' in evidence
+
+
+def proof_only_unrecorded(old, new_evidence, new_version, validation_status=''):
+    """Whether a match turns proven only because correlation now records a field it did not record before (``provenance_recorded``): the old
+    row (``old``: a CVEMatch as it was, or anything with its ``source``, ``evidence``, ``template_result``, ``distro_status`` and
+    ``matched_version``) at the same version, with that field filled in from the new evidence, was already proven. That is no news, so it is not
+    paged. Anything else is new proof (nmap now probes the service instead of guessing from the port, the version moved) and is paged."""
+    from types import SimpleNamespace
+    old_evidence = getattr(old, 'evidence', None)
+    if provenance_recorded(old_evidence) or (getattr(old, 'matched_version', '') or '') != (new_version or ''):
+        return False
+    filled = {**old_evidence, 'vendor_banner': bool((new_evidence or {}).get('vendor_banner'))}
+    probe = SimpleNamespace(source=getattr(old, 'source', ''), evidence=filled, template_result=getattr(old, 'template_result', '') or '',
+                            distro_status=getattr(old, 'distro_status', '') or '')
+    return version_proven(probe, validation_status=validation_status or '')
+
+
+_TYPEOF_REGISTERED = []
+
+
+def _register_json_typeof():
+    """Register ``jsontype`` (PostgreSQL ``jsonb_typeof``) on JSON key lookups once, so a database form can insist a value is a number: JSONB
+    orders true, arrays and objects above every number, so ``value >= 0.8`` alone holds for them where Python's test does not."""
+    if _TYPEOF_REGISTERED:
+        return
+    from django.db.models import CharField, Transform
+    from django.db.models.fields.json import KeyTransform
+
+    class JSONTypeof(Transform):
+        lookup_name = 'jsontype'
+        function = 'jsonb_typeof'
+        output_field = CharField()
+
+    KeyTransform.register_lookup(JSONTypeof)
+    _TYPEOF_REGISTERED.append(True)
+
+
+def version_read_from_component(evidence, distro_status='', template_result=''):
+    """Whether a match's version was read from the component itself, at a confidence that proves it: "version proven", the second half of
+    ``version_proven`` (the first, "vulnerability confirmed", is ``has_hard_evidence``). It proves the version is there, not that the flaw is,
+    so it never lifts triage, creates a finding or counts as a validation hit; it is what the heat rule needs. Three readings qualify:
+
+      * a version-class template hit on this host (``template_result`` version_only): a template that only reads a static page or a banner
+        read the version from the service or the file itself and found it inside the range;
+      * a JavaScript library whose OWN FILE states the version: ``evidence.source`` tech, ``version_source`` body (the file's comment banner
+        or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
+        ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set),
+        and that copy is the file that was read: the ``evidence.copies`` entry whose ``url`` is the ``script_url`` is itself ``source`` body
+        and ``state`` effective (``script_copy_read``; ``copy_state`` is the best state of any copy of the version, so a read copy a later
+        unread one shadows would pass on it alone);
+      * a network service that answered nmap's version probe itself: ``evidence.source`` port, ``method`` probed (``table`` is nmap's
+        guess from the port number), a vendor-built product (``evidence.vendor_banner``: ``vendor_built``, recorded by correlation)
+        and NO distribution packaging read from the banner (``evidence.distro``). A distribution backports fixes without changing the
+        upstream version it prints, and most print no marker of themselves, so the banner of any product not on the vendor list (OpenSSH,
+        Apache httpd, nginx, OpenSSL, MySQL, PHP, Exim, BIND, Dovecot, IIS, an unknown product, ...) proves nothing until the distribution's own
+        tracker gives a verdict (``distro_status`` vulnerable is hard evidence; patched is ice).
+
+    Never proof: a version from a script's file name, CDN path or ``?ver=`` query (``version_source`` filename, 0.4), a copy a later one
+    replaces, a fallback or a copy of an unresolved set (their caps, 0.4 and 0.5, are below the bar), a library version another tool read
+    (``version_source`` other), technology detection (Wappalyzer, httpx, a page generator, a header), WPScan, an OpenVAS test below its
+    quality bar, a version inherited from another host or a redirect (correlation records none of those as a file or probe reading), a
+    nmap row from before the method was kept, and an AI verdict. To tighten it, drop a clause here (and in ``version_read_from_component_q``):
+    the heat, lists, counts, scores, alerts and API all follow."""
+    if distro_status == 'patched':
+        return False
+    if template_result == VERSION_TEMPLATE_RESULT:
+        return True
+    if not isinstance(evidence, dict):
+        return False
+    source = evidence.get('source')
+    if source == 'tech':
+        confidence = evidence.get('version_confidence')
+        return (evidence.get('version_source') == 'body' and evidence.get('copy_state') == 'effective'
+                and isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= PROVEN_LIBRARY_CONFIDENCE
+                and not evidence_flag(evidence, 'copies_unresolved') and script_copy_read(evidence))
+    if source == 'port':
+        return evidence.get('method') == 'probed' and evidence_flag(evidence, 'vendor_banner') and not evidence_flag(evidence, 'distro')
+    return False
+
+
+def script_copy_read(evidence):
+    """Whether the copy at a library match's ``script_url`` is the file that was read and the one that runs: its ``evidence.copies`` entry
+    (same ``url``) is ``source`` body and ``state`` effective. No such entry is no proof. ``script_copy_read_q`` is the database form."""
+    url = evidence.get('script_url') if isinstance(evidence, dict) else None
+    copies = evidence.get('copies') if isinstance(evidence, dict) else None
+    return bool(isinstance(url, str) and url and isinstance(copies, list) and any(
+        isinstance(c, dict) and c.get('url') == url and c.get('source') == 'body' and c.get('state') == 'effective' for c in copies))
+
+
+_SCRIPT_COPY_PATH = '$.copies[*] ? (@.url == $u && $u != "" && @.source == "body" && @.state == "effective")'
+
+
+def script_copy_read_q(prefix=''):
+    """The database form of ``script_copy_read`` (PostgreSQL ``jsonb_path_exists``, the ``script_url`` passed in as ``$u``)."""
+    from django.db.models import BooleanField, F, Func, Q
+
+    class ScriptCopyRead(Func):
+        output_field = BooleanField()
+        conditional = True
+        template = (f"jsonb_path_exists(%(expressions)s, '{_SCRIPT_COPY_PATH}'::jsonpath, "
+                    "jsonb_build_object('u', (%(expressions)s) -> 'script_url'))")
+    return Q(ScriptCopyRead(F(prefix + 'evidence')))
+
+
+def library_read_q(prefix=''):
+    """``version_read_from_component_q``'s library clause alone (a library's own file states the version, for the copy that runs)."""
+    from django.db.models import Q
+    _register_json_typeof()
+    p = prefix
+    return (Q(**{p + 'evidence__source': 'tech', p + 'evidence__version_source': 'body', p + 'evidence__copy_state': 'effective',
+                 p + 'evidence__version_confidence__jsontype': 'number',
+                 p + 'evidence__version_confidence__gte': PROVEN_LIBRARY_CONFIDENCE}) & ~evidence_flag_q('copies_unresolved', p)
+            & script_copy_read_q(p))
+
+
+def version_read_from_component_q(prefix=''):
+    """The database form of ``version_read_from_component``. The confidence must be a JSON number (``jsonb_typeof``), as Python's
+    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number."""
+    from django.db.models import Q
+    p = prefix
+    library = library_read_q(p)
+    service = (Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & evidence_flag_q('vendor_banner', p)
+               & ~evidence_flag_q('distro', p))
+    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})
+    return (template | library | service) & ~Q(**{p + 'distro_status': 'patched'})
+
+
+def version_proven(match, validation_status=None):
+    """Whether a CVEMatch PROVES the version is on the host, in the sense of the owner's heat policy ("we can PROVE that version is in our
+    environment": fire when its CVE is hot, ``threat.match_heat``). The one definition, with its database form ``version_proven_q``:
+
+      * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, testssl), the distribution
+        tracker listing the package as vulnerable, the host's own inventory report, runZero reporting the CVE, a validation hit; or
+      * the version read from the component itself at high confidence (``version_read_from_component``): a version-class template hit, a
+        JavaScript library's own file (banner 0.9 or code signature 0.8, the copy that runs), or a service banner nmap's probe read from a
+        service that is not distribution-packaged.
+
+    Everything else (``version_read_from_component`` lists it) is a version we only THINK is there: smoke when hot. ``validation_status``
+    overrides the Triage row's (``''``: as if no validation had hit yet)."""
+    status = _validation_status(match) if validation_status is None else validation_status
+    return (has_hard_evidence(getattr(match, 'source', ''), getattr(match, 'evidence', None), getattr(match, 'template_result', '') or '',
+                              getattr(match, 'distro_status', '') or '', status)
+            or version_read_from_component(getattr(match, 'evidence', None), getattr(match, 'distro_status', '') or '',
+                                           getattr(match, 'template_result', '') or ''))
+
+
+def version_proven_q(prefix=''):
+    """The database form of ``version_proven``."""
+    return hard_evidence_q(prefix) | version_read_from_component_q(prefix)
+
+
+def proof_of(match):
+    """What proves a CVEMatch's version, in a few words for the heat reason ("version proven: template hit"), or '' when nothing does."""
+    evidence = getattr(match, 'evidence', None)
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if (getattr(match, 'template_result', '') or '') == 'vulnerable':
+        return 'version proven: template hit'
+    if (getattr(match, 'distro_status', '') or '') == 'vulnerable':
+        return "version proven: the distribution's tracker lists the package as vulnerable"
+    if getattr(match, 'source', '') == 'host' or evidence_flag(evidence, 'host_reported'):
+        return "version proven: the host's own inventory report"
+    if evidence_flag(evidence, 'runzero'):
+        return 'version proven: runZero reports it'
+    if _validation_status(match) == 'hit':
+        return 'version proven: a validation check reproduced it'
+    if (getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched':
+        return 'version proven: a version check read it on the host'
+    if version_read_from_component(evidence, getattr(match, 'distro_status', '') or ''):
+        return ('version proven: read from the library file itself' if evidence.get('source') == 'tech'
+                else 'version proven: read from the service banner by nmap')
+    return ''
 
 
 def version_only(source, evidence, version_in_range, template_result='', distro_status=''):

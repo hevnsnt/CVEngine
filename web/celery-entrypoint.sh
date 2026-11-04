@@ -34,6 +34,9 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
+# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: the
+# screenshot browser runs as nobody in this container and has no business with scan output, PDF reports or log archives. Applied at every start.
+chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
 # test the scanners the pipeline runs, required for configuration
 naabu -version
@@ -84,6 +87,11 @@ generate_worker_command() {
 # An update kills the workers holding messages they took and never started; Redis hands those back only after the visibility timeout
 # (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
 python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
+
+# Chromium's sandbox for the web screenshots (cveFeed/web_shot.py): started once here as the screenshot worker starts it. While it cannot engage
+# (a container without config/seccomp/playwright-chromium.json, a kernel without unprivileged user namespaces) screenshots stay off and the host
+# page, get_system_status and this log say why. It never stops the workers from starting.
+python3 manage.py check_screenshot_sandbox || echo "Web screenshots stay off until Chromium's sandbox can start (see above)."
 
 echo "Starting Celery Workers..."
 

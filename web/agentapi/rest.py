@@ -16,6 +16,7 @@ from agentapi import sentinel_dispatch
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
+from agentapi import egress
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
@@ -147,6 +148,10 @@ ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
     ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
+    ('GET', r'egress/connections', 'App Admin: the log of this server\'s own outbound connections to the logged ports (25, 465, 587 by default), newest first: '
+     'at, address, port, outcome (sent|paced|skipped), mode (exact|estimated), kind (the tool), project, scan_id. ?port=&project=&since=&until= '
+     '(ISO 8601 or epoch seconds), limit (up to 1000) and cursor (the next of the previous page); format=csv downloads every matching record',
+     lambda r, c, **k: egress.connections_csv(c, r.GET) if r.GET.get('format') == 'csv' else egress.list_connections(c, r.GET)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
@@ -157,16 +162,18 @@ ROUTES = [
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)', 'One CVE with affected ranges',
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
-    ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range',
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range; body {value, description, discover, mode, scope_mode}. "=example.com" (or scope_mode host) adds exactly that host, no subdomains',
      lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover')),
-                                            mode=_body(r).get('mode')), 201)),
-    ('POST', r'projects/(?P<slug>[-\w]+)/targets/bulk', 'Add many targets (list or pasted text), optionally start discovery',
+                                            mode=_body(r).get('mode'), scope_mode=_body(r).get('scope_mode')), 201)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/targets/bulk', 'Add many targets (list or pasted text), optionally start discovery; scope_mode is the batch scope and an "=example.com" entry is exactly that host',
      lambda r, c, slug, **k: (svc.add_targets(c, slug, _body(r).get('targets') or _body(r).get('text') or '',
-                                              discover=bool(_body(r).get('discover', True)), mode=_body(r).get('mode')), 201)),
-    ('POST', r'targets/bulk-org', 'Bulk add across an organization: text with ##Org, #Project headers; creates missing projects',
+                                              discover=bool(_body(r).get('discover', True)), mode=_body(r).get('mode'),
+                                              scope_mode=_body(r).get('scope_mode')), 201)),
+    ('POST', r'targets/bulk-org', 'Bulk add across an organization: text with ##Org, #Project headers; creates missing projects; scope_mode and "=example.com" as in targets/bulk',
      lambda r, c, **k: (svc.add_targets_by_org(c, _body(r).get('text') or '', discover=bool(_body(r).get('discover', True)),
                                                mode=_body(r).get('mode'),
-                                               current_project=_body(r).get('current_project')), 201)),
+                                               current_project=_body(r).get('current_project'),
+                                               scope_mode=_body(r).get('scope_mode')), 201)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/delete', 'Delete targets by ids, or all matching a search (skips running scans)',
      lambda r, c, slug, **k: svc.delete_targets(c, slug, ids=_body(r).get('ids'), all_matching=bool(_body(r).get('all_matching')),
                                                 q=_body(r).get('q') or '')),
@@ -176,7 +183,7 @@ ROUTES = [
      'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run; body {hosts: [...]}',
      lambda r, c, slug, target_id, **k: (svc.rescan_hosts(c, slug, int(target_id), _body(r).get('hosts')), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/scope',
-     'Set a target\'s scope_mode: auto (shared-domain list decides), host (this host only) or parent (parent domain is owned); body {scope_mode}',
+     'Set a target\'s scope_mode: auto (shared-domain list decides), host (exactly this host: no parent, no subdomains) or parent (parent domain is owned); body {scope_mode}',
      lambda r, c, slug, target_id, **k: svc.set_target_scope(c, slug, int(target_id), _need(_body(r), 'scope_mode')[0])),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile',
      'Set a target\'s alias (a short display name, up to 60 characters, one line) and/or note (free text, up to 1000 characters); body {alias, note}, any subset, an empty one clears it. Display only: the target\'s name is what is scanned',
@@ -310,9 +317,9 @@ ROUTES = [
      lambda r, c, slug, **k: suppliers.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/technologies', 'The technologies the suppliers run, most widespread first, with suppliers, hosts and versions seen',
      lambda r, c, slug, **k: suppliers.list_technologies(c, slug)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/findings', 'Supplier posture findings (certificate, email authentication, headers, exposed pages, known CVEs for announced versions); ?status=open|accepted|resolved|all, ?supplier=, ?severity=, ?category=tls|email|web|exposed|cve',
+    ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/findings', 'Supplier posture findings (certificate, email authentication, headers, exposed pages, known CVEs for announced versions); ?status=open|accepted|false_positive|resolved|all, ?supplier=, ?severity=, ?category=tls|email|web|exposed|cve',
      lambda r, c, slug, **k: suppliers.list_supplier_findings(c, slug, r.GET)),
-    ('PATCH', r'projects/(?P<slug>[-\w]+)/suppliers/findings/(?P<finding_id>\d+)', 'Accept a supplier finding or open it again: {status: accepted|open, note?} (organization admin or App Admin); resolved is set by the checks',
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/suppliers/findings/(?P<finding_id>\d+)', 'Close a supplier finding as accepted or false_positive, or open it again: {status: accepted|false_positive|open, note? (why, at most 2000 characters)} (organization admin or App Admin); resolved is set by the checks',
      lambda r, c, slug, finding_id, **k: suppliers.set_finding_status(c, slug, finding_id, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/suppliers/(?P<supplier_id>\d+)/summary', 'A plain-text message about one supplier to copy and send (the technology it announces, ?tech= asks about those first, and its open findings with what to ask). Nothing is sent',
      lambda r, c, slug, supplier_id, **k: suppliers.supplier_summary(c, slug, supplier_id, r.GET)),
@@ -352,7 +359,7 @@ ROUTES = [
     ('GET', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)/validate/(?P<request_id>\d+)',
      'Read the queued, running, completed or failed state of one validation request',
      lambda r, c, slug, match_id, request_id, **k: svc.validation_request(c, slug, int(match_id), int(request_id))),
-    ('PATCH', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)', 'Set remediation status, note and/or assignee (at least one of status/assignee)',
+    ('PATCH', r'projects/(?P<slug>[-\w]+)/matches/(?P<match_id>\d+)', 'Set remediation status (open, in_progress, fixed, accepted_risk, false_positive), note (why; at most 2000 characters) and/or assignee (at least one of status/assignee)',
      lambda r, c, slug, match_id, **k: svc.update_match(c, slug, int(match_id), _body(r).get('status'), note=_body(r).get('note'), **_assignee_kw(_body(r)))),
     ('GET', r'projects/(?P<slug>[-\w]+)/triage', 'AI triage of every finding: classification, status and validation state (status=, classification=, validation=, kind=)',
      lambda r, c, slug, **k: svc.list_triage(c, slug, r.GET)),
@@ -360,10 +367,10 @@ ROUTES = [
      'One finding in full: why it matters, how it was found, first and last seen with history, AI classification, remediation, every validation check with its exact command and result',
      lambda r, c, slug, kind, finding_id, **k: svc.finding_detail(c, slug, kind, int(finding_id))),
     ('PATCH', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)',
-     'Set remediation status (open, in_progress, fixed, accepted_risk), note and/or assignee (at least one of status/assignee); a web route has no remediation workflow (400)',
+     'Set remediation status (open, in_progress, fixed, accepted_risk, false_positive), note (why; at most 2000 characters, kept as the closure note with who and when) and/or assignee (at least one of status/assignee); a web route has no remediation workflow (400)',
      lambda r, c, slug, kind, finding_id, **k: svc.update_finding_status(c, slug, kind, int(finding_id), _body(r).get('status'),
                                                                         note=_body(r).get('note'), **_assignee_kw(_body(r)))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/findings/status', 'Set the same remediation status and note on up to 200 findings at once; '
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/status', 'Set the same remediation status and note on up to 200 findings at once (the note goes on each; false_positive closes like fixed); '
      "body {items: [{kind, id}, ...], status, note}; returns {updated, failed: [{kind, id, error}]}",
      lambda r, c, slug, **k: svc.bulk_update_finding_status(c, slug, _body(r).get('items'), *_need(_body(r), 'status'),
                                                              note=_body(r).get('note'))),

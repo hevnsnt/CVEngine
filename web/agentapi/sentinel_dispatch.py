@@ -186,6 +186,22 @@ def any_scanner_for(project, kind, internal=False):
     return sentinel_broker.any_scanner_for(project, kind, internal)
 
 
+def offline_fallback(project, kind, internal=False):
+    """Whether a stage of ``kind`` runs here although ``project`` has a Sentinel for it, because every such Sentinel is offline (called once
+    no live one was found). Such a run is a local fallback like a task nobody claimed: it is counted for the warning
+    (``cveFeed.local_egress.note_fallback``), and the nmap and naabu stages put it under their hourly cap. A project that never had a Sentinel
+    for ``kind`` runs here as its normal mode: never counted, never capped. Never raises."""
+    from agentapi import sentinel_broker
+    try:
+        configured = bool(sentinel_broker.eligible_sentinels(project, kind, internal=internal))
+    except Exception:  # noqa: BLE001 - bookkeeping never changes where a stage runs
+        return False
+    if configured:
+        from cveFeed.local_egress import note_fallback
+        note_fallback(kind, getattr(project, 'pk', project))
+    return configured
+
+
 def _label(host, ips):
     host = (host or '').strip()
     if host:
@@ -239,6 +255,17 @@ class _Dispatch:
     def finished(self):
         return self.task.status in TERMINAL
 
+    def _fell_back(self):
+        """Count one task that falls back to local execution (``cveFeed.local_egress.note_fallback``: the warning when it keeps happening). Nothing
+        is counted for internal work (it never had a local run) or for a kind ``CVENGINE_LOCAL_FALLBACK`` keeps off this server (it stays due)."""
+        if self.internal or not fallback_allowed(self.kind):
+            return
+        try:
+            from cveFeed.local_egress import note_fallback
+            note_fallback(self.kind, getattr(self.project, 'pk', self.project))
+        except Exception:  # noqa: BLE001 - bookkeeping never changes the dispatch
+            pass
+
     def step(self, now, no_sentinel_left=False):
         """Act on the task as it was just read: start the completion clock once it is claimed, and give it up (expire it, so the stage falls back)
         when the wait for a Sentinel or for its report ran out. Returns True once the task is over. ``no_sentinel_left`` is set by the loop
@@ -250,6 +277,7 @@ class _Dispatch:
         if no_sentinel_left and task.status == 'queued':
             self.never_claimed = self.vanished = True  # the last live Sentinel went away while the task waited: nothing will take it
             sentinel_broker.expire(task, f'no live Sentinel is left to take the task; {outcome_text(self.kind)}')
+            self._fell_back()
             return True
         if task.status in ('claimed', 'running') and self.run_deadline is None:
             self.run_deadline = now + self.timeout
@@ -266,9 +294,11 @@ class _Dispatch:
             self.never_claimed = True
             sentinel_broker.expire(task, (f'no Sentinel slot freed up in time; {outcome_text(self.kind)}' if self.busy
                                           else f'no Sentinel claimed the task in time; {outcome_text(self.kind)}'))
+            self._fell_back()
             return True
         if self.run_deadline is not None and now >= self.run_deadline:
             sentinel_broker.expire(task, f'the dispatch wait timed out; {outcome_text(self.kind)}')
+            self._fell_back()
             return True
         return False
 
@@ -657,6 +687,7 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
     run is already one host:port per call, locally or dispatched."""
     if not any_scanner_for(project, 'testssl'):
         _no_scanner('testssl', project)
+        offline_fallback(project, 'testssl')
         return None
     target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
     result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
@@ -676,6 +707,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     chunked: one address per task, like testssl."""
     if not any_scanner_for(project, 'nmap_udp'):
         _no_scanner('nmap_udp', project)
+        offline_fallback(project, 'nmap_udp')
         return None
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
@@ -694,8 +726,18 @@ def wrap_naabu_runner(project, scan, timeout=None):
     never sent once an earlier one went unclaimed) falls back to the real, unmodified ``naabu_scan.run_naabu``, when the kind
     may run here (``_no_local``)."""
     if not any_scanner_for(project, 'naabu'):
-        _no_scanner('naabu', project)
-        return None
+        _no_scanner('naabu', project)  # raises ScannerUnavailable when naabu may not run here
+        if not offline_fallback(project, 'naabu'):
+            return None  # no Sentinel configured for naabu: local is this project's normal mode, discover uses run_naabu as before
+
+        def offline_runner(ips):  # every Sentinel that could take it is offline: a local fallback, under the hourly cap
+            from cveFeed.local_egress import admit_fallback
+            from cveFeed.naabu_scan import PortMap, run_naabu
+            ips = list(ips)
+            if admit_fallback('naabu', getattr(project, 'pk', project)):
+                return run_naabu(ips)
+            return PortMap({}, deferred=ips)
+        return offline_runner
 
     def runner(ips):
         from cveFeed.naabu_scan import run_naabu
@@ -708,9 +750,16 @@ def wrap_naabu_runner(project, scan, timeout=None):
                     unserved.append(index)
                 else:
                     found.update(dict(result.get('ports') or {}))
+        from cveFeed.local_egress import admit_fallback
+        from cveFeed.naabu_scan import PortMap
+        deferred = []
         if unserved:
-            found.update(run_naabu([ip for index in sorted(unserved) for ip in chunks[index]]))
-        return found
+            left = [ip for index in sorted(unserved) for ip in chunks[index]]
+            if admit_fallback('naabu', getattr(project, 'pk', project)):
+                found.update(run_naabu(left))
+            else:  # over the local fallback cap: not scanned here now; discover leaves them due for the next run
+                deferred = left
+        return PortMap(found, deferred=deferred)
     return runner
 
 
@@ -774,7 +823,7 @@ def _finding_to_nuclei_line(finding):
             'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': None,
             'response': None, 'extracted-results': finding.get('extracted_results') or [],
             'info': {'name': finding.get('name') or '', 'severity': finding.get('severity') or 'unknown',
-                     'description': finding.get('description') or '', 'classification': {}, 'reference': [],
+                     'description': finding.get('description') or '', 'classification': {'cve-id': list(finding.get('cve_ids') or [])}, 'reference': [],
                      'tags': finding.get('tags') or []}}
 
 
@@ -789,7 +838,9 @@ def _nuclei_target(kind, targets, kwargs):
     cached, else on the first policy request)."""
     from agentapi import template_bundle
     from cveFeed import nuclei_scan
-    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or [])
+    # no severities given: the local run's own default (``nuclei_scan.SEVERITIES``, info to critical), sent as a list, since a client given none
+    # would run every severity, ``unknown`` included, and the two runs of one pass would not agree
+    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or nuclei_scan.SEVERITIES.split(','))
     if kind == 'nuclei_light' or kwargs.get('tech'):
         tags, severities = ['tech'], ['info']
     flags = nuclei_scan.BASE_FLAGS
@@ -856,6 +907,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         return internal_stream
     if not any_scanner_for(project, kind):
         _no_scanner(kind, project)
+        offline_fallback(project, kind)
         return stream_nuclei
 
     def stream(targets_file, **kwargs):
@@ -931,6 +983,7 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
         _no_scanner('wpscan', project)
+        offline_fallback(project, 'wpscan')
         return run_wpscan_process
 
     def runner(url, token):

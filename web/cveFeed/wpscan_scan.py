@@ -892,10 +892,11 @@ def _pending_hosts(project_id):
 
 def _latest_row(project_id, host):
     from startScan.models import Subdomain
-    from targetApp.models import Domain
-    # a target set to manual only is never given the thorough pass on a schedule: its host is no longer one the pass may scan
+    from targetApp.models import Domain, in_target_scope_q
+    # a target set to manual only is never given the thorough pass on a schedule: its host is no longer one the pass may scan; nor is a name
+    # kept under a target that is now exactly one host
     return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
-            .select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
+            .filter(in_target_scope_q()).select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
 
 
 def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
@@ -931,7 +932,7 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
             host, domain_id = todo[0]
             sub = _latest_row(project_id, host)
             if sub is None or (exclusions.excluded_names(project_id) and exclusions.normalize(host) in exclusions.excluded_names(project_id)):
-                record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project, or its target is set to manual only')
+                record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project, or its target is set to manual only or to that host only')
                 summary['failed'] += 1
                 continue
             why = gate.refusal(project_id, host)  # a bug bounty project that has not confirmed automated testing, or a host outside the program's scope

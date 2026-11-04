@@ -51,6 +51,18 @@ class ComposeEnvTests(unittest.TestCase):
             self.assertIs(celery.get('init'), True, name)
             self.assertEqual(celery.get('stop_grace_period'), '60s', name)
 
+    def test_the_celery_container_can_give_chromium_its_sandbox(self):
+        # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1
+        import hashlib
+        import json
+        path = 'config/seccomp/playwright-chromium.json'
+        for name in FILES:
+            self.assertIn(f'seccomp=./{path}', load(name)['celery'].get('security_opt', []), name)
+        data = (ROOT / path).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849')
+        rule = json.loads(data)['syscalls'][0]
+        self.assertEqual((sorted(rule['names']), rule['action']), (['clone', 'setns', 'unshare'], 'SCMP_ACT_ALLOW'))
+
     def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
         services = load('docker-compose.yml')
         for name in ('vulnerability-tests', 'notus-data', 'scap-data', 'cert-bund-data', 'dfn-cert-data', 'data-objects', 'report-formats'):

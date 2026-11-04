@@ -55,6 +55,16 @@ class OpenvasStateTests(unittest.TestCase):
             self.assertEqual(self.state('openvas-applied', bad).returncode, 1, bad)
         self.assertFalse((self.tmp / 'web' / '.openvas-applied').exists())
 
+    def test_the_gvmd_restart_answer_replaces_a_planted_link(self):
+        (self.tmp / 'web' / '.openvas-restarted').symlink_to(self.victim)
+        result = self.state('openvas-restarted', 'ok')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.victim.read_text(), 'keep me')
+        published = self.tmp / 'web' / '.openvas-restarted'
+        self.assertFalse(published.is_symlink())
+        self.assertTrue(json.loads(published.read_text())['ok'])
+        self.assertFalse(json.loads((self.state('openvas-restarted', 'failed'), published.read_text())[1])['ok'])
+
     def test_the_log_tail_replaces_a_planted_link(self):
         (self.tmp / 'web' / '.openvas-log').symlink_to(self.victim)
         private = self.tmp / 'private.log'
@@ -64,6 +74,21 @@ class OpenvasStateTests(unittest.TestCase):
         published = (self.tmp / 'web' / '.openvas-log').read_bytes()
         self.assertTrue(published.endswith(b'last line\n'))
         self.assertLessEqual(len(published), 65536)
+
+    def test_the_running_build_is_read_without_following_a_planted_link(self):
+        # security review 1.3.4 (sentinel-1): apply-update.sh read web/.commit with head, so a link to a host file put its first line into
+        # the update log the app is shown
+        sha = 'a' * 40
+        commit = self.tmp / 'web' / '.commit'
+        commit.write_text(sha.upper() + '\n')
+        self.assertEqual(self.state('built').stdout.strip(), sha)
+        commit.write_text('root:$6$secret:19000:0:99999:7:::\n')
+        self.assertEqual(self.state('built').stdout.strip(), '')
+        commit.unlink()
+        self.victim.write_text(sha + '\n')
+        commit.symlink_to(self.victim)
+        self.assertEqual(self.state('built').stdout.strip(), '')
+        self.assertNotIn('head -n1 web/.commit', (SCRIPTS / 'apply-update.sh').read_text())
 
     def test_the_request_is_read_without_following_links_and_only_on_or_off_count(self):
         wanted = self.tmp / 'web' / '.openvas-wanted'
@@ -85,6 +110,58 @@ class OpenvasStateTests(unittest.TestCase):
             self.assertNotRegex(text, r'>>?\s*"?web/')  # a plain redirection into the shared mount follows links, as root
         self.assertNotIn('$APPLIED.tmp', sync)
         self.assertNotIn('mv -f', sync)
+
+
+@unittest.skipUnless(HAVE_SCRIPTS, 'needs the repository scripts directory')
+class RedisPasswordTests(unittest.TestCase):
+    """scripts/redis-password.sh: an installation without a broker password gets one from `make up` and every update, headless (security
+    review 1.3.4: the host network overlay publishes the broker on the host's loopback, where an open one runs anything as root)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def ensure(self, env_file=''):
+        script = f'. {SCRIPTS / "redis-password.sh"} && cvengine_ensure_redis_password "$1"'
+        return subprocess.run(['bash', '-c', script, 'x', env_file], cwd=self.tmp, capture_output=True, text=True).returncode
+
+    def value(self, name='.env'):
+        lines = [l for l in (self.tmp / name).read_text().splitlines() if l.startswith('REDIS_PASSWORD=')]
+        return lines[-1].split('=', 1)[1] if lines else None
+
+    def test_an_empty_password_is_generated_once(self):
+        (self.tmp / '.env').write_text('POSTGRES_PASSWORD=x\nREDIS_PASSWORD=\nOTHER=y\n')
+        os.chmod(self.tmp / '.env', 0o600)
+        self.assertEqual(self.ensure(), 0)
+        password = self.value()
+        self.assertRegex(password, r'^[A-Za-z0-9]{32}$')
+        self.assertIn('POSTGRES_PASSWORD=x\n', (self.tmp / '.env').read_text())
+        self.assertEqual(oct((self.tmp / '.env').stat().st_mode & 0o777), '0o600')  # rewritten in place
+        self.assertEqual(self.ensure(), 1)  # already has one: nothing changes, nothing is recreated
+        self.assertEqual(self.value(), password)
+
+    def test_a_missing_line_is_added(self):
+        (self.tmp / '.env').write_text('OTHER=y')  # no trailing newline
+        self.assertEqual(self.ensure(), 0)
+        self.assertIn('OTHER=y\nREDIS_PASSWORD=', (self.tmp / '.env').read_text())
+
+    def test_the_overlay_env_file_gets_the_same_password(self):
+        (self.tmp / '.env').write_text('REDIS_PASSWORD=\n')
+        (self.tmp / '.env.vps').write_text('REDIS_PASSWORD=\n')
+        self.assertEqual(self.ensure('.env.vps'), 0)
+        self.assertEqual(self.value('.env'), self.value('.env.vps'))
+        # .env already has one and Compose reads another file: that file gets it, the password is not changed
+        (self.tmp / '.env.vps').write_text('X=1\n')
+        password = self.value('.env')
+        self.assertEqual(self.ensure('.env.vps'), 0)
+        self.assertEqual((self.value('.env'), self.value('.env.vps')), (password, password))
+        self.assertEqual(self.ensure('.env.vps'), 1)
+
+    def test_every_start_path_uses_it(self):
+        for name in ('update-deploy.sh', 'update.sh', 'apply-update.sh'):
+            self.assertIn('cvengine_ensure_redis_password', (SCRIPTS / name).read_text(), name)
+        self.assertIn('cvengine_ensure_redis_password', (SCRIPTS.parent / 'Makefile').read_text())
+        self.assertNotIn('${REDIS_PASSWORD:?', (SCRIPTS.parent / 'docker-compose.hostnet.yml').read_text())
 
 
 @unittest.skipUnless(HAVE_SCRIPTS and os.geteuid() == 0 and shutil.which('git'), 'needs root and git')

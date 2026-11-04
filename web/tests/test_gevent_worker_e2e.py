@@ -4,7 +4,11 @@ bounds how many run at once, so these go through it rather than stubbing the con
 
 * the worker runs as many as its ceiling, never more;
 * a ceiling raised live while the worker is idle (configMaxxing's resize) is honoured: celery's own path returned early with no task running;
-* after a broker reconnect the worker comes back to its ceiling: celery's prefetch restore read the greenlets running, so it stayed at one.
+* after a broker reconnect the worker comes back to its ceiling: celery's prefetch restore read the greenlets running, so it stayed at one;
+* an ack lost to a dropped broker connection does not cost a slot: kombu kept counting that delivery against the prefetch, so the worker ran
+  one task fewer at once until a restart (``reNgine/broker_acks.py``). The reconnect test hit it when its cut landed on an ack.
+* remote control (ping, ``autoscale``) is answered again after a broker reconnect: celery's gevent pidbox loop ended on the
+  ``ConnectionError`` and, with kombu 5.7 keeping the consumer, never came back (``reNgine/gevent_pidbox.py``).
 
 Needs the Redis of ``CELERY_BROKER`` (CI has it); skipped without it. Each test uses its own queue and keys and cuts only its own worker's
 connections."""
@@ -52,7 +56,8 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
             self.worker.kill()
             self.worker.wait(10)
             self.worker.stdout.close()
-        self.r.delete(self.queue, f'{self.name}:running', f'{self.name}:max', f'{self.name}:done')
+        self.r.delete(self.queue, f'{self.name}:running', f'{self.name}:max', f'{self.name}:done', f'{self.name}:dropped_ack',
+                      f'{self.name}:drop_armed')
         self.client.close()
 
     def start(self, ceiling):
@@ -84,6 +89,13 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
             time.sleep(every)
         return out
 
+    def cut(self):
+        """Kill every broker connection of this worker (they carry its name), as a Redis restart or a network blip does."""
+        mine = [line for line in self.r.client_list() if line.get('name') == self.name]
+        self.assertTrue(mine, 'the worker\'s broker connections carry its name')
+        for client in mine:
+            self.r.client_kill_filter(_id=client['id'])
+
     def test_acks_late_tasks_run_up_to_the_ceiling_and_no_more(self):
         self.start(4)
         self.send(8, 3)
@@ -108,10 +120,40 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
         self.send(16, 5)
         before = self.watch(8)
         self.assertEqual(max(before), 4)
-        mine = [line for line in self.r.client_list() if line.get('name') == self.name]
-        self.assertTrue(mine, 'the worker\'s broker connections carry its name')
-        for client in mine:
-            self.r.client_kill_filter(_id=client['id'])
+        self.cut()
         after = self.watch(25)
         # the tasks running at the cut finish within 5 s; from then on the worker must be back at its ceiling, not at one
         self.assertGreaterEqual(max(after[int(7 / 0.25):]), 4, after)
+
+    def test_an_ack_lost_to_a_dropped_broker_connection_does_not_cost_a_slot(self):
+        # The reconnect above fails only when the cut lands on an ack (about one run in thirty); this drops the first ack every time. kombu
+        # then never freed the delivery, so the prefetch counted it for good and the worker ran 3 at a time from then on (reNgine/broker_acks.py).
+        self.env['E2E_DROP_ONE_ACK'] = '1'
+        self.start(4)
+        self.send(24, 5)
+        seen = self.watch(26)
+        self.assertTrue(self.r.get(f'{self.name}:dropped_ack'), 'the first ack was dropped')
+        # the first ack is about 5 s in; from 12 s on the worker must be running 4 at once again
+        self.assertEqual(max(seen[int(12 / 0.25):]), 4, seen)
+
+    def test_remote_control_is_answered_again_after_a_broker_reconnect(self):
+        # ping, inspect, autoscale and revoke all go through this loop: scan_concurrency.apply_discovery's resize, the admin worker panel, a
+        # revoke, broker_recovery.live_tasks. Before reNgine/gevent_pidbox.py the worker went on running tasks and answered none of them again.
+        self.start(4)
+        self.send(8, 3)
+        time.sleep(2)
+        self.cut()
+        time.sleep(1)  # let the worker see the cut before asking
+        deadline, pinged, resized = time.time() + 30, False, False
+        while time.time() < deadline and not resized:
+            if not pinged:
+                pinged = bool(self.client.control.ping(destination=[self.node], timeout=1))
+            if pinged:
+                replies = self.client.control.broadcast('autoscale', arguments={'max': 5}, destination=[self.node], reply=True, timeout=2)
+                resized = 'max=5' in str(replies)
+        self.assertTrue(pinged, 'the worker answered no ping within 30 s of the cut')
+        self.assertTrue(resized, 'the worker answered no autoscale within 30 s of the cut')
+        # and it still runs its tasks, now up to the new ceiling
+        self.send(10, 3)
+        self.watch(8)
+        self.assertEqual(self.most(), 5)

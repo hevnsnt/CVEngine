@@ -14,6 +14,7 @@ finds the product states no version records that too (``hidden``): the AI is tol
 
 ``plan_for_host`` picks the probes for a host's leads without any AI, so this works with no AI key; the AI, when configured, may choose
 among the ones this module offers (cveFeed.validation_plan) and reason over what they found."""
+import itertools
 import logging
 import os
 import re
@@ -24,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, versions
+from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ def display_for(probe_id, target):
     if probe['family'] == 'nmap':
         return shlex.join(nmap_argv(target['ip'], target['port'], target.get('service', '')))
     base = target['base'].rstrip('/')
-    return '; '.join(f"curl -sS -i --max-time 6 {shlex.quote(base + path)}" for _method, path in probe['requests'])
+    return '; '.join(f"curl -gsS -i --max-time 6 {shlex.quote(base + path)}" for _method, path in probe['requests'])
 
 
 def nmap_argv(ip, port, service=''):
@@ -265,31 +266,38 @@ def _permitted(host, project):
     return not (project and (is_excluded(project, host) or host.lower().rstrip('.') in archived_names(project)))
 
 
-def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_bytes=None, headers=None):
+def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_bytes=None, headers=None, hop=None):
     """One probe GET with browser-like headers, following at most MAX_REDIRECTS redirects that stay inside ``allowed`` (the names of this host's
-    group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop. A "try later" (429, 503) is
+    group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop, and ``hop(host)`` too when
+    given (a further scope rule of the caller: '' when the host may be asked, else why not; a refusal raises ValueError like ``_permitted``). A "try later" (429, 503) is
     asked again once after a pause; an edge challenge is never retried and never pushed against: it is returned with ``challenge`` naming the
     edge. ``project`` (an id) lets the gate and the pinned transport accept the tailnet address of a device that project's own Tailscale
-    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``."""
+    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``, and, after a redirect, ``redirected_from``: the first
+    answer (the asked URL's own redirect, its headers without a body)."""
     from cveFeed import route_auth
     probe = probe or route_auth.probe_url
     last = None
     for attempt in range(len(RETRY_DELAYS) + 1):
-        current, hops = url, 0
+        current, hops, first = url, 0, None
         while True:
             if not _permitted(urlsplit(current).hostname or '', project):
                 raise ValueError('probe destination is not allowed')
+            if hop is not None and hop(urlsplit(current).hostname or ''):
+                raise ValueError('probe destination is outside the scope')
             response = probe(current, max_bytes=max_bytes or route_auth.MAX_PROBE_BYTES, browser=True, project=project,
                              **({'headers': headers} if headers else {}))
             location = response.get('location') or ''
             if 300 <= (response.get('status') or 0) < 400 and location and hops < MAX_REDIRECTS:
                 nxt = urljoin(current, location)
                 if urlsplit(nxt).hostname and (allowed is None or urlsplit(nxt).hostname.lower() in allowed):
+                    first = first or {**response, 'url': current, 'final_url': current, 'body': '', 'title': '', 'challenge': ''}
                     current, hops = nxt, hops + 1
                     sleep(REQUEST_GAP)
                     continue
             break
         last = {**response, 'final_url': current, 'challenge': challenge_of(response)}
+        if first is not None:
+            last['redirected_from'] = first  # the asked host's own answer (a redirect), headers only: what it says about itself
         if last['challenge'] or (response.get('status') or 0) not in (429, 503):
             return last
         if attempt < len(RETRY_DELAYS):
@@ -477,6 +485,10 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
         except (OSError, ValueError) as exc:
             logger.info('probe %s: %s did not answer (%s)', probe_id, path, type(exc).__name__)
             responses.append(None)
+    # fetch follows a redirect inside the host's group (apex and www answer for each other): a page another host served is that host's
+    # (its scripts, Server header and generator tags; the other host's own probe records them). Only what this host answered itself, its
+    # redirect, is read for it
+    responses = [own_answer(r, base) for r in responses]
     out = []
     first = responses[0] if responses else None
     if handler == 'headers' and first:
@@ -489,6 +501,26 @@ def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=
     if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
         out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
     return out
+
+
+def own_answer(response, base):
+    """``response`` when ``base``'s own host served it, else that host's own first answer (``redirected_from``: a redirect, headers only),
+    or None when there is none to read: what another host served is never attributed to this one."""
+    if not response or served_by(response, base):
+        return response
+    origin = response.get('redirected_from')
+    return origin if origin and served_by(origin, base) else None
+
+
+def served_by(response, base):
+    """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
+    host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
+    final = response.get('final_url') or response.get('url') or ''
+    try:
+        here, there = (urlsplit(base).hostname or '').lower().rstrip('.'), (urlsplit(final).hostname or '').lower().rstrip('.')
+    except ValueError:
+        return False
+    return not there or here == there
 
 
 def _wordpress_responses(base, get, sleep):
@@ -564,6 +596,11 @@ def _library_observations(first, get, sleep, project=None, reader=None, target=N
     entries = js_libraries.parse_page(first.get('body', ''), page)
     records = js_libraries.read_page(entries, page, get, js_libraries.vetter(page, project, target=target),
                                      {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project)
+    return _library_records_observations(records)
+
+
+def _library_records_observations(records):
+    """One ``version`` observation per library record (``js_libraries.resolve``), carrying the record in ``evidence['library']``."""
     out = []
     for record in records.values():
         version = record['version']
@@ -571,6 +608,202 @@ def _library_observations(first, get, sleep, project=None, reader=None, target=N
                                 confidence=record['version_confidence'] if version else 0.7, outcome='found' if version else 'hidden', url='/',
                                 evidence={'library': record}))
     return out
+
+
+_JS_STRING = re.compile(r'''["']([^"'\s<>]{1,300}?\.js(?:\?[^"'\s<>]{0,200})?)["']''')
+
+
+def lazy_libraries(body, page_url, entries):
+    """The library keys a page names in a script file path that is not one of its ``<script src>`` tags (``parse_page`` ``entries``): a loader,
+    a consent manager or inline code that adds the script at run time (``createElement('script')``, a ``src`` set later, an import map). Such a
+    copy is not read by the page read, so it can never be ruled out."""
+    seen = {e['url'] for e in entries or [] if e.get('url')}
+    out = set()
+    for found in itertools.islice(_JS_STRING.finditer((body or '').replace('\\/', '/')), 2000):
+        url = js_libraries._absolute(found.group(1), page_url)
+        key = js_libraries.identify(url)['library'] if url else ''
+        if key and url not in seen:
+            out.add(key)
+    return sorted(out)
+
+
+def scope_hop(project_id, sub, unattended=True):
+    """``hop(host)`` for ``fetch``: why a script read may not ask ``host`` at any hop of a redirect ('' when it may), beyond ``_permitted``'s
+    address, exclusion and archive gate: a host-scoped target reads its own host only, a name held only under a target set to exactly one
+    host is never read (``narrowed_names``), and a bug bounty project's program scope (``bounty_gate``; ``unattended``: a run the system
+    started is also held to the project's confirmation). A public library CDN (``js_libraries.CDN_HOSTS``) touches no target and is not
+    asked about."""
+    from cveFeed.bounty_gate import Gate
+    from targetApp.models import narrowed_names
+    own = sub.name.lower().rstrip('.')
+    target = getattr(sub, 'target_domain', None)
+    scoped = target is not None and target.is_host_scoped()
+    gate, memo = Gate(), {}
+
+    def hop(host):
+        host = (host or '').lower().rstrip('.')
+        if host in js_libraries.CDN_HOSTS:
+            return ''
+        if host not in memo:
+            if scoped and host != own:
+                memo[host] = 'host-scoped target'
+            elif narrowed_names(project_id, [host]):
+                memo[host] = 'host_only_scope'
+            else:
+                memo[host] = gate.refusal(project_id, host, unattended=unattended)
+        return memo[host]
+    return hop
+
+
+def _scanned(got, error=''):
+    """What one fetched script says, searched whole (``js_libraries.whole_body``): ``status``, ``whole`` (a 2xx body read to its end, not a
+    challenge), ``truncated`` and, for a whole body, ``versions``, ``unplaceable``, ``blocks``, ``loaders`` and ``overflow``."""
+    if got is None:
+        return {'status': 0, 'whole': False, 'error': error or 'not read'}
+    status = got.get('status') or 0
+    text = got.get('body') or ''
+    raw = got.get('bytes')
+    size = raw if isinstance(raw, int) else len(text.encode('utf-8', 'replace'))
+    truncated = size >= js_libraries.MAX_SCRIPT_BYTES or bool(got.get('truncated'))
+    out = {'status': status, 'truncated': truncated, 'whole': 200 <= status < 300 and not truncated and not got.get('challenge')}
+    if not out['whole']:
+        out['error'] = ('cut at the read limit' if truncated else f"challenged by {got['challenge']}" if got.get('challenge')
+                        else f'answered {status}')
+        return out
+    return {**out, **js_libraries.whole_body(text)}
+
+
+def _entry_kinds(entries, page_url):
+    """The page's scripts with a source, as a script read needs them: ``url``, ``kind`` (``js_libraries.kind_of``), ``library`` (the library
+    its name is, ``js_libraries.identify``) and ``fallback``."""
+    out = []
+    for entry in entries:
+        if entry.get('url'):
+            out.append({'url': entry['url'], 'kind': js_libraries.kind_of(entry['url'], page_url),
+                        'library': js_libraries.identify(entry['url'])['library'], 'fallback': bool(entry.get('fallback'))})
+    return out
+
+
+def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep, unattended=True):
+    """The html-libraries read of every web base of ``sub`` for a validation re-test (``cveFeed.validation.run_script_read``): each base's front
+    page through the same gated, pinned GET as every probe (a redirect is followed only on the host itself, so a redirect to another host is
+    seen as it is), then the scripts of every page through ``js_libraries`` (its vetter, one fresh ``Reader`` with the usual budgets, the
+    per-host script limit shared by the bases), past the script cache: every script is asked for in full (no ETag), and every script and
+    page is searched whole (``js_libraries.whole_body``). Every hop of every request, redirects included, passes the probe gate and the
+    scope rules of ``scope_hop`` (host scope, a one-host target, the bug bounty program; ``unattended`` for a run the system started).
+    Nothing is stored. ``get(url, headers=None)`` replaces the network (tests). Returns ``{'pages': [...], 'scanned': {url: _scanned},
+    'budget_left': n}``, one page per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were read),
+    ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered``, ``refused`` (the gate refused the address)
+    or ``held`` (this server's egress governor or skip list held the port: ``cveFeed.local_egress``; nothing was sent). Every connection
+    goes through the pinned transport, so it is counted, logged and paced like any in-process connection; a read page carries ``records``
+    (``js_libraries.resolve``), ``entries`` (its scripts with a source: ``_entry_kinds``), ``skipped`` (scripts it wanted and did not read,
+    with why), ``truncated`` (scripts read only up to the size cap), ``read_whole`` (scripts whose file was read whole), ``capped`` (the
+    parse could not see every script), ``page_truncated`` (the page itself was cut at the read limit), ``inline`` (``[library key,
+    version]`` inline scripts state), ``inline_unread`` (inline code no rule reads), ``scripts`` (how many scripts with a source the page
+    has), ``lazy`` (libraries the page adds at run time) and ``page_scan`` (the page's own text searched whole)."""
+    host = sub.name.lower().rstrip('.')
+    own = {host}
+    scanned = {}
+    if get is not None:
+        page_get, raw_get = (lambda url: get(url)), (lambda url: get(url))
+    else:
+        allowed = allowed_names(sub)
+        hop = scope_hop(project_id, sub, unattended=unattended)
+        page_get = lambda url: fetch(url, allowed=own, sleep=sleep, project=project_id, hop=hop)  # noqa: E731
+        raw_get = lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project_id,  # noqa: E731
+                                    max_bytes=js_libraries.MAX_SCRIPT_BYTES, hop=hop)
+
+    def script_get(url, headers=None):
+        # asked in full, never revalidated with an ETag: a 304 would leave nothing to search whole
+        try:
+            got = raw_get(url)
+        except local_egress.PortHeld:
+            scanned[url] = {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
+            raise
+        except (OSError, ValueError) as exc:
+            scanned[url] = {'status': 0, 'whole': False, 'error': 'refused by the scope gate' if isinstance(exc, ValueError) else type(exc).__name__}
+            raise
+        scanned[url] = _scanned(got)
+        return got
+    reader = js_libraries.Reader(project_id, fresh=True)
+    budget = {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
+    pages = []
+    for base in bases:
+        page = {'base': base, 'outcome': '', 'status': 0}
+        try:
+            first = page_get(base.rstrip('/') + '/') or {}
+        except ValueError:
+            page['outcome'] = 'refused'
+            pages.append(page)
+            continue
+        except local_egress.PortHeld as exc:  # this server's egress governor or skip list held the port: nothing was sent (cveFeed.local_egress)
+            page.update(outcome='held', error=str(exc)[:200])
+            pages.append(page)
+            continue
+        except OSError as exc:
+            page.update(outcome='unanswered', error=type(exc).__name__)
+            pages.append(page)
+            continue
+        status = first.get('status') or 0
+        final = first.get('final_url') or first.get('url') or base
+        page.update(status=status, final_url=str(final)[:500])
+        if first.get('challenge'):
+            page.update(outcome='challenged', challenge=first['challenge'])
+        elif 300 <= status < 400:
+            page.update(outcome='redirect', location=urljoin(final, (first.get('location') or '').strip())[:500])
+        elif 200 <= status < 300 and not served_by(first, base):
+            # followed to another host (a caller's fetch that follows): the host's own answer, when fetch kept it, says which redirect it was
+            origin = first.get('redirected_from') or {}
+            page.update(outcome='redirect', location=urljoin(origin.get('final_url') or base, (origin.get('location') or '').strip())[:500]
+                        if origin.get('location') else str(final)[:500], status=origin.get('status') or status)
+        elif not 200 <= status < 300:
+            page['outcome'] = 'error_page'
+        else:
+            body = first.get('body', '')
+            entries = js_libraries.parse_page(body, final)
+            report, coverage = {}, {}
+            records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
+                                             budget, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project_id, report=report,
+                                             coverage=coverage)
+            page.update(outcome='read', records=records, skipped=list(report.get('skipped') or [])[:40], truncated=list(report.get('truncated') or [])[:20],
+                        scripts=sum(1 for e in entries if e.get('url')), read_whole=coverage.get('read', 0),
+                        capped=bool(getattr(entries, 'capped', False)), inline_unread=int(getattr(entries, 'inline_unread', 0)),
+                        inline=[list(pair) for pair in getattr(entries, 'inline', ())][:20],
+                        lazy=lazy_libraries(body, final, entries), entries=_entry_kinds(entries, final)[:js_libraries.MAX_ENTRIES],
+                        page_truncated=bool(first.get('truncated')), page_scan=js_libraries.whole_body(body, page=True))
+        pages.append(page)
+    return {'pages': pages, 'scanned': scanned, 'budget_left': budget['left']}
+
+
+def refetch_script(project_id, sub, url, get=None, sleep=time.sleep, page_url=None, unattended=True):
+    """A script file a match was made on (or the host was seen to load the library from), fetched again for a script read when the pages
+    did not load it: through ``js_libraries.vetter`` for ``page_url`` (its port rule, a third-party or analytics host never, a same-site
+    host only under the vetter's rules) and the same gated, scoped GET as the page read (``scope_hop``). Returns ``_scanned`` (the file
+    searched whole), with ``held`` when this server's egress governor held the port, or ``{'status': 0, 'whole': False, 'error': why}``
+    when it may not be read."""
+    page_url = page_url or f'https://{sub.name}/'
+    try:
+        refusal = js_libraries.vetter(page_url, project_id, target=getattr(sub, 'target_domain', None))(url)
+    except Exception:  # noqa: BLE001 - a host that cannot be vetted is not read
+        refusal = 'not vetted'
+    if refusal:
+        return {'status': 0, 'whole': False, 'error': f'not read ({refusal})'}
+    if get is not None:
+        getter = get
+    else:
+        target_host = (urlsplit(url).hostname or '').lower()
+        hop = scope_hop(project_id, sub, unattended=unattended)
+        getter = lambda u: fetch(u, allowed={target_host}, sleep=sleep, project=project_id,  # noqa: E731
+                                 max_bytes=js_libraries.MAX_SCRIPT_BYTES, hop=hop)
+    try:
+        got = getter(url)
+    except local_egress.PortHeld:
+        return {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
+    except ValueError:
+        return {'status': 0, 'whole': False, 'error': 'refused by the scope gate'}
+    except OSError as exc:
+        return {'status': 0, 'whole': False, 'error': type(exc).__name__}
+    return _scanned(got or {})
 
 
 def observations_from_nmap(inventory, port):
@@ -816,6 +1049,10 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
         for asset, entry in todo.items():
             try:
                 found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
+            except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
+                logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
+                stats['held'] = stats.get('held', 0) + 1
+                continue
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
                 logger.warning('probe %s failed on host %s: %s', entry['probe'], sub.pk, type(exc).__name__)
                 ledger.record(SERVICE, [asset], project, scan, 'failed')
