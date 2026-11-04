@@ -6,7 +6,11 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Upgrade notes
 
-- **Three backfill commands, each a dry run unless `--apply`** (run them after reading the counts; each prints one line per project, takes `--project <slug>` (repeatable), never merges across projects and is safe to run again): `manage.py dedupe_findings` merges the scanner and hygiene findings filed more than once, `manage.py fold_alias_findings` folds what redirect aliases share with their target host, and `manage.py close_fixed_findings` closes the WPScan findings the version WPScan last stored for the host is past the fix of. No migration.
+- **Three backfill commands, each a dry run unless `--apply`** (run them after reading the counts; each prints one line per project, takes `--project <slug>` (repeatable), never merges across projects and is safe to run again; these changes add no migration): `manage.py dedupe_findings` merges the scanner and hygiene findings filed more than once, `manage.py fold_alias_findings` folds what redirect aliases share with their target host, and `manage.py close_fixed_findings` closes the WPScan findings the version WPScan last stored for the host is past the fix of.
+
+### Added
+
+- **Re-rate a finding's heat by hand.** cvENGINE derives a finding's heat (fire, smoke, ice) and had no way to change it when a person who reviewed the finding knew better. A CVE match or a scanner finding can now be set to fire, smoke or ice with a reason, and cleared back to the derived heat: on its detail pane (the **Heat** control under What to do, for anyone who may change its status), over REST (`POST projects/{slug}/findings/{kind}/{id}/heat`, and `POST projects/{slug}/findings/heat` for up to 500 findings with one heat and one reason) and over MCP (`set_finding_heat`, one finding or `items`). The heat set wins everywhere a heat is read: the Findings list, its heat facet and counts, host heat and scores, dashboards, reports, the graph, the validation and OpenVAS order and alerts; `heat_reason` says "set to smoke by alice: <reason>" and findings carry `heat_override` `{heat, reason, by, at}`. Each change is in the finding's audit trail (`event: heat`). A match a change makes fire is paged once like any match that turns fire; a closed one never, and lowering never pages. Triage, AI review and validation never undo it, and a rescan keeps it while the match's evidence is the same. Migration `cveFeed.0142` adds the columns with database defaults, so the previous version keeps working during the update.
 
 ### Fixed
 

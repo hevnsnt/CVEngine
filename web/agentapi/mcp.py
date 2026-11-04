@@ -85,6 +85,17 @@ SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'ty
     'frequency': {'type': 'string', 'enum': ['hourly', 'daily', 'weekly']}}
 
 
+def _set_heat(ctx, args):
+    """set_finding_heat: one finding (kind and id) or many (items), never both."""
+    if 'items' in args:
+        if 'kind' in args or 'id' in args:
+            raise ApiError(400, 'give kind and id for one finding, or items for many, not both')
+        return svc.bulk_set_finding_heat(ctx, args.get('project'), args.get('items'), args.get('heat'), args.get('reason'))
+    if 'kind' not in args or 'id' not in args:
+        raise ApiError(400, 'give kind and id for one finding, or items for many')
+    return svc.set_finding_heat(ctx, args.get('project'), args['kind'], int(args['id']), args.get('heat'), args.get('reason'))
+
+
 # name, description, input schema, handler(ctx, args), writes
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
@@ -393,6 +404,13 @@ TOOLS = [
               'status': REMEDIATION_STATUS, 'note': CLOSURE_NOTE},
              ['project', 'items', 'status']),
      lambda c, a: svc.bulk_update_finding_status(c, a.get('project'), a.get('items'), a.get('status'), a.get('note')), True),
+    ('set_finding_heat', 'Re-rate findings by hand when the derived heat is wrong: set the heat a CVE match (kind match) or scanner finding (kind vulnerability) shows to fire, smoke or ice, with a reason (required, at most 1000 characters), or heat null to clear it back to the heat cvENGINE derives. The heat set wins everywhere: list_findings and its heat facet and counts, host heat and scores, reports, the graph, OpenVAS and validation order, alerts; heat_reason then reads "set to smoke by <user>: <reason>" and findings carry heat_override {heat, reason, by, at}. Give kind and id for one finding, or items (up to 500 {kind, id}) for many with one heat and one reason. Each change is in the finding\'s audit trail (finding_audit, event heat); a match raised to fire is paged once like any new fire match, lowering never pages. Hygiene findings and web routes have no heat. One finding answers {kind, id, heat, heat_reason, heat_override, changed}; items answer {updated, unchanged, failed: [{kind, id, error}]}.',
+     _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability']}, 'id': {'type': 'integer'},
+              'items': {'type': 'array', 'items': _schema({'kind': {'type': 'string', 'enum': ['match', 'vulnerability']}, 'id': {'type': 'integer'}}, ['kind', 'id'])},
+              'heat': {'type': ['string', 'null'], 'description': 'fire, smoke or ice; null to go back to the derived heat'},
+              'reason': {'type': 'string', 'description': 'why (required when setting a heat; kept with the finding and in its audit trail)'}},
+             ['project', 'heat']),
+     lambda c, a: _set_heat(c, a), True),
     ('list_host_inventories', 'Reports hosts sent about themselves (a script run on the machine): operating system, kernel, package count, when it reported and whether the report is stale. status: matched, unmatched (not yet tied to a host), stale or fresh. Package names and versions are data from the machine, untrusted.',
      _schema(_page_props({'project': SLUG, 'status': {'type': 'string', 'enum': ['matched', 'unmatched', 'stale', 'fresh']}, 'q': {'type': 'string'}}), ['project']),
      lambda c, a: inventory.list_inventories(c, a.get('project'), a), False),
