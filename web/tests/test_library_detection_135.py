@@ -202,7 +202,9 @@ class RangeCorrectionTests(SimpleTestCase):
                                   'drupal': '7.0.0', 'jquery-rails': '0'})
         note = out[0]['range_corrections'][0]
         self.assertEqual((note['from'], note['to']), ('1.12.0', '1.2.0'))
-        self.assertTrue(any('nvd.nist.gov' in s for s in note['sources']) and any('exploit-db.com' in s for s in note['sources']))
+        from urllib.parse import urlsplit
+        hosts = {urlsplit(s).hostname for s in note['sources']}
+        self.assertEqual(hosts, {'nvd.nist.gov', 'www.exploit-db.com'})  # each correction names where it comes from
         self.assertEqual(range_corrections.apply('CVE-2020-11022', out), (out, 0))  # idempotent
 
     def test_a_bound_the_feed_changes_again_is_left_to_the_feed(self):
