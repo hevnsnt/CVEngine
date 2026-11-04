@@ -332,8 +332,8 @@ List endpoints (`vulnerabilities`, `matches`, `routes`, `hygiene`, `work`) carry
 **Remediation loop**
 
 1. `register_assets` with the hosts, IPs, or CIDRs the agent is responsible for.
-2. `get_remediation_work` returns open CVE-on-host items for those assets, fire first, with the host's IPs and the CVE's fixed versions. Fixed, accepted-risk, false-positive and closed matches are left out, and `?include_fp=0` also drops likely false positives.
-3. `update_remediation_status` sets `open`, `in_progress`, `fixed`, `accepted_risk` or `false_positive` with a note on why.
+2. `get_remediation_work` returns open CVE-on-host items for those assets, fire first, with the host's IPs and the CVE's fixed versions. Fixed, accepted-risk, false-positive and closed matches are left out, and `?include_fp=0` also drops likely false positives. There is one item per upgrade: if the same upgrade of the same component on one host fixes several CVEs (CVE-2020-11022 and CVE-2020-11023 on jQuery 3.4.1, both fixed in 3.5.0), they are one item. Its `cves` and `match_ids` list them all and `upgrade_to` is the version that fixes them. `count` counts items and `matches` counts the matches behind them.
+3. `update_remediation_status` (once per id in `match_ids`) sets `open`, `in_progress`, `fixed`, `accepted_risk` or `false_positive` with a note on why.
 
 Matches also carry `distro_status` (`patched`, `vulnerable`, `unknown`, `no_data`), `distro_label`, `evidence`, and the template test result (`vulnerable`, `no_match`, `error`).
 
