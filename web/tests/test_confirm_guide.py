@@ -236,7 +236,7 @@ class MatchGuideTests(TestCase):
 		steps = {s['run_in']: s for s in guide['steps']}
 		self.assertEqual(steps['browser']['url'], SCRIPT)
 		self.assertEqual(steps['browser_console']['command'], 'jQuery.fn.jquery')
-		self.assertIn(f'curl -sS --max-time 20 {SCRIPT}', steps['shell']['command'])
+		self.assertIn(f'curl -gsS --max-time 20 {SCRIPT}', steps['shell']['command'])  # -g: a script URL's [1-100000] is not a curl range
 		self.assertEqual(guide['verdict']['fixed'], '3.5.0')
 		self.assertIn('untrusted sources', guide['precondition']['quote'])
 		self.assertIn('<option>', guide['precondition']['needs'])
@@ -269,7 +269,7 @@ class MatchGuideTests(TestCase):
 		guide = self.site.detail(match)['confirm']
 		self.assertEqual(guide['class'], 'web_server')
 		self.assertEqual(guide['look_for'][0]['text'], 'Server: nginx/1.18.0')
-		self.assertIn("curl -sS -I --max-time 15 https://www.example.com/ | grep -i -e '^Server:'", all_commands(guide))
+		self.assertIn("curl -gsS -I --max-time 15 https://www.example.com/ | grep -i -e '^Server:'", all_commands(guide))
 		self.assertIn('nginx -v', all_commands(guide))
 		self.assertTrue(any("dpkg-query" in c and ' nginx' in c for c in all_commands(guide)))
 		self.assertIn('backport', guide['verdict']['not_affected'])
@@ -330,7 +330,7 @@ class MatchGuideTests(TestCase):
 		readme = 'https://news.example.com/wp-content/plugins/example-forms/readme.txt'
 		self.assertEqual(guide['where'][0]['url'], readme)
 		self.assertEqual(guide['look_for'][0]['text'], 'Stable tag: 2.3.0')
-		self.assertTrue(any(c.startswith(f'curl -sS --max-time 15 {readme} | grep') for c in all_commands(guide)))
+		self.assertTrue(any(c.startswith(f'curl -gsS --max-time 15 {readme} | grep') for c in all_commands(guide)))
 		self.assertIn('wp plugin get example-forms --fields=name,status,version', all_commands(guide))
 		self.assertIn('contributor access', guide['precondition']['quote'])
 
@@ -376,7 +376,7 @@ class MatchGuideTests(TestCase):
 		match.sev = 2
 		entry = _match_entry(match, 'smoke')
 		self.assertIn(SCRIPT, ' '.join(entry['confirm']['where']))
-		self.assertTrue(any(s['command'].startswith('curl -sS') for s in entry['confirm']['steps']))
+		self.assertTrue(any(s['command'].startswith('curl -gsS') for s in entry['confirm']['steps']))
 		self.assertIn('3.5.0', entry['confirm']['not_affected'])
 
 
@@ -686,3 +686,21 @@ class ReviewFixTests(TestCase):
 			self.assertEqual(detection_author.regenerate_rules_records(), 0)
 		row.refresh_from_db()
 		self.assertEqual((row.source, row.strategy), ('manual', {'summary': 'HUMAN'}))
+
+
+class CurlGlobbingTests(SimpleTestCase):
+	"""Security review 1.3.4 (exec-1): curl expands [1-100000] and {a,b} in a URL even inside quotes, so a hostile page's script URL turned
+	a copied "one request" command into thousands from the tester's machine. Every curl cvENGINE renders for a person turns that off."""
+
+	def test_a_bracketed_script_url_is_one_request(self):
+		url = 'https://victim.example/js/jquery-1.12.4.js?v=[1-100000]'
+		command = f'curl -gsS --max-time 20 {shlex.quote(url)}'
+		self.assertEqual(shlex.split(command)[:2], ['curl', '-gsS'])
+
+	def test_every_rendered_curl_turns_globbing_off(self):
+		from pathlib import Path
+		root = Path(__file__).resolve().parent.parent / 'cveFeed'
+		for name in ('confirm_guide.py', 'probes.py', 'detection_commands.py', 'validation.py'):
+			text = (root / name).read_text()
+			for found in re.finditer(r"""f?['"]curl (-[A-Za-z]+|\{)""", text):
+				self.assertIn('g', found.group(1) if found.group(1) != '{' else '', f'{name}: {text[found.start():found.start() + 60]}')

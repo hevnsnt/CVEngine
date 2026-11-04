@@ -189,7 +189,13 @@ deploy_builtin() {
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" up -d --no-recreate db redis || return 1
+  if [ -f scripts/redis-password.sh ] && . scripts/redis-password.sh && cvengine_ensure_redis_password "${COMPOSE_ENV_FILE:-}"; then
+    log "the Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once"
+    "${compose[@]}" up -d --no-recreate db || return 1
+    "${compose[@]}" up -d --no-deps --force-recreate redis || return 1
+  else
+    "${compose[@]}" up -d --no-recreate db redis || return 1
+  fi
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
@@ -444,7 +450,9 @@ fi
 restore_branch() { if [ "$SWITCHED" = 1 ]; then git checkout -q -f "$BRANCH" >>"$LOG" 2>&1 || true; fi; }
 # The files can already be at $SHA while the running containers are older (someone ran `git pull` by hand, which is also how a host
 # without this updater is brought up to date the first time). web/.commit is the commit the running build was made from.
-BUILT=$(head -n1 web/.commit 2>/dev/null | tr 'A-F' 'a-f' || true)
+# (read through the state helper: ./web is writable by the web container, and a plain read would follow a link it planted there to a host
+# file and copy its first line into the log the app is shown)
+BUILT=$(python3 "$STATE_HELPER" built 2>/dev/null || true)
 # (HEAD contains the approved commit: it is $SHA itself, or a checkout with commits of its own that has merged it, and what is built is HEAD)
 if git merge-base --is-ancestor "$SHA" HEAD && [ "$BUILT" = "$PREV" ] && [ "$(deployed_commit)" = "$PREV" ] && schema_current; then
   log "already at $SHA"

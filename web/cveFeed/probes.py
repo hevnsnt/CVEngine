@@ -218,7 +218,7 @@ def display_for(probe_id, target):
     if probe['family'] == 'nmap':
         return shlex.join(nmap_argv(target['ip'], target['port'], target.get('service', '')))
     base = target['base'].rstrip('/')
-    return '; '.join(f"curl -sS -i --max-time 6 {shlex.quote(base + path)}" for _method, path in probe['requests'])
+    return '; '.join(f"curl -gsS -i --max-time 6 {shlex.quote(base + path)}" for _method, path in probe['requests'])
 
 
 def nmap_argv(ip, port, service=''):

@@ -37,6 +37,8 @@ up: check-env		## Build and start all services.
 	@./scripts/upgrade-postgres.sh
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	@python3 scripts/update-state.py upstream || true
+	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
+	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
 	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi

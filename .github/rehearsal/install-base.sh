@@ -6,6 +6,8 @@ set -euo pipefail
 echo "$1" > "$HOME/mode"
 cd "$HOME/cvengine"
 ./scripts/init-env.sh
+# Installed without a broker password, as installations that predate it are: the update must give it one by itself (verify.sh checks it)
+sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=/' .env
 make certs
 if [ "$1" = overlay ]; then
   cat > docker-compose.vps.yml <<'YML'
