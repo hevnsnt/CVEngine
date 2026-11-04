@@ -86,7 +86,8 @@ deploy_steps() {
   maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
-  if . scripts/redis-password.sh && cvengine_ensure_redis_password "${COMPOSE_ENV_FILE:-}"; then
+  # Compose reads ${REDIS_PASSWORD} from the --env-file it is given (an overlay's .env.vps), so the password goes there too
+  if . scripts/redis-password.sh && cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"; then
     # an installation without a broker password gets one: Redis is recreated with it now, and every client below with the new address
     log "the Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once"
     "${compose[@]}" up -d --no-recreate db || return 1

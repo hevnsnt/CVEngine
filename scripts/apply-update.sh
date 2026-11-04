@@ -189,7 +189,7 @@ deploy_builtin() {
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
-  if [ -f scripts/redis-password.sh ] && . scripts/redis-password.sh && cvengine_ensure_redis_password "${COMPOSE_ENV_FILE:-}"; then
+  if [ -f scripts/redis-password.sh ] && . scripts/redis-password.sh && cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"; then
     log "the Redis broker had no password: generated one (REDIS_PASSWORD in .env) and recreating Redis with it; queued tasks are lost once"
     "${compose[@]}" up -d --no-recreate db || return 1
     "${compose[@]}" up -d --no-deps --force-recreate redis || return 1

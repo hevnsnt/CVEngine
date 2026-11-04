@@ -140,6 +140,18 @@ class RedisPasswordTests(unittest.TestCase):
         self.assertEqual(self.ensure(), 1)  # already has one: nothing changes, nothing is recreated
         self.assertEqual(self.value(), password)
 
+    def test_the_env_file_is_read_from_the_compose_command_line(self):
+        # the updater keeps its layout in a COMPOSE array (scripts/apply-update.sh resolve_layout), not in a variable of its own: the
+        # password has to reach the --env-file Compose reads, or Redis is recreated without one (the 1.3.4 overlay rehearsal)
+        script = f'. {SCRIPTS / "redis-password.sh"} && cvengine_compose_env_file "$@"'
+        run = lambda *args: subprocess.run(['bash', '-c', script, 'x', *args], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(run('docker', 'compose', '--env-file', '.env.vps', '-p', 'cvengine', '-f', 'docker-compose.yml'), '.env.vps')
+        self.assertEqual(run('docker', 'compose', '-f', 'docker-compose.yml'), '')
+        for name in ('update-deploy.sh', 'apply-update.sh'):
+            text = (SCRIPTS / name).read_text()
+            self.assertIn('cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"', text, name)
+            self.assertNotIn('COMPOSE_ENV_FILE:-', text, name)
+
     def test_a_missing_line_is_added(self):
         (self.tmp / '.env').write_text('OTHER=y')  # no trailing newline
         self.assertEqual(self.ensure(), 0)
