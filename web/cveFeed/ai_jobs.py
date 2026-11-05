@@ -11,7 +11,7 @@ answer are dropped.
 What a job carries (``packet``) is the stage's fixed system prompt and its parts in order: text cvENGINE wrote itself, and data that came
 from a scanned host, a scanner or a feed, which the container puts between nonce markers (its ``guard.fence``). Every string is masked for
 secrets before it is stored (``cveFeed.secret_redaction``), as every prompt was before 1.4, and so is the answer, unless the stage needs it
-literal (a nuclei template).
+literal (a scanner template it drafted).
 
 With no AI provider configured the stages do not queue anything (they behave as they always did without AI). With a provider but no
 reviewer to serve the queue (``CVENGINE_REVIEWER=0``, the container down, scanning paused) jobs wait, and ``waiting`` says so for the UI.

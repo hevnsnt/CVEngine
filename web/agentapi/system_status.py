@@ -333,7 +333,7 @@ def _os_detection():
     return os_detection.status()
 
 
-def _ai(problems):
+def _ai(problems=None):
     from cveFeed import ai_jobs, autotune, tunables
     from cveFeed.models import ValidationBudget
     from dashboard.models import AIProviderSettings
@@ -349,7 +349,7 @@ def _ai(problems):
 def _ai_jobs(problems, ai_jobs):
     """The pipeline's AI jobs, which the AI reviewer container answers (docs/AI-REVIEWER.md): a problem when they wait for it."""
     state = ai_jobs.waiting()
-    if state['waiting_for_reviewer']:
+    if state['waiting_for_reviewer'] and problems is not None:
         problems.append('ai: ' + ai_jobs.waiting_message(state))
     return state
 
