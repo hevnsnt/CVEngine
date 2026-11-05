@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve`` and ``alive_check``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check`` and ``bucket_check``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -119,11 +119,42 @@ def clean_alive_check(body):
     return {'checks': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
+MAX_BUCKETS = 100
+BUCKET_STATES = ('public', 'private', 'missing', 'unknown')
+
+
+def _verdict(raw):
+    """A bucket verdict clipped to the contract, or None. The object names stay raw here: ``bucket_scan`` redacts them before storing or showing."""
+    if not isinstance(raw, dict) or raw.get('state') not in BUCKET_STATES:
+        return None
+    objects = raw.get('objects') if isinstance(raw.get('objects'), list) else []
+    object_read = raw.get('object_read')
+    def number(value, top):
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= top else 0
+    return {'state': raw['state'], 'objects': [_text(o, 1024) for o in objects[:20] if isinstance(o, str)], 'truncated': raw.get('truncated') is True,
+            'region': _text(raw.get('region'), 40), 'object_read': object_read if isinstance(object_read, bool) else None,
+            'status': number(raw.get('status'), 999), 'code': _text(raw.get('code'), 64), 'request_count': number(raw.get('request_count'), 20)}
+
+
+def clean_bucket_check(body):
+    buckets = body.get('buckets')
+    if not isinstance(buckets, list) or len(buckets) > MAX_BUCKETS:
+        raise ApiError(400, 'a bucket_check result lists its buckets (at most %d)' % MAX_BUCKETS)
+    out = []
+    for item in buckets:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+            continue
+        verdict = _verdict(item.get('verdict'))
+        if verdict is not None:
+            out.append({'id': _text(item['id'], 300), 'verdict': verdict})
+    return {'buckets': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
-    if kind in ('http_probe', 'alive_check'):
-        key = 'probes' if kind == 'http_probe' else 'checks'
+    if kind in ('http_probe', 'alive_check', 'bucket_check'):
+        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets'}[kind]
         asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
         kept = [p for p in result[key] if p['id'] in asked]
         dropped = len(result[key]) - len(kept)

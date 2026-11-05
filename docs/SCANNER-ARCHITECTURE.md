@@ -67,7 +67,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/probes.py` | version and identity probes | moved: the `http_probe` kind (contract 3), a batch of planned probes per task; the scanner runs them (`cvengine_scanner.probes.version_probes`), the server keeps the plan, the ledger and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/route_auth.py` (750), `auth_routes.py` | route state, anonymous and signed in | move; signed-in half built-in only |
 | `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | move |
-| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | move |
+| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/supplier_scan.py` (647) | third-party supplier posture | move |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/hygiene.py` | DNS, TLS, SPF/DKIM/DMARC | the network helpers move; the evaluators are pure and stay |
@@ -184,8 +184,8 @@ which send nothing to the target and need no vantage point.
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
-   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, vhost and subdir, buckets, suppliers and the
+   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, vhost and subdir, suppliers and the
    hygiene network helpers.
 8. Drop the scan tools, Go and bbot from the server image.
 

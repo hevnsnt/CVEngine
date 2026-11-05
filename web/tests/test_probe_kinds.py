@@ -1,5 +1,6 @@
 """The probe kinds of contract version 3 (``http_probe``, ``dns_resolve``): the scope policy the server computes for a task, the validation of what
 a Sentinel reports, and each stage end to end through the fake built-in scanner, served, offline and failed."""
+import json
 import os
 from unittest import mock
 
@@ -9,11 +10,12 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import changes, discovery, ledger, probe_scope, probes
-from cveFeed.models import AssetChange, HostExclusion, HostState, ProbeObservation, ServiceRun
+from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes
+from cveFeed.models import AssetChange, HostExclusion, HostState, HygieneFinding, ProbeObservation, ServiceRun
 from startScan.models import Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
+from tests.test_bucket_scan import Fixture as BucketFixture
 from tests.test_changes import ChangeFixture
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
 
@@ -284,3 +286,65 @@ class AliveCheckStageTests(ChangeFixture, TestCase):
         self.assertFalse(AssetChange.objects.filter(kind__in=('host_retired', 'zombie_host')).exists())
         for guard in self.guards:
             self.assertEqual(guard.calls, [])
+
+
+class BucketCheckStageTests(BucketFixture, TestCase):
+    """The cloud storage sweep (``bucket_scan.sweep``): the due buckets go to the scanner as one ``bucket_check`` batch, and the server
+    evaluates what comes back exactly as it evaluates its own checks."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'bucket_check')
+        self.host('static.example.test', cname='ex-static.s3.amazonaws.com')
+
+    def public(self, task):
+        return {'outcome': 'done', 'touched': ['ex-static.s3.amazonaws.com'], 'refused': [],
+                'buckets': [{'id': b['id'], 'verdict': {'state': 'public', 'objects': ['css/site.css', 'backup/db.sql', 'keys/AKIAABCDEFGHIJKLMNOP.txt'], 'truncated': False,
+                                                         'region': 'us-east-1', 'object_read': True, 'status': 200, 'code': '', 'request_count': 2}}
+                            for b in task['target']['buckets']]}
+
+    def test_the_scanner_checks_the_bucket_and_the_sweep_stores_the_finding(self):
+        with FakeScanner(kinds=['bucket_check'], responders={'bucket_check': self.public}) as fake:
+            out = bucket_scan.sweep(self.project.id)
+        self.assertEqual(fake.served_kinds(), ['bucket_check'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual((out['checked'], out['public']), (1, 1))
+        found = self.finding('static.example.test')
+        self.assertEqual(found.status, 'open')
+        self.assertEqual(found.evidence['sensitive_looking_names'], 1)  # backup/db.sql, read here from the raw names as for a local check
+        self.assertNotIn('AKIAABCDEFGHIJKLMNOP', json.dumps(found.evidence))  # and a secret in a name is redacted before it is stored
+        target = fake.served[0]['target']
+        self.assertEqual(target['buckets'], [{'id': 's3:ex-static', 'provider': 's3', 'name': 'ex-static'}])
+        self.assertEqual((target['scope']['domains'], target['scope']['hosts']), (['amazonaws.com'], []))  # the platform, never a project host
+        self.assertTrue(ServiceRun.objects.filter(service=bucket_scan.SERVICE, asset='s3:ex-static').exists())
+
+    def test_an_excluded_bucket_is_never_sent(self):
+        HostExclusion.objects.create(org=self.org, host='static.example.test')
+        with FakeScanner(kinds=['bucket_check'], responders={'bucket_check': self.public}) as fake:
+            out = bucket_scan.sweep(self.project.id)
+        self.assertEqual((fake.served, out['checked']), ([], 0))
+
+    def test_with_the_scanner_offline_the_buckets_stay_due(self):
+        with FakeScanner(kinds=['bucket_check'], mode='offline') as fake:
+            out = bucket_scan.sweep(self.project.id)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual(out['checked'], 0)
+        self.assertIn('waiting for a scanner', out['skipped'])
+        self.assertFalse(ServiceRun.objects.filter(service__in=(bucket_scan.SERVICE, bucket_scan.FAILED_SERVICE)).exists())
+        self.assertFalse(HygieneFinding.objects.exists())
+
+    def test_an_unanswered_check_is_recorded_as_without_an_answer(self):
+        def unknown(task):
+            out = self.public(task)
+            for row in out['buckets']:
+                row['verdict'] = {**row['verdict'], 'state': 'unknown', 'objects': [], 'object_read': None, 'status': 0}
+            return out
+        with FakeScanner(kinds=['bucket_check'], responders={'bucket_check': unknown}):
+            out = bucket_scan.sweep(self.project.id)
+        self.assertEqual(out['unknown'], 1)
+        self.assertFalse(HygieneFinding.objects.exists())
+        self.assertTrue(ServiceRun.objects.filter(service=bucket_scan.FAILED_SERVICE).exists())

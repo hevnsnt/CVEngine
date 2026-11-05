@@ -593,7 +593,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
     """Check the due buckets of one project, one at a time. Returns ``{'checked', 'public', 'takeover', 'private', 'missing', 'unknown',
     'resolved'}`` (and ``skipped`` with the reason when nothing ran; ``not_guessed`` names the domains no bucket name was guessed from because
     they show another owner). ``fetch``, ``dns`` and ``owner_check`` replace the network in tests."""
-    from cveFeed import activity, exclusions, ledger
+    from cveFeed import activity, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from reNgine import resources
     from targetApp.models import Domain
@@ -602,6 +602,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
         return {**summary, 'skipped': 'bucket checks are turned off (CVENGINE_BUCKETS=0)'}
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
+    injected = fetch is not None or dns is not None  # tests replace the network: the local path
     fetch, dns = fetch or probe.http_fetch, dns or probe.dns_exists
     owner = f'buckets-{os.getpid()}'
     with resources.redis_claim(f'cvengine:buckets:{project_id}', owner, 300) as holder:
@@ -616,20 +617,19 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
         found_by_domain, checked_by_domain = {}, {}
         running = activity.log('run_check', f'Cloud storage check: {len(candidates)} candidate bucket{"s" if len(candidates) != 1 else ""}',
                                project=project_id, status='running')
-        for cand in due(project_id, candidates)[:max_per_sweep()]:
+        todo = due(project_id, candidates)[:max_per_sweep()]
+        remote, waiting = ({}, False) if injected else _remote_verdicts(project_id, [c for c in todo if _runnable(project_id, c, domains, manual)])
+        if waiting:
+            summary['skipped'] = 'waiting for a scanner: the buckets stay due'
+        for cand in todo:
+            if waiting:
+                break
             if resources.global_pause_requested(fail_closed=True):
                 summary['skipped'] = 'scanning is paused: the buckets stay due'
                 break
-            banned = exclusions.excluded_names(project_id)  # read again: an exclusion made while the sweep runs stops the next request
-            if cand.name in banned or any(h in banned for h in cand.hosts) or cand.domain_id not in domains:
+            if not _runnable(project_id, cand, domains, manual):
                 continue
-            if cand.domain_id in manual:  # a manual only target's names are not checked on a schedule, unless a target that is not manual only holds a host that leads here
-                from cveFeed.manual_only import other_holder
-                holders = [d for d in (other_holder(project_id, h) for h in cand.hosts) if d is not None]
-                if not holders:
-                    continue
-                cand.domain_id = holders[0].pk
-            verdict = probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
+            verdict = remote[cand.asset] if cand.asset in remote else probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
             summary['checked'] += 1
             if verdict.state == 'unknown':
                 summary['unknown'] += 1
@@ -651,6 +651,39 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
             f', {summary["takeover"]} dangling' + (f', {summary["unknown"]} without an answer' if summary['unknown'] else '')
             + ''.join(f'; no bucket names guessed from {d}: {r}' for d, r in sorted(not_guessed.items()))), **summary)
     return summary
+
+
+def _runnable(project_id, cand, domains, manual):
+    """Whether ``cand`` may be checked now: no exclusion names it or a host that leads to it (read again for every candidate: an exclusion made
+    while the sweep runs stops the next request), its target is one of the project's, and a manual only target's names are checked only when a
+    target that is not manual only holds a host that leads here (``cand.domain_id`` then becomes that target)."""
+    from cveFeed import exclusions
+    banned = exclusions.excluded_names(project_id)
+    if cand.name in banned or any(h in banned for h in cand.hosts) or cand.domain_id not in domains:
+        return False
+    if cand.domain_id in manual:
+        from cveFeed.manual_only import other_holder
+        holders = [d for d in (other_holder(project_id, h) for h in cand.hosts) if d is not None]
+        if not holders:
+            return False
+        cand.domain_id = holders[0].pk
+    return True
+
+
+def _remote_verdicts(project_id, candidates):
+    """``(verdicts, waiting)``: the verdicts a Sentinel's ``bucket_check`` tasks gave (``{asset: Verdict}``, empty when no Sentinel can take the
+    kind and the sweep checks here, as before), and whether the sweep must wait because none can and the kind may not run here."""
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
+    if not candidates:
+        return {}, False
+    try:
+        got = probe_dispatch.try_buckets(Project.objects.get(pk=project_id), candidates, probe.request_rate())
+    except ScannerUnavailable as exc:
+        logger.info('bucket sweep of project %s waits for a scanner: %s', project_id, exc)
+        return {}, True
+    return (got or {}), False
 
 
 def sweep_all(fetch=None, dns=None):

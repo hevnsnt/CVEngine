@@ -130,6 +130,17 @@ def for_addresses(project_id, addresses):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_buckets(project_id, candidates):
+    """The policy of a bucket_check task: the storage platforms' own endpoints, never a project host. An S3 bucket's regional host is learnt
+    from the platform's answer, so S3 and GCS are named by their endpoint domain (the scanner also holds every request to the documented
+    endpoint patterns); an Azure account by its own host. The candidates were already filtered by the project's exclusions."""
+    from cveFeed import bucket_probe
+    providers = {c.provider for c in candidates}
+    domains = (['amazonaws.com'] if bucket_probe.S3 in providers else []) + (['storage.googleapis.com'] if bucket_probe.GCS in providers else [])
+    hosts = sorted({bucket_probe.azure_host(c.name) for c in candidates if c.provider == bucket_probe.AZURE})[:MAX_HOSTS]
+    return {'hosts': hosts, 'domains': domains, 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_names(project_id, domain, names, unattended=False):
     """The policy of a dns_resolve task for ``names`` of target ``domain``: each name the target holds that no gate refuses. A lookup asks the
     Sentinel's resolver, never the host, so this is about which names the scanner is told of at all."""
