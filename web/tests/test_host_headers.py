@@ -48,7 +48,10 @@ class ComposeServiceHostTests(TestCase):
         self.assertIn('web', self.allowed_hosts())
 
     def test_web_is_not_trusted_when_the_reviewer_and_the_scanner_are_off(self):
-        self.assertNotIn('web', self.allowed_hosts(CVENGINE_REVIEWER='0'))
+        self.assertNotIn('web', self.allowed_hosts(CVENGINE_REVIEWER='0', CVENGINE_BUILTIN_SCANNER='0'))
+
+    def test_web_is_trusted_by_default_for_the_built_in_scanner(self):
+        self.assertIn('web', self.allowed_hosts(CVENGINE_REVIEWER='0'))  # the built-in scanner is on unless switched off
 
     def test_web_is_trusted_for_the_built_in_scanner_alone(self):
         self.assertIn('web', self.allowed_hosts(CVENGINE_REVIEWER='0', CVENGINE_BUILTIN_SCANNER='1'))
