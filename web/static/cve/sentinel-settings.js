@@ -29,6 +29,8 @@ export const SENTINEL_KINDS = [
   "openvas",
   "discover",
   "bbot_discovery",
+  "http_probe",
+  "dns_resolve",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -42,6 +44,8 @@ const KIND_WORDS = {
   openvas: "OpenVAS",
   discover: "internal discovery",
   bbot_discovery: "bbot discovery",
+  http_probe: "version probes",
+  dns_resolve: "name resolution",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {
