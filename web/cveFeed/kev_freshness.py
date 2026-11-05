@@ -22,7 +22,7 @@ MAX_REREAD_HOSTS = 50           # hosts one call asks to be read again
 
 
 def _key(name):
-    from cveFeed import cms
+    from cvengine_scanner import cms
     return cms.key(name)
 
 

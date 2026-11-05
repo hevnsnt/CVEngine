@@ -5,7 +5,9 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import host_context, probes, triage, versions, wp_correlation, wpscan_scan
+from cvengine_scanner import versions
+
+from cveFeed import host_context, probes, triage, wp_correlation, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, ServiceRun
 from startScan.models import Subdomain
 from tenancy.scope import SCOPES

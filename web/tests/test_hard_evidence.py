@@ -7,7 +7,7 @@ from django.utils import timezone
 from cveFeed import db_exposure as dbx
 from cveFeed import nmap_scan
 from cveFeed.models import CVEMatch
-from reNgine import nmap_service
+from cvengine_scanner import nmap as nmap_service
 from startScan.models import IpAddress, Subdomain, Vulnerability
 from tests.test_hard_distro import SSH_CVE, SSH_FIXES, Fixture, NGINX_CVE
 

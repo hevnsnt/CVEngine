@@ -25,7 +25,9 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
+from cvengine_scanner import cms, fingerprint, versions
+
+from cveFeed import js_libraries, local_egress
 
 logger = logging.getLogger(__name__)
 
@@ -396,9 +398,9 @@ def observations_from_page(response, source_prefix='page'):
         hint = source == 'script:filename'  # a library version a script's file name carries: a hint (cveFeed.js_libraries)
         out.append(_observation('version', base, version, outcome='found' if version else 'hidden',
                                 confidence=(js_libraries.CONFIDENCE['filename'] if hint else 0.9) if version else 0.7, source=source, url='/'))
+    scripts = js_libraries.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0]
     found = fingerprint.from_response(response.get('server', ''), response.get('powered_by', ''), response.get('body', ''),
-                                      response.get('content_type', ''), scripts=fingerprint.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0],
-                                      headers=headers)
+                                      response.get('content_type', ''), from_scripts=js_libraries.script_fingerprints(scripts), headers=headers)
     for item in found:
         add(item['name'], item['source'])
     for product in cms.SOURCES:  # a version the front page already carries (Drupal's core scripts); WordPress has its own probe
@@ -446,7 +448,7 @@ def _wordpress_signals(responses):
             if product.lower() == 'wordpress':
                 signals.append(('meta:generator', path))
                 generator = generator or found
-    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cveFeed.cms: best source wins, a library's ?ver= never)
+    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cvengine_scanner.cms: best source wins, a library's ?ver= never)
     pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
     candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
     candidates.sort(key=lambda c: -c[2])
@@ -603,7 +605,7 @@ def _wordpress_responses(base, get, sleep):
 
 def _same_host_scripts(response, pattern=None, limit=4):
     page = response.get('final_url') or response.get('url') or ''
-    _every, local = fingerprint.script_sources(response.get('body', ''), page, limit=40)
+    _every, local = js_libraries.script_sources(response.get('body', ''), page, limit=40)
     return [u for u in local if pattern is None or pattern.search(u)][:limit]
 
 
@@ -1082,13 +1084,25 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget, shared by every host's library probe
     running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
                            status='running', scan_id=scan.id)
+    # the http probes go to a Sentinel when one can take them (agentapi.probe_dispatch); whatever it does not run is run here, as before
+    remote, waiting = ({}, False) if get is not None else _remote_http(scan, due)
+    if waiting:
+        stats['waiting'] = True
     for sub, todo in due:
         if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
             break
         ran = False
         for asset, entry in todo.items():
+            if waiting and BY_ID[entry['probe']]['family'] == 'http':
+                continue  # no scanner can take it and it may not run here: it stays due
             try:
-                found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
+                if asset in remote:
+                    found = remote[asset]
+                    if isinstance(found, Exception):
+                        raise found
+                    found = apply_remote(project, domain.id, sub, entry, found)
+                else:
+                    found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
             except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1
@@ -1104,5 +1118,28 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
             ran = True
         stats['hosts'] += int(ran)
     activity.settle(running, 'done', message=(f'Probes for {domain.name}: {stats["probes"]} probe(s) on {stats["hosts"]} host(s), '
-                                              f'{stats["versions"]} version(s) found'), **stats)
+                                              f'{stats["versions"]} version(s) found' + ('; the web probes wait for a scanner' if waiting else '')),
+                    **stats)
     return stats
+
+
+def _remote_http(scan, due):
+    """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
+    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them and they may not run here."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
+    try:
+        got = probe_dispatch.try_http_probes(scan.domain.project, scan, planned)
+    except ScannerUnavailable as exc:
+        logger.info('version probes of scan %s wait for a scanner: %s', scan.pk, exc)
+        return {}, True
+    return (got[0] if got is not None else {}), False
+
+
+def apply_remote(project_id, domain_id, sub, entry, found):
+    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's)."""
+    record(project_id, domain_id, sub.name, entry['probe'], found)
+    if apply_to_subdomain(sub, found):
+        recorrelate(sub)
+    return found

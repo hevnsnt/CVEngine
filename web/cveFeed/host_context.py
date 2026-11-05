@@ -39,7 +39,9 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
     the CDN flag on the host or an address, a WAF fingerprint, edge-only response headers, a probe that saw only an edge page). ``fronted`` is
     for the model's information. ``verified`` is true only on DNS-level evidence (the CNAME, the host's own name, a CDN flag on an address):
     a response header or a page is the scanned host's own say-so, and one ``cf-ray`` header must not be able to clear its CVE matches."""
-    from cveFeed import hosting, versions
+    from cvengine_scanner import versions
+
+    from cveFeed import hosting
     providers, basis = set(), []
     ips = list(sub.ip_addresses.all())
     pointers = [ip.reverse_pointer for ip in ips if ip.reverse_pointer]
@@ -100,7 +102,9 @@ def library_copies(record, names=(), limit=6):
 
 
 def _technologies(sub, names, observed, libraries=None):
-    from cveFeed import fingerprint, js_libraries
+    from cvengine_scanner import fingerprint
+
+    from cveFeed import js_libraries
     from cveFeed.correlation import split_name_version
     by_product = {str(r.get('product', '')).lower(): r for r in (libraries or {}).values() if isinstance(r, dict)}
     out = []
