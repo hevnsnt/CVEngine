@@ -14,7 +14,7 @@ def unschedule(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cveFeed", "0146_ai_job"),
+        ("cveFeed", "0147_secrets_inventory"),
         ("django_celery_beat", "0001_initial"),
     ]
 
