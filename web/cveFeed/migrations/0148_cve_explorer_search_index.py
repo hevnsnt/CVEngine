@@ -42,7 +42,7 @@ def drop_indexes(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0146_ai_job'),
+        ('cveFeed', '0147_secrets_inventory'),
     ]
 
     operations = [
