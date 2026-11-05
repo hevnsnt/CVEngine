@@ -1,6 +1,6 @@
 # Deployment
 
-cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, and `proxy` ([ARCHITECTURE.md](ARCHITECTURE.md)). Two optional parts ship in the same file as Compose profiles and are **off by default**: a `tailscale` service ([TAILSCALE.md](TAILSCALE.md)) and the OpenVAS add-on, 15 Greenbone containers on a network of their own ([OPENVAS.md](OPENVAS.md)). Until you switch one on, none of its containers exist, run, publish a port or use memory. Sentinels, the scanner agents you run on other machines, are not part of this stack: each runs from its own repository and calls this server over HTTPS on 443. The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable, and heavy jobs queue by memory use ([CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
+cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, `proxy`, the AI reviewer (`reviewer`, [AI-REVIEWER.md](AI-REVIEWER.md)) and the built-in scanner (`scanner`, [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)), which runs the scan tools ([ARCHITECTURE.md](ARCHITECTURE.md)). Two optional parts ship in the same file as Compose profiles and are **off by default**: a `tailscale` service ([TAILSCALE.md](TAILSCALE.md)) and the OpenVAS add-on, 15 Greenbone containers on a network of their own ([OPENVAS.md](OPENVAS.md)). Until you switch one on, none of its containers exist, run, publish a port or use memory. Sentinels, the scanner agents you run on other machines, are not part of this stack: each runs from its own repository and calls this server over HTTPS on 443. The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable with the built-in scanner, and heavy jobs queue by memory use ([Memory](#memory), [CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
 
 ## Ports
 
@@ -170,6 +170,24 @@ Leave the other scanner kinds at their defaults unless a particular queue is the
 
 **The best way to scale is a second machine.** A Sentinel scans from its own machine with its own CPU, memory and network path, takes work from this server and reports back, so it adds capacity instead of squeezing more out of one container. Add one before you push the numbers on a single server far above the table ([Sentinels](SENTINELS.md)).
 
+## Memory
+
+Each container has a memory ceiling of its own, set in `.env` and applied by `make up` or the next update:
+
+| Container | Variable | Default | What it holds |
+| --- | --- | --- | --- |
+| `celery` | `CELERY_MEM_LIMIT` | `4g` | the workers: bbot discovery, the in-process probes, the work that stays on the server; heavy jobs queue inside it by memory |
+| `scanner` | `SCANNER_MEM_LIMIT` | `2g` | the built-in scanner: nmap, naabu, nuclei, testssl.sh, WPScan and wafw00f, several at once |
+| `web` | `WEB_MEM_LIMIT` | `1g` | the web server |
+| `celery-beat` | `BEAT_MEM_LIMIT` | `512m` | the scheduler |
+| `reviewer` | `REVIEWER_MEM_LIMIT` | `256m` | the AI reviewer |
+
+With PostgreSQL, Redis and the proxy that comes to about 8 GB, which is why 8 GB is comfortable. On a smaller host the installer gives the
+scanner 1 GB (`SCANNER_MEM_LIMIT=1g`, written when the host has less than about 7 GB) and warns. Below 4 GB lower `CELERY_MEM_LIMIT` too (the
+scan tools no longer run in celery once the scanner has enrolled, so it needs less than before). A scanner that hits its ceiling has the tool
+that was running killed by the kernel: that task is reported failed and the work waits for the scanner (nothing is marked failed in the scan).
+To keep fewer tools running at once, lower how many tasks the scanner runs at once on its card on the Sentinels page (**Settings**).
+
 ## Backups
 
 Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
@@ -193,7 +211,7 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 
 | Target | What it does |
 | --- | --- |
-| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the six core services. |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the built-in scanner's pinned image and starts it after celery ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make build` | Records the installed commit and builds the images. |
 | `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
 | `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one. |
@@ -205,6 +223,7 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
 | `make openvas-up`, `make openvas-user`, `make openvas-down` | Start the optional OpenVAS add-on, save its generated login, stop it. The app does the same from Administration, OpenVAS ([OPENVAS.md](OPENVAS.md)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
+| `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the Sentinel commit `scanner.lock.json` pins (the fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
 ## Development stack

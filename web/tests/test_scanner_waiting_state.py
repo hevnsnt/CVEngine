@@ -71,10 +71,17 @@ class SentinelWorld(FallbackEnv):
 
 
 class HelperTests(SentinelWorld, TestCase):
-    def test_unset_nothing_can_be_waiting_and_nothing_is_read(self):
-        for value in (None, '', 'all', '*'):
+    def test_all_nothing_can_be_waiting_and_nothing_is_read(self):
+        for value in ('all', '*'):
             self.policy(value)
             with self.assertNumQueries(0):
+                self.assertEqual(scanner_state.waiting_kinds(), [])
+                self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
+
+    def test_unset_nothing_waits_until_the_builtin_scanner_has_enrolled(self):
+        for value in (None, ''):
+            self.policy(value)
+            with self.assertNumQueries(2):  # whether the built-in scanner has enrolled, asked by each call; nothing else
                 self.assertEqual(scanner_state.waiting_kinds(), [])
                 self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 

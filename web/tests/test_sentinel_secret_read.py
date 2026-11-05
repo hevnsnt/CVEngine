@@ -1,6 +1,6 @@
 """The single-use secure read of a stored credential (``POST /api/v1/sentinel/tasks/<id>/secret``): only the built-in scanner, only for the one signed-in task
-it holds, exactly once, audited on every call, and the value is in no row, message or log. Dormant: nothing dispatches signed-in work yet, so these tests
-build the tasks by hand."""
+it holds, exactly once, audited on every call, and the value is in no row, message or log. The signed-in nuclei pass dispatches such tasks
+(tests.test_builtin_default); these tests build them by hand."""
 import logging
 import os
 import tempfile
@@ -57,6 +57,9 @@ class SecretBase(TestCase):
                            {'enrollment_token': payload['enrollment_token'], 'name': 'x', 'capabilities': CAPS})
         self.assertEqual(status, 201, out)
         self.t['builtin'], self.builtin = out['token'], Agent.objects.get(pk=out['id'])
+        # the built-in scanner image says it reads stored sign-ins (info.features): only such an image is offered signed-in work
+        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True, 'features': ['secret_read', 'vantage']})
+        self.builtin.refresh_from_db()
         self.touch(self.builtin)
         self.external, self.t['external'] = self.enroll(self.t['dana'], '/api/v1/projects/sen-a/sentinels/enroll', 'external-1')
         self.instance, self.t['instance'] = self.enroll(self.t['root'], '/api/v1/sentinels/enroll', 'external-instance')
@@ -323,6 +326,24 @@ class BrokerGateTests(SecretBase):
         self.assertEqual(sentinels.capacity_state(self.pa, kind)['state'], 'free')
         self.task(agent=None, status='queued', ref=None)
         self.assertEqual(sentinels.capacity_state(self.pa, kind)['state'], 'busy')
+
+
+class FeatureGateTests(SecretBase):
+    def test_a_builtin_image_that_does_not_read_sign_ins_is_never_offered_signed_in_work(self):
+        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True})
+        self.task(agent=None, status='queued')
+        status, out = call(self.t['builtin'], 'POST', '/api/v1/sentinel/tasks/next', {'kinds': ['nuclei_targeted']})
+        self.assertEqual(status, 200, out)
+        self.assertIsNone(out.get('task'))
+        self.assertEqual(sentinels.capacity_state(self.pa, 'nuclei_targeted', builtin_only=True)['state'], 'none')
+
+    def test_the_offer_says_it_is_signed_in_and_carries_no_value(self):
+        self.task(agent=None, status='queued')
+        status, out = call(self.t['builtin'], 'POST', '/api/v1/sentinel/tasks/next', {'kinds': ['nuclei_targeted']})
+        self.assertEqual(status, 200, out)
+        self.assertIs(out['task']['signed_in'], True)
+        for secret in (*SECRETS, 'authcred'):
+            self.assertNotIn(secret, str(out))
 
 
 class ConcurrencyAndRateTests(SecretBase):

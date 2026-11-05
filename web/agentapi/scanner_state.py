@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
 INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design: never part of a vantage-point warning
+VANTAGE_FEATURE = 'vantage'  # the built-in scanner image's ``info.features`` entry: it applies ``sentinel_settings.builtin_vantage``
 NO_STAGE = ('waf',)  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (drop when one does)
 
 
@@ -74,7 +75,7 @@ def _uses_proxy(kind, tools):
     return kind in tools or kind.split('_')[0] in tools
 
 
-def _tailscale_enabled():
+def tailscale_enabled():
     """Whether this install runs the ``tailscale`` compose profile: it is in ``COMPOSE_PROFILES`` (``.env`` reaches every container) or the sidecar has
     published a node status file (``cveFeed.tailscale_local``, fresh or not: the install is set up for it)."""
     import os
@@ -86,17 +87,22 @@ def _tailscale_enabled():
 
 
 def vantage_warnings():
-    """Sentences (one per cause, empty for none) warning that ``CVENGINE_LOCAL_FALLBACK`` moves kinds to the built-in scanner container, which has
-    none of this server's vantage point: its egress proxy (Settings > Proxy, only for the kinds whose tools take one), the Tailscale network namespace
-    that the ``tailscale`` sidecar shares with celery, or ``CVENGINE_ALLOW_PRIVATE_TARGETS``. Those scans would start from the scanner's network
-    without anything failing, so an administrator is told. It is a warning, never a refusal, derived and never stored (``ScanControl`` is untouched).
-    Internal ranges are Sentinel-only already and are not a cause. With the variable unset no kind moves and nothing is read."""
-    from agentapi import sentinel_dispatch
+    """Sentences (one per cause, empty for none) warning that ``CVENGINE_LOCAL_FALLBACK`` moves kinds to a built-in scanner that does not scan from this
+    server's vantage point. The built-in scanner shares celery's network namespace (so the Tailscale sidecar's route and the host network or macvlan
+    overlays are its own) and is sent this server's egress proxy and private-target setting in its settings (``sentinel_settings.builtin_vantage``),
+    which an image that applies them says it does (``info.features`` has ``vantage``). Only a built-in scanner image that does not is a cause: its
+    scans would leave without this server's proxy (Settings > Proxy, only for the kinds whose tools take one) and refuse the private addresses this
+    server may scan (``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet). It is a warning, never a refusal, derived and never stored (``ScanControl`` is
+    untouched). Internal ranges are Sentinel-only already and are not a cause. When no kind moves nothing is read."""
+    from agentapi import builtin_scanner, sentinel_dispatch
     from agentapi.models import SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
     off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY]
     if not off:
         return []
+    builtin = builtin_scanner.builtin_agent()
+    if builtin is None or VANTAGE_FEATURE in ((builtin.info or {}).get('features') or []):
+        return []  # no built-in scanner yet (nothing moved to it runs anywhere), or one that scans from this server's vantage point
 
     def probe(check):
         try:
@@ -106,8 +112,8 @@ def vantage_warnings():
             return False
 
     def sentence(kinds, what):
-        return (f"CVENGINE_LOCAL_FALLBACK moves {_join(kinds)} to the built-in scanner, which does not use {what}; "
-                "those scans will start from the scanner's network instead.")
+        return (f"CVENGINE_LOCAL_FALLBACK moves {_join(kinds)} to the built-in scanner, whose image does not use {what}; "
+                "update it (the server's updater pulls the image this release pins).")
 
     from cveFeed import egress_proxy
     from targetApp import target_types
@@ -115,8 +121,8 @@ def vantage_warnings():
     proxied = [k for k in off if _uses_proxy(k, egress_proxy.TOOLS)]
     if proxied and probe(egress_proxy.configured):
         out.append(sentence(proxied, "this server's egress proxy"))
-    if probe(_tailscale_enabled):
-        out.append(sentence(off, 'the Tailscale network'))
+    if probe(tailscale_enabled):
+        out.append(sentence(off, 'the private Tailscale addresses this server may scan'))
     if probe(target_types.private_targets_allowed):
         out.append(sentence(off, 'the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)'))
     return out
@@ -132,11 +138,11 @@ def state(now=None):
 
     from agentapi import sentinel_dispatch
     raw = os.environ.get(sentinel_dispatch.LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw in ('', 'all', '*'):
+    if raw in ('all', '*') or (raw == '' and not sentinel_dispatch.builtin_scanner_enrolled()):
         return _empty()  # every kind may still run here: nothing can be waiting, and nothing is read
     if now is not None:
         return _compute(now)
-    key = CACHE_KEY + raw
+    key = CACHE_KEY + (raw or 'default')
     try:
         cached = cache.get(key)
     except Exception:  # noqa: BLE001 - a cache that is down only means asking again

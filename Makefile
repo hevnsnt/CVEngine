@@ -42,6 +42,9 @@ up: check-env		## Build and start all services.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
 	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
+	@# The built-in scanner (docs/BUILTIN-SCANNER.md) shares celery's network namespace too: its pinned image is fetched and it is recreated after celery
+	@# (with CVENGINE_BUILTIN_SCANNER=0 it is taken away instead). Never fails make up: until it runs, the scans that need it wait.
+	@bash -c '. scripts/scanner.sh && cvengine_scanner_fetch ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} && cvengine_scanner_start --no-wait ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
 
 build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
@@ -100,11 +103,12 @@ openvas-user:	## Create the GVM user cvENGINE uses and save its generated login,
 openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
 
-scanner-build:	## Build the optional built-in scanner image from the pinned Sentinel commit (docs/SCANNER-ARCHITECTURE.md; needs COMPOSE_PROFILES=builtin-scanner to run).
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile builtin-scanner build scanner
+scanner-build:	## Build the built-in scanner image from source, the Sentinel commit scanner.lock.json pins (the fallback when the published image cannot be pulled).
+	@tag=$$(bash -c '. scripts/scanner.sh && cvengine_scanner_build' | tail -n1) && echo "Built $$tag (also cvengine-sentinel-local:latest)." && \
+	if python3 scripts/scanner_lock.py published; then echo "To run it instead of the published image, set CVENGINE_SCANNER_IMAGE=$$tag in .env, then make up."; fi
 
-scanner-logs:	## Tail the optional built-in scanner's log.
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile builtin-scanner logs --follow --tail=200 scanner
+scanner-logs:	## Tail the built-in scanner's log.
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} logs --follow --tail=200 scanner
 
 inventory-sync:	## Copy the host inventory reporter scripts to the copies the server hands out (web/static/cve/inventory).
 	cp -p scripts/inventory/cvengine-inventory.sh scripts/inventory/cvengine-inventory.py scripts/inventory/cvengine-inventory.ps1 web/static/cve/inventory/

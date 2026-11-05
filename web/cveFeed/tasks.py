@@ -1688,6 +1688,7 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     from cveFeed.discovery import SUCCESS, run_host_pipeline
     from cveFeed.models import DeferredRetest
     from cveFeed import ledger, retest
+    from cveFeed import scanner_wait as retest_scanner_wait
     from cveFeed.bounty_gate import Gate
     from targetApp.models import Domain
     if Gate().project_blocked(Domain.objects.values_list('project_id', flat=True).filter(pk=domain_id).first()):  # a bug bounty project that has not confirmed automated testing
@@ -1707,7 +1708,14 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
         outcome = {'status': 'failed', 'error': str(exc)[:200]}
     if rows:
         good = outcome.get('status') == SUCCESS and not outcome.get('error')
-        if good:
+        waited = [r.pk for r in rows if r.signature == retest_scanner_wait.SIGNATURE] if outcome.get('scanner_waited') else []
+        if waited:  # hosts queued again because a scanner was missing, and it was missing again: they stay pending, without spending an attempt
+            DeferredRetest.objects.filter(pk__in=waited).update(status='pending', attempts=0, next_attempt_at=timezone.now() + retest_scanner_wait.delay(),
+                                                                updated_at=timezone.now())
+            rows = [r for r in rows if r.pk not in set(waited)]
+        if not rows:
+            pass
+        elif good:
             DeferredRetest.objects.filter(pk__in=[r.pk for r in rows]).update(status='done', updated_at=timezone.now())
             ledger.record(retest.RETEST_SERVICE, [r.host for r in rows], rows[0].project_id, outcome.get('scan_id'))
         else:

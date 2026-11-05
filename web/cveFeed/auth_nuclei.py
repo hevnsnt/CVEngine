@@ -1,8 +1,14 @@
 """Nuclei with a stored sign-in (cveFeed.auth_checks): the authenticated pass that ``nuclei_scan.run_nuclei`` and the CVE template checks run
 for the hosts a credential covers.
 
+Where it runs: on the built-in scanner when the stream comes from ``sentinel_dispatch.wrap_nuclei_stream`` (its ``signed_in`` runner): one task per
+credential and chunk, carrying only ``secret_ref`` (a reference to the credential); the built-in scanner reads the credential once through
+``POST sentinel/tasks/<id>/secret`` and no other Sentinel is ever offered the task. Without a built-in scanner that reads stored sign-ins it runs on
+this server, when nuclei may run here (``CVENGINE_LOCAL_FALLBACK``), and otherwise waits for one (nothing is recorded, the targets stay due).
+
 How the values reach nuclei: in a secrets file (nuclei's ``-sf``, the ``static`` authenticated-scan format) written to a private temporary
-directory as a 0600 file and removed afterwards, never on the command line, in the environment or in a log. Nuclei 3.11 matches each
+directory as a 0600 file and removed afterwards, never on the command line, in the environment or in a log (the built-in scanner does the same,
+on a memory file system). Nuclei 3.11 matches each
 secret against the request's host (and port, unless it is 80 or 443) and sends it only there, so a template that reaches out to another
 host sends nothing. The run is also given ``-dr`` (no redirects): nuclei would otherwise carry the custom headers to wherever a redirect
 leads. The targets are explicit ``scheme://host[:port]`` URLs for exactly the origins the credential was stored for.
@@ -15,6 +21,7 @@ Every result line is redacted (``auth_checks.redact_obj``) before anything reads
 value that echoes a secret reaches the database, the activity feed or an AI prompt, and a finding it produced is tagged
 ``seen-while-authenticated``.
 """
+import contextlib
 import hashlib
 import logging
 import os
@@ -84,7 +91,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
     from cveFeed.models import DiscoveryEvent
     from reNgine import resources
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
-    from reNgine.resources import MemoryKill
+    from reNgine.resources import MemoryKill, ScannerUnavailable
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import Subdomain
     from targetApp.target_types import scannable_hosts
@@ -112,6 +119,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
         if not plan:
             return {**summary, 'skipped': 'Nuclei TLS is not verified'}
         stream_is_real = stream is nuclei_scan.stream_nuclei
+        dispatched = getattr(stream, 'signed_in', None)  # the built-in scanner's secure read (sentinel_dispatch.signed_in_stream)
         ledger_name = ledger_service(service, stream_is_real)
         assets = {_asset(item.url, item.credential): item for item in plan}
         done = set() if force else ledger.fresh(ledger_name, list(assets), project)
@@ -137,9 +145,9 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                         handle.write('\n'.join(item.url for item in items) + '\n')
                         path = handle.name
                     try:
-                        with auth_checks.secrets_file(auth_checks.entries_for(items)) as secret_path:
+                        with (contextlib.nullcontext(None) if dispatched else auth_checks.secrets_file(auth_checks.entries_for(items))) as secret_path:
                             for profile in profiles:
-                                kwargs = {'secret_file': secret_path}
+                                kwargs = {'secret_file': secret_path} if secret_path else {}
                                 if tags:
                                     kwargs['tags'] = tags
                                 if severities:
@@ -147,7 +155,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                                 if profile != 'normal':
                                     kwargs['profile'] = profile
                                 try:
-                                    for line in stream(path, **kwargs):
+                                    for line in (dispatched(items, **kwargs) if dispatched else stream(path, **kwargs)):
                                         line = auth_checks.redact_obj(line, values)
                                         if isinstance(line, dict) and nuclei_fp.same_body_artefact(line, project):
                                             continue  # the host answers anything with this error page (cveFeed.nuclei_fp)
@@ -181,6 +189,12 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                         os.unlink(path)
                     ledger.record(ledger_name, chunk, project, scan)
                     scanned += chunk
+            except ScannerUnavailable as exc:  # no built-in scanner can take it and nuclei may not run here: not a failure, the targets stay due
+                message = auth_checks.safe_error(exc, values)
+                left = len([a for a in won_assets if a not in set(scanned)])
+                activity.settle(running, 'done', message=f'Authenticated nuclei for {domain.name} is waiting: no scanner could take this work '
+                                f'({exc.kind}); {left} signed-in target(s) stay due until one can')
+                return {**summary, 'targets': len(won_assets), 'skipped': message}
             except Exception as exc:  # noqa: BLE001 - the plain pass's result stands; say what failed without any value
                 message = auth_checks.safe_error(exc, values)
                 logger.error('authenticated nuclei failed for scan %s: %s', scan.id, message)

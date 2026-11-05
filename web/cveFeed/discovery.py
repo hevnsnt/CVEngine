@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from django.conf import settings
 from django.utils import timezone
 
+from cveFeed import scanner_wait
 from reNgine import bbot as bbot_lib
 
 logger = logging.getLogger(__name__)
@@ -428,6 +429,15 @@ def domain_lock(domain_id, scan_id):
         yield holder
 
 
+def _scan_hosts(result, args, kwargs):
+    return None  # every host the scan recorded
+
+
+def _named_hosts(result, args, kwargs):
+    return kwargs.get('names') if 'names' in kwargs else (args[1] if len(args) > 1 else None)
+
+
+@scanner_wait.requeues(_scan_hosts)
 def run_pipeline(scan_id, *args, **kwargs):
     """Run the pipeline for one scan unless this target is already being worked on (see ``domain_lock``)."""
     from cveFeed import activity
@@ -910,6 +920,7 @@ def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
     return pairs
 
 
+@scanner_wait.requeues(_named_hosts)
 def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, retest=False, source_scan_id=None,
                       force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages

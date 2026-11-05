@@ -114,6 +114,10 @@ def dispatch_deferred_retests(limit=None):
         DeferredRetest.objects.filter(status__in=['queued', 'running'], updated_at__lt=now - timedelta(hours=3)).update(
             status='pending', next_attempt_at=now + timedelta(minutes=5), updated_at=now)
         due = DeferredRetest.objects.filter(status='pending', next_attempt_at__lte=now)
+        from cveFeed import scanner_wait
+        if scanner_wait.held_back():  # hosts that waited for a scanner are not sent while one is still missing: they would only wait again
+            due.filter(signature=scanner_wait.SIGNATURE).update(next_attempt_at=now + scanner_wait.delay(), updated_at=now)
+            due = due.exclude(signature=scanner_wait.SIGNATURE)
         project = _next_project(due)
         if project is None:
             return {'queued': 0}
