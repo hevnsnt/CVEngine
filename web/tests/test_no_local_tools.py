@@ -439,7 +439,7 @@ class NoLocalToolsTests(SimpleTestCase):
         self.assertFalse(set(ALLOWED) - set(PATTERNS), 'ALLOWED has a key the guard does not search for')
 
     def test_walk_is_fast_and_sees_the_code(self):
-        self.assertLess(self.elapsed, 2.0, 'the walk must stay under two seconds')
+        self.assertLess(self.elapsed, 5.0, 'the walk must stay under five seconds')  # about 0.4 s of CPU on a developer machine; CI runners have taken 2.0 s, so the limit is for a runaway walk, not for jitter
         self.assertGreater(len(candidate_files()), 100, 'the walk found almost nothing: is it pointed at web/?')
 
     def test_no_new_scan_tool_reference(self):
