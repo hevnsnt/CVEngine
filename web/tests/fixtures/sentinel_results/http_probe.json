@@ -1,0 +1,25 @@
+{
+  "outcome": "done",
+  "probes": [
+    {
+      "id": "www.example.com|headers-root|https://www.example.com",
+      "observations": [
+        {"kind": "version", "product": "nginx", "version": "1.24.0", "variant": "", "outcome": "found", "confidence": 0.9, "source": "header:server",
+         "port": 0, "url": "/", "evidence": {}},
+        {"kind": "edge", "product": "Cloudflare", "version": "", "variant": "", "outcome": "edge", "confidence": 0.8, "source": "header:edge",
+         "port": 0, "url": "/", "evidence": {}}
+      ]
+    },
+    {
+      "id": "www.example.com|wordpress-detect|https://www.example.com",
+      "observations": [
+        {"kind": "wordpress", "product": "WordPress", "version": "6.4.2", "variant": "wordpress", "outcome": "found", "confidence": 0.8,
+         "source": "header:link-api.w.org", "port": 0, "url": "/",
+         "evidence": {"signals": ["header:link-api.w.org", "meta:generator"], "probed": [{"path": "/", "status": 200, "challenge": ""}]}}
+      ]
+    },
+    {"id": "shop.example.com|robots-txt|https://shop.example.com", "observations": [], "error": "TimeoutError: probe exceeded its total time budget"}
+  ],
+  "touched": ["www.example.com", "shop.example.com"],
+  "refused": ["tracker.example.net"]
+}

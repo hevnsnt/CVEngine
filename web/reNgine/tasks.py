@@ -21,7 +21,9 @@ from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
-from cveFeed import js_libraries, versions
+from cvengine_scanner import versions
+
+from cveFeed import js_libraries
 
 """
 Celery tasks.

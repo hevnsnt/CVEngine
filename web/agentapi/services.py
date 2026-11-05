@@ -1703,7 +1703,9 @@ def _host_record(sub, ips, techs, root):
     """``(http, hosting, technology_details)`` for one host: the Shodan-style part of the record. What the host row stores wins; what
     the web route check saw on the root page (its status, title, Server and X-Powered-By headers) fills what the row lacks, so a host
     the route check reached is never shown as unprobed."""
-    from cveFeed import cms, fingerprint, hosting, js_libraries
+    from cvengine_scanner import cms, fingerprint
+
+    from cveFeed import cms_evidence, hosting, js_libraries
     from cveFeed.correlation import split_name_version
     evidence = dict((root.evidence or {}) if root else {})
     http = {'url': sub.http_url or (root.url if root else None),
@@ -1718,7 +1720,7 @@ def _host_record(sub, ips, techs, root):
     info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=http['webserver'], reverse_pointers=pointers,
                             cdn_name=sub.cdn_name or '', is_cdn=bool(sub.is_cdn or any(e['ip'].is_cdn for e in ips.values())))
     from_page = {f['name']: f['source'] for f in evidence.get('fingerprints') or []}
-    wrong = cms.superseded(sub, techs | set(from_page))  # a version of a one-core product the evidence disproves: kept, shown, never matched
+    wrong = cms_evidence.superseded(sub, techs | set(from_page))  # a version of a one-core product the evidence disproves: kept, shown, never matched
     libraries = {str(r.get('product', '')).lower(): r for r in (evidence.get('libraries') or {}).values() if isinstance(r, dict)} \
         if isinstance(evidence.get('libraries'), dict) else {}
     details = []

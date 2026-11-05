@@ -109,7 +109,6 @@ ALLOWED = {
         'reNgine/common_func.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
-        'reNgine/nmap_service.py',
         'reNgine/resources.py',
     ],
     'nuclei': [
@@ -220,7 +219,6 @@ ALLOWED = {
         'cveFeed/api_credentials.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/cms.py',
         'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/discovery.py',
@@ -324,7 +322,6 @@ ALLOWED = {
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',
         'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
-        'cveFeed/versions.py',
         'cveFeed/views.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/bbot.py',
@@ -432,9 +429,11 @@ class NoLocalToolsTests(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        started = time.monotonic()
+        # CPU time, not wall-clock time: CI runs this beside other test processes on a shared
+        # runner, and waiting for a CPU there is not the walk being slow.
+        started = time.process_time()
         cls.found = scan_usage()
-        cls.elapsed = time.monotonic() - started
+        cls.elapsed = time.process_time() - started
 
     def test_allowlist_only_names_known_tools(self):
         self.assertFalse(set(ALLOWED) - set(PATTERNS), 'ALLOWED has a key the guard does not search for')

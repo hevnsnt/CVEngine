@@ -2157,7 +2157,7 @@ class SupplierHostCard(models.Model):
     (supplier, domain), refreshed by each sweep. A section the last check could not read (the certificate, the web page) keeps what the
     check before it saw, and ``checked_at`` says when the card was last attempted. Everything here is what a browser or a TLS client is
     given anyway: response headers (never cookies' values), the certificate, the technologies the page and its headers state (the same
-    fingerprinting owned hosts use, ``cveFeed.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
+    fingerprinting owned hosts use, ``cvengine_scanner.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
     technology search reads."""
 
     STATES = ("ok", "no_address", "blocked", "unreachable", "challenged", "excluded")

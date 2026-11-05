@@ -35,6 +35,7 @@ from django.utils import timezone
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
 from agentapi import builtin_scanner
+from agentapi import probe_results
 from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
@@ -715,6 +716,8 @@ def task_hosts(task):
         raw += [k for k in target['hosts'] if isinstance(k, str)]
     elif isinstance(target.get('hosts'), list):  # a secrets_scan batch
         raw += [h.get('host') for h in target['hosts'] if isinstance(h, dict)]
+    raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
+    raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     names, ips = [], []
     for value in raw:
         if not isinstance(value, str) or not value.strip():
@@ -2087,7 +2090,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
              'discover': _clean_discover_result, 'waf': _clean_waf_result, 'secrets_scan': _clean_secrets_scan_result,
-             'bbot_discovery': sentinel_stream.clean_bbot_result}
+             'bbot_discovery': sentinel_stream.clean_bbot_result,
+             'http_probe': probe_results.clean_http_probe, 'dns_resolve': probe_results.clean_dns_resolve}
 
 
 def _bind_to_task(kind, result, task):
@@ -2097,6 +2101,8 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
+    if task is not None and kind in ('http_probe', 'dns_resolve'):
+        return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
         return result
     target = task.target if isinstance(task.target, dict) else {}

@@ -7,6 +7,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Added
 
 - **bbot discovery on a Sentinel** (contract version 3, kind `bbot_discovery`). A discovery can now run on a Sentinel that declares the kind, as a streamed task: the Sentinel posts numbered batches of what it found to the new `POST /api/v1/sentinel/tasks/{id}/partial` while bbot runs, and the server stores each one as it arrives, so hosts, the live feed and screenshots appear during the run as they do for a local one. Each batch is held again to the scope the task carried (the target, the organization's exclusions, a bug bounty program's out-of-scope entries, the internal ranges), stored once and in order, and a stop of the scan ends the run at its next batch. A project's API keys for bbot's modules never go in a task: only the built-in scanner is offered such a run, and it reads them once through the audited secure read. With no Sentinel for the kind, discovery runs on the server as before (`CVENGINE_LOCAL_FALLBACK` governs it like every other kind). [docs/AGENT-API.md](docs/AGENT-API.md)
+- **Version probes and discovery lookups on the scanner** (contract version 3). The version and identity probes run as the `http_probe` kind and the
+  discovery pipeline's DNS lookups as `dns_resolve`, on a Sentinel that declares contract 3. Each task carries a scope policy the server computes
+  (the names it may ask, what is excluded, the address rules), and the Sentinel holds every hop to it, redirects and script reads included, and
+  reports the hosts it touched. With no such Sentinel, or with the kinds left on `CVENGINE_LOCAL_FALLBACK`, they run here as before.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
@@ -34,6 +38,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Changed
 
 - **A browser key no longer scores like a password.** A host whose secrets the inventory knows is scored by its worst counting secret: a server secret 25, a browser key 5 (it was 25 for any credential pattern). The score line reads "Server credential served on /" or "Browser key served on /".
+
+### Changed
+
+- **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in
+  `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection) and the nmap
+  parser. The server's own copies are gone, so a Sentinel and the server read a host the same way. Nothing changes in what is found or stored.
 
 ## v1.3.5 (2026-11-04)
 
