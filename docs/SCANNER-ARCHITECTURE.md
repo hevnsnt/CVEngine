@@ -71,15 +71,15 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 
 | Module | What it does | Decision |
 |---|---|---|
-| `cveFeed/probes.py` | version and identity probes | move (batched `http_probe` stage task) |
+| `cveFeed/probes.py` | version and identity probes | moved: the `http_probe` kind (contract 3), a batch of planned probes per task; the scanner runs them (`cvengine_scanner.probes.version_probes`), the server keeps the plan, the ledger and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/route_auth.py` (750), `auth_routes.py` | route state, anonymous and signed in | move; signed-in half built-in only |
 | `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | move |
 | `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | move |
 | `cveFeed/supplier_scan.py` (647) | third-party supplier posture | move |
 | `cveFeed/zombie.py` | does a retired name's address still answer | move |
 | `cveFeed/hygiene.py` | DNS, TLS, SPF/DKIM/DMARC | the network helpers move; the evaluators are pure and stay |
-| `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | move with them |
-| DNS resolution in `discovery.resolve_names` | names to addresses | move: the scanner's view of DNS is the right one |
+| `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | copied into the library (`cvengine_scanner.probes.transport`, `egress_proxy`, `legacy_tls`), held to the task's scope policy; a Sentinel takes its probe proxy from its own `CVENGINE_SENTINEL_PROBE_PROXY`, never from the server; the server's copies stay for the local paths |
+| DNS resolution in `discovery.resolve_names` | names to addresses | moved: the `dns_resolve` kind (contract 3) for `run_host_pipeline`; the local lookup stays behind `CVENGINE_LOCAL_FALLBACK` (and `changes.py`'s certificate-transparency check still resolves here) |
 
 ### D. Pure code shared by both sides (becomes the library)
 
@@ -173,6 +173,13 @@ which send nothing to the target and need no vantage point.
    and the server imports it for the fingerprint readers and the nmap parser; see section D for the status of the flags.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
    **bbot** above); the local run stays as the fallback until its telemetry shows none.
+   Probes in progress: contract version 3 has the scope policy
+   for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
+   `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
+   reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`) and the
+   discovery lookups (`dns_resolve`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, vhost and subdir, buckets, suppliers, zombie and
+   the hygiene network helpers.
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).

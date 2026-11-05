@@ -77,13 +77,14 @@ class VantageWarningTests(VantageBase):
         self.proxy_on()
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, waf, bbot_discovery, nuclei_validate to "
-                                 "the built-in scanner, which does not "
+        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, waf, bbot_discovery, http_probe, "
+                                 "nuclei_validate to the built-in scanner, which does not "
                                  "use this server's egress proxy; those scans will start from the scanner's network instead.")
 
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
-        # nmap, naabu, udp and the other raw-socket or in-process kinds never took the proxy; wafw00f (waf), bbot and nuclei (nuclei_validate's test) do
-        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,nuclei_validate'
+        # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
+        # probes (http_probe) and nuclei (nuclei_validate's test) do
+        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,http_probe,nuclei_validate'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -101,8 +102,8 @@ class VantageWarningTests(VantageBase):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, nmap_full, nmap_verify, '
-                      'node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, which does not use the '
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
+                      'nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, which does not use the '
                       'Tailscale network; those scans will start from the scanner\'s network instead.', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
 

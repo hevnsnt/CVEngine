@@ -18,11 +18,11 @@ class ContractFunctionTests(SimpleTestCase):
 
     def test_an_unreported_version_is_taken_as_one(self):
         self.assertTrue(all(contract.can_run(None, kind) for kind in SentinelTask.KINDS if contract.kind_since(kind) == 1))
-        self.assertEqual({kind for kind in SentinelTask.KINDS if not contract.can_run(None, kind)},
-                         {kind for kind in SentinelTask.KINDS if contract.kind_since(kind) > 1})  # waf (2) and the kinds of version 3
+        self.assertEqual({kind for kind in SentinelTask.KINDS if not contract.can_run(None, kind)}, {k for k in SentinelTask.KINDS if contract.kind_since(k) > 1})
+        self.assertIn('waf', {k for k in SentinelTask.KINDS if contract.kind_since(k) > 1})
         self.assertTrue(all(contract.can_run(1, kind) == contract.can_run(None, kind) for kind in SentinelTask.KINDS))
         self.assertTrue(all(contract.can_run(2, kind) == (contract.kind_since(kind) <= 2) for kind in SentinelTask.KINDS))
-        self.assertTrue(all(contract.can_run(3, kind) for kind in SentinelTask.KINDS))
+        self.assertTrue(all(contract.can_run(contract.version(), kind) for kind in SentinelTask.KINDS))
         self.assertEqual(contract.state(None), 'unreported')
 
     def test_a_kind_newer_than_what_the_sentinel_speaks_is_not_offered(self):

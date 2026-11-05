@@ -1,0 +1,5 @@
+{
+  "names": ["www.example.com", "mail.example.com", "slow.example.com"],
+  "scope": {"hosts": ["www.example.com", "mail.example.com", "slow.example.com"], "domains": [], "excluded": [], "excluded_trees": [],
+            "private": false, "addresses": [], "blocked": []}
+}

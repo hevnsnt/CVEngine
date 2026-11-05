@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -943,6 +943,221 @@
               "required": [
                 "partials",
                 "mode"
+              ]
+            }
+          }
+        ]
+      },
+      "http_probe": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "probes": {
+                "type": "array",
+                "maxItems": 300,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "observations": {
+                      "type": "array",
+                      "maxItems": 40,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "version",
+                              "identity",
+                              "edge",
+                              "wordpress",
+                              "wp-upgrade-dir"
+                            ]
+                          },
+                          "product": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "version": {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          "variant": {
+                            "type": "string",
+                            "maxLength": 60
+                          },
+                          "outcome": {
+                            "enum": [
+                              "found",
+                              "hidden",
+                              "absent",
+                              "challenged",
+                              "edge"
+                            ]
+                          },
+                          "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                          },
+                          "source": {
+                            "type": "string",
+                            "maxLength": 48
+                          },
+                          "port": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 65535
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 500
+                          },
+                          "evidence": {
+                            "type": "object",
+                            "description": "what the probe read (signals, the library record); at most 16 KB as JSON"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "product",
+                          "outcome",
+                          "confidence",
+                          "source"
+                        ]
+                      }
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "observations"
+                  ]
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "description": "every host a request was sent to"
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "description": "every host a hop (a redirect, a script) was refused for by the scope policy"
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "probes",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "dns_resolve": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "resolved": {
+                "type": "object",
+                "maxProperties": 500,
+                "propertyNames": {
+                  "maxLength": 253
+                },
+                "additionalProperties": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  },
+                  "minItems": 1
+                },
+                "description": "every address each name answered, as answered: the server judges them"
+              },
+              "errors": {
+                "type": "object",
+                "maxProperties": 500,
+                "propertyNames": {
+                  "maxLength": 253
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "description": "a lookup the resolver could not answer (never a name without an address)"
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "resolved",
+                "errors"
               ]
             }
           }
@@ -1903,6 +2118,100 @@
           }
         }
       },
+      "http_probe": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "probes": {
+            "type": "array",
+            "maxItems": 300,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "probe": {
+                  "enum": [
+                    "headers-root",
+                    "error-page",
+                    "nginx-variants",
+                    "nextjs-version",
+                    "html-libraries",
+                    "drupal-changelog",
+                    "joomla-manifest",
+                    "magento-version",
+                    "robots-txt",
+                    "wordpress-detect"
+                  ]
+                },
+                "base": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "description": "scheme://host[:port] of that host"
+                },
+                "allowed": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 260
+                  },
+                  "description": "the names a redirect may lead to (the host's apex and www)"
+                }
+              },
+              "required": [
+                "id",
+                "host",
+                "probe",
+                "base",
+                "allowed"
+              ]
+            },
+            "minItems": 1
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        },
+        "required": [
+          "probes",
+          "scope"
+        ]
+      },
+      "dns_resolve": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "names": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "minItems": 1
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        },
+        "required": [
+          "names",
+          "scope"
+        ]
+      },
       "nmap_full": {
         "description": "one address: every TCP port, open ports only",
         "type": "object",
@@ -2515,6 +2824,82 @@
               ]
             }
           }
+        }
+      }
+    },
+    "probe_scope": {
+      "type": "object",
+      "description": "What a probe task may touch, computed by the server when it builds the task (exclusions, archived hosts, the targets' name scope, a bug bounty program's scope, the hosts a page may read scripts from, the private addresses the project authorised) and enforced by the scanner at every hop, redirects and script reads included, on top of its own floor. A name is allowed when it is in hosts or equal to or under a domain, and is not excluded; an address must also pass the floor, blocked and the private rule. Missing or malformed, it allows nothing.",
+      "required": [
+        "hosts",
+        "domains",
+        "excluded",
+        "excluded_trees",
+        "private",
+        "addresses",
+        "blocked"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 260
+          }
+        },
+        "domains": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 260
+          }
+        },
+        "excluded_trees": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 260
+          }
+        },
+        "private": {
+          "type": "boolean",
+          "description": "the server allows private addresses (a lab install); an external Sentinel still never reaches them, and an internal one only with this"
+        },
+        "addresses": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "description": "private addresses the project authorised (its own tailnet devices), reached only when asked for as themselves"
+        },
+        "blocked": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50
+          },
+          "description": "CIDR ranges the server never scans"
         }
       }
     }

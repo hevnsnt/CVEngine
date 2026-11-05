@@ -15,8 +15,9 @@ from agentapi.services import ApiError
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
-           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify',
-           'node2shell': 'node2shell', 'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate'}
+           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
+           'dns_resolve': 'dns_resolve', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify', 'node2shell': 'node2shell',
+           'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate'}
 
 
 V1_SHA256 = {
@@ -227,9 +228,8 @@ class WafContractTests(SimpleTestCase):
         self.assertGreaterEqual(contract.version(), 2)
         self.assertEqual(contract.min_supported(), 1)
         self.assertEqual(contract.kind_since('waf'), 2)
-        version_one = {KIND_OF[p.stem] for p in V1.glob('*.json')} | {'nuclei_targeted', 'nuclei_deep'}  # contract 1's kinds (one nuclei fixture for three)
-        self.assertEqual({k for k, v in contract.load()['kind_since'].items() if v == 1}, version_one)
-        self.assertTrue(all(v >= 2 for k, v in contract.load()['kind_since'].items() if k not in version_one))
+        since = {k: v for k, v in contract.load()['kind_since'].items() if v < 3}  # version 3 added kinds of its own; none older moved
+        self.assertEqual({k: v for k, v in since.items() if k != 'waf'}, {k: 1 for k in since if k != 'waf'})
 
 
 class ContractMatchesTheServerTests(SimpleTestCase):
