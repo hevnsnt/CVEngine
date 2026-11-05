@@ -12,7 +12,7 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import scanner_state, sentinel_dispatch
+from agentapi import scanner_state, sentinel_contract, sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import conductor, testssl_scan, udp_scan, wpscan_scan
@@ -67,7 +67,8 @@ class SentinelWorld(FallbackEnv):
             token.save(update_fields=['revoked'])
         last_seen = {'now': timezone.now(), 'old': timezone.now() - timedelta(hours=2), None: None}[seen]
         return Agent.objects.create(token=token, name=f'sentinel-{self.count}', kind='scanner', status=status, capabilities=capabilities,
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen)
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen,
+                                    info={'contract_version': sentinel_contract.version()})  # it speaks the current contract: every kind is its to run
 
 
 class HelperTests(SentinelWorld, TestCase):

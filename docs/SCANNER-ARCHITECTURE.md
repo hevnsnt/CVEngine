@@ -110,6 +110,13 @@ which send nothing to the target and need no vantage point.
   floor). The scanner enforces it on every hop and reports the hosts it touched. Today each hop asks the database.
 - **bbot**: a streamed job type. Partial results are posted as the run goes, screenshots travel as blobs, and the server
   can stop it. It does not fit "one result per task".
+  - *Built (server side):* the `bbot_discovery` kind, contract version 3, with `$defs/partials` (the batches) and `$defs/scope_policy` (what the
+    scanner may touch). `POST /api/v1/sentinel/tasks/<id>/partial` (`agentapi.sentinel_stream.report_partial`) takes numbered batches once and in
+    order, holds them to the task's scope and stores them as `SentinelPartial` rows; `sentinel_stream.dispatch_stream` (the discovery stage) reads
+    them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
+    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind and runs bbot here otherwise, through the same
+    `_no_local` decision as every other kind. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
+    scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
@@ -145,7 +152,8 @@ which send nothing to the target and need no vantage point.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (unset, the built-in scanner's kinds, `sentinel_dispatch.BUILTIN_SCANNER_KINDS`, are taken off this server once it has enrolled; `all` is the 1.3 behaviour; a kind joins that list in the change that teaches the built-in scanner to run it; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. Add the missing kinds from section B as they move.
 6. Extract the shared library and delete the server's copies of the parsers and flags.
-7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
+7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
+   **bbot** above); the local run stays as the fallback until its telemetry shows none.
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).

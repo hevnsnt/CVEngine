@@ -181,7 +181,7 @@ jobs:
 
   reviewer-image:
     # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no
-    # capabilities, and import every module (the Anthropic SDK included) with the network off.
+    # capabilities, import every module (the Anthropic SDK included) with the network off, and pass its unit tests there.
     name: 🤖 Build the AI reviewer image
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -195,3 +195,9 @@ jobs:
           docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
             --network none --entrypoint python3 cvengine-reviewer-ci -I -c \
             "import os, cvengine_reviewer.llm, cvengine_reviewer.jobs, cvengine_reviewer.server, cvengine_reviewer.__main__, anthropic; assert os.getuid() == 10002; print('reviewer image ok', anthropic.__version__)"
+      - name: 🧪 Run the reviewer package's unit tests inside the image
+        # reviewer/tests (standard library only): the pipeline's request layer and the job loop, on the image's own Python, no network
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
+            --network none -v "$PWD/reviewer/tests:/reviewer-tests:ro" --entrypoint python3 cvengine-reviewer-ci \
+            -m unittest discover -s /reviewer-tests -v

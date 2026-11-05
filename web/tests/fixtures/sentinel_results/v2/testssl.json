@@ -1,0 +1,11 @@
+{
+  "outcome": "done",
+  "items": [
+    {
+      "id": "TLS1",
+      "severity": "LOW",
+      "finding": "offered",
+      "cve": ""
+    }
+  ]
+}

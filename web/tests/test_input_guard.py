@@ -299,8 +299,9 @@ class SentinelMachineDataTests(TestCase):
 		self.assertEqual(response.status_code, 403)
 		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
 
-	def test_the_exemption_matches_only_those_two_routes(self):
+	def test_the_exemption_matches_only_those_routes(self):
 		for path, expected in (('/api/v1/sentinel/tasks/7/result', True), ('/api/v1/sentinel/tasks/7/result/', True), ('/api/v1/sentinel/heartbeat', True),
+							   ('/api/v1/sentinel/tasks/7/partial', True), ('/api/v1/sentinel/tasks/7/partial/x', False), ('/api/v1/sentinel/tasks/7/secret', False),
 							   ('/api/v1/sentinel', False), ('/api/v1/sentinel/tasks/next', False), ('/api/v1/sentinel/tasks/7/release', False),
 							   ('/api/v1/sentinel/tasks/x/result', False), ('/api/v1/agent/tasks/7/result', False),
 							   ('/api/v1/sentinels/bootstrap', False), ('/api/v1/sentinel/tasks/7/result/extra', False)):
