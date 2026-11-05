@@ -16,7 +16,7 @@ from agentapi.services import ApiError
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
-           'dns_resolve': 'dns_resolve', 'error': 'nmap'}
+           'dns_resolve': 'dns_resolve', 'bucket_check': 'bucket_check', 'error': 'nmap'}
 
 
 V1_SHA256 = {

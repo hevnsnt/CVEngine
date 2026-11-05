@@ -1,0 +1,10 @@
+{
+  "buckets": [
+    {"id": "s3:example-static", "provider": "s3", "name": "example-static"},
+    {"id": "gcs:example-assets", "provider": "gcs", "name": "example-assets", "read_object": false},
+    {"id": "azure:examplestore/media", "provider": "azure", "name": "examplestore", "container": "media"}
+  ],
+  "rate": 2.0,
+  "scope": {"hosts": ["examplestore.blob.core.windows.net"], "domains": ["amazonaws.com", "storage.googleapis.com"], "excluded": [],
+            "excluded_trees": [], "private": false, "addresses": [], "blocked": []}
+}

@@ -103,6 +103,30 @@ def try_dns_resolve(domain, names, scan=None):
     return pairs, errors
 
 
+MAX_BUCKETS_PER_TASK = 100  # the contract's bound
+
+
+def try_buckets(project, candidates, rate):
+    """``{asset: Verdict}`` for the bucket candidates (``bucket_scan.Candidate``) a Sentinel checked, or ``None`` when no Sentinel can take
+    ``bucket_check`` or one did not answer (the caller checks them here, as before). Raises ``ScannerUnavailable`` when no Sentinel can take the
+    work and the kind may not run here."""
+    from cveFeed import bucket_probe, probe_scope
+    if not candidates or not _offered(project, 'bucket_check'):
+        return None
+    answered = {}
+    for start in range(0, len(candidates), MAX_BUCKETS_PER_TASK):
+        chunk = candidates[start:start + MAX_BUCKETS_PER_TASK]
+        target = {'buckets': [{'id': c.asset, 'provider': c.provider, 'name': c.name, **({'container': c.container} if c.container else {})}
+                              for c in chunk],
+                  'rate': bucket_probe.request_rate(), 'scope': probe_scope.for_buckets(project.pk, chunk)}
+        result = sentinel_dispatch.dispatch_or_none(project, 'bucket_check', target,
+                                                    host=_hosts_label(h for c in chunk for h in (c.hosts or [c.asset])))
+        if result is None:
+            return None
+        answered.update({row['id']: bucket_probe.Verdict(**row['verdict']) for row in result.get('buckets') or []})
+    return answered
+
+
 def resolve_for(domain, names, errors=None, scan=None):
     """``discovery.resolve_names`` for the names of target ``domain``, through a Sentinel when one can take ``dns_resolve``: the same answer
     (``{(name, ip)}``, and ``errors`` filled with the lookups that could not be answered)."""

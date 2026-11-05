@@ -31,6 +31,7 @@ export const SENTINEL_KINDS = [
   "bbot_discovery",
   "http_probe",
   "dns_resolve",
+  "bucket_check",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -46,6 +47,7 @@ const KIND_WORDS = {
   bbot_discovery: "bbot discovery",
   http_probe: "version probes",
   dns_resolve: "name resolution",
+  bucket_check: "cloud storage checks",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {

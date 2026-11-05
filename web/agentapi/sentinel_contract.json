@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -1162,6 +1162,135 @@
             }
           }
         ]
+      },
+      "bucket_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "buckets": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "verdict"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "verdict": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "state",
+                        "objects",
+                        "truncated",
+                        "region",
+                        "object_read",
+                        "status",
+                        "code",
+                        "request_count"
+                      ],
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "public",
+                            "private",
+                            "missing",
+                            "unknown"
+                          ]
+                        },
+                        "objects": {
+                          "type": "array",
+                          "maxItems": 20,
+                          "items": {
+                            "type": "string",
+                            "maxLength": 1024
+                          },
+                          "description": "raw names from the first listing page; the server redacts them before anything is stored or shown"
+                        },
+                        "truncated": {
+                          "type": "boolean"
+                        },
+                        "region": {
+                          "type": "string",
+                          "maxLength": 40
+                        },
+                        "object_read": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 999
+                        },
+                        "code": {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        "request_count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 20
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "buckets",
+                "touched"
+              ]
+            }
+          }
+        ]
       }
     },
     "targets": {
@@ -1742,6 +1871,69 @@
           "names",
           "scope"
         ]
+      },
+      "bucket_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "buckets",
+          "rate",
+          "scope"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "provider",
+                "name"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "provider": {
+                  "enum": [
+                    "s3",
+                    "gcs",
+                    "azure"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 222,
+                  "description": "the bucket, or the Azure storage account"
+                },
+                "container": {
+                  "type": "string",
+                  "maxLength": 63,
+                  "description": "the Azure container"
+                },
+                "read_object": {
+                  "type": "boolean",
+                  "description": "a public listing may be followed by one HEAD of a listed object (default true)"
+                }
+              }
+            }
+          },
+          "rate": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 5,
+            "description": "requests per second within the task (the server keeps the global rate)"
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
       }
     },
     "scope_policy": {

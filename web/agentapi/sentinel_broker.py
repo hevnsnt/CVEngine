@@ -2070,14 +2070,15 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
              'discover': _clean_discover_result, 'waf': _clean_waf_result,
              'bbot_discovery': sentinel_stream.clean_bbot_result,
-             'http_probe': probe_results.clean_http_probe, 'dns_resolve': probe_results.clean_dns_resolve}
+             'http_probe': probe_results.clean_http_probe, 'dns_resolve': probe_results.clean_dns_resolve,
+             'bucket_check': probe_results.clean_bucket_check}
 
 
 def _bind_to_task(kind, result, task):
     """``result`` (already typed and clipped) cut down to what ``task`` actually asked about: an nmap host or naabu address that was not among the
     task's addresses, or a nuclei finding on a host that was not among its targets, is dropped (and counted in ``dropped``), never stored. Without
     this a Sentinel scoped to one project could write port rows for any address of the organization, which are per organization, not per project."""
-    if task is not None and kind in ('http_probe', 'dns_resolve'):
+    if task is not None and kind in ('http_probe', 'dns_resolve', 'bucket_check'):
         return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
         return result
