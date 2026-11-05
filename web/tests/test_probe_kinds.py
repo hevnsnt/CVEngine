@@ -131,11 +131,13 @@ class DnsResolveStageTests(FallbackOffBase):
 
     def test_an_excluded_name_is_never_sent(self):
         HostExclusion.objects.create(org=self.org, host='secret.example.test')
+        errors = {}
         with FakeScanner(kinds=['dns_resolve'], responders={'dns_resolve': fixture('dns_resolve', resolved={}, errors={})}) as fake:
-            probe_dispatch.resolve_for(self.domain, ['api.example.test', 'secret.example.test'])
+            probe_dispatch.resolve_for(self.domain, ['api.example.test', 'secret.example.test'], errors=errors)
         target = fake.served[0]['target']
         self.assertEqual(target['names'], ['api.example.test'])
         self.assertIn('secret.example.test', target['scope']['excluded'])
+        self.assertIn('secret.example.test', errors)  # unknown, never "no address": a retire check would read absent as gone
 
     def test_with_the_scanner_offline_the_pipeline_records_nothing_and_the_names_stay_due(self):
         with FakeScanner(kinds=['dns_resolve'], mode='offline') as fake:

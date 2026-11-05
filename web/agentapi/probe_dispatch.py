@@ -72,8 +72,8 @@ def _allowed(sub):
 
 def try_dns_resolve(domain, names, scan=None):
     """``(pairs, errors)`` as ``discovery.resolve_names`` returns them (``{(name, ip)}`` and ``{name: reason}``) from a Sentinel's lookups, or
-    ``None`` when no Sentinel can take the kind or one did not answer (the caller resolves here). A name the scope policy left out is never sent; a
-    name the Sentinel refused or did not report is an error (looked up again later), never a name without an address. Raises
+    ``None`` when no Sentinel can take the kind or one did not answer (the caller resolves here). A name the scope policy left out is never sent and
+    is an error, as is a name the Sentinel refused: looked up again later, never a name without an address. Raises
     ``ScannerUnavailable`` when no Sentinel can take the work and the kind may not run here."""
     from cveFeed import probe_scope
     project = domain.project
@@ -83,6 +83,9 @@ def try_dns_resolve(domain, names, scan=None):
     scope = probe_scope.for_names(project.pk, domain, names)
     allowed = scope['hosts']
     pairs, errors = set(), {}
+    for name in names:  # a name the policy left out is not looked up: unknown, never a name without an address (a retire check reads absent as gone)
+        if name not in allowed:
+            errors[name] = 'not looked up: outside the scope policy'
     for start in range(0, len(allowed), MAX_NAMES_PER_TASK):
         chunk = allowed[start:start + MAX_NAMES_PER_TASK]
         result = sentinel_dispatch.dispatch_or_none(project, 'dns_resolve', {'names': chunk, 'scope': {**scope, 'hosts': chunk}},
