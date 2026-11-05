@@ -109,7 +109,6 @@ ALLOWED = {
         'reNgine/common_func.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
-        'reNgine/nmap_service.py',
         'reNgine/resources.py',
     ],
     'nuclei': [
@@ -217,7 +216,6 @@ ALLOWED = {
         'cveFeed/api_credentials.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/cms.py',
         'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/discovery.py',
@@ -317,7 +315,6 @@ ALLOWED = {
         'cveFeed/tasks.py',
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',
-        'cveFeed/versions.py',
         'cveFeed/views.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/bbot.py',

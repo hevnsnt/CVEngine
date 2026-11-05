@@ -86,6 +86,17 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 `fingerprint.py` (pure), `cms.py`, `versions.py`, `soft404.py`, nmap and nuclei parsers, nuclei flag builders, scan policy
 constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the supervised runner).
 
+Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
+runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
+`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `nmap_scan.parse_xml` is the library's reader,
+re-exported under its old name. Two parts stay on the server because they are not pure:
+- reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
+  hands what it read to the library's `fingerprint.from_response` as `from_scripts` pairs;
+- the CMS version evidence a probe stored (`cveFeed/cms_evidence.py`: `attested`, `superseded`). It reads `ProbeObservation` rows and
+  applies the library's `cms.disproven` to them.
+
+The server's copies of the flag builders and policy constants are deleted in a follow-up PR.
+
 ### E. Stays on the server
 
 Correlation, triage, validation, the CVE feeds (`intel.py`, `distro_sync.py`), the work conductor and its fairness rules,
@@ -158,7 +169,8 @@ which send nothing to the target and need no vantage point.
    pause the conductor honours, re-queue stages with a delay instead of failing them, and show a banner.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. The kinds of section B exist since contract version 3 (1.4), so each can now be moved like the others.
-6. Extract the shared library and delete the server's copies of the parsers and flags.
+6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
+   and the server imports it for the fingerprint readers and the nmap parser; see section D for the status of the flags.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
    **bbot** above); the local run stays as the fallback until its telemetry shows none.
 8. Drop the scan tools, Go and bbot from the server image.

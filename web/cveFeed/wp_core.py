@@ -7,7 +7,7 @@ update takes and a reachable directory; Wordfence reports exploitation attempts.
 WordPress from its own files, so the site's plugins never run for that request); denying the directory at the web server does. Sources: the 7.1.4
 release notes, Patchstack's and Wordfence's write-ups.
 
-Whether a site runs a release that has the fix is the CVE pipeline's job: the version cveFeed.cms reads is matched against the advisory once the
+Whether a site runs a release that has the fix is the CVE pipeline's job: the version cvengine_scanner.cms reads is matched against the advisory once the
 feed has it. This module adds what no CVE record can say, whether the mitigation is in place: the WordPress probe (cveFeed.probes) asks a site it
 already knows is WordPress for the directory (one GET, a second only to tell an empty page from a catch-all), ``classify_dir`` reads the answer,
 and ``record_exposure`` turns a served directory into a finding.
