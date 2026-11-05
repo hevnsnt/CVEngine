@@ -57,6 +57,10 @@ CATEGORIES = frozenset(('provider_error', 'provider_auth', 'provider_rate_limit'
 HANDLERS = {
     'triage': 'cveFeed.triage',
     'local_checks': 'cveFeed.triage',
+    'cve_detection': 'cveFeed.detection_author',
+    'autotune_advice': 'cveFeed.autotune',
+    'rdp_screenshot': 'cveFeed.rdp_shot',
+    'template_generation': 'cveFeed.templategen',
 }
 
 

@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve`` and ``bucket_check``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check`` and ``bucket_check``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -101,6 +101,24 @@ def clean_dns_resolve(body):
     return {'resolved': out, 'errors': failed, 'refused': refused}
 
 
+MAX_CHECKS = 600
+
+
+def clean_alive_check(body):
+    checks = body.get('checks')
+    if not isinstance(checks, list) or len(checks) > MAX_CHECKS:
+        raise ApiError(400, 'an alive_check result lists its checks (at most %d)' % MAX_CHECKS)
+    out = []
+    for item in checks:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('alive'), bool):
+            continue
+        row = {'id': _text(item['id'], 200), 'alive': item['alive']}
+        if item.get('error'):
+            row['error'] = _text(item['error'], 200)
+        out.append(row)
+    return {'checks': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 MAX_BUCKETS = 100
 BUCKET_STATES = ('public', 'private', 'missing', 'unknown')
 
@@ -135,8 +153,8 @@ def clean_bucket_check(body):
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
-    if kind in ('http_probe', 'bucket_check'):
-        key = 'probes' if kind == 'http_probe' else 'buckets'
+    if kind in ('http_probe', 'alive_check', 'bucket_check'):
+        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets'}[kind]
         asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
         kept = [p for p in result[key] if p['id'] in asked]
         dropped = len(result[key]) - len(kept)

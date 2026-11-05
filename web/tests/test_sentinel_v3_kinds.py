@@ -358,6 +358,29 @@ class NucleiValidateTests(StageBase):
         with self.assertRaises(resources.ScannerUnavailable):
             dispatch.nuclei_validate_ready(self.project)
 
+    def _cve(self):
+        from cveFeed.models import CVEEntry
+        return CVEEntry.objects.create(cve_id='CVE-2099-8802', kev=True, cvss=9.8, published_at=timezone.now(), title='Heap overflow',
+                                       affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
+
+    def test_no_ai_job_is_queued_when_nothing_could_check_the_template(self):
+        from cveFeed.models import AIJob
+        with self.assertRaises(resources.ScannerUnavailable):
+            templategen.generate_template(self._cve(), project=self.project.id)
+        self.assertFalse(AIJob.objects.exists())  # the AI reviewer was never asked for a template nothing could check
+
+    def test_a_template_whose_scanner_went_away_before_its_check_is_never_a_draft(self):
+        from types import SimpleNamespace
+        from cveFeed.models import GeneratedTemplate
+        cve = self._cve()
+        job = SimpleNamespace(context={'cve': cve.pk, 'project': self.project.id}, provider='vllm', model='m')
+        with mock.patch.object(templategen, 'static_check', return_value=(True, '')), \
+                mock.patch.object(templategen, 'validate_anywhere', side_effect=resources.ScannerUnavailable('nuclei_validate', 'gone')):
+            templategen.job_answer(job, self.TEMPLATE)
+        saved = GeneratedTemplate.objects.get(cve_entry=cve)
+        self.assertEqual(saved.status, GeneratedTemplate.STATUS_INVALID)
+        self.assertIn('not validated: no scanner could take this work (nuclei_validate)', saved.validation_output)
+
     def test_an_approved_template_is_run_against_the_project_hosts_on_the_scanner(self):
         self.arm('nuclei_validate')
         hosts = ['https://www.rt.test', 'https://api.rt.test']

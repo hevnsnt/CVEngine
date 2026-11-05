@@ -12,7 +12,6 @@ class Command(BaseCommand):
         parser.add_argument('--batch', type=int, default=5000, help='records per round (default 5000)')
         parser.add_argument('--ai', action='store_true', help='also ask the configured AI model, within the daily budget (Settings > AI model)')
         parser.add_argument('--count', type=int, default=0, help='with --ai: write this many CVEs now, whatever is left of the daily budget')
-        parser.add_argument('--workers', type=int, default=4, help='with --ai: requests in flight at once (default 4)')
 
     def handle(self, *args, **options):
         total = 0
@@ -27,14 +26,13 @@ class Command(BaseCommand):
         self.stdout.write(f'{total} detection record(s) written, {refreshed} refreshed, {regenerated} rules record(s) regenerated, '
                           f'{libraries} client-library record(s) corrected')
         if options['ai']:
-            from reNgine.ai_settings import get_configured_provider
-            provider = get_configured_provider()
-            if provider is None:
+            from cveFeed import ai_jobs
+            if not ai_jobs.ai_on():
                 self.stdout.write('no AI provider is configured; skipped')
             else:
                 if options['count']:
-                    wrote = detection_author.author_with_ai(provider, per_run=options['count'], workers=options['workers'], within_budget=False)
+                    asked = detection_author.author_with_ai(per_run=options['count'], within_budget=False)
                 else:
-                    wrote = detection_author.author_with_ai(provider, workers=options['workers'])
-                self.stdout.write(f'{wrote} record(s) gained the model\'s guidance')
+                    asked = detection_author.author_with_ai()
+                self.stdout.write(f'{asked} record(s) asked of the AI reviewer container; each is stored when its answer lands')
             self.stdout.write(str(detection_author.progress()))

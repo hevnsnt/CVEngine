@@ -169,8 +169,7 @@ class ConsumerTests(SimpleTestCase):
         from cveFeed import detection_author
         from cveFeed.models import CVEEntry
         cve = CVEEntry(cve_id='CVE-2099-6', title='x', affected=CONFLUENCE_AFFECTED)
-        prompt = detection_author.build_user_prompt(cve)
-        info = json.loads(prompt[prompt.index('{'):prompt.rindex('}') + 1])
+        info = next(part['data'] for part in detection_author.user_parts(cve) if part.get('fence') == 'CVE')
         self.assertJoined(info['affected'][0]['ranges'])
 
     def test_the_template_and_validation_prompt_context(self):

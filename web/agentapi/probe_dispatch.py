@@ -127,6 +127,29 @@ def try_buckets(project, candidates, rate):
     return answered
 
 
+MAX_CHECKS_PER_TASK = 600  # the contract's bound
+
+
+def try_alive(project, scan, checks):
+    """``{id: alive}`` for ``checks`` (``[{'id', 'host', 'ip', 'port', 'scheme'}]``, the zombie check's endpoints) as a Sentinel answered them, or
+    ``None`` when no Sentinel can take ``alive_check`` or one did not answer (the caller checks here, as before). A check the Sentinel reports
+    with an error, or not at all, is missing from the answer: the caller reads it as unknown, never as gone. Raises ``ScannerUnavailable`` when no
+    Sentinel can take the work and the kind may not run here."""
+    from cveFeed import probe_scope
+    if not checks or not _offered(project, 'alive_check'):
+        return None
+    answered = {}
+    for start in range(0, len(checks), MAX_CHECKS_PER_TASK):
+        chunk = checks[start:start + MAX_CHECKS_PER_TASK]
+        target = {'checks': chunk, 'scope': probe_scope.for_addresses(project.pk, [c['ip'] for c in chunk])}
+        result = sentinel_dispatch.dispatch_or_none(project, 'alive_check', target, host=_hosts_label(c['host'] for c in chunk),
+                                                    ips=list(dict.fromkeys(c['ip'] for c in chunk))[:64], scan=scan)
+        if result is None:
+            return None
+        answered.update({row['id']: row['alive'] for row in result.get('checks') or [] if not row.get('error')})
+    return answered
+
+
 def resolve_for(domain, names, errors=None, scan=None):
     """``discovery.resolve_names`` for the names of target ``domain``, through a Sentinel when one can take ``dns_resolve``: the same answer
     (``{(name, ip)}``, and ``errors`` filled with the lookups that could not be answered)."""

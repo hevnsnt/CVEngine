@@ -751,19 +751,14 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
     from cveFeed import hit_batch, notify
     from cveFeed.models import CVEEntry
     from cveFeed.templategen import run_cve_tests
-    from reNgine.ai_settings import get_configured_provider
+    from cveFeed import ai_jobs
     from cveFeed.conductor import bounty_blocked_projects
 
     try:
         if project_id in bounty_blocked_projects():  # a bug bounty project that has not confirmed automated testing is not tested on its own
             return {"cve_pk": cve_pk, "skipped": "the bug bounty engagement has not confirmed automated testing"}
         cve = CVEEntry.objects.get(pk=cve_pk)
-        try:
-            provider = get_configured_provider()
-        except Exception as exc:  # misconfigured provider: still run existing templates
-            logger.warning("template_test_for_cve: no usable AI provider: %s", exc)
-            provider = None
-        outcome = run_cve_tests(cve, hosts, provider=provider, project=project_id)
+        outcome = run_cve_tests(cve, hosts, ai=ai_jobs.ai_on(), project=project_id)  # a draft, when one is needed, is written by the AI reviewer container
         logger.info("template test %s: %s on %d hosts", cve.cve_id, outcome["source"], len(hosts))
         from cveFeed.templategen import is_confirmed
         vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
@@ -2036,15 +2031,9 @@ def author_cve_detections():
     """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back
     catalogue are covered the same way), refresh rules-written checks whose CVE changed, and spend the daily AI budget on the
     CVEs attackers use. See cveFeed.detection and cveFeed.detection_author."""
-    from cveFeed import detection_author
-    from reNgine.ai_settings import get_configured_provider
-    try:
-        provider = get_configured_provider()
-    except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
-        logger.warning("could not build the AI provider for detection authoring", exc_info=True)
-        provider = None
+    from cveFeed import ai_jobs, detection_author
     rules_first = detection_author.author_all_rules()  # the whole back catalogue by itself after an update, not a small batch per run
-    out = detection_author.author_pending(provider)
+    out = detection_author.author_pending(ai_jobs.ai_on())  # the model's questions are queued for the AI reviewer container
     out['rules_first'] = rules_first
     from cveFeed import locality
     locality.refresh(limit=100000)
@@ -2083,22 +2072,20 @@ def build_cve_seed():
 def write_cve_guidance_now(count=200):
     """An administrator asked the model to write guidance for the next ``count`` CVEs now (Settings > AI model), whatever is left of the
     day's budget. Matchable CVEs first. Works in rounds of 50 so progress shows and a stop request is honoured between rounds."""
-    from cveFeed import activity, detection_author
-    from reNgine.ai_settings import get_configured_provider
-    provider = get_configured_provider()
-    if provider is None:
+    from cveFeed import activity, ai_jobs, detection_author
+    if not ai_jobs.ai_on():
         return {'written': 0, 'error': 'no AI provider is configured'}
     detection_author.author_rules(batch=5000)
     done, count = 0, max(1, min(int(count), 5000))
     handle = activity.log('inventory', f'Writing CVE guidance for up to {count} CVEs', status='running')
     try:
         while done < count:
-            wrote = detection_author.author_with_ai(provider, per_run=min(50, count - done), workers=4, within_budget=False)
+            wrote = detection_author.author_with_ai(per_run=min(50, count - done), within_budget=False)
             if not wrote:
                 break
             done += wrote
     finally:
-        activity.settle(handle, 'done', message=f'Wrote CVE guidance for {done} CVEs')
+        activity.settle(handle, 'done', message=f'Asked the AI reviewer container for CVE guidance on {done} CVEs')
     from cveFeed import locality
     locality.refresh()
     locality.close_local_matches()

@@ -13,6 +13,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   discovery pipeline's DNS lookups as `dns_resolve`, on a Sentinel that declares contract 3. Each task carries a scope policy the server computes
   (the names it may ask, what is excluded, the address rules), and the Sentinel holds every hop to it, redirects and script reads included, and
   reports the hosts it touched. With no such Sentinel, or with the kinds left on `CVENGINE_LOCAL_FALLBACK`, they run here as before.
+- **The retire check on the scanner**: a full scan's retire check looks up the vanished names through `dns_resolve` and asks their last known
+  addresses whether they still answer through `alive_check` (the zombie check: a web request as the old name, then a bare connect). A check the
+  scanner could not answer never retires a host, and with no scanner able to take the work nothing is retired until one can.
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
@@ -52,6 +55,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection), the nmap
   parser, and the scan flags and policy constants (nuclei's `-etags dos`, the reviewed NSE scripts, the UDP port list, the probe ports). The
   server's own copies are gone, so a Sentinel and the server scan and read a host the same way. Nothing changes in what is run, found or stored.
+- **More AI work goes through the AI reviewer container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#the-pipelines-ai-jobs)): detection records and CVE guidance, the auto-tuner's advisor, the RDP login-screen reading (the screenshot travels in the job) and nuclei template drafts are queued as AI jobs and applied when the answer lands, with the same validation, budgets and gates as before. `update_cve_detection` with `guidance` now answers at once with `revision: {state: queued}`; the record changes when the revision lands. The auto-tuner applies its advisor's answer in the round after it was asked, judged against the range in force then.
 
 ### Removed
 

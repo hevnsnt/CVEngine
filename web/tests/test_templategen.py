@@ -226,96 +226,6 @@ class RunTimeHitTests(unittest.TestCase):
 		self.assertIn('TimeoutExpired', out[0]['error'])
 
 
-class ValidateBeforeSaveTests(unittest.TestCase):
-	def setUp(self):  # the generation budget is covered by GenerationBudgetTests
-		lease = mock.patch.object(templategen, '_generation_lease', return_value='cvengine:templategen:test')
-		lease.start()
-		self.addCleanup(lease.stop)
-
-	def test_on_demand_candidate_stays_draft_after_syntax_and_benign_fixture(self):
-		provider = mock.Mock(model='m')
-		provider.name = 'test'
-		provider.complete.return_value = GOOD
-		cve = CVEEntry(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8,
-			affected=[], references=[])
-		with mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
-				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')) as fixture, \
-				mock.patch('cveFeed.activity.log'), mock.patch('cveFeed.activity.step') as step, \
-				mock.patch('cveFeed.models.GeneratedTemplate.save'), \
-				mock.patch.object(templategen, 'save_template_file') as install:
-			step.return_value.__enter__.return_value = mock.Mock()
-			tmpl = templategen.generate_template(cve, provider, candidate_only=True)
-		self.assertEqual(tmpl.status, tmpl.STATUS_DRAFT)
-		self.assertEqual(tmpl.path, '')
-		self.assertIn('positive fixture', tmpl.validation_output)
-		fixture.assert_called_once()
-		install.assert_not_called()
-
-	def test_literal_secrets_in_a_drafted_template_survive_the_round_trip(self):
-		"""The reply is a nuclei template: a hardcoded JWT, a Basic credential and a PEM header matcher must reach the saved YAML as written."""
-		from reNgine import ai_providers
-		jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'
-		yaml_text = ('id: CVE-2024-1234\ninfo:\n  name: t\n  severity: high\nhttp:\n  - method: GET\n    path:\n      - "{{BaseURL}}/x"\n'
-					 '    headers:\n      Authorization: "Bearer ' + jwt + '"\n      X-Basic: "Basic YWRtaW46YWRtaW4="\n'
-					 '    matchers:\n      - type: word\n        words:\n          - "-----BEGIN RSA PRIVATE KEY-----"\n')
-
-		class Resp:
-			def raise_for_status(self):
-				pass
-
-			def json(self):
-				return {'content': [{'type': 'text', 'text': '```yaml\n' + yaml_text + '```'}]}
-		provider = ai_providers.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')
-		cve = CVEEntry(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8, affected=[], references=[])
-		with mock.patch('requests.post', return_value=Resp()), mock.patch.object(templategen, 'GENERATED_DIR', '/nonexistent-cvengine-test'), \
-				mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
-				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')), \
-				mock.patch('cveFeed.activity.log'), mock.patch('cveFeed.activity.step') as step, \
-				mock.patch('cveFeed.models.GeneratedTemplate.save'), mock.patch.object(templategen, 'save_template_file'):
-			step.return_value.__enter__.return_value = mock.Mock()
-			tmpl = templategen.generate_template(cve, provider, candidate_only=True)
-		for literal in (jwt, 'Basic YWRtaW46YWRtaW4=', '-----BEGIN RSA PRIVATE KEY-----'):
-			self.assertIn(literal, tmpl.yaml)
-		self.assertNotIn('[redacted', tmpl.yaml)
-
-	def _generate(self, valid):
-		import tempfile
-		provider = mock.Mock(model='m')
-		provider.name = 'test'
-		provider.complete.return_value = GOOD
-		cve = CVEEntry(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8, affected=[], references=[])
-		seen = {}
-		with tempfile.TemporaryDirectory() as generated:
-			def validate(path):
-				seen['generated_during_validation'] = os.listdir(generated)
-				seen['validated_path_exists'] = os.path.exists(path)
-				return valid, 'ok' if valid else 'error: bad'
-			with mock.patch.object(templategen, 'GENERATED_DIR', generated), mock.patch.object(templategen, 'validate_with_nuclei', validate), \
-					mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')), \
-					mock.patch('cveFeed.activity.log'), mock.patch('cveFeed.activity.step') as step, \
-					mock.patch('cveFeed.models.GeneratedTemplate.save'):
-				step.return_value.__enter__.return_value = mock.Mock()
-				tmpl = templategen.generate_template(cve, provider)
-			seen['after'] = os.listdir(generated)
-		return tmpl, seen
-
-	def test_syntax_valid_draft_never_reaches_the_scan_path(self):
-		tmpl, seen = self._generate(True)
-		self.assertEqual(seen['generated_during_validation'], [])
-		self.assertTrue(seen['validated_path_exists'])
-		self.assertEqual(seen['after'], [])
-		self.assertEqual(tmpl.path, '')
-		self.assertEqual(tmpl.status, 'draft')
-		with self.assertRaisesRegex(ValueError, 'positive fixture'):
-			templategen.generate_template(None, None, candidate_only=False)
-
-	def test_an_invalid_template_never_reaches_the_scan_path(self):
-		tmpl, seen = self._generate(False)
-		self.assertEqual(seen['after'], [])
-		self.assertEqual(tmpl.path, '')
-		self.assertEqual(tmpl.status, 'invalid')
-
-
 import datetime
 import os
 from unittest import mock
@@ -361,14 +271,12 @@ class RecordOutcomesTests(TestCase):
 
 	def test_missing_installed_template_stays_a_draft_without_customer_execution(self):
 		from types import SimpleNamespace
-		draft = SimpleNamespace(status='draft', STATUS_DRAFT='draft', template_id='cve-2099-5',
-			validation_output='syntax passed; positive fixture unavailable')
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
-				mock.patch.object(templategen, 'generate_template', return_value=draft) as generate, \
+				mock.patch.object(templategen, 'generate_template', return_value=SimpleNamespace(pk=7)) as generate, \
 				mock.patch.object(templategen, '_run_template_with_retry') as run:
-			result = templategen.run_cve_tests(self.cve, ['www.t.test'], provider=mock.Mock(), project=self.project.id)
-		self.assertEqual((result['source'], result['results']), ('candidate', []))
-		self.assertIn('positive fixture', result['reason'])
+			result = templategen.run_cve_tests(self.cve, ['www.t.test'], ai=True, project=self.project.id)
+		self.assertEqual((result['source'], result['results'], result['job']), ('candidate', [], 7))
+		self.assertIn('never run on a host', result['reason'])
 		self.assertTrue(generate.call_args.kwargs['candidate_only'])
 		run.assert_not_called()
 
@@ -433,8 +341,9 @@ class GenerationBudgetTests(TestCase):
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-0101', cvss=9.8, title='t', published_at=timezone.now())
 
 	def generate(self, cve=None):
-		with mock.patch.object(templategen, '_generate_template', return_value='written') as write:
-			return templategen.generate_template(cve or self.cve, self.provider), write
+		"""Queue one draft; 'written' when the question was queued."""
+		job = templategen.generate_template(cve or self.cve)
+		return ('written' if job.kind == 'template_generation' else job), None
 
 	def test_one_attempt_per_cve_inside_the_window_whatever_its_outcome(self):
 		GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='', status=GeneratedTemplate.STATUS_INVALID)
@@ -459,12 +368,16 @@ class GenerationBudgetTests(TestCase):
 			self.generate()
 		cache.clear()
 		self.generate()
-		self.generate()  # the lease from the first call was released (no row was written by the stub)
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already being written'):
+			self.generate()  # its question is still open in the AI job queue
+		from cveFeed.models import AIJob
+		AIJob.objects.update(status='applied')
+		self.generate()  # the cache lease of the first call was released
 
 	def test_scan_path_reports_the_budget_instead_of_calling_the_ai(self):
 		GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='')
 		with mock.patch('cveFeed.validation.resolve_template', return_value=(None, 'no installed template')):
-			outcome = templategen.run_cve_tests(self.cve, ['www.acme.example'], provider=self.provider, project=None)
+			outcome = templategen.run_cve_tests(self.cve, ['www.acme.example'], ai=True, project=None)
 		self.assertEqual(outcome['source'], 'none')
 		self.assertIn('already attempted', outcome['reason'])
 		self.provider.complete.assert_not_called()
@@ -476,14 +389,16 @@ class ProviderFailureLedgerTests(TestCase):
 		cache.clear()
 		provider = mock.Mock(model='m')
 		provider.name = 'test'
-		provider.complete.side_effect = RuntimeError('provider down')
+		from reNgine.ai_providers import AIProviderError
+		from tests import ai_queue
+		provider.complete.side_effect = AIProviderError('provider down', category='provider_network')
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-0303', cvss=9.8, title='t', published_at=timezone.now())
-		with self.assertRaises(RuntimeError):
-			templategen.generate_template(cve, provider)
+		ai_queue.asking(templategen.generate_template, provider, cve)
 		row = GeneratedTemplate.objects.get(cve_entry=cve)
 		self.assertEqual(row.status, GeneratedTemplate.STATUS_INVALID)
-		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already attempted'):  # the next run does not call the provider again
-			templategen.generate_template(cve, provider)
+		self.assertIn('provider_network', row.validation_output)
+		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already attempted'):  # the next run does not ask again
+			templategen.generate_template(cve)
 		self.assertEqual(provider.complete.call_count, 1)
 
 
@@ -506,3 +421,81 @@ class LaunchTimeResolutionTests(TestCase):
 			out = templategen.run_template('/t.yaml', ['rebind.example.test'])
 		run.assert_not_called()
 		self.assertIn('error', out[0])
+
+
+class ValidateBeforeSaveTests(TestCase):
+	"""The model's draft is asked of the AI reviewer container (cveFeed.ai_jobs); when it lands it is gated here, as before."""
+
+	def setUp(self):  # the generation budget is covered by GenerationBudgetTests
+		lease = mock.patch.object(templategen, '_generation_lease', return_value='cvengine:templategen:test')
+		lease.start()
+		self.addCleanup(lease.stop)
+		self.cve = CVEEntry.objects.create(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8,
+										   affected=[], references=[], published_at=timezone.now())
+
+	def provider(self, text):
+		provider = mock.Mock(model='m')
+		provider.name = 'anthropic'
+		provider.complete.return_value = text
+		return provider
+
+	def test_on_demand_candidate_stays_draft_after_syntax_and_benign_fixture(self):
+		from tests import ai_queue
+		with mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
+				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')) as fixture, \
+				mock.patch.object(templategen, 'save_template_file') as install:
+			job = ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve, candidate_only=True)
+		self.assertEqual(job.kind, 'template_generation')
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
+		self.assertEqual((tmpl.status, tmpl.path, tmpl.ai_model), (tmpl.STATUS_DRAFT, '', 'anthropic:m'))
+		self.assertIn('positive fixture', tmpl.validation_output)
+		fixture.assert_called_once()
+		install.assert_not_called()
+
+	def test_literal_secrets_in_a_drafted_template_survive_the_round_trip(self):
+		"""The reply is a nuclei template: a hardcoded JWT, a Basic credential and a PEM header matcher must reach the saved YAML as written."""
+		from tests import ai_queue
+		jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+		yaml_text = ('id: CVE-2024-1234\ninfo:\n  name: t\n  severity: high\nhttp:\n  - method: GET\n    path:\n      - "{{BaseURL}}/x"\n'
+					 '    headers:\n      Authorization: "Bearer ' + jwt + '"\n      X-Basic: "Basic YWRtaW46YWRtaW4="\n'
+					 '    matchers:\n      - type: word\n        words:\n          - "-----BEGIN RSA PRIVATE KEY-----"\n')
+		with mock.patch.object(templategen, 'GENERATED_DIR', '/nonexistent-cvengine-test'), \
+				mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
+				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')), \
+				mock.patch.object(templategen, 'save_template_file'):
+			ai_queue.asking(templategen.generate_template, self.provider('```yaml\n' + yaml_text + '```'), self.cve, candidate_only=True)
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
+		for literal in (jwt, 'Basic YWRtaW46YWRtaW4=', '-----BEGIN RSA PRIVATE KEY-----'):
+			self.assertIn(literal, tmpl.yaml)
+		self.assertNotIn('[redacted', tmpl.yaml)
+
+	def _generate(self, valid):
+		import tempfile
+		from tests import ai_queue
+		seen = {}
+		with tempfile.TemporaryDirectory() as generated:
+			def validate(path):
+				seen['generated_during_validation'] = os.listdir(generated)
+				seen['validated_path_exists'] = os.path.exists(path)
+				return valid, 'ok' if valid else 'error: bad'
+			with mock.patch.object(templategen, 'GENERATED_DIR', generated), mock.patch.object(templategen, 'validate_with_nuclei', validate), \
+					mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')):
+				ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve)
+			seen['after'] = os.listdir(generated)
+		return GeneratedTemplate.objects.get(cve_entry=self.cve), seen
+
+	def test_syntax_valid_draft_never_reaches_the_scan_path(self):
+		tmpl, seen = self._generate(True)
+		self.assertEqual(seen['generated_during_validation'], [])
+		self.assertTrue(seen['validated_path_exists'])
+		self.assertEqual(seen['after'], [])
+		self.assertEqual(tmpl.path, '')
+		self.assertEqual(tmpl.status, 'draft')
+		with self.assertRaisesRegex(ValueError, 'positive fixture'):
+			templategen.generate_template(None, candidate_only=False)
+
+	def test_an_invalid_template_never_reaches_the_scan_path(self):
+		tmpl, seen = self._generate(False)
+		self.assertEqual(seen['after'], [])
+		self.assertEqual(tmpl.path, '')
+		self.assertEqual(tmpl.status, 'invalid')

@@ -23,9 +23,15 @@ def container():
 def configure(provider='anthropic', model='m', **fields):
     """An enabled AI provider, so the stages queue their questions."""
     from dashboard.models import AIProviderSettings
-    AIProviderSettings.objects.all().delete()
     defaults = {'api_key': 'sk-ant-test-key'} if provider in ('anthropic', 'openai', 'openrouter') else {'base_url': 'http://192.0.2.10:8000/v1'}
-    return AIProviderSettings.objects.create(enabled=True, provider=provider, model=model, **{**defaults, **fields})
+    values = {'enabled': True, 'provider': provider, 'model': model, **defaults, **fields}
+    row = AIProviderSettings.objects.first()  # the single settings row: its other settings (budgets) are kept
+    if row is None:
+        return AIProviderSettings.objects.create(**values)
+    for key, value in values.items():
+        setattr(row, key, value)
+    row.save()
+    return row
 
 
 def ensure_configured(fake):
@@ -101,3 +107,13 @@ def sweep(project_id=None, provider=False, **kw):
     if _fake(provider):
         serve(provider)
     return stats
+
+
+def asking(fn, fake, *args, **kwargs):
+    """Call a stage function that queues AI jobs (``fn(*args, **kwargs)``), then answer them with ``fake``. Returns what ``fn`` returned."""
+    if _fake(fake):
+        ensure_configured(fake)
+    out = fn(*args, **kwargs)
+    if _fake(fake):
+        serve(fake)
+    return out
