@@ -21,6 +21,7 @@ from scanEngine.models import Proxy
 from tests.test_sentinel_secret_read import SECRETS, SecretBase
 
 BUILTIN_KINDS = set(sentinel_dispatch.BUILTIN_SCANNER_KINDS)
+EVERY_LOCAL = set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL)  # every kind that has a local path at all
 
 
 class Env:
@@ -43,7 +44,7 @@ class SwitchTests(Env, TestCase):
 
     def test_unset_every_kind_runs_here_until_the_builtin_scanner_has_enrolled(self):
         self.env(CVENGINE_BUILTIN_SCANNER=None, CVENGINE_LOCAL_FALLBACK=None)
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), set(SentinelTask.KINDS))
+        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
         self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
 
@@ -54,14 +55,14 @@ class DefaultFallbackTests(Env, SecretBase):
         self.env(CVENGINE_LOCAL_FALLBACK=None)
         allowed = sentinel_dispatch.local_fallback_kinds()
         self.assertFalse(allowed & BUILTIN_KINDS)
-        self.assertEqual(allowed, set(SentinelTask.KINDS) - BUILTIN_KINDS)
+        self.assertEqual(allowed, EVERY_LOCAL - BUILTIN_KINDS)
         self.assertIn('openvas', allowed)  # the built-in scanner has no OpenVAS: the server's own sidecar still runs it
 
     def test_all_is_the_escape_hatch_and_the_off_switch_restores_every_kind(self):
         self.env(CVENGINE_LOCAL_FALLBACK='all')
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), set(SentinelTask.KINDS))
+        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
         self.env(CVENGINE_LOCAL_FALLBACK=None, CVENGINE_BUILTIN_SCANNER='0')
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), set(SentinelTask.KINDS))
+        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
 
     def test_turning_it_off_revokes_its_token_and_removes_the_blob(self):
         task = self.task(status='claimed', ref=None)
