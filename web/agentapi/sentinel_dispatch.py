@@ -43,12 +43,14 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'http_probe': 1500, 'dns_resolve': 300, 'secrets_scan': 1800,
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
+                      'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
+                      'nuclei_validate': 600,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
-PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60}
+PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15}
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
@@ -1296,3 +1298,238 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             return run_wpscan_process(url, token)
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
     return runner
+
+
+# --- the kinds of contract version 3: one task per item, several at once, through dispatch_many -----------------------------------------------
+#
+# waf, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe and nuclei_validate (docs/SCANNER-ARCHITECTURE.md, section B). Each stage
+# asks ``scanner_or_local`` first: True sends its items with ``dispatch_each``; False is the local run of before (no Sentinel was ever set up for the
+# kind, or every one is offline and the kind may run here, counted as a fallback); ``ScannerUnavailable`` when the kind may not run here, which the
+# stage turns into "waiting" with its targets left due. An item a Sentinel did not finish comes back as ``None``: the stage runs it here when the kind
+# may, and ``dispatch_each`` raises ``ScannerUnavailable`` once the others are in when it may not.
+
+def scanner_or_local(project, kind):
+    """Whether ``kind`` work of ``project`` goes to a Sentinel (True) or runs here (False). Raises ``ScannerUnavailable`` when no live Sentinel can take
+    it and the kind may not run here (``CVENGINE_LOCAL_FALLBACK``)."""
+    if any_scanner_for(project, kind):
+        return True
+    _no_scanner(kind, project)
+    offline_fallback(project, kind)
+    return False
+
+
+def dispatch_each(project, kind, items, target_of, scan=None, label_of=None, ips_of=None):
+    """Send one ``kind`` task per entry of ``items`` (``target_of(item)`` is its target, ``None`` to keep it here) and yield ``(index, result)`` as each
+    finishes: the task's typed result, or ``None`` when no Sentinel did it (the caller runs it here: it has been through ``_no_local`` once, as for any
+    chunk). Raises ``ScannerUnavailable`` after the finished ones are yielded when one may not run here."""
+    items = list(items)
+    if not items:
+        return
+
+    def prepare(chunk):
+        item = items[chunk[0]]
+        target = target_of(item)
+        if target is None:
+            return None
+        return target, list(ips_of(item)) if ips_of else []
+    labeler = (lambda chunk: label_of(items[chunk[0]])) if label_of else None
+    with contextlib.closing(dispatch_many(project, kind, [[i] for i in range(len(items))], prepare=prepare, scan=scan, labeler=labeler)) as results:
+        yield from results
+
+
+def _project_of(project_id):
+    from dashboard.models import Project
+    return Project.objects.select_related('org').filter(pk=project_id).first() if project_id else None
+
+
+def _netloc(host, port):
+    return f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
+
+
+# waf: one site, at the address the server vetted -------------------------------------------------------------------------------------------
+
+def waf_target(url, ip):
+    """The ``waf`` target for a site root ``url`` reached at ``ip``, or ``None`` when the URL has no host."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    if not parts.hostname or not ip:
+        return None
+    scheme = parts.scheme if parts.scheme in ('http', 'https') else 'https'
+    return {'host': parts.hostname, 'ip': ip, 'port': parts.port or (443 if scheme == 'https' else 80), 'scheme': scheme}
+
+
+def waf_outcome(result):
+    """A Sentinel's ``waf`` result in the shape ``cveFeed.waf_scan.run_wafw00f`` returns, through the same product rule (``waf_scan._named``)."""
+    from cveFeed import waf_scan
+    products = waf_scan._named((p.get('name'), p.get('manufacturer')) for p in (result.get('products') or [])[:waf_scan.MAX_PRODUCTS])
+    return {'products': products, 'generic': result.get('generic') is True and not products, 'error': ''}
+
+
+# nmap_full and nmap_verify: one address, the raw report read by cveFeed.nmap_scan.parse_xml --------------------------------------------------
+
+def nmap_hosts(xml, address):
+    """The host records of a Sentinel's raw nmap report, read by ``cveFeed.nmap_scan.parse_xml`` (strict, hardened against a custom ENTITY
+    declaration) and cut to ``address``: a report that names any other host never puts it in the inventory."""
+    from cveFeed.nmap_scan import parse_xml
+    return [h for h in parse_xml(xml or '', strict=True) if h.get('ip') == address]
+
+
+def _scanner_first(project, kind):
+    """``scanner_or_local`` for work that has a project only when its address is attached to one: no project means here when the kind may run here,
+    else ``ScannerUnavailable``."""
+    if project is not None:
+        return scanner_or_local(project, kind)
+    if not fallback_allowed(kind):
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable(kind, 'the address is attached to no project a scanner could take it for')
+    return False
+
+
+def try_nmap_full(project, address, scan=None):
+    """The host records (``nmap_hosts``) of a full TCP sweep of ``address`` on a Sentinel, or ``None`` to sweep it here (no Sentinel took it and
+    nmap_full may run here). Raises ``ScannerUnavailable`` when it may not."""
+    if not _scanner_first(project, 'nmap_full'):
+        return None
+    result = dispatch_or_none(project, 'nmap_full', {'address': address}, ips=[address], scan=scan)
+    return None if result is None else nmap_hosts(result.get('xml'), address)
+
+
+def nmap_verify_target(address, ports, version_all=False, intensity=None, scripts=(), host_timeout=None):
+    """The ``nmap_verify`` target: service detection on ``ports`` of ``address``, at full intensity (``version_all``) or ``intensity``, with the named safe
+    NSE scripts (a Sentinel runs only the ones on its own reviewed list) and a per-host timeout in seconds."""
+    target = {'address': str(address), 'ports': sorted({int(p) for p in ports})[:MAX_ADDRESSES]}
+    if version_all:
+        target['version_all'] = True
+    elif intensity is not None:
+        target['version_intensity'] = int(intensity)
+    names = [n for n in (scripts or []) if n]
+    if names:
+        target['scripts'] = names[:12]
+    if host_timeout:
+        target['host_timeout'] = max(10, min(600, int(host_timeout)))
+    return target
+
+
+def try_nmap_verify(project, target, scan=None):
+    """The host records (``nmap_hosts``) of an ``nmap_verify`` task on a Sentinel, or ``None`` to run it here. Raises ``ScannerUnavailable`` when it
+    may not run here."""
+    if not _scanner_first(project, 'nmap_verify'):
+        return None
+    result = dispatch_or_none(project, 'nmap_verify', target, ips=[target['address']], scan=scan)
+    return None if result is None else nmap_hosts(result.get('xml'), target['address'])
+
+
+# node2shell: the vendored detector on the scanner, the verdict in run_check's shape ---------------------------------------------------------
+
+def node2shell_outcome(result):
+    """A Sentinel's ``node2shell`` result in the shape ``cveFeed.node2shell_scan.run_check`` returns (the detector's own dict)."""
+    return {'vulnerable': result.get('vulnerable'), 'verdict': result.get('verdict') or '', 'reason': result.get('reason') or '',
+            'status_code': result.get('status_code'), 'response': result.get('evidence') or ''}
+
+
+# rdp_shot: the PNG comes back, the reading of it stays here -----------------------------------------------------------------------------------
+
+def rdp_image(result):
+    """The PNG bytes of a Sentinel's ``rdp_shot`` result (``clean_result`` checked them), or ``None`` when nothing was painted."""
+    import base64
+    if not result.get('painted') or not result.get('image'):
+        return None
+    return base64.b64decode(result['image'])
+
+
+# path_probe: the built-in scanner's own path -------------------------------------------------------------------------------------------------
+
+def try_path_probe(groups):
+    """The path survey rows (``cveFeed.path_probe.survey``'s shape) from the built-in scanner, one task per project of ``groups`` (``{project_id: [(ip,
+    port)]}``, so no task names another tenant's address), or ``None`` to survey from here. Raises ``ScannerUnavailable`` when the built-in scanner
+    cannot take it and the survey may not run here."""
+    from reNgine.resources import ScannerUnavailable
+    projects = [(p, targets) for p, targets in ((_project_of(pid), t) for pid, t in groups.items()) if p is not None]
+    if not projects:
+        return None
+    if not any(any_scanner_for(p, 'path_probe') for p, _t in projects):
+        _no_scanner('path_probe', projects[0][0])
+        return None
+    rows = []
+    for project, targets in projects:
+        if not any_scanner_for(project, 'path_probe'):
+            continue
+        result = dispatch_or_none(project, 'path_probe', {'targets': [{'ip': ip, 'port': port} for ip, port in targets]},
+                                  ips=[ip for ip, _port in targets])
+        if result is not None:
+            rows.extend(result.get('results') or [])
+    if not rows and not fallback_allowed('path_probe'):
+        raise ScannerUnavailable('path_probe', 'the built-in scanner returned no path survey')
+    return rows
+
+
+# nuclei_validate: an AI-written or approved template, on the built-in scanner --------------------------------------------------------------
+
+def _carrier_project(project):
+    """The project a ``nuclei_validate`` task in mode ``validate`` is filed under: the one the work is for, else the oldest. The task carries only a
+    template written from public CVE data, never a host, and only the built-in scanner, whose scope is the whole instance, takes the kind."""
+    if project is not None and not isinstance(project, int):
+        return project
+    from dashboard.models import Project
+    return _project_of(project) if project else Project.objects.select_related('org').order_by('id').first()
+
+
+def nuclei_validate_ready(project=None):
+    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live built-in scanner, and nuclei may not run here), so the
+    AI is not asked for one first. Records nothing."""
+    if fallback_allowed('nuclei_validate'):
+        return
+    carrier = _carrier_project(project)
+    if carrier is None or not any_scanner_for(carrier, 'nuclei_validate'):
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable('nuclei_validate', 'no live built-in scanner can check a new template')
+
+
+def try_nuclei_validate(text, project=None):
+    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on the built-in scanner, or ``None`` to run
+    them here. Raises ``ScannerUnavailable`` when the scanner cannot take it and nuclei may not run here."""
+    carrier = _carrier_project(project)
+    if not _scanner_first(carrier, 'nuclei_validate'):
+        return None
+    result = dispatch_or_none(carrier, 'nuclei_validate', {'mode': 'validate', 'template': text})
+    if result is None:
+        return None
+    return result.get('valid') is True, result.get('output') or '', result.get('fixture_ok'), result.get('fixture_note') or ''
+
+
+NOT_REPORTED = 'not tested: the scanner reported no result for this host'
+
+
+def try_template_test(text, hosts, project):
+    """The outcomes (``cveFeed.templategen._run_template``'s shape, one per host in order) of the approved template ``text`` run on the built-in
+    scanner against ``hosts`` of ``project`` (the project the hosts belong to), in tasks of at most ``MAX_ADDRESSES``; ``None`` to run them all
+    here. An entry is ``None`` for a host whose chunk no Sentinel finished and that may run here. A host a finished chunk left out, or one that
+    may not run here while no scanner can take it, is reported as not tested (an error outcome), so it stays due."""
+    from reNgine.resources import ScannerUnavailable
+    project = _project_of(project) if isinstance(project, int) else project
+    if not _scanner_first(project, 'nuclei_validate'):
+        return None
+    hosts = list(hosts)
+    chunks = _chunks(hosts)
+    by_host, local, waiting = {}, set(), None
+    try:
+        with contextlib.closing(dispatch_many(project, 'nuclei_validate', chunks, labeler=_targets_label,
+                                              prepare=lambda chunk: ({'mode': 'test', 'template': text, 'targets': list(chunk)}, []))) as results:
+            for index, result in results:
+                if result is None:
+                    local.update(chunks[index])  # through _no_local already: it may run here
+                    continue
+                for outcome in result.get('outcomes') or []:
+                    by_host.setdefault(outcome['host'], outcome)
+    except ScannerUnavailable as exc:
+        waiting = exc
+    out = []
+    for host in hosts:
+        if host in by_host:
+            out.append(by_host[host])
+        elif host in local and waiting is None:
+            out.append(None)
+        else:
+            error = f'not tested: no scanner could take this work ({waiting.kind})' if waiting else NOT_REPORTED
+            out.append({'host': host, 'vulnerable': False, 'output': '', 'error': error})
+    return out

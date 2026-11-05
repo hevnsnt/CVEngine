@@ -123,7 +123,12 @@ def verdict(results):
 
 
 def in_scope(ip):
-    """Whether some project may still have ``ip`` probed: a name of one of its targets that scans by itself (not manual only, not passive)
+    """Whether some project may still have ``ip`` probed (``holder``)."""
+    return holder(ip) is not None
+
+
+def holder(ip):
+    """The first project that may still have ``ip`` probed, or ``None``: a name of one of its targets that scans by itself (not manual only, not passive)
     resolves there, that name and the address are not excluded or archived, and the address passes the project's own scope
     (``scannable_hosts`` with the project: exclusions, archives, a bug bounty program's scope). The fingerprint that made the address a
     candidate says nothing about whether anyone may still be probed (security review 1.3.4, ssrf-1)."""
@@ -145,14 +150,15 @@ def in_scope(ip):
     for project, names in holders.items():
         banned = excluded_names(project) | archived_names(project)
         if ip not in banned and names - banned and scannable_hosts([ip], project=project):
-            return True
-    return False
+            return project
+    return None
 
 
-def candidates(limit=MAX_TARGETS, days=14):
+def candidates(limit=MAX_TARGETS, days=14, admit=True):
     """``[(ip, closed_port)]`` for up to ``limit`` addresses this server fingerprinted lately and that name a closed port, each from a
     different /16 (a path problem shows on any host; several networks rule out one host's own firewall). Only addresses the scanners
-    may reach."""
+    may reach. ``admit`` puts each port through this server's own egress governor (``cveFeed.local_egress``); a survey a scanner runs leaves from the
+    scanner, so it is not charged here."""
     from datetime import timedelta
 
     from django.utils import timezone
@@ -176,9 +182,10 @@ def candidates(limit=MAX_TARGETS, days=14):
         if network in seen or not is_scannable_ip(ip) or not in_scope(ip):
             continue
         from cveFeed import local_egress
-        if local_egress.admit_one(port, 'path-probe', ip):  # the opt-in skip list or the egress governor holds this port: another address is asked instead
+        if admit and local_egress.admit_one(port, 'path-probe', ip):  # the opt-in skip list or the egress governor holds this port: another address is asked
             continue
-        local_egress.record_one(port, 'path-probe', address=ip)
+        if admit:
+            local_egress.record_one(port, 'path-probe', address=ip)
         seen.add(network)
         out.append((ip, port))
         if len(out) >= limit:
@@ -186,15 +193,35 @@ def candidates(limit=MAX_TARGETS, days=14):
     return out
 
 
-def check(probe=send_probe):
+def check(probe=None):
     """Run the survey on ``candidates()`` and return ``{'state', 'answered', 'lost', 'hosts'}``, or ``{'state': 'unknown', 'why': ...}``
-    when there is nothing to probe or raw sockets are not allowed."""
+    when there is nothing to probe or raw sockets are not allowed.
+
+    The path that matters is the one the scans leave from: when the built-in scanner can take the ``path_probe`` kind, the survey runs there (one
+    task per project that holds the addresses, so no task names another tenant's address) and ``vantage`` is ``scanner``; otherwise it runs
+    here, as before (``vantage`` ``server``), when the kind may run here."""
+    if probe is None:  # an injected probe (a test) is never second-guessed
+        from agentapi import sentinel_dispatch
+        from reNgine.resources import ScannerUnavailable
+        targets = candidates(admit=False)
+        if len(targets) >= MIN_HOSTS:
+            groups = {}
+            for ip, port in targets:
+                groups.setdefault(holder(ip), []).append((ip, port))
+            groups.pop(None, None)  # out of scope since the candidates were listed
+            try:
+                rows = sentinel_dispatch.try_path_probe(groups)
+            except ScannerUnavailable as exc:
+                return {'state': 'unknown', 'why': f'no scanner could take this work ({exc.kind})', 'hosts': len(targets)}
+            if rows is not None:
+                state, answered, lost = verdict(rows)
+                return {'state': state, 'answered': answered, 'lost': lost, 'hosts': len(targets), 'vantage': 'scanner'}
     targets = candidates()
     if len(targets) < MIN_HOSTS:
         return {'state': 'unknown', 'why': 'too few fingerprinted hosts to measure with', 'hosts': len(targets)}
     try:
-        results = survey(targets, probe=probe)
+        results = survey(targets, probe=probe or send_probe)
     except RawSocketsUnavailable:
         return {'state': 'unknown', 'why': 'this process may not send raw packets', 'hosts': len(targets)}
     state, answered, lost = verdict(results)
-    return {'state': state, 'answered': answered, 'lost': lost, 'hosts': len(targets)}
+    return {'state': state, 'answered': answered, 'lost': lost, 'hosts': len(targets), 'vantage': 'server'}

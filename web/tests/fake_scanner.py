@@ -392,6 +392,15 @@ LOCAL_RUNNERS = {
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'waf': ('cveFeed.waf_scan.run_wafw00f',),
+    'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
+    'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
+                    'cveFeed.nmap_scan.run_nmap_args'),
+    'node2shell': ('cveFeed.node2shell_scan.run_check',),
+    'rdp_shot': ('cveFeed.rdp_shot.capture',),
+    'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
+    'path_probe': ('cveFeed.path_probe.send_probe',),
+    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -406,6 +415,14 @@ HEAVY_KINDS = {
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
+    'waf': ('route-probe',),
+    'nmap_full': ('nmap-full-bg',),
+    'nmap_verify': ('nmap',),
+    'node2shell': ('route-probe',),
+    'rdp_shot': (),
+    'db_probe': ('route-probe',),
+    'path_probe': (),
+    'nuclei_validate': ('template-test',),
 }
 
 

@@ -1,0 +1,4 @@
+{
+  "mode": "validate",
+  "template": "id: cve-2024-0001-example\ninfo:\n  name: Example\n  author: cvengine\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/\"\n    matchers:\n      - type: word\n        words:\n          - \"example-banner\"\n"
+}

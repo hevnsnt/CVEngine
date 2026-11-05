@@ -49,18 +49,23 @@ rough sizes of the work.
 | `cveFeed/openvas_scan.py` | GVM | opt-in; keeps its own compose profile |
 | `cveFeed/internal_discovery.py` | nmap -sn | the `discover` kind, internal ranges only |
 
-### B. Tool work that is not a Sentinel kind yet
+### B. Tool work that became Sentinel kinds in contract version 3
 
-| Module | What it runs | Needed kind |
-|---|---|---|
-| `cveFeed/fullscan.py` (380) | nmap, all 65,535 ports of one IP | `nmap_full` |
-| `cveFeed/probes.py` (821, lines near 223 and 599) | nmap NSE scripts | part of the probe kinds |
-| `cveFeed/waf_scan.py` (146) | wafw00f | `waf` (contract-ready since contract version 2, not wired: no dispatch, the local scan still runs) |
-| `cveFeed/node2shell_scan.py` (146) | vendored detector | `node2shell` |
-| `cveFeed/rdp_shot.py` (269) | xfreerdp screenshot | `rdp_shot` returns a blob; the AI reading stays on the server |
-| `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` |
-| `cveFeed/path_probe.py` (169) | checks that the scan path does not alter packets | must run in the scanner: it tests the vantage point scans leave from |
-| `reNgine/bbot.py`, `cveFeed/discovery.py` (875) | bbot, a streaming producer for up to six hours, screenshots as files | a streamed job type |
+Built in 1.4: each module asks for a scanner first (`sentinel_dispatch.scanner_or_local`) and runs here only when no scanner takes the work and
+`CVENGINE_LOCAL_FALLBACK` lets the kind run here; otherwise the stage waits and its targets stay due. The server keeps every decision (scope, exclusions,
+the finding) and the scanner runs the tool. A Sentinel declares these kinds only to a server whose contract has them (`server_knows`).
+
+| Module | What it runs | Kind | Notes |
+|---|---|---|---|
+| `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `nmap_scan.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
+| `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
+| `cveFeed/waf_scan.py` | wafw00f | `waf` | one task per site at the address the server vetted; the result goes through the same product rules as a local run |
+| `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
+| `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | the PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
+| `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
+| `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | built-in scanner only (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. One task per project that holds the addresses |
+| `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | built-in scanner only. The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
+| `reNgine/bbot.py`, `cveFeed/discovery.py` | bbot, a streaming producer for up to six hours | `bbot_discovery` | a streamed task, also contract version 3 (see **bbot** under Target shape) |
 
 ### C. In-process network probes (Python in server workers)
 
@@ -108,8 +113,9 @@ which send nothing to the target and need no vantage point.
 
 ### Open items from the inventory
 
-- `cveFeed/templategen.py` runs nuclei to validate AI-written templates, and `cveFeed/tasks.py` runs `nuclei -update-templates`.
-  Decide: a `nuclei_validate` kind and the approved-template bundle built by the scanner, or keep a nuclei binary on the server.
+- `cveFeed/templategen.py` runs nuclei to validate AI-written templates and to test approved ones: decided, the `nuclei_validate` kind (contract
+  version 3, built-in scanner only). Still on the server: the maintainer's approval of a reviewed draft (`approve_reviewed_template`, a loopback
+  fixture), the signed-in template run (`auth_nuclei`, which needs the secure read), and `nuclei -update-templates` in `cveFeed/tasks.py`.
 - `reNgine/resources.py` and `reNgine/tasks.py` still start subprocesses (legacy `run_command`); check what remains of them.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
@@ -163,13 +169,13 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected); the published image is not done. Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`); it is dormant, offered only to a Sentinel that declares 2, and no stage dispatches it.
+2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Contract half done: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected); the published image is not done. Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`), offered only to a Sentinel that declares 2; the wafw00f stage dispatches it since 1.4. Contract version 3 adds `nmap_full`, `nmap_verify`, `node2shell`, `rdp_shot`, `db_probe`, `path_probe` and `nuclei_validate` (section B); the frozen fixtures of version 2 are in `tests/fixtures/sentinel_results/v2/`.
 3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done as an opt-in profile: System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
 4. Make waiting non-fatal before any fallback is deleted. Today a stage waits eight seconds for any Sentinel to claim a task and
    then falls back or fails, so every scanner restart would fail scans. Add a "scanner offline" pause that reuses the existing
    pause the conductor honours, re-queue stages with a delay instead of failing them, and show a banner.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
-   for a set number of days. Add the missing kinds from section B as they move.
+   for a set number of days. The kinds of section B exist since contract version 3 (1.4), so each can now be moved like the others.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
    and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
    source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
@@ -252,8 +258,10 @@ Unset (or `all`), every kind may still run on this server when no Sentinel takes
 nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released; the one exception is the nmap fast scan,
 which marks `done` an address a Sentinel already fingerprinted in full, so only the rest stay due, an address a Sentinel finished without a host row
 or without every port naabu found among them: it is never fingerprinted here), the stage is not marked failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
-fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl and
-UDP. Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
+fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl,
+UDP, and the kinds of contract version 3: wafw00f, node2shell, the RDP screenshot and the database check (the stage returns `skipped`), the
+background full sweep (the address is swept later, with no back-off), the nmap probe (counted as held), the path check (no verdict) and the
+template check (no AI template is written, an approved template's test reports the hosts as not tested). Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
 signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes still run here by design until the secure read exists.

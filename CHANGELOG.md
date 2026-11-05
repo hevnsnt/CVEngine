@@ -40,6 +40,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 - **A browser key no longer scores like a password.** A host whose secrets the inventory knows is scored by its worst counting secret: a server secret 25, a browser key 5 (it was 25 for any credential pattern). The score line reads "Server credential served on /" or "Browser key served on /".
 
+- **Seven more scan tools run on the scanner** (Sentinel contract version 3, [docs/SCANNER-ARCHITECTURE.md](docs/SCANNER-ARCHITECTURE.md#b-tool-work-that-became-sentinel-kinds-in-contract-version-3)). The background full port sweep (`nmap_full`), the nmap service probe (`nmap_verify`), the node2shell check, the RDP screenshot (`rdp_shot`), the database exposure check (`db_probe`), the scan path check (`path_probe`) and the AI template check (`nuclei_validate`) are now Sentinel kinds, and the wafw00f stage dispatches the `waf` kind it already had. Each stage asks a scanner first and runs here only when `CVENGINE_LOCAL_FALLBACK` allows it; otherwise it waits and its targets stay due. The path check and the template check go only to the built-in scanner. A Sentinel asks for the new kinds only from a server that has them, so 1.3 servers are unaffected.
+
 ### Changed
 
 - **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in

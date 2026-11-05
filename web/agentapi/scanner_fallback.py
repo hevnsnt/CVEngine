@@ -32,7 +32,7 @@ REASONS = ('no_scanner', 'not_claimed_in_time', 'slot_busy', 'failed_then_local'
 RETENTION_DAYS = 30  # rows older than this are deleted by the weekly maintenance
 SOAK_HOURS = 72  # a kind is ready to delete after this many hours with no fallback (the maintainer's gate, with the fake-scanner tests)
 STATUS_DAYS = 7  # the window of the system status block
-NO_STAGE = ('waf',)  # kinds no stage dispatches: they have no local path to delete (same as ``scanner_state.NO_STAGE``)
+NO_STAGE = ()  # kinds no stage dispatches: they have no local path to delete (same as ``scanner_state.NO_STAGE``, empty since 1.4)
 
 _warned = False  # the first failure to record in this process was logged at warning level
 
