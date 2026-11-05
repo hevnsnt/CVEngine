@@ -5,9 +5,11 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from agentapi.host_manage import exclude_host
 from agentapi.services import Ctx
-from cveFeed import fullscan, nmap_scan
+from cveFeed import fullscan
 from cveFeed.models import HostExclusion, HostState
 from dashboard.models import Org, OrgMembership, Project
 from startScan.models import Subdomain
@@ -40,7 +42,7 @@ class FullScanRevocationTests(FullScanBase):
         with mock.patch('reNgine.resources.heavy_job', admission), \
                 mock.patch('cveFeed.nmap_scan.subprocess.Popen', return_value=process) as popen:
             try:
-                return runner([self.address], nmap_scan.FULL_PORT_FLAGS, '1m', org_id=self.address_row.org_id if org_id is None else org_id), popen
+                return runner([self.address], scan_flags.NMAP_FULL_PORT_FLAGS, '1m', org_id=self.address_row.org_id if org_id is None else org_id), popen
             except Exception:
                 popen.assert_not_called()
                 raise

@@ -35,7 +35,10 @@ def _compute(now):
     from agentapi import sentinel_broker, sentinel_dispatch
     from agentapi.models import Agent, SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE]
+    # A kind with no local path at all (sentinel_dispatch.NEVER_LOCAL) counts once the install has moved work off this server: while every
+    # other kind still runs here, its stage waits and says so in its own activity line, and nothing is "offline" for it.
+    local_all = not (set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL) - set(NO_STAGE) - set(allowed))
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and not (local_all and k in sentinel_dispatch.NEVER_LOCAL)]
     if not off:
         return _empty()
     offered, denied, live_pks = set(), set(), set()
@@ -68,10 +71,14 @@ def _compute(now):
     return out
 
 
+IN_PROCESS_PROXIED = ('http_probe',)  # the version probes' requests go through cveFeed.pinned_transport, which takes the egress proxy
+
+
 def _uses_proxy(kind, tools):
     """Whether a run of ``kind`` takes the egress proxy: its tool (the kind's name, or the part before the first underscore) is one of
-    ``egress_proxy.TOOLS``. A kind that runs on raw sockets never did, so the proxy is no part of its vantage point."""
-    return kind in tools or kind.split('_')[0] in tools
+    ``egress_proxy.TOOLS``, or it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw sockets, or only asks
+    a resolver, never did, so the proxy is no part of its vantage point."""
+    return kind in tools or kind.split('_')[0] in tools or kind in IN_PROCESS_PROXIED
 
 
 def _tailscale_enabled():
@@ -94,7 +101,7 @@ def vantage_warnings():
     from agentapi import sentinel_dispatch
     from agentapi.models import SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY]
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY and k not in sentinel_dispatch.NEVER_LOCAL]
     if not off:
         return []
 

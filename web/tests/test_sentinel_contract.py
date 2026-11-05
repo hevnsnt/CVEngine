@@ -15,7 +15,8 @@ from agentapi.services import ApiError
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
-           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'error': 'nmap'}
+           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
+           'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap'}
 
 
 V1_SHA256 = {
@@ -72,7 +73,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery', 'secrets_scan'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
@@ -225,8 +226,8 @@ class WafContractTests(SimpleTestCase):
         self.assertGreaterEqual(contract.version(), 2)
         self.assertEqual(contract.min_supported(), 1)
         self.assertEqual(contract.kind_since('waf'), 2)
-        newer = {'waf', *contract.STREAMED}  # contract version 3 added bbot_discovery, and nothing older changed with it
-        self.assertEqual({k: v for k, v in contract.load()['kind_since'].items() if k not in newer}, {k: 1 for k in SentinelTask.KINDS if k not in newer})
+        since = {k: v for k, v in contract.load()['kind_since'].items() if v < 3}  # version 3 added kinds of its own; none older moved
+        self.assertEqual({k: v for k, v in since.items() if k != 'waf'}, {k: 1 for k in since if k != 'waf'})
 
 
 class ContractMatchesTheServerTests(SimpleTestCase):

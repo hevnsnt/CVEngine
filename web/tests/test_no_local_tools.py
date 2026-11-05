@@ -109,7 +109,6 @@ ALLOWED = {
         'reNgine/common_func.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
-        'reNgine/nmap_service.py',
         'reNgine/resources.py',
     ],
     'nuclei': [
@@ -146,6 +145,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
@@ -163,6 +163,8 @@ ALLOWED = {
         'cveFeed/safeyaml.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
+        'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
@@ -217,7 +219,6 @@ ALLOWED = {
         'cveFeed/api_credentials.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/cms.py',
         'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/discovery.py',
@@ -298,6 +299,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/labels.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/management/commands/rerate_dangling_dns.py',  # 1.3.5 backfill (develop): re-rates stored bbot/baddns findings, runs no tool
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
@@ -312,12 +314,14 @@ ALLOWED = {
         'cveFeed/route_auth.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
+        'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/shots.py',
         'cveFeed/supplier_scan.py',
         'cveFeed/tasks.py',
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',
-        'cveFeed/versions.py',
+        'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/views.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/bbot.py',
@@ -425,9 +429,11 @@ class NoLocalToolsTests(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        started = time.monotonic()
+        # CPU time, not wall-clock time: CI runs this beside other test processes on a shared
+        # runner, and waiting for a CPU there is not the walk being slow.
+        started = time.process_time()
         cls.found = scan_usage()
-        cls.elapsed = time.monotonic() - started
+        cls.elapsed = time.process_time() - started
 
     def test_allowlist_only_names_known_tools(self):
         self.assertFalse(set(ALLOWED) - set(PATTERNS), 'ALLOWED has a key the guard does not search for')

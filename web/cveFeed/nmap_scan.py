@@ -19,59 +19,10 @@ from cveFeed import naabu_scan
 logger = logging.getLogger(__name__)
 
 NMAP_BIN = 'nmap'
-# NSE scripts that read what a service says about itself and its host. All are in nmap's safe or discovery categories and none
-# exploits anything: banner (the raw greeting), ssh-hostkey and ssh2-enum-algos (SSH server identity), ssl-cert (certificate
-# subject, issuer, validity), http-headers, http-title, http-server-header (the Server header when -sV could not read it) and
-# http-generator (the generator meta tag of the front page: one GET), ftp-anon (whether anonymous login is accepted, and the top level
-# listing it shows), rdp-ntlm-info (the OS build, host and domain names RDP's NTLM challenge reveals, without logging in),
-# rdp-enum-encryption (which RDP security layers the server accepts, so a server that does not insist on NLA is visible),
-# smb-os-discovery and nbstat (OS, host and domain names over SMB and NetBIOS). mysql-info, mongodb-info, redis-info,
-# memcached-info and couchdb-stats read each database's own pre-authentication greeting for its version and build details;
-# ms-sql-ntlm-info reads the same NTLM challenge rdp-ntlm-info does, over SQL Server's own protocol; ms-sql-info asks the SQL
-# Server Browser service, once per host, which instances exist and their exact version. None of these sends a credential or
-# reads a credential-protected value; cveFeed.db_intel turns their output into Port.version/Port.extra, and
-# cveFeed.db_exposure separately tests whether a database answers a real query with no authentication at all. Scripts only
-# run on ports whose service matches.
-NSE_SCRIPTS = ('banner', 'ssh-hostkey', 'ssh2-enum-algos', 'ssl-cert', 'http-headers', 'http-title', 'http-server-header', 'http-generator',
-               'ftp-anon',
-               'rdp-ntlm-info', 'rdp-enum-encryption', 'smb-os-discovery', 'nbstat', 'mysql-info', 'ms-sql-info',
-               'ms-sql-ntlm-info', 'mongodb-info', 'redis-info', 'memcached-info', 'couchdb-stats')
-NSE_FLAGS = ['--script', ','.join(NSE_SCRIPTS), '--script-timeout', '30s']
-# nmap's own documentation says a version scan "automatically executes the scripts in the version category" (rpcinfo,
-# hnap-info, vmware-version, skypev2-version, and more) whenever -sV runs, regardless of --script; these "cannot be
-# selected explicitly", so there is no flag that turns them off while keeping -sV. Their output is hidden from the
-# console but still written to -oX, which is exactly what this module parses. None of them have been reviewed the way
-# NSE_SCRIPTS has, so persist_inventory drops anything -sV smuggled in before it is ever stored, searched or shown.
-# The UDP sweep (cveFeed.udp_scan) adds five scripts, each reviewed as read-only: snmp-sysdescr (one SNMP GET of sysDescr and the uptime
-# with the default community "public": a reply is proof that community works), snmp-info (the SNMPv3 engine ID, the probe -sV sends),
-# ntp-info (the time and the "readvar" variables: version, system, processor), upnp-info (one SSDP M-SEARCH: the server string and
-# device description) and ipmi-version (one Get Channel Authentication Capabilities request: the IPMI version and the
-# authentication types offered, no login). ntp-monlist is deliberately absent: nmap files it under "intrusive" and says the
-# target records the request. Together with nbstat above (UDP 137) they only run on UDP ports whose service matches.
-UDP_NSE_SCRIPTS = ('snmp-sysdescr', 'snmp-info', 'ntp-info', 'upnp-info', 'ipmi-version')
-NSE_SCRIPT_SET = frozenset(NSE_SCRIPTS) | frozenset(UDP_NSE_SCRIPTS)
-
-
-def _reviewed_scripts(scripts):
-    """``scripts`` with every id outside NSE_SCRIPT_SET dropped. See the note above NSE_SCRIPT_SET for why -sV can hand
-    us scripts nobody asked for and nobody has reviewed."""
-    return {sid: text for sid, text in (scripts or {}).items() if sid in NSE_SCRIPT_SET}
-FAST_FLAGS = ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn', '-T4',
-              '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', *NSE_FLAGS]
-FULL_PORT_FLAGS = ['-p-', '--open', '-T4', '-Pn']
-# nmap's --top-ports ranks ports by how often they are open across the internet, not by how dangerous an open one is, so
-# the thousand it picks leave out most of the services an exposure check cares about (Redis is 2742th, MongoDB 2169th,
-# the Docker API 3217th, kubelet is not ranked at all). The pass scans the top thousand plus these, about 3% more probes.
-EXTRA_PORTS = (
-    2181, 2375, 2376, 2379, 2380,     # Zookeeper, Docker API (plain and TLS), etcd
-    3100, 4369, 5601, 5672, 5984,     # Loki, Erlang epmd, Kibana, AMQP, CouchDB
-    6379, 6380, 6443, 7474, 8086,     # Redis, Kubernetes API, Neo4j, InfluxDB
-    8161, 8200, 8500, 8834, 8983,     # ActiveMQ console, Vault, Consul, Nessus, Solr
-    9042, 9092, 9100, 9200, 9300,     # Cassandra, Kafka, node exporter, Elasticsearch HTTP and transport
-    9443, 10250, 10255, 11211, 15672, # alternate HTTPS, kubelet, kubelet read-only, Memcached, RabbitMQ console
-    16686, 27017, 27018, 50070, 61616, 1883, 8883,  # Jaeger, MongoDB, Hadoop, ActiveMQ, MQTT (plain and TLS)
-)
-TOP_PORTS = 1000
+# The reviewed NSE scripts (and why -sV's own "version" scripts are dropped before anything is stored: ``reviewed_scripts``), the fingerprint
+# pass's flags, the full-port sweep's (NMAP_FULL_PORT_FLAGS) and the high-risk ports scanned beside the top thousand are the scanner library's
+# (cvengine_scanner.flags), so a Sentinel's nmap and this one run the same reviewed set.
+from cvengine_scanner.flags import EXTRA_PORTS, NMAP_FAST_FLAGS as FAST_FLAGS, TOP_PORTS, port_argument, reviewed_scripts  # noqa: E402
 NMAP_SERVICES = ('/usr/local/share/nmap/nmap-services', '/usr/share/nmap/nmap-services')  # built from source / distro package
 _port_list = []
 
@@ -112,7 +63,7 @@ def fast_flags(paths=NMAP_SERVICES):
         logger.warning('nmap-services not found; scanning --top-ports %s without the extra high-risk ports', TOP_PORTS)
         return list(FAST_FLAGS)
     i = FAST_FLAGS.index('--top-ports')
-    return [*FAST_FLAGS[:i], '-p', naabu_scan.port_argument(ports), *FAST_FLAGS[i + 2:]]
+    return [*FAST_FLAGS[:i], '-p', port_argument(ports), *FAST_FLAGS[i + 2:]]
 
 
 HOST_TIMEOUT_FAST = '8m'  # a host that has not finished in 8 minutes is skipped, not waited for
@@ -270,52 +221,9 @@ def _check_exit(returncode, stderr):
         raise RuntimeError(f'nmap exited with status {returncode}')
 
 
-def parse_xml(xml_text, strict=False):
-    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
-
-    This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
-    process's own nmap subprocess, so an entity-expansion or external-entity payload must fail safe here exactly as it
-    would from any other untrusted input, never expand or fetch anything. A real nmap report never declares a custom
-    ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
-    handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
-    bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
-    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all.
-
-    ``strict`` is for a scan that will record coverage: missing, invalid or explicitly failed output must raise so
-    its caller records failure and leaves the target due. Display and import callers retain the tolerant default."""
-    import xmltodict
-
-    from reNgine.nmap_service import extract_nmap_inventory
-    if not (xml_text or '').strip():
-        if strict:
-            raise RuntimeError('nmap returned no XML report')
-        return []
-    if '<!ENTITY' in xml_text:
-        logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
-        if strict:
-            raise RuntimeError('nmap returned an unsafe XML report')
-        return []
-    try:
-        data = xmltodict.parse(xml_text)
-        if not isinstance(data, dict) or 'nmaprun' not in data:
-            raise ValueError('missing nmaprun root')
-        run = data['nmaprun'] or {}
-        if not isinstance(run, dict):
-            raise ValueError('invalid nmaprun root')
-        data['nmaprun'] = run
-        if strict:
-            finished = (run.get('runstats') or {}).get('finished') or {}
-            # Nmap writes this terminal marker even when no hosts or ports are
-            # reported. A bare root can be a truncated process output, not a
-            # completed empty scan, so it must never establish coverage.
-            if not isinstance(finished, dict) or finished.get('@exit') != 'success':
-                raise ValueError('nmap report has no successful completion marker')
-    except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
-        logger.warning('could not parse nmap XML output', exc_info=True)
-        if strict:
-            raise RuntimeError('nmap returned an invalid or failed XML report') from None
-        return []
-    return extract_nmap_inventory(data)
+# The one reader of nmap's XML, a local run's or a Sentinel's (hardened against hostile XML; ``ToolOutputError`` is a ``RuntimeError``). Kept
+# under this name because a dozen callers and their tests read it from here.
+from cvengine_scanner.nmap import parse_xml  # noqa: E402,F401
 
 
 def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
@@ -357,7 +265,7 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             # a port this host answered with a reset, and when: the path check (cveFeed.path_probe) probes it, from this server, later
             ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'closed_tcp': host['closed_tcp'], 'closed_tcp_at': now.isoformat()}
             ip_obj.save(update_fields=['fingerprint'])
-        host_scripts = _reviewed_scripts(host.get('hostscripts'))
+        host_scripts = reviewed_scripts(host.get('hostscripts'))
         if host_scripts:
             # smb-os-discovery and nbstat describe the host, not one port
             ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host_scripts}
@@ -412,7 +320,7 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
                     port.extra.pop(key, None)
             if rec.get('tls'):
                 port.tls = rec['tls']  # the certificate ssl-cert read, in the same place bbot's TLS facts go
-            kept_scripts = _reviewed_scripts(rec.get('scripts'))
+            kept_scripts = reviewed_scripts(rec.get('scripts'))
             if kept_scripts:
                 port.extra['scripts'] = kept_scripts  # this run's reviewed NSE output; a run with none kept leaves the last in place
                 port.extra['script_text'] = '\n'.join(kept_scripts.values())  # flat text for search, without the script ids

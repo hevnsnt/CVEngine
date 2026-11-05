@@ -26,6 +26,7 @@ DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 2
                      'testssl': 14 * 24, 'testssl-failed': 3 * 24, 'buckets': 7 * 24, 'buckets-failed': 24, 'vhost': 7 * 24, 'vhost-ip': 3 * 24, 'subapp': 7 * 24,
                      'nuclei-auth': 24, 'nuclei-auth-refused': 24, 'route-auth-signed': 24, 'udp-scan': 7 * 24, 'udp-scan-failed': 24,
                      'openvas': 7 * 24, 'openvas-failed': 3 * 24, 'supplier': 7 * 24, 'supplier-failed': 24,
+                     'secrets-scan': 7 * 24, 'secrets-validate': 7 * 24,
                      # kinds that always ran on the 24 hour default; listed so the check coverage registry (cveFeed.check_coverage) can see them
                      'nuclei-light': 24, 'nuclei-cve': 24, 'rdp-shot': 24, 'node2shell': 24}
 CLAIM_TTL = 180  # seconds; refreshed while held, so a crashed worker frees its assets within minutes

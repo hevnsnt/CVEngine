@@ -21,8 +21,9 @@ class PolicyParsingTests(SimpleTestCase):
             return dispatch.local_fallback_kinds()
 
     def test_unset_empty_all_and_star_allow_every_kind(self):
-        for value in (None, '', 'all', '*', 'ALL', ' all '):
-            self.assertEqual(self.kinds(value), set(SentinelTask.KINDS), repr(value))
+        from agentapi.sentinel_dispatch import NEVER_LOCAL
+        for value in (None, '', 'all', '*', 'ALL', ' all '):  # every kind that has a local path at all (secrets_scan has none)
+            self.assertEqual(self.kinds(value), set(SentinelTask.KINDS) - set(NEVER_LOCAL), repr(value))
 
     def test_none_allows_no_kind(self):
         self.assertEqual(self.kinds('none'), set())
