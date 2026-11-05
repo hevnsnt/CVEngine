@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **A Sentinel can no longer be refused for ever by a call counter that lost its expiry.** The claim, report and heartbeat calls of an agent or Sentinel are counted per minute in a cache key that expires with the minute. A Sentinel that polls a few times a minute was answered `429 too many claim calls: at most 60 per 60 seconds` for an hour while its sibling worked, which only a counter that never resets explains. A counter that is over its limit is now checked once for an expiry, and one that has none is started again. A refusal is also written to the log once per window with the counter's name and count, so a refusal that is a real burst can be told apart from one that is not.
+
 ## v1.3.6 (2026-11-05)
 
 ### Fixed

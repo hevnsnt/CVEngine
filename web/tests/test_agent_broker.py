@@ -1531,6 +1531,35 @@ class LimitTests(AgentBrokerTestCase):
 		cache.delete('agentapi:test:atomic')
 		self.assertEqual(passed, [True, True, True, False, False, False])
 
+	def test_a_counter_that_lost_its_expiry_is_started_again_not_refused_for_ever(self):
+		"""A window counter with no expiry would never reset: its caller would get 429 at any rate, however slow (a Sentinel polling once a
+		minute was refused for an hour). Past its limit such a counter is started again; a counter with an expiry is left alone."""
+		from django.core.cache import cache
+		name = 'agentapi:test:no-expiry'
+		key = cache.make_key(name)
+		client = cache._cache.get_client(key, write=True)
+		cache.delete(name)
+		self.addCleanup(cache.delete, name)
+		client.set(key, 99)  # over the limit, and no expiry
+		self.assertEqual(client.ttl(key), -1)
+		with self.assertLogs('agentapi.agent_broker', 'WARNING') as logs:
+			self.assertTrue(broker._hit(name, 3, 30))
+		self.assertIn('no expiry', logs.output[0])
+		self.assertGreater(client.ttl(key), 0)  # it has a window again
+		self.assertEqual([broker._hit(name, 3, 30) for _ in range(3)], [True, True, False])  # and counts as any other
+		self.assertGreater(client.ttl(key), 0)
+
+	def test_a_refusal_is_logged_once_per_window_with_its_counter(self):
+		from django.core.cache import cache
+		name = 'agentapi:test:logged'
+		cache.delete(name)
+		self.addCleanup(cache.delete, name)
+		with self.assertLogs('agentapi.agent_broker', 'WARNING') as logs:
+			passed = [broker._hit(name, 2, 30) for _ in range(5)]
+		self.assertEqual(passed, [True, True, False, False, False])
+		self.assertEqual(len(logs.output), 1)
+		self.assertIn('agentapi:test:logged used 3 of 2 per 30 s', logs.output[0])
+
 	def test_long_poll_slots_are_capped_per_token_and_per_user(self):
 		alice, alice2, ro = (ApiTokenOf(self, n) for n in ('alice', 'alice2', 'ro'))
 		with broker._waiter_slot(True, alice) as first:
