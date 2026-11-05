@@ -1111,13 +1111,31 @@ def api_activity(request):
     return snapshot_cache.respond(request, snapshot_cache.token_of(body), lambda: {**body, 'now': timezone.now().isoformat()})
 
 
+_COUNT_CHUNK = 5000  # ids per lookup below: a statement stays small however many hosts the caller can see
+
+
+def _chunks(ids, size=_COUNT_CHUNK):
+    ids = list(ids)
+    for start in range(0, len(ids), size):
+        yield ids[start:start + size]
+
+
 def discovery_counts():
-    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see.
+
+    The live hosts are read once (the one expensive part: the current inventory collapsed to a row per host), and the addresses and ports
+    are then looked up through the link tables by id. The three counts used to be three nested queries that each repeated the whole host walk
+    inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold."""
     from cveFeed.counts import LIVE_HOST_Q, host_reps
-    from startScan.models import IpAddress, Port
-    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
-    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
-    return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
+    from startScan.models import IpAddress, Subdomain
+    live = set(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True))
+    ips = set()
+    for chunk in _chunks(sorted(live)):
+        ips.update(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=chunk).values_list('ipaddress_id', flat=True))
+    ports = set()
+    for chunk in _chunks(sorted(ips)):
+        ports.update(IpAddress.ports.through.objects.filter(ipaddress_id__in=chunk, port__state__in=OPEN_PORT_STATES).values_list('port_id', flat=True))
+    return {'hosts': len(live), 'ips': len(ips), 'ports': len(ports)}
 
 
 def cached_discovery_counts(params=()):

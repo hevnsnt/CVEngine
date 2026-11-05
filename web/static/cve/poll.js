@@ -92,9 +92,11 @@ export function staleRows(rows, seen, { key, has, now = Date.now(), safetyMs = 1
 /**
  * Runs ``fn`` now and then again ``ms`` (jittered) after each run finishes, never two at once. ``hidden`` says what a hidden tab does: "pause" (the
  * default: nothing runs until the tab is visible again, which runs it at once) or "slow" (it keeps running, ``slow`` times as seldom, and runs at once on
- * return). The wait follows ``pace`` (failures and Retry-After). Returns ``{stop, tick}``.
+ * return). The wait follows ``pace`` (failures and Retry-After), and is never less than ``backoff`` times how long the run itself took: a server
+ * that needs ten seconds to answer is asked again after at least twenty, so a slow answer is not met with more of the same question (a room of tabs
+ * polling a busy server every few seconds is what kept it busy). Returns ``{stop, tick}``.
  */
-export function every(fn, ms, { pace = createPace(), doc = globalThis.document, hidden = "pause", slow = 4, random = Math.random, timers } = {}) {
+export function every(fn, ms, { pace = createPace(), doc = globalThis.document, hidden = "pause", slow = 4, backoff = 2, random = Math.random, timers, clock = () => Date.now() } = {}) {
   const set = timers ? timers.set : (f, d) => setTimeout(f, d);
   const clear = timers ? timers.clear : (t) => clearTimeout(t);
   let timer = 0;
@@ -108,13 +110,15 @@ export function every(fn, ms, { pace = createPace(), doc = globalThis.document, 
     if (stopped || busy) return;
     if (doc.hidden && hidden === "pause") return;
     busy = true;
+    const started = clock();
     try {
       await fn();
     } catch (_) {
       /* a poller handles its own errors; one that throws must still be asked again */
     } finally {
       busy = false;
-      if (!stopped) arm(pace.wait(ms) * (doc.hidden && hidden === "slow" ? slow : 1));
+      const took = Math.max(0, clock() - started);
+      if (!stopped) arm(Math.max(pace.wait(ms), took * backoff) * (doc.hidden && hidden === "slow" ? slow : 1));
     }
   }
   const onVisible = () => {
