@@ -12,7 +12,7 @@ cleaners, the dispatch budgets, ``$defs.results`` and ``$defs.targets``) is held
 
 Frozen fixtures. ``tests/fixtures/sentinel_results/`` holds one good result per kind at the current ``contract_version``. Bumping
 ``contract_version`` copies the then-current fixtures, unchanged, into ``v<N>/`` (``v1/`` is the first set, and ``waf.json``, which arrived in 2,
-joins ``v2/``, copied when version 3 added ``bbot_discovery``). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
+joins ``v2/``, copied when version 3 added ``bbot_discovery`` and ``secrets_scan``). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
 a Sentinel one release behind sends exactly what it sent before, and ``tests.test_sentinel_contract`` runs each frozen set through
 ``sentinel_broker.clean_result`` and this schema."""
 import json

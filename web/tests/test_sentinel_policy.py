@@ -11,6 +11,8 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from agentapi import agent_broker as broker
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
@@ -60,7 +62,7 @@ class LightNucleiPolicyTests(DispatchBase):
 
     def test_a_pass_with_no_severities_sends_the_local_default_not_an_empty_list(self):
         # An empty list makes the client run every severity, ``unknown`` included; the local run's default is info to critical.
-        self.assertEqual(nuclei_scan.SEVERITIES, 'info,low,medium,high,critical')
+        self.assertEqual(scan_flags.NUCLEI_SEVERITIES, 'info,low,medium,high,critical')
         target = self.dispatched('nuclei_targeted', tags=['wordpress'])
         self.assertEqual((target['tags'], target['severities']), (['wordpress'], ['info', 'low', 'medium', 'high', 'critical']))
         for severities in (None, []):
@@ -74,7 +76,7 @@ class LightNucleiPolicyTests(DispatchBase):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             for kind in ('nuclei_light', 'nuclei_targeted'):
                 target = self.dispatched(kind)
-                self.assertEqual(target['etags'], ['dos'], kind)  # nuclei_scan.BASE_FLAGS: the tags the local run never runs
+                self.assertEqual(target['etags'], ['dos'], kind)  # scan_flags.NUCLEI_EXCLUDED_TAGS: the tags no run ever runs
                 self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
 
     def test_a_policy_that_allows_every_template_is_said_so(self):

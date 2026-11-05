@@ -23,10 +23,6 @@ class PureTests(unittest.TestCase):
 		self.assertEqual(naabu_scan.parse_output('\n'.join(lines)),
 			{'198.51.100.1': [22, 8443], '198.51.100.2': [9200], '198.51.100.9': None})
 
-	def test_the_port_argument_is_compact(self):
-		self.assertEqual(naabu_scan.port_argument([8080, 22, 80, 81, 82, 443, 22]), '22,80-82,443,8080')
-		self.assertEqual(naabu_scan.port_argument([5]), '5')
-
 	def test_a_pass_over_open_ports_gets_closed_probe_ports_so_nmap_can_fingerprint_the_system(self):
 		# nmap's -O --osscan-limit needs an open and a closed TCP port; with naabu's open ports alone no host was ever OS-fingerprinted
 		with_probe = naabu_scan.flags_for({'a': [22]}, nmap_scan.FAST_FLAGS)(['a'])

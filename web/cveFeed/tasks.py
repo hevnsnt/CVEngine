@@ -68,6 +68,14 @@ def testssl_sweep():
     return testssl_scan.sweep_all()
 
 
+@app.task(name='secrets_validate_hosts', bind=False, queue='vhost_queue')
+def secrets_validate_hosts(project_id, hosts, user_id=None):
+    """A person asked to validate a secret (``agentapi.secrets_api.request_validation``): the built-in scanner reads its hosts again and checks what it
+    finds with the allow-listed read-only validators (see ``cveFeed.secrets_validation``). On the slow, polite queue: it waits for the scanner."""
+    from cveFeed import secrets_scan
+    return secrets_scan.validate_hosts(project_id, hosts, user_id)
+
+
 @app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
 def bucket_sweep():
     """Daily: the cloud storage exposure check of every project's due buckets, a few requests per second (see ``cveFeed.bucket_scan``). It has a
@@ -1733,6 +1741,8 @@ def weekly_deep_nuclei():
     from overlapping another. The cursor and successful-only seven-day ledger make
     progress durable without queuing thousands of deep jobs at once.
     """
+    from cvengine_scanner import flags as scan_flags
+
     from cveFeed import activity, ledger, nuclei_scan
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
@@ -1780,7 +1790,7 @@ def weekly_deep_nuclei():
             if sub.name not in hostnames:
                 continue
             targets = [sub.name] + [f'{sub.name}:{port}' for host, port in sorted(ports)
-                                    if host == sub.name and port not in nuclei_scan.DEFAULT_PORTS][:20]
+                                    if host == sub.name and port not in scan_flags.NUCLEI_DEFAULT_PORTS][:20]
             BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=sub.pk, updated_at=timezone.now())
             run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
                                project=project_id, status='running', scan_id=sub.scan_history_id)

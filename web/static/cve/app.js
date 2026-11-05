@@ -25,6 +25,7 @@ import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import { secretsPage } from "/staticfiles/cve/secrets.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
@@ -1624,6 +1625,13 @@ function renderFinding(d, cfg, row) {
     fix.append(el("p", "note", "No remediation advice is recorded yet."));
   }
   if (d.agent_task) fix.append(el("p", "note", agentLine(d.agent_task)));
+  (d.secrets || []).forEach((s) => {
+    // a token finding's secret lives in the secrets inventory: its mask, kind and rating, and a link there (never the value)
+    const line = el("p", "note");
+    line.append("Tracked in Secrets: ", el("code", "", s.masked), ` (${s.label}, ${s.status === "unverified" ? s.severity_basis : s.status.replace(/_/g, " ")}) `);
+    line.append(el("a", "", "Open Secrets", { href: `/cve/${encodeURIComponent(projectOf(row) || slug)}/secrets/` }));
+    fix.append(line);
+  });
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
     if (!ALL) fix.append(cfg.statusControl(d));
@@ -3453,6 +3461,10 @@ const pages = {
       if (chip) head.append(chip);
       if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
+      if (h.secrets) {
+        const s = el("a", "badge medium", `Secrets: ${h.secrets}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/secrets/`, title: "Exposed secrets this host serves (masked values only)" });
+        head.append(s);
+      }
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));
       if (h.pinned) head.append(badge("Pinned", "success"));
@@ -4780,5 +4792,8 @@ pages.scan = async function scanDetail(mount) {
 
 // Third-party suppliers: host cards and the technology search (static/cve/suppliers.js)
 pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL });
+
+// Exposed secrets: the secrets inventory, masked values only (static/cve/secrets.js); the API refuses a change the caller's role does not allow
+pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL });
 
 pages[kind](root.querySelector("#view"));
