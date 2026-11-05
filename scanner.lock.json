@@ -1,9 +1,9 @@
 {
   "image": "ghcr.io/hevnsnt/cvengine-sentinel",
   "digest": null,
-  "version": "3250af6831c8",
+  "version": "de4aae5ebb27",
   "source": {
     "repository": "https://github.com/hevnsnt/cvENGINE-sentinel.git",
-    "commit": "3250af6831c82d055dbec46dd7d839855d2cfac3"
+    "commit": "de4aae5ebb2794f5753213ffa2e75f9d97123bea"
   }
 }
