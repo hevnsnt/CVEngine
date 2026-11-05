@@ -422,9 +422,11 @@ class NoLocalToolsTests(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        started = time.monotonic()
+        # CPU time, not wall-clock time: CI runs this beside other test processes on a shared
+        # runner, and waiting for a CPU there is not the walk being slow.
+        started = time.process_time()
         cls.found = scan_usage()
-        cls.elapsed = time.monotonic() - started
+        cls.elapsed = time.process_time() - started
 
     def test_allowlist_only_names_known_tools(self):
         self.assertFalse(set(ALLOWED) - set(PATTERNS), 'ALLOWED has a key the guard does not search for')
