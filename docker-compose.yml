@@ -265,7 +265,7 @@ services:
   scanner:
     profiles: ["builtin-scanner"]
     build:
-      context: "${CVENGINE_SCANNER_SOURCE:-https://github.com/hevnsnt/cvENGINE-sentinel.git#98e67d03832de6df6f8ee7e4028b50af8ac27597}"
+      context: "${CVENGINE_SCANNER_SOURCE:-https://github.com/hevnsnt/cvENGINE-sentinel.git#f94a942f3c7bd7428c7c04a8d6fcc037453eb4ac}"
       args:
         BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
     image: "${CVENGINE_SCANNER_IMAGE:-cvengine-sentinel-local:latest}"
