@@ -98,9 +98,9 @@ def check_skip(words, patterns):
 
 
 def current():
-    """The stored row, or an unsaved one with the defaults."""
+    """The stored row, made with the defaults the first time it is read."""
     from cveFeed.models import SecretScanRules
-    return SecretScanRules.objects.order_by('id').first() or SecretScanRules(skip_words=list(DEFAULT_SKIP_WORDS), skip_regex=[])
+    return SecretScanRules.objects.order_by('id').first() or SecretScanRules.objects.create(skip_words=list(DEFAULT_SKIP_WORDS), skip_regex=[])
 
 
 def bundle():
@@ -136,7 +136,6 @@ def _ids_quietly(text):
 
 def save(user, rules_yaml=None, skip_words=None, skip_regex=None):
     """Store what is given (what is left out stays as it is) after checking it; App Admins only. Returns ``describe()``."""
-    from cveFeed.models import SecretScanRules
     from tenancy import audit
     if not (user and user.is_superuser):
         raise PermissionError('only an App Admin can change the secrets scan rules')
@@ -145,8 +144,6 @@ def save(user, rules_yaml=None, skip_words=None, skip_regex=None):
     ids = check_rules(rules_yaml)
     words, patterns = check_skip(list(row.skip_words or []) if skip_words is None else skip_words,
                                  list(row.skip_regex or []) if skip_regex is None else skip_regex)
-    if row.pk is None:
-        row = SecretScanRules()
     row.rules_yaml, row.skip_words, row.skip_regex, row.updated_by = rules_yaml, words, patterns, user
     row.save()
     audit.record(user, 'secrets.rules.updated', 'secrets scan rules', rules=ids, skip_words=len(words), skip_regex=len(patterns))

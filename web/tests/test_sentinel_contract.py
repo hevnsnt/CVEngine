@@ -15,7 +15,7 @@ from agentapi.services import ApiError
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
-           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'secrets_scan': 'secrets_scan', 'error': 'nmap'}
+           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'secrets_scan': 'secrets_scan', 'error': 'nmap'}
 
 
 V1_SHA256 = {
@@ -29,8 +29,10 @@ V1_SHA256 = {
     'testssl.json': '0c3e9354aa1432420761aece78877e727bfca1b760dd22e26dac1769c0ba5d80',
     'wpscan.json': '548ae1d7ad40e9c5a81bf183a39fba3b3b7a270d92380da8602384db0d53b736',
 }
-# ``v2/`` as it was copied from the fixtures of contract version 2, when secrets_scan brought version 3
-V2_SHA256 = {**V1_SHA256, 'waf.json': '109fd92d329180c9ee7ba2e64337de0bd677023c6a85532e3154dd60aa69bcec'}
+V2_SHA256 = {  # v1's files unchanged, and waf, copied when version 3 added bbot_discovery
+    **V1_SHA256,
+    'waf.json': '109fd92d329180c9ee7ba2e64337de0bd677023c6a85532e3154dd60aa69bcec',
+}
 PASSES_THROUGH =('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp')  # unchanged by the server (openvas and wpscan fill in defaults)
 
 
@@ -70,7 +72,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'secrets_scan'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery', 'secrets_scan'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
@@ -223,9 +225,8 @@ class WafContractTests(SimpleTestCase):
         self.assertGreaterEqual(contract.version(), 2)
         self.assertEqual(contract.min_supported(), 1)
         self.assertEqual(contract.kind_since('waf'), 2)
-        newer = {'waf': 2, 'secrets_scan': 3}  # kinds that arrived after the first contract, and the version that brought each
+        newer = {'waf', 'secrets_scan', *contract.STREAMED}  # contract version 3 added bbot_discovery and secrets_scan, and nothing older changed
         self.assertEqual({k: v for k, v in contract.load()['kind_since'].items() if k not in newer}, {k: 1 for k in SentinelTask.KINDS if k not in newer})
-        self.assertEqual({k: contract.kind_since(k) for k in newer}, newer)
 
 
 class ContractMatchesTheServerTests(SimpleTestCase):

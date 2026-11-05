@@ -1114,6 +1114,49 @@ class AIUsage(models.Model):
         indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx')]
 
 
+class AIJob(models.Model):
+    """One model call the pipeline needs, made by the AI reviewer container (docs/AI-REVIEWER.md, cveFeed.ai_jobs): the server makes no
+    model call itself. The server queues the job; the container takes it (``leased``, for a while, with a fresh ``lease`` token), calls
+    the model and posts the answer back (``answered``); a Celery task checks the answer with the stage's own validator and applies it
+    (``applied``), or queues the stage's one retry (``attempt`` 2), or gives up (``failed``). ``packet`` is what the container gets: the
+    stage's fixed system prompt, its parts (text cvENGINE wrote, and fenced data that came from a scanned host or a feed), the schema and
+    request options, and at most one bounded image. ``context`` is what the continuation needs and never leaves the server. The raw answer
+    is kept only until it is applied. ``dedupe`` keeps one open job per question."""
+
+    OPEN = ("queued", "leased", "answered", "applying")
+    kind = models.CharField(max_length=24)
+    stage = models.CharField(max_length=40, default="unspecified")  # the usage stage each call is recorded under (AIUsage.stage)
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    dedupe = models.CharField(max_length=80, blank=True, default="")
+    priority = models.PositiveSmallIntegerField(default=5)  # lower first
+    packet = models.JSONField(default=dict, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=10, default="queued")  # queued | leased | answered | applying | applied | failed | expired
+    attempt = models.PositiveSmallIntegerField(default=1)
+    leases = models.PositiveSmallIntegerField(default=0)
+    lease = models.CharField(max_length=32, blank=True, default="")
+    lease_until = models.DateTimeField(null=True, blank=True)
+    result = models.JSONField(default=dict, blank=True)  # the answer {text} or the failure {error}, until it is applied
+    error_category = models.CharField(max_length=40, blank=True, default="")
+    provider = models.CharField(max_length=32, blank=True, default="")
+    model = models.CharField(max_length=200, blank=True, default="")
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "priority", "created_at"], name="aijob_queue_idx"),
+                   models.Index(fields=["kind", "dedupe"], name="aijob_dedupe_idx")]
+        constraints = [models.UniqueConstraint(fields=["kind", "dedupe"], condition=models.Q(status__in=("queued", "leased", "answered", "applying"))
+                                               & ~models.Q(dedupe=""), name="one_open_aijob_per_question")]
+
+    def __str__(self):
+        return f"AI job {self.pk} ({self.kind}, {self.status})"
+
+
 class AIPriceRate(models.Model):
     """Operator supplied USD rates; a rate only applies to the exact provider/model."""
 

@@ -1,7 +1,8 @@
 """The routes of the AI reviewer container (``/api/v1/reviewer/*``, docs/AI-REVIEWER.md). Only a token of scope ``reviewer`` may call them:
 the middleware keeps that token on these paths (``agentapi.auth.REVIEWER_PATH``), and every route here refuses any other token and any
 signed-in session, so a person's full token or browser can never read the provider key the configuration carries. All decisions are made in
-``cveFeed.reviewer``; these only parse and answer."""
+``cveFeed.reviewer`` (the finding review and the operations check) and ``cveFeed.ai_jobs`` (the pipeline's AI jobs); these only parse and
+answer."""
 from agentapi.services import ApiError
 
 MAX_BODY_ITEMS = 50
@@ -60,4 +61,23 @@ def ops_report(request, ctx, body):
     try:
         return reviewer.apply_ops_report(body)
     except reviewer.VerdictError as exc:
+        raise ApiError(exc.status, str(exc))
+
+
+def next_jobs(request, ctx):
+    from cveFeed import ai_jobs
+    _require_reviewer(ctx)
+    try:
+        limit = int(request.GET.get('limit') or 8)
+    except ValueError:
+        raise ApiError(400, 'limit must be a whole number')
+    return {'jobs': ai_jobs.next_jobs(limit)}
+
+
+def job_result(request, ctx, job_id, body):
+    from cveFeed import ai_jobs
+    _require_reviewer(ctx)
+    try:
+        return ai_jobs.submit(int(job_id), body)
+    except ai_jobs.JobError as exc:
         raise ApiError(exc.status, str(exc))

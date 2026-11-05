@@ -7,11 +7,12 @@ to the limits the broker enforces (``sentinel_broker``) and to one fixture per k
 correct client keeps to, so the server never has to clip or drop anything of a good Sentinel's.
 
 The kinds are listed once, in ``kind_since``: ``KINDS`` is that list, and ``SentinelTask.KINDS`` is ``KINDS``. Every other per-kind table (the
-cleaners, the dispatch budgets, ``$defs.results`` and ``$defs.targets``) is held to it by ``tests.test_sentinel_contract``.
+cleaners, the dispatch budgets, ``$defs.results`` and ``$defs.targets``) is held to it by ``tests.test_sentinel_contract``. A streamed kind
+(``STREAMED``: ``bbot_discovery``, contract version 3) also has ``$defs.partials``: the batches it posts while it runs.
 
 Frozen fixtures. ``tests/fixtures/sentinel_results/`` holds one good result per kind at the current ``contract_version``. Bumping
-``contract_version`` copies the then-current fixtures, unchanged, into ``v<N>/`` (``v1/`` is the first set; ``v2/`` was copied when version 3
-brought ``secrets_scan``, and holds ``waf.json``, which arrived in 2). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
+``contract_version`` copies the then-current fixtures, unchanged, into ``v<N>/`` (``v1/`` is the first set, and ``waf.json``, which arrived in 2,
+joins ``v2/``, copied when version 3 added ``bbot_discovery`` and ``secrets_scan``). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
 a Sentinel one release behind sends exactly what it sent before, and ``tests.test_sentinel_contract`` runs each frozen set through
 ``sentinel_broker.clean_result`` and this schema."""
 import json
@@ -25,6 +26,7 @@ def load():
 
 
 KINDS = tuple(load()['kind_since'])  # every task kind, in the order the file lists them
+STREAMED = tuple(load()['$defs']['partials'])  # the kinds that post partial results while they run (``partial_schema``) before the result that closes them
 
 
 def version():
@@ -75,6 +77,14 @@ def result_schema(kind):
     if kind not in doc['$defs']['results']:
         raise KeyError(kind)
     return {'$schema': doc['$schema'], '$ref': f'#/$defs/results/{kind}', '$defs': doc['$defs']}
+
+
+def partial_schema(kind):
+    """A self-contained schema for one batch of partial results a streamed ``kind`` task posts while it runs (``STREAMED``)."""
+    doc = load()
+    if kind not in doc['$defs'].get('partials', {}):
+        raise KeyError(kind)
+    return {'$schema': doc['$schema'], '$ref': f'#/$defs/partials/{kind}', '$defs': doc['$defs']}
 
 
 def target_schema(kind):

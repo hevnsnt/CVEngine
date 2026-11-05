@@ -333,8 +333,8 @@ def _os_detection():
     return os_detection.status()
 
 
-def _ai():
-    from cveFeed import autotune, tunables
+def _ai(problems=None):
+    from cveFeed import ai_jobs, autotune, tunables
     from cveFeed.models import ValidationBudget
     from dashboard.models import AIProviderSettings
     cfg = AIProviderSettings.objects.first()
@@ -342,7 +342,16 @@ def _ai():
     return {'provider_enabled': bool(cfg and cfg.enabled), 'provider': cfg.provider if cfg and cfg.enabled else None,
             'validation_attempts_today': today,
             'autotune_advisor_today': {'used': autotune.advisor_calls_today(), 'cap': tunables.value('autotune_ai_max_per_day'),
-                                       'since': 'UTC midnight'}}
+                                       'since': 'UTC midnight'},
+            'jobs': _ai_jobs(problems, ai_jobs)}
+
+
+def _ai_jobs(problems, ai_jobs):
+    """The pipeline's AI jobs, which the AI reviewer container answers (docs/AI-REVIEWER.md): a problem when they wait for it."""
+    state = ai_jobs.waiting()
+    if state['waiting_for_reviewer'] and problems is not None:
+        problems.append('ai: ' + ai_jobs.waiting_message(state))
+    return state
 
 
 def _autotune():
@@ -599,7 +608,7 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
-    out['ai'] = _probe(problems, 'ai', _ai)
+    out['ai'] = _probe(problems, 'ai', lambda: _ai(problems))
     out['autotune'] = _probe(problems, 'autotune', _autotune)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))

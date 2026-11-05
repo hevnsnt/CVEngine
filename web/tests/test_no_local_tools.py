@@ -146,6 +146,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
@@ -163,6 +164,8 @@ ALLOWED = {
         'cveFeed/safeyaml.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
+        'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
@@ -278,6 +281,9 @@ ALLOWED = {
         'Dockerfile',
         'agentapi/mcp.py',
         'agentapi/rest.py',
+        'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
+        'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
+        'agentapi/sentinel_stream.py',  # 1.4 bbot on a Sentinel: hands the run to a Sentinel and takes its batches, runs nothing
         'agentapi/services.py',
         'celery-entrypoint.sh',
         'cveFeed/admin_api.py',
@@ -295,6 +301,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/labels.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/management/commands/rerate_dangling_dns.py',  # 1.3.5 backfill (develop): re-rates stored bbot/baddns findings, runs no tool
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
@@ -309,11 +316,14 @@ ALLOWED = {
         'cveFeed/route_auth.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
+        'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/shots.py',
         'cveFeed/supplier_scan.py',
         'cveFeed/tasks.py',
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',
+        'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/versions.py',
         'cveFeed/views.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work

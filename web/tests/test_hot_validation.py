@@ -414,12 +414,16 @@ class HotValidationTests(TestCase):
         provider.complete.return_value = json.dumps({
             'classification': 'likely', 'reason': 'fixture evidence', 'impact': 'fixture impact',
             'severity_adjust': 0, 'severity_reason': '', 'remediation': 'Review fixture', 'validation_steps': []})
-        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
-                mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider):
+        from tests import ai_queue
+        ai_queue.ensure_configured(provider)
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]):
             result = automatic_validate_finding(job.pk)
         self.assertNotIn('error', result)
-        self.assertEqual(result['ai_state'], 'completed')
+        self.assertEqual(result['ai_state'], 'queued')  # asked of the AI reviewer container
         self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'completed')
+        ai_queue.serve(provider)
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.classification), ('triaged', 'likely'))
 
     def test_scope_recheck_blocks_checks_and_ai_review(self):
         from cveFeed.tasks import automatic_validate_finding

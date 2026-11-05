@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BYTES = 8_000_000
 _REF = re.compile(r'^t\d{1,12}$')
+_JOB = re.compile(r'^\d{1,12}$')
 
 
 class ServerError(RuntimeError):
@@ -78,6 +79,14 @@ class Server:
         if not _REF.match(str(ref)):
             raise ServerError('a packet with a malformed reference')
         return self._request('POST', f'findings/{ref}/verdict', body=body)
+
+    def next_jobs(self, limit):
+        return self._request('GET', 'jobs/next', query={'limit': int(limit)}).get('jobs') or []
+
+    def job_result(self, job_id, body):
+        if not _JOB.match(str(job_id)):
+            raise ServerError('a job with a malformed id')
+        return self._request('POST', f'jobs/{job_id}/result', body=body)
 
     def ops_snapshot(self, release=None):
         query = {'templates_release': release['tag'], 'templates_published_at': release.get('published_at', '')} if release else None

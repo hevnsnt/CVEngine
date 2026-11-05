@@ -13,6 +13,7 @@ from cveFeed.tasks import correlate_refreshed_cves
 from cveFeed.threat import ICE, FIRE, HEAT_RANK, SMOKE, classify_threat_tier, match_heat_rank_expr, match_temperature
 from startScan.models import IpAddress, Subdomain
 from tests.test_match_policy import Cve, Fixture
+from tests import ai_queue
 
 NO_RANGE = [{'vendor': 'Jenkins Project', 'product': 'Jenkins', 'ranges': []}]
 WITH_RANGE = [{'vendor': 'Jenkins Project', 'product': 'Jenkins', 'ranges': [{'introduced': '2.0', 'fixed': '2.442'}]}]
@@ -77,7 +78,7 @@ class VersionUnknownTests(Fixture):
 
 	def triage_all(self, p=None):
 		match = triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain').filter(pk=self.only_match().pk))
-		return triage.run_triage(triage.track(match), provider=p or provider())
+		return ai_queue.run_triage(triage.track(match), provider=p or provider())
 
 	def heat_rank(self):
 		return CVEMatch.objects.annotate(h=match_heat_rank_expr()).get(pk=self.only_match().pk).h
@@ -193,7 +194,7 @@ class VersionUnknownTests(Fixture):
 		p = provider()
 		p.complete.return_value = '{"classification": "likely", "reason": "banner matches"}'
 		match = triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain').filter(pk=ranged.pk))
-		self.assertEqual(triage.run_triage(triage.track(match), provider=p)['asked'], 1)
+		self.assertEqual(ai_queue.run_triage(triage.track(match), provider=p)['asked'], 1)
 
 	def test_a_non_kev_cve_without_a_range_still_makes_no_match(self):
 		self.entry.kev = False

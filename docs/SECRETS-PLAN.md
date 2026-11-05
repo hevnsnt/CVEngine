@@ -12,7 +12,7 @@ gate bbot's trufflehog) is being done separately on `develop` for 1.3.2, and its
 - **Where the code is.** Server: `cveFeed/secrets_catalog.py` (mapping, masks, severity), `secrets_inventory.py` (fingerprint key, `record`,
   feeders, retirement, scoring input), `secrets_scan.py` (the stage, the target, `clean_result`, `persist`), `secrets_validation.py` (the three
   locks), `secret_rules.py` (custom rules and skip lists), `agentapi/secrets_api.py` (REST and MCP), `static/cve/secrets.js` (the Secrets page),
-  the backfill `backfill_secrets_inventory` and migration `cveFeed.0146`. Sentinel: `cvengine_scanner/secrets.py` and `client/tools.py
+  the backfill `backfill_secrets_inventory` and migration `cveFeed.0147`. Sentinel: `cvengine_scanner/secrets.py` and `client/tools.py
   run_secrets_scan`.
 - **No `value_enc`.** Re-validation from a stored value is deferred to 1.5 (section 12), and validation happens in the built-in scanner while it
   holds the value (5.2), so nothing in 1.4 would read a stored copy. Storing one anyway would only add exposure; the column is left out, and
