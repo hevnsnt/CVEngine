@@ -77,11 +77,11 @@ class VantageWarningTests(VantageBase):
         self.proxy_on()
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, bbot_discovery, http_probe to the built-in scanner, which does not "
+        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, bbot_discovery, http_probe, alive_check to the built-in scanner, which does not "
                                  "use this server's egress proxy; those scans will start from the scanner's network instead.")
 
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
-        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,bbot_discovery,http_probe'  # nmap, naabu and udp use raw sockets, dns_resolve a resolver
+        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,bbot_discovery,http_probe,alive_check'  # nmap, naabu and udp use raw sockets, dns_resolve a resolver
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -99,7 +99,7 @@ class VantageWarningTests(VantageBase):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, bbot_discovery, http_probe, dns_resolve to the built-in scanner, which does not use the '
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, bbot_discovery, http_probe, dns_resolve, alive_check to the built-in scanner, which does not use the '
                       'Tailscale network; those scans will start from the scanner\'s network instead.', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
 

@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "alive_check": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -1162,6 +1162,82 @@
             }
           }
         ]
+      },
+      "alive_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "checks": {
+                "type": "array",
+                "maxItems": 600,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "alive"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "alive": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "checks",
+                "touched"
+              ]
+            }
+          }
+        ]
       }
     },
     "targets": {
@@ -1742,6 +1818,67 @@
           "names",
           "scope"
         ]
+      },
+      "alive_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checks",
+          "scope"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 600,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "host",
+                "ip",
+                "port",
+                "scheme"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260,
+                  "description": "the name the address used to serve: the Host header and TLS server name of an http(s) check"
+                },
+                "ip": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60,
+                  "description": "the last known address, asked as itself"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "scheme": {
+                  "enum": [
+                    "http",
+                    "https",
+                    "tcp"
+                  ],
+                  "description": "http(s): a GET of / as host, any answer counts; tcp: a connect, nothing sent"
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
       }
     },
     "scope_policy": {

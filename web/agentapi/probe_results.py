@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe`` and ``dns_resolve``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve`` and ``alive_check``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -101,14 +101,33 @@ def clean_dns_resolve(body):
     return {'resolved': out, 'errors': failed, 'refused': refused}
 
 
+MAX_CHECKS = 600
+
+
+def clean_alive_check(body):
+    checks = body.get('checks')
+    if not isinstance(checks, list) or len(checks) > MAX_CHECKS:
+        raise ApiError(400, 'an alive_check result lists its checks (at most %d)' % MAX_CHECKS)
+    out = []
+    for item in checks:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('alive'), bool):
+            continue
+        row = {'id': _text(item['id'], 200), 'alive': item['alive']}
+        if item.get('error'):
+            row['error'] = _text(item['error'], 200)
+        out.append(row)
+    return {'checks': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
-    if kind == 'http_probe':
-        asked = {p.get('id') for p in target.get('probes') or [] if isinstance(p, dict)}
-        kept = [p for p in result['probes'] if p['id'] in asked]
-        dropped = len(result['probes']) - len(kept)
-        result = {**result, 'probes': kept}
+    if kind in ('http_probe', 'alive_check'):
+        key = 'probes' if kind == 'http_probe' else 'checks'
+        asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
+        kept = [p for p in result[key] if p['id'] in asked]
+        dropped = len(result[key]) - len(kept)
+        result = {**result, key: kept}
     else:
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('names') or [] if isinstance(n, str)}
         resolved = {n: a for n, a in result['resolved'].items() if n in asked}

@@ -68,7 +68,7 @@ def _compute(now):
     return out
 
 
-IN_PROCESS_PROXIED = ('http_probe',)  # the version probes' requests go through cveFeed.pinned_transport, which takes the egress proxy
+IN_PROCESS_PROXIED = ('http_probe', 'alive_check')  # in-process requests through cveFeed.pinned_transport, which takes the egress proxy
 
 
 def _uses_proxy(kind, tools):

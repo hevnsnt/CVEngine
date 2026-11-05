@@ -357,6 +357,7 @@ LOCAL_RUNNERS = {
     'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
+    'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -370,6 +371,7 @@ HEAVY_KINDS = {
     'bbot_discovery': ('bbot-standard', 'bbot-deep', 'bbot-passive'),
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
+    'alive_check': (),
 }
 
 

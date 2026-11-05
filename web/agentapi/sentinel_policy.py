@@ -29,7 +29,7 @@ SHIPPED_BUILTIN = {'openvas': {'mode': 'deny', 'max_concurrent': None}}  # the b
 # The words an administrator reads, for the messages the server writes (the interface has the same list).
 # A kind is named by its own name with the underscores read as spaces, except where an administrator knows it by another word.
 LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF detection', 'bbot_discovery': 'bbot discovery',
-          'http_probe': 'version probes', 'dns_resolve': 'name resolution'}
+          'http_probe': 'version probes', 'dns_resolve': 'name resolution', 'alive_check': 'retired host checks'}
 SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'default')
 
 

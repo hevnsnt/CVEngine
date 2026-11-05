@@ -123,6 +123,13 @@ def for_probes(project_id, planned, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_addresses(project_id, addresses):
+    """The policy of an alive_check task: the last known addresses it asks, each as itself (``zombie.endpoints`` already kept only the ones a
+    scanner may touch, by this server's address rules, which travel along for the scanner to apply again)."""
+    hosts = list(dict.fromkeys(str(a).strip().lower() for a in addresses if str(a).strip()))[:MAX_HOSTS]
+    return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_names(project_id, domain, names, unattended=False):
     """The policy of a dns_resolve task for ``names`` of target ``domain``: each name the target holds that no gate refuses. A lookup asks the
     Sentinel's resolver, never the host, so this is about which names the scanner is told of at all."""
