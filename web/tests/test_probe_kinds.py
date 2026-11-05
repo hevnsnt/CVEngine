@@ -3,17 +3,18 @@ a Sentinel reports, and each stage end to end through the fake built-in scanner,
 import os
 from unittest import mock
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import discovery, ledger, probe_scope, probes
-from cveFeed.models import HostExclusion, ProbeObservation, ServiceRun
+from cveFeed import changes, discovery, ledger, probe_scope, probes
+from cveFeed.models import AssetChange, HostExclusion, HostState, ProbeObservation, ServiceRun
 from startScan.models import Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
+from tests.test_changes import ChangeFixture
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
 
 HOST = 'www.example.test'
@@ -224,3 +225,62 @@ class ResultTests(SimpleTestCase):
         for kind in ('http_probe', 'dns_resolve'):
             sent = fixture(kind)
             self.assertEqual(broker.clean_result(kind, sent), sent, kind)
+
+
+class AliveCheckStageTests(ChangeFixture, TestCase):
+    """The retire check of a full scan (``changes._retire``): the names that vanished are looked up by the scanner (``dns_resolve``) and their last
+    known addresses asked by it (``alive_check``): the web check first, then a bare connect for a host that answered nowhere."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.addCleanup(mock.patch.stopall)
+        self.guards = [assert_ran_nowhere_locally(self, 'alive_check'), assert_ran_nowhere_locally(self, 'dns_resolve')]
+        changes.record_scan_changes(self.baseline().id, resolver=lambda names: set())
+        # a.ct.test (a web port) and b.ct.test (ssh only) are gone from the second scan, and neither resolves any more
+        self.second = self.scan({'c.ct.test': {'ip': '203.0.113.7', 'ports': [(80, 'http', '', '')]}})
+        self.asked = []
+
+    def responders(self, web_alive=False, error=False):
+        gone = fixture('dns_resolve', resolved={}, errors={}, refused=[])
+
+        def alive(task):
+            self.asked.append([(c['host'], c['ip'], c['port'], c['scheme']) for c in task['target']['checks']])
+            rows = []
+            for c in task['target']['checks']:
+                row = {'id': c['id'], 'alive': web_alive and c['scheme'] != 'tcp' or c['scheme'] == 'tcp'}
+                if error:
+                    row = {'id': c['id'], 'alive': False, 'error': 'TimeoutError'}
+                rows.append(row)
+            return {'outcome': 'done', 'checks': rows, 'touched': [c['ip'] for c in task['target']['checks']], 'refused': []}
+        return {'dns_resolve': gone, 'alive_check': alive}
+
+    def test_an_address_that_still_answers_makes_a_zombie_not_a_retired_host(self):
+        with FakeScanner(kinds=['dns_resolve', 'alive_check'], responders=self.responders(web_alive=True)) as fake:
+            out = changes.record_scan_changes(self.second.id)
+        self.assertEqual(fake.served_kinds(), ['dns_resolve', 'alive_check', 'alive_check'])
+        self.assertEqual(self.asked[0], [('a.ct.test', '203.0.113.5', 443, 'https')])  # the web check: only the host that had a web port
+        self.assertEqual(self.asked[1], [('b.ct.test', '203.0.113.6', 22, 'tcp')])  # the connect: only the host the web check found nothing on
+        self.assertEqual((out['zombies'], out['retired']), (1, 1))
+        self.assertIsNotNone(HostState.objects.get(host='a.ct.test').zombie_since)
+        retired = AssetChange.objects.get(kind='host_retired')
+        self.assertEqual((retired.host, retired.after), ('b.ct.test', {'tcp_alive': ['203.0.113.6:22']}))
+        for guard in self.guards:
+            self.assertEqual(guard.calls, [])
+
+    def test_a_check_the_scanner_could_not_answer_never_retires_the_host(self):
+        with FakeScanner(kinds=['dns_resolve', 'alive_check'], responders=self.responders(error=True)):
+            out = changes.record_scan_changes(self.second.id)
+        self.assertEqual(out['retired'], 1)  # b.ct.test had no web port: nothing unknown about it
+        self.assertIsNone(HostState.objects.get(host='a.ct.test').retired_at)  # unknown: asked again at the next scan
+        self.assertEqual(AssetChange.objects.get(kind='host_retired').host, 'b.ct.test')
+
+    def test_with_the_scanner_offline_nothing_is_retired_and_the_hosts_wait(self):
+        with FakeScanner(kinds=['dns_resolve', 'alive_check'], mode='offline') as fake:
+            out = changes.record_scan_changes(self.second.id)
+        self.assertEqual(fake.served, [])
+        self.assertEqual((out.get('retired', 0), out.get('zombies', 0)), (0, 0))
+        self.assertFalse(AssetChange.objects.filter(kind__in=('host_retired', 'zombie_host')).exists())
+        for guard in self.guards:
+            self.assertEqual(guard.calls, [])

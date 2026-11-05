@@ -17,7 +17,8 @@ FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
            'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify', 'node2shell': 'node2shell',
-           'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate'}
+           'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate',
+           'alive_check': 'alive_check'}
 
 
 V1_SHA256 = {

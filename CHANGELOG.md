@@ -13,6 +13,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   discovery pipeline's DNS lookups as `dns_resolve`, on a Sentinel that declares contract 3. Each task carries a scope policy the server computes
   (the names it may ask, what is excluded, the address rules), and the Sentinel holds every hop to it, redirects and script reads included, and
   reports the hosts it touched. With no such Sentinel, or with the kinds left on `CVENGINE_LOCAL_FALLBACK`, they run here as before.
+- **The retire check on the scanner**: a full scan's retire check looks up the vanished names through `dns_resolve` and asks their last known
+  addresses whether they still answer through `alive_check` (the zombie check: a web request as the old name, then a bare connect). A check the
+  scanner could not answer never retires a host, and with no scanner able to take the work nothing is retired until one can.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
