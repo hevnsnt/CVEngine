@@ -2,6 +2,16 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## v1.3.6 (2026-11-05)
+
+### Fixed
+
+- **The all-projects dashboard no longer overloads a small server.** An install with about 4,100 scans on a 3-core VPS ran at a load of 8 and swapped, and nearly all of it was one query repeated: the live ticker's open-ports count, which took 6 to 18 s and, when its snapshot went cold, was run by six requests at once. Three changes:
+  - **The three ticker counts (live hosts, addresses, open ports) read the host list once.** They used to be three nested queries that each repeated the whole host walk inside them; the addresses and ports are now looked up through their link tables by id. The numbers are the same (`tests/test_discovery_counts_query.py` checks the new result against the old query).
+  - **A computed snapshot is kept for ten minutes, not three times its freshness window, and a request with nothing to serve waits up to ten seconds for the one computing it** (it waited two). A slow count therefore leaves an old copy to serve while one request recomputes it, instead of an empty key that sends every poll to compute it at once. The lock of a computing request lasts 45 s (was 20).
+  - **A Live page waits at least twice as long as a slow answer took before it asks again** (`static/cve/poll.js`). It already polled one request at a time, paused in a hidden tab and backed off on errors; it now also backs off when the server is slow but not failing, so a busy server is not met with more of the same question.
+- No migration, no setting to change, nothing to run after the update.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes

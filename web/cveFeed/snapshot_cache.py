@@ -32,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 REVISION_KEY = 'cvengine:stats:revision'
 STALE_FACTOR = 3  # a snapshot is kept this many times as long as it is fresh, to serve while one request refreshes it
-LOCK_SECONDS = 20  # a winner that dies leaves the lock this long at most
-WAIT_SECONDS = 2.0  # a request with nothing to serve waits this long for the winner before computing for itself
+STALE_KEEP_SECONDS = 600  # ...and at least this long: a count that takes longer than three freshness windows to compute must not leave the key empty,
+# or every request that finds it empty computes the count itself, all at once (the stampede that overloaded a 3-core host with six identical 6 to 18 s queries)
+LOCK_SECONDS = 45  # a winner that dies leaves the lock this long at most (a slow compute must not lose its lock while it still runs)
+WAIT_SECONDS = 10.0  # a request with nothing to serve waits this long for the winner before computing for itself
 WAIT_STEP = 0.05
 
 HOT_KEY = 'cve:snap:hot'  # {'<name>:<scope>': recipe}: the scopes asked for lately, and how to recompute each
@@ -286,7 +288,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         count(name, 'miss')
         entry = _build(compute, etag_of, rev)
         try:
-            cache.set(key, entry, int(fresh * STALE_FACTOR) or 1)
+            cache.set(key, entry, max(int(fresh * STALE_FACTOR) or 1, STALE_KEEP_SECONDS))
         except Exception:  # noqa: BLE001
             logger.warning('could not store the %s snapshot: the cache is not answering', name)
         return entry
