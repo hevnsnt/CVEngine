@@ -1514,7 +1514,8 @@ class SupplyChainTests(SimpleTestCase):
 
     def test_the_digests_in_the_docs_are_the_ones_the_compose_file_runs(self):
         doc = (ROOT / 'docs' / 'OPENVAS.md').read_text()
-        for digest in re.findall(r'@sha256:([0-9a-f]{64})', (ROOT / 'docker-compose.yml').read_text()):
+        # the Greenbone images only: the built-in scanner's image is pinned by scanner.lock.json and checked in test_compose
+        for digest in re.findall(r'registry\.community\.greenbone\.net/\S+?@sha256:([0-9a-f]{64})', (ROOT / 'docker-compose.yml').read_text()):
             self.assertIn(digest, doc)
 
 

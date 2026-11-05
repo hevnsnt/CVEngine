@@ -16,13 +16,6 @@ from cveFeed.models import CVEEntry
 logger = logging.getLogger(__name__)
 
 
-@app.task(name='assessment_review', bind=False, queue='cve_feed_queue')
-def assessment_review_task(review_id=None):
-    """Three-hour AI coverage review, continued in bounded project pages."""
-    from cveFeed.assessment_review import run_page
-    return run_page(review_id)
-
-
 @app.task(name='rediscover_archived_hosts', bind=False, queue='cve_feed_queue')
 def rediscover_archived_hosts(run_id=None):
     from cveFeed.archive_rediscovery import run_page
@@ -45,8 +38,8 @@ def review_unresolved_hosts(run_id=None):
 
 @app.task(name='top_up_host_assessments', bind=False, queue='discovery_queue')
 def top_up_host_assessments():
-    """Every few minutes: enqueue due host assessments directly (no model call), draining a coverage backlog far
-    faster than the three-hour AI review's one-due-host-per-project-per-window pace (see cveFeed.coverage_topup)."""
+    """Every few minutes: enqueue due host assessments directly (no model call), so a coverage backlog drains in hours (see
+    cveFeed.coverage_topup)."""
     from cveFeed.coverage_topup import top_up
     return top_up()
 
@@ -1692,12 +1685,9 @@ def assess_hosts(self, assessment_ids):
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
 def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None):
     """Hosts that just changed, through the host pipeline again with the CVE checks forced (see cveFeed.retest)."""
-    from datetime import timedelta
     from django.utils import timezone
-    from cveFeed.discovery import SUCCESS, run_host_pipeline
+    from cveFeed.discovery import run_host_pipeline
     from cveFeed.models import DeferredRetest
-    from cveFeed import ledger, retest
-    from cveFeed import scanner_wait as retest_scanner_wait
     from cveFeed.bounty_gate import Gate
     from targetApp.models import Domain
     if Gate().project_blocked(Domain.objects.values_list('project_id', flat=True).filter(pk=domain_id).first()):  # a bug bounty project that has not confirmed automated testing
@@ -1710,11 +1700,27 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     if rows and DeferredRetest.objects.filter(pk__in=[r.pk for r in rows], status__in=['dispatching', 'queued']).update(
             status='running', updated_at=timezone.now()) != len(rows):
         return {'status': 'skipped', 'error': 'retest request was already claimed'}
+    then = ('retest.finish', {'domain_id': domain_id, 'names': list(names), 'row_ids': [r.pk for r in rows], 'deferred_ids': list(deferred_ids or [])})
     try:
-        outcome = run_host_pipeline(domain_id, names, celery_id=self.request.id, retest=True, source_scan_id=source_scan_id)
+        outcome = run_host_pipeline(domain_id, names, celery_id=self.request.id, retest=True, source_scan_id=source_scan_id, then=then)
     except Exception as exc:
         logger.exception('retest host pipeline failed')
         outcome = {'status': 'failed', 'error': str(exc)[:200]}
+    from agentapi import stage_runs
+    if stage_runs.is_waiting(outcome):  # the stages wait on Sentinels without this worker: the callback records the outcome
+        return outcome
+    return _finish_retest(outcome, **then[1])
+
+
+def _finish_retest(outcome, domain_id, names, row_ids, deferred_ids):
+    """What ``retest_hosts`` does with the pipeline's outcome (also its continuation when the stages waited on Sentinels)."""
+    from datetime import timedelta
+    from django.utils import timezone
+    from cveFeed.discovery import SUCCESS
+    from cveFeed.models import DeferredRetest
+    from cveFeed import ledger, retest
+    from cveFeed import scanner_wait as retest_scanner_wait
+    rows = list(DeferredRetest.objects.filter(pk__in=row_ids)) if row_ids else []
     if rows:
         good = outcome.get('status') == SUCCESS and not outcome.get('error')
         waited = [r.pk for r in rows if r.signature == retest_scanner_wait.SIGNATURE] if outcome.get('scanner_waited') else []
@@ -1742,6 +1748,14 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     return outcome
 
 
+def _register_retest():
+    from agentapi import stage_runs
+    stage_runs.continuation('retest.finish')(_finish_retest)
+
+
+_register_retest()
+
+
 @app.task(name="retest_sweep", bind=False, queue="cve_feed_queue")
 def retest_sweep():
     from cveFeed.retest import dispatch_deferred_retests
@@ -1758,16 +1772,18 @@ def weekly_deep_nuclei():
     """
     from cvengine_scanner import flags as scan_flags
 
-    from cveFeed import activity, ledger, nuclei_scan
+    from cveFeed import ledger, nuclei_scan
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
     from django.db.models import Exists, OuterRef
-    from reNgine import resources
     from startScan.models import Subdomain
     from targetApp.target_types import scannable_hosts
     from django.db import transaction
     from django.utils import timezone
 
+    from agentapi import stage_runs
+    if stage_runs.enabled() and stage_runs.busy('nuclei.weekly'):  # the last host still waits on Sentinels: one deep run at a time
+        return {'status': 'busy'}
     with ledger.claim('weekly-deep-nuclei', 'global') as won:
         if not won:
             return {'status': 'busy'}
@@ -1807,32 +1823,57 @@ def weekly_deep_nuclei():
             targets = [sub.name] + [f'{sub.name}:{port}' for host, port in sorted(ports)
                                     if host == sub.name and port not in scan_flags.NUCLEI_DEFAULT_PORTS][:20]
             BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=sub.pk, updated_at=timezone.now())
-            run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
-                               project=project_id, status='running', scan_id=sub.scan_history_id)
-            try:
-                from agentapi import sentinel_dispatch
-                stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
-                outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
-                if outcome.get('skipped'):  # no scanner could take the work: the host is not marked checked, and is due again when the cursor returns to it
-                    activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {outcome["skipped"]}')
-                    return {'status': 'skipped', 'host': sub.name, 'skipped': outcome['skipped']}
-                if outcome.get('error'):
-                    activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
-                    return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
-                ledger.record(host_service, [sub.name], project_id, sub.scan_history)
-                activity.settle(run, 'done', f'Weekly deep Nuclei completed on {sub.name}: {outcome.get("findings", 0)} new findings')
-                return {'status': 'done', 'host': sub.name, 'targets': len(targets), 'findings': outcome.get('findings', 0)}
-            except resources.ScannerUnavailable as exc:  # the wrap found no scanner for this kind (and it may not run here): wait, do not fail
-                logger.warning('weekly deep Nuclei on host %s is waiting for a scanner: %s', sub.pk, exc)
-                message = f'no scanner could take this work ({exc.kind}); the host stays due until one can'
-                activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {message}')
-                return {'status': 'skipped', 'host': sub.name, 'skipped': message}
-            except Exception:
-                logger.exception('weekly deep Nuclei failed on host %s', sub.pk)
-                activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}; see worker diagnostics')
-                return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+            from agentapi import stage_runs
+            # the host's chunks wait on Sentinels without holding this worker (agentapi.stage_runs): the callback finishes the host
+            context = {'sub_id': sub.pk, 'targets': targets, 'host_service': host_service, 'target_service': target_service}
+            return stage_runs.run('nuclei.weekly', context, first=lambda: _weekly_deep_host(context), project=project_id,
+                                  scan=sub.scan_history_id)
         BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=rows[-1].pk, updated_at=timezone.now())
         return {'status': 'no_due_host', 'reviewed': len(rows)}
+
+
+def _weekly_deep_host(context):
+    """One host of the weekly deep Nuclei pass (``weekly_deep_nuclei``), and the completion callback of one that waited on Sentinels."""
+    from cveFeed import activity, ledger, nuclei_scan
+    from reNgine import resources
+    from startScan.models import Subdomain
+    sub = Subdomain.objects.select_related('scan_history', 'target_domain').filter(pk=context['sub_id']).first()
+    if sub is None:
+        return {'status': 'skipped', 'skipped': 'the host is gone'}
+    project_id, targets = sub.target_domain.project_id, context['targets']
+    host_service, target_service = context['host_service'], context['target_service']
+    run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
+                       project=project_id, status='running', scan_id=sub.scan_history_id)
+    try:
+        from agentapi import sentinel_dispatch
+        stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
+        outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
+        if outcome.get('skipped'):  # no scanner could take the work: the host is not marked checked, and is due again when the cursor returns to it
+            activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {outcome["skipped"]}')
+            return {'status': 'skipped', 'host': sub.name, 'skipped': outcome['skipped']}
+        if outcome.get('error'):
+            activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
+            return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+        ledger.record(host_service, [sub.name], project_id, sub.scan_history)
+        activity.settle(run, 'done', f'Weekly deep Nuclei completed on {sub.name}: {outcome.get("findings", 0)} new findings')
+        return {'status': 'done', 'host': sub.name, 'targets': len(targets), 'findings': outcome.get('findings', 0)}
+    except resources.ScannerUnavailable as exc:  # the wrap found no scanner for this kind (and it may not run here): wait, do not fail
+        logger.warning('weekly deep Nuclei on host %s is waiting for a scanner: %s', sub.pk, exc)
+        message = f'no scanner could take this work ({exc.kind}); the host stays due until one can'
+        activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {message}')
+        return {'status': 'skipped', 'host': sub.name, 'skipped': message}
+    except Exception:
+        logger.exception('weekly deep Nuclei failed on host %s', sub.pk)
+        activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}; see worker diagnostics')
+        return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+
+
+def _register_weekly():
+    from agentapi import stage_runs
+    stage_runs.adapter('nuclei.weekly', queue='cve_feed_queue')(_weekly_deep_host)
+
+
+_register_weekly()
 
 
 @app.task(name="background_full_scan", bind=False, queue="cve_feed_queue")
@@ -2146,12 +2187,38 @@ def reap_stuck_jobs():
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',
                      status='done', requeued=again)
         counts['HostAssessment:requeued'] = again
+    from agentapi import stage_runs
+    again_runs = stage_runs.tick()  # the minute tick's work too, in case beat itself was down: no stage run is left behind by a restart
+    if again_runs:
+        counts.update({f'StageRun:{key}': n for key, n in again_runs.items()})
     scans = reaper.redispatch_queued_scans()
     if scans:
         activity.log('discovery', f'Queued {scans} discovery scan{"s" if scans != 1 else ""} again: their worker message was lost, most likely in a restart',
                      status='done', requeued=scans)
         counts['ScanHistory:requeued'] = scans
     return counts
+
+
+@app.task(name='stage_run_resume', bind=False, queue='discovery_queue')
+def stage_run_resume(run_id):
+    """The completion callback of a stage that waited on Sentinels without its worker: continue it (``agentapi.stage_runs.resume``). Queued on
+    the queue of the stage's own adapter (the discovery queue for a pipeline)."""
+    from agentapi import stage_runs
+    return stage_runs.resume(run_id)
+
+
+@app.task(name='stage_run_drive', bind=False, queue='cve_feed_queue')
+def stage_run_drive(run_id):
+    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``)."""
+    from agentapi import stage_runs
+    return stage_runs.drive(run_id)
+
+
+@app.task(name='stage_runs_tick', bind=False, queue='cve_feed_queue')
+def stage_runs_tick():
+    """Every minute: re-drive the stage runs a restart or a lost message left behind (``agentapi.stage_runs.tick``)."""
+    from agentapi import stage_runs
+    return stage_runs.tick()
 
 
 BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"

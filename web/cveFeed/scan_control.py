@@ -21,6 +21,9 @@ PAUSE_EXEMPT_TASKS = frozenset({
     # The OpenVAS step is exempt so that a pause can reach a GVM task that is already running: while scanning is paused it only stops
     # that task (``openvas_scan.tick``), and never starts or dispatches one.
     'openvas_sweep',
+    # A stage that waits on Sentinels without its worker (agentapi.stage_runs) is work already in flight, as a stage blocked in its worker was: its
+    # callback finishes it during a pause (an update's drain waits for it), and its drive and tick are what let a pause reach its fanned-out tasks.
+    'stage_run_resume', 'stage_run_drive', 'stage_runs_tick',
 })
 
 

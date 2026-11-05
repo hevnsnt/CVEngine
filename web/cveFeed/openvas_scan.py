@@ -1631,7 +1631,16 @@ def dispatch_to_sentinel(link, batch):
     activity.log('run_check', f'Handed {run_label(run)} to a Sentinel', project=link.project_id, sentinel_task_id=task.pk,
                  trace_id=task.trace_id, **run_detail(run))
     log_started(run, via='sentinel')
+    from agentapi import stage_runs
+    # the sweep never waited in a worker for this (each tick polls the task); the watch makes the report import at once, not at the next tick
+    stage_runs.watch('openvas.import', [task.pk], {'run_id': run.pk}, project=link.project)
     return run
+
+
+def _import_reported(context):
+    """The completion callback of a Sentinel's OpenVAS task (``stage_runs.watch``): one sweep step now, which imports the report (``tick`` ->
+    ``poll_sentinel``) and frees the one-at-a-time slot for the next batch."""
+    return tick()
 
 
 # What a Sentinel says when its own stack, not the scan, failed (client/openvas.py raises these before a task exists in gvmd).
@@ -2060,3 +2069,11 @@ def tick(session_factory=None, resolve=None, blocked=None):
                 finish(run, 'failed', 'gvmd could not be reached and the run is past its time budget')
                 return {'run': run.pk, 'status': 'failed', 'error': str(exc)}
             return {'error': str(exc)}
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('openvas.import', queue='openvas_queue')(_import_reported)
+
+
+_register()

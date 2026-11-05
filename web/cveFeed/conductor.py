@@ -8,7 +8,7 @@ never a project whose bug bounty engagement has not confirmed automated testing,
 organization excluded, or anything while scanning is paused (including the pause an update holds).
 
 Everything else that keeps the instance busy (validation of fire and smoke matches, re-tests of changed hosts, the paced full port scan
-and deep nuclei, triage, the AI review every three hours) has its own schedule; this is the part that guarantees the discovery queue
+and deep nuclei, triage, the coverage top-up) has its own schedule; this is the part that guarantees the discovery queue
 never runs dry. Each dispatch is logged in the target's project activity, and the last round is kept for ``status()``.
 """
 import logging

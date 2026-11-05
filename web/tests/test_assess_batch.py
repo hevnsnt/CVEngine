@@ -14,7 +14,6 @@ from django.utils import timezone
 from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent
-from cveFeed import assessment_review as ar
 from cveFeed import coverage_topup, discovery, host_assessment, reaper
 from cveFeed.host_assessment import BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
 from cveFeed.models import HostAssessment, HostState
@@ -521,7 +520,7 @@ class StopTests(Base):
         for other in jobs[1:]:
             self.assertEqual((rows[other.pk].status, rows[other.pk].error), ('stopped', BATCH_STOPPED))
         # the host a person stopped waits out the 24 hours like any attempt; the ones that were only in the same run are due at the next sweep
-        _, due = ar.host_coverage_due(self.project, self.now + timedelta(minutes=1), limit=10, need_count=False)
+        _, due = coverage_topup.host_coverage_due(self.project, self.now + timedelta(minutes=1), limit=10, need_count=False)
         by_pk = {s.pk: s.name for s in Subdomain.objects.filter(pk__in=due)}
         self.assertEqual(sorted(by_pk.values()), sorted(j.host for j in jobs[1:]))
 

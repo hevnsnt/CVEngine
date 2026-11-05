@@ -1301,8 +1301,17 @@ def expire(task, reason=None, actor=None):
     if won:
         audit.record(actor, 'sentinel.task.expire', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=task.agent_id,
                      trace_id=task.trace_id, reason=reason)
+        _ended(task, task.agent_id)
     task.refresh_from_db()
     return task
+
+
+def _ended(task, agent_id=None):
+    """A task ended (reported, failed, expired, cancelled, released): wake the stage waiting for it (a blocking wait through Redis, a StageRun
+    through its callback) and the long poll of the Sentinel whose slot it held. Never raises."""
+    from agentapi import sentinel_notify, stage_runs
+    sentinel_notify.task_changed(task, agent_id)
+    stage_runs.task_ended(task)
 
 
 def reap_expired(now=None):
@@ -1568,6 +1577,8 @@ def _claim(agent, kinds, now):
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
                 task.refresh_from_db()
+                from agentapi import sentinel_notify
+                sentinel_notify.task_changed(task)  # the stage waiting for it starts its completion clock at once
                 audit.record(agent.token.user, 'sentinel.task.claim', _target(task), org=task.project.org_id, task_id=task.pk,
                              trace_id=task.trace_id, agent_id=agent.pk, agent=agent.name)
                 return task, ''
@@ -1600,13 +1611,31 @@ def next_task(ctx, body=None):
             claimed, why = _try_claim(agent, kinds, now)
             if claimed or time.monotonic() >= deadline:
                 break
-            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            _await_work(agent, why, max(0.0, deadline - time.monotonic()))
             agent.refresh_from_db()
             if agent.status != 'active':
                 raise ApiError(403, f'no work can be assigned: the agent is {agent.status}')
     if not claimed:
         return {'task': None, 'reason': why, 'retry_after_seconds': 5 if wait == 0 or held else 1}
     return {'task': task_payload(claimed), 'reason': ''}
+
+
+HELD_BACK = 'no eligible work is queued right now ('  # the start of ``_claim``'s answer when a task was held back for another Sentinel
+
+
+def _await_work(agent, why, left):
+    """Wait, inside a long poll, until there may be work for this Sentinel: a wake-up (``sentinel_notify``: a task it could take was queued, or one
+    of its own ended and freed a slot) or the safety interval (``CVENGINE_SENTINEL_WAKE_POLL_SECONDS``), whichever comes first. A task held back for
+    a Sentinel that prefers it, or a less loaded one, becomes this Sentinel's by time alone, so then it looks again after one second, as it always
+    did. Without Redis it sleeps one second."""
+    from agentapi import sentinel_notify
+    if (why or '').startswith(HELD_BACK) or time.sleep is not _REAL_SLEEP:
+        time.sleep(min(1.0, left))
+        return
+    sentinel_notify.wait_agent(agent.pk, min(float(sentinel_notify.safety_seconds()), left), sleep=lambda s: time.sleep(min(1.0, s)))
+
+
+_REAL_SLEEP = time.sleep
 
 
 def _int(value):
@@ -2237,6 +2266,7 @@ def report_result(ctx, task_id, body):
                                                             error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome='rejected')
+    _ended(task, agent.pk)
     if rejected is not None:
         raise rejected
     task.refresh_from_db()
@@ -2454,8 +2484,10 @@ def _live_overview(ctx):
             'load': {'held': len(mine), **activity['agents'][agent.pk]}})
     from cveFeed import internal_view, openvas_scan
     networks = internal_view.declared_networks()
+    from agentapi import stage_runs
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
+            'stage_runs': stage_runs.metrics(now, project_ids=allowed),  # the stages waiting on Sentinels without a worker (the caller's projects)
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
             'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
 
@@ -2538,5 +2570,6 @@ def cancel_task(ctx, slug, task_id):
         raise ApiError(409, 'the task already finished')
     audit.record(ctx.user, 'sentinel.task.cancel', _target(task), org=project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=task.agent_id)
+    _ended(task, task.agent_id)
     task.refresh_from_db()
     return task_brief(task)

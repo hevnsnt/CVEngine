@@ -119,7 +119,7 @@ which send nothing to the target and need no vantage point.
   expires. External Sentinels enrol the way they do today. Built, on by default (see "The built-in scanner's enrollment" below).
 - **Transport**: HTTP pull for the built-in as well, with the same token, validation and trust model. A second channel would
   be a second code path. Latency is cut inside the one path: a Redis notify wakes the long poll and the dispatcher in place of
-  polling every half second, and the long-poll waiter cap is lifted for the built-in token (built: the instance cap, and a Sentinel's token is never counted against its user's cap).
+  polling every half second, and the long-poll waiter cap is lifted for the built-in token (built: the instance cap, and a Sentinel's token is never counted against its user's cap; the notify is built too, see "Asynchronous stages" below).
 - **Parsing**: the scanner turns tool output into normalised facts and the server validates them (`clean_result`), for every
   kind. The raw-XML exception for UDP goes away, and the server stops parsing hostile XML in its own process.
 - **Policy**: the server decides what to scan (conductor, bounty gate, exclusions, internal ranges, SSRF). The scanner keeps its
@@ -304,4 +304,93 @@ A kind can also wait because it is **turned off**, not because a scanner is gone
 `agentapi/sentinel_policy.py` is the per-Sentinel, per-kind policy: `allow` (the default for a declared kind), `deny` (what `disabled_kinds` always meant) or `prefer`, and a per-kind `max_concurrent`. It lives in `Agent.managed_settings['kinds']` (the same `{value, at, by}` envelope as every managed setting, so last write wins and each change is audited with the map before and after) and, for kinds a Sentinel has no policy for, in `SentinelDefaults.builtin_kinds` (shipped as OpenVAS denied) and `external_kinds`. Resolution per Sentinel and kind: the machine's veto (`disabled_kinds` it reported; the server cannot lift it), the Sentinel's own policy, the instance default of its class (built-in or external), allow. Only a kind the Sentinel declares can be allowed or preferred (`409` otherwise).
 
 `sentinel_broker.effective_capabilities` leaves out every denied kind, so `_claimable`, `refusal`, `capacity_state` and `eligible_sentinels` need no other rule. `_try_claim` then orders: deny, the per-kind cap (a queued task whose kind is at its cap for this Sentinel is skipped, a later task of another kind may be taken), then prefer (a task younger than `prefer_defer_for(kind)`, which is `CVENGINE_SENTINEL_PREFER_DEFER_SECONDS` (default 60, a ceiling) and for every kind but OpenVAS at most the stage claim window less two seconds so a preference never costs a stage its Sentinel, is held back from a Sentinel that does not prefer its kind while another live Sentinel that does is in scope, not updating and has room). `capacity_state` counts the slots of a kind as the sum over the eligible Sentinels of the smaller of their free slots and their headroom under the cap. With `why=True`, a `none` carries `reason` (`disabled`, `offline`, `withheld`, `inactive`, `outdated` or `never`) and a sentence naming each Sentinel that has the kind, which `dispatch_or_none` and the stages pass into the stage message and `ScannerFallback.reason` (`disabled_everywhere` for `disabled`). The OpenVAS tick logs one line per tick naming the state instead of passing silently over a project. The wire format to a Sentinel is unchanged: `settings.disabled_kinds` in the registration and heartbeat replies is derived from the policy (every denied kind), so a client that predates the policy keeps honouring it. After prefer, `_try_claim` balances: a task younger than `balance_defer_for(kind)` (`CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS`, default 60; the same stage-window rule as `prefer_defer_for`, `_stage_window`: at most the claim window less two seconds for every kind but OpenVAS) is passed over by a Sentinel that holds tasks while `_lighter_elsewhere` finds another live Sentinel with a strictly lower `held / max_concurrent` that `_can_take` the task (live, not updating, free slot, per-kind cap, and the same `refusal` as `_preferred_elsewhere`: scope, hosts, credential, internal network, capability). The candidates (`_peers`) and what they hold are read once per `(project, kind)` for one pass (one query for the Sentinels, one for their tasks), with the rights shared with the prefer check, and the answer is memoised like the prefer answer, so a pass over many queued tasks does not query per task; a Sentinel that holds nothing skips the check altogether. A Sentinel that prefers the kind is never held back (prefer wins), the built-in scanner is a symmetric peer (signed-in work is refused to the others by `refusal`), and `CVENGINE_SENTINEL_BALANCE=0` is the kill switch. `activity_metrics` (the last hour's utilisation, finished tasks and queue wait of each Sentinel and kind, and the queue depth by kind) feeds `GET sentinels/live` (`load` per Sentinel, `kinds`) and the system status (`sentinels.load`).
+
+## Asynchronous stages (queue Q4)
+
+Built. A stage that hands work to a Sentinel no longer holds its Celery worker while the Sentinel works. Before this, the stage created the
+`SentinelTask` and polled it every half second until it was reported or a budget ran out, so the scans in flight were capped by the number of
+workers. Now the stage writes its waits to an `agentapi.StageRun` row and returns; the worker takes other work. When the last task of the run
+ends (reported done or failed, expired, cancelled, released), a completion callback continues the stage from where it stopped, persists the
+results as before, and goes on with the next stage. `CVENGINE_ASYNC_STAGES=0` brings back the blocking wait.
+
+**What waits this way.** Every stage that blocked: the nmap fast scan (its naabu sweep and its nmap fingerprint are two waits), the nuclei
+technology and AI-targeted passes, WPScan (in the pipeline and the quick pass), the weekly deep nuclei pass, the testssl.sh sweep, the UDP sweep,
+an internal scan and an internal range's discovery. Their entry points are `discovery._run_pipeline` and `run_host_pipeline` (adapters `pipeline`
+and `pipeline.host`, which also serve host assessments and re-tests through continuations), `internal_scan.run` (`pipeline.internal`),
+`internal_discovery.discover_range` (`internal.discover`), `testssl_scan.sweep_all` (`sweep.testssl`), `udp_scan.run` (`sweep.udp`),
+`tasks.weekly_deep_nuclei` (`nuclei.weekly`) and `wpscan_scan.run_quick` (`wpscan.quick`). OpenVAS never blocked (each tick polls its task);
+its task is now watched (`stage_runs.watch`, adapter `openvas.import`), so a report is imported as soon as it arrives instead of at the next tick. A bbot discovery on a Sentinel (`sentinel_stream.dispatch_stream`, a streamed task) still waits in its worker, because it stores each batch as it arrives; moving it to a run is the `watch` pattern below, with the batches stored by the callback.
+
+**How a stage is continued: replay.** A stage is unchanged code that calls `dispatch_or_none` or `dispatch_many`. Inside a run those calls are
+keyed by kind and target (`stage_runs.task_key`; a WPScan token and the nuclei template policy are left out of the key). The first pass that
+asks for a key creates the task and stops (`stage_runs.Suspend`, a `BaseException`, so a stage's own `except Exception` never takes it for a
+failure). The callback runs the same stage again; this time the call finds its task over and ends it exactly as the blocking wait did:
+
+- the same activity line is closed (`Sentinel X checked in nmap work for ...`, or `No Sentinel picked up ...`);
+- `_no_local` makes the same decision: `ScannerUnavailable` for a kind `CVENGINE_LOCAL_FALLBACK` keeps off this server (the stage says it
+  waits, records nothing in the ledger, releases its claim), or one `ScannerFallback` row with the same reason (`not_claimed_in_time`,
+  `slot_busy`, `failed_then_local`, `completion_timeout`, `over_chunk`, `no_scanner`, `partial_result`) and the local run;
+- `dispatch_many` keeps its window (the free slots, the stage's share, `CVENGINE_STAGE_PARALLEL`), refills it when any chunk ends, stops
+  sending when a chunk goes unclaimed or the last Sentinel leaves, and yields nothing until every chunk is over, so a stage never handles a
+  chunk's result twice. A nuclei pass sends all its targets in one call when it runs this way, so its findings and counts are saved once.
+
+What a stage does before its waits is done again on each pass, so it must be safe to repeat. The ledger makes the scan stages so (a naabu sweep
+that was recorded is not run again). For the rest the engine keeps what an earlier pass did: a pipeline stage that finished returns the result
+it had and its `ScanActivity` row is not made twice (`discovery._stage`); `stage_runs.once(name, fn)` keeps a step that must not repeat (the AI
+targeting plan, an inter-stage carry-forward, the internal scan's address row); an activity line an earlier pass wrote is not written again;
+a fallback row is written once per decision; and a Redis claim taken inside a pass (the ledger's, a sweep's, the discovery lock of the target)
+belongs to the run and is held, not released, while the run waits, then taken back by the next pass.
+
+**The budgets.** The claim budget (8 s), the queue budget for a busy fleet, the completion budget counted from the claim, the reap of a Sentinel
+that stopped heartbeating, the last Sentinel leaving and a stop of the scan (which cancels fanned-out chunks, as before) are kept by
+`stage_runs.drive`: a Celery countdown at the moment the next budget ends, at least once a minute, on `cve_feed_queue`. A stop of a scan
+(`resources.request_abort`) drives its runs at once.
+
+**Restarts.** Nothing lives only in a worker. `stage_runs.tick` (beat, every minute, `stage_runs_tick`, and the 15-minute `reap_stuck_jobs`)
+drives a waiting run whose deadline passed without a drive, queues again the callback of a ready run that never started, and makes ready again a
+run whose pass lost its worker (its lease, renewed every minute while a pass works, ran out); that callback replays the stage. The orphan reaper
+(`reaper.expire_orphaned_running`) leaves a scan or host assessment alone while a run carries it. During an update, old workers' blocking waits
+finish as before; the new table is new, so nothing old writes to it. The callback, the drive and the tick are exempt from the pause gate: they
+finish work already in flight, as a blocked worker did.
+
+**Wake-ups (`agentapi.sentinel_notify`).** A queued task (any creator: a `post_save` hook) pushes a token on
+`cvengine:sentinel:wake:agent:<id>` of every live Sentinel that could take it; a claimed or ended task pushes one on
+`cvengine:sentinel:wake:task:<id>` and, when it ended, on the agent key of the Sentinel whose slot it freed. The long poll (`next_task`) and the
+blocking dispatcher wait with `BLPOP` on those keys instead of sleeping one second or half a second. Each wait still wakes by itself after the
+safety interval (`CVENGINE_SENTINEL_WAKE_POLL_SECONDS`, default 5); a long poll whose task is held back for a preferring or less loaded
+Sentinel looks again after one second, as before, since that task becomes free by time alone. Without Redis the waits sleep as before. A reported
+result wakes its `StageRun` directly: `task_ended` queues the callback in the same request.
+
+**Metrics.** `stage_runs.metrics()`: `waiting` and `waiting_by_kind` (the stage a pipeline waits in, such as `nmap_scan`, or the adapter for a
+sweep), `oldest_wait_seconds`, `ready`, `callback_latency_p50_seconds` and `_p95_seconds` (last task ended to callback started, last hour),
+`slots_freed` (the workers the waiting runs would hold if they blocked: one each), `freed_seconds_1h` and `resumed_1h`. They are in the system
+status (`sentinels.stage_runs`, and a `problems` line when a stage has waited four hours) and in `GET sentinels/live` (`stage_runs`, over the
+caller's projects), shown as a line under the summary of the Sentinels page.
+
+### Writing an adapter for a new kind
+
+A new stage (the WAF fingerprint, `nmap_full`, the probe kinds, `secrets_scan`) gets all of this by calling `dispatch_or_none` or
+`dispatch_many` from a stage that is entered through `stage_runs.run`. The adapter is three things:
+
+```python
+from agentapi import stage_runs
+
+def run_for_scan(scan_id, runner=None):
+    if runner is not None:                       # a test's seam: no StageRun, the stage waits in its worker
+        return _run(scan_id, runner)
+    return stage_runs.run('waf.scan', {'scan_id': scan_id},       # JSON only: ids and flags, never a credential
+                          first=lambda: _run(scan_id, None), scan=scan_id)
+
+def _resume(context):                            # the completion callback: the same work, from the context
+    return _run(context['scan_id'], None)
+
+stage_runs.adapter('waf.scan', queue='discovery_queue')(_resume)  # the queue the work belongs on
+```
+
+and the module goes in `stage_runs.ADAPTER_MODULES`, so a worker that did not import it can still run its callback. Inside a pipeline stage
+(`discovery._run_stages`) nothing more is needed: the `pipeline` adapter replays the pipeline and `_stage` keeps the finished stages. A caller
+that does something with the result passes `then=('<continuation>', {args})` and registers it with `@stage_runs.continuation`; `run` returns
+`stage_runs.is_waiting(result)` while it waits. Code before the dispatch must be safe to repeat: use the ledger, `stage_runs.once`, and
+`stage_runs.remember` / `recall` for a sweep's place in its list (see `testssl_scan.sweep`). A job that creates its own tasks (a streamed bbot job)
+uses `stage_runs.watch(adapter, task_ids, context)` to be called back when they end.
 
