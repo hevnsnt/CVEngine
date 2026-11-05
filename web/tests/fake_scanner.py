@@ -357,6 +357,8 @@ LOCAL_RUNNERS = {
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
     'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
+    'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
+    'dns_resolve': ('cveFeed.discovery.resolve_names',),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -368,6 +370,8 @@ HEAVY_KINDS = {
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
     'bbot_discovery': ('bbot-standard', 'bbot-deep', 'bbot-passive'),
+    'http_probe': (),  # in-process requests: no heavy job
+    'dns_resolve': (),
 }
 
 

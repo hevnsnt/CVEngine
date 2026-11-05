@@ -5,7 +5,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import fingerprint, fullscan, hosting, nmap_scan, route_auth
+from cveFeed import fullscan, hosting, nmap_scan, route_auth
 from cveFeed.models import RouteAuth
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -15,61 +15,6 @@ from targetApp.models import Domain
 
 def names(found):
 	return [f['name'] for f in found]
-
-
-class FingerprintTests(unittest.TestCase):
-	def test_a_netlify_nextjs_site(self):
-		found = fingerprint.from_response(server='Netlify', content_type='text/html', body='<script id="__NEXT_DATA__"></script>')
-		self.assertEqual(names(found), ['Netlify', 'Next.js'])
-		self.assertEqual([f['source'] for f in found], ['header:server', 'page:_next'])
-
-	def test_server_and_powered_by_headers_carry_versions(self):
-		found = fingerprint.from_response(server='nginx/1.25.3 (Ubuntu)', powered_by='PHP/8.2.30')
-		self.assertEqual(names(found), ['nginx:1.25.3', 'PHP:8.2.30'])
-		self.assertEqual(names(fingerprint.from_response(server='Apache/2.4.58 (Ubuntu)')), ['Apache HTTP Server:2.4.58'])
-		self.assertEqual(names(fingerprint.from_response(server='Microsoft-IIS/10.0')), ['Microsoft IIS:10.0'])
-
-	def test_several_powered_by_values(self):
-		self.assertEqual(names(fingerprint.from_response(server='cloudflare', powered_by='Craft CMS, SEOmatic')),
-			['Cloudflare', 'Craft CMS', 'SEOmatic'])
-
-	def test_generator_meta_and_wordpress_paths(self):
-		body = '<meta name="generator" content="WordPress 6.4.2" /><link href="/wp-content/x.css">'
-		self.assertEqual(names(fingerprint.from_response(body=body, content_type='text/html')), ['WordPress:6.4.2'])
-
-	def test_a_php_link_names_php_and_a_header_version_replaces_it(self):
-		body = '<a href="/index.php?x=1">x</a>'
-		self.assertEqual(names(fingerprint.from_response(body=body, content_type='text/html')), ['PHP'])
-		found = fingerprint.from_response(powered_by='PHP/8.2.30', body=body, content_type='text/html')
-		self.assertEqual(names(found), ['PHP:8.2.30'])
-
-	def test_a_page_with_no_php_signs_names_no_php(self):
-		body = '<script src="/_next/static/a.js"></script><img src="https://www.datocms-assets.com/1/a.png">'
-		self.assertNotIn('PHP', ' '.join(names(fingerprint.from_response(server='Netlify', body=body, content_type='text/html'))))
-
-	def test_a_hostile_header_cannot_inject_a_name(self):
-		for value in ('<script>alert(1)</script>/9', 'x' * 80, 'a"b', 'Robert\'); DROP TABLE'):
-			self.assertEqual(names(fingerprint.from_response(powered_by=value)), [], value)
-		found = fingerprint.from_response(server='nginx/1.2<b>', powered_by='')
-		for name in names(found):
-			self.assertNotRegex(name, r'[<>"\']')
-
-	def test_names_are_capped(self):
-		body = ''.join(f'<meta name="x{i}">' for i in range(100)) + '__NEXT_DATA__ /_nuxt/ /wp-content/ Drupal.settings cdn.shopify.com csrfmiddlewaretoken .php'
-		self.assertLessEqual(len(fingerprint.from_response(server='Netlify', powered_by=', '.join(f'P{i}' for i in range(50)), body=body, content_type='text/html')),
-			fingerprint.MAX_FINGERPRINTS)
-
-	def test_a_body_that_is_not_html_is_not_searched(self):
-		self.assertEqual(fingerprint.from_response(body='/wp-content/', content_type='application/json'), [])
-
-	def test_categories(self):
-		self.assertEqual(fingerprint.categorize('PHP:8.2.30'), 'language')
-		self.assertEqual(fingerprint.categorize('nginx:1.25.3'), 'web server')
-		self.assertEqual(fingerprint.categorize('Next.js'), 'framework')
-		self.assertEqual(fingerprint.categorize('google-tag-manager'), 'analytics')
-		self.assertEqual(fingerprint.categorize('datocms'), 'cms')
-		self.assertEqual(fingerprint.categorize('Netlify'), 'hosting')
-		self.assertEqual(fingerprint.categorize('mystery'), '')
 
 
 class ClassifyTests(unittest.TestCase):

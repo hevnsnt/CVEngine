@@ -69,10 +69,14 @@ def _compute(now):
     return out
 
 
+IN_PROCESS_PROXIED = ('http_probe',)  # the version probes' requests go through cveFeed.pinned_transport, which takes the egress proxy
+
+
 def _uses_proxy(kind, tools):
     """Whether a run of ``kind`` takes the egress proxy: its tool (the kind's name, or the part before the first underscore) is one of
-    ``egress_proxy.TOOLS``. A kind that runs on raw sockets never did, so the proxy is no part of its vantage point."""
-    return kind in tools or kind.split('_')[0] in tools
+    ``egress_proxy.TOOLS``, or it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw sockets, or only asks
+    a resolver, never did, so the proxy is no part of its vantage point."""
+    return kind in tools or kind.split('_')[0] in tools or kind in IN_PROCESS_PROXIED
 
 
 def tailscale_enabled():

@@ -1012,7 +1012,7 @@ def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
 
 
 @scanner_wait.requeues(_named_hosts)
-def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, retest=False, source_scan_id=None,
+def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=False, source_scan_id=None,
                       force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
@@ -1090,7 +1090,15 @@ def run_host_pipeline(domain_id, names, resolver=resolve_names, celery_id=None, 
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
             lookup_errors = {}
-            pairs = resolver(wanted, errors=lookup_errors) if resolver is resolve_names else resolver(wanted)
+            if resolver is None or resolver is resolve_names:  # through a Sentinel when one can take dns_resolve (agentapi.probe_dispatch), else here
+                from agentapi import probe_dispatch
+                try:
+                    pairs = probe_dispatch.resolve_for(domain, wanted, errors=lookup_errors, scan=scan)
+                except resources.ScannerUnavailable as exc:  # no scanner can resolve them and it may not run here: nothing is recorded, all stay due
+                    pairs = set()
+                    lookup_errors.update({name: f'waiting for a scanner ({exc.why or "none is live"})'[:120] for name in wanted})
+            else:
+                pairs = resolver(wanted)
             if lookup_errors:  # a name whose lookup was not answered is not recorded as a host with no address: the next pass looks again
                 wanted = [n for n in wanted if n not in lookup_errors]
                 activity.log('discovery', f'DNS could not answer {len(lookup_errors)} lookup{"s" if len(lookup_errors) != 1 else ""} for {domain.name} '
