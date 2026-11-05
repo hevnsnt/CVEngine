@@ -20,6 +20,8 @@ import logging
 import os
 import tempfile
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import auth_checks
 
 logger = logging.getLogger(__name__)
@@ -156,7 +158,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                                         except (KeyError, TypeError):
                                             continue
                                         data['tags'] = [*(data.get('tags') or []), auth_checks.SEEN_TAG]
-                                        host = nuclei_scan.host_of(line)
+                                        host = scan_flags.host_of(line)
                                         if template_gates.held_back(line, by_name.get(host)):
                                             continue  # a template that matches patched releases too, on a patched host
                                         vuln, created = save_vulnerability(

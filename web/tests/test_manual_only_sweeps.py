@@ -289,9 +289,9 @@ class SharedHostTests(PlainWorld):
             _admit(w.project, Subdomain.objects.select_related('target_domain').get(pk=w.found.pk))
 
     def test_the_coverage_backlog_counts_the_host_through_the_standard_targets_row(self):
-        from cveFeed import assessment_review
+        from cveFeed import coverage_topup
         w = self.shared()
-        count, due = assessment_review.host_coverage_due(w.project, self.now)
+        count, due = coverage_topup.host_coverage_due(w.project, self.now)
         self.assertEqual(due, [w.scanned.pk])  # the row of the target that may be scanned, not the manual only one
 
 

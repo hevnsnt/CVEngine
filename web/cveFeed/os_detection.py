@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # kernel names of VMs that sit behind NAT: Docker Desktop (linuxkit; moby, the name of the kernel it was first built with), WSL 2, OrbStack, and
 # boot2docker (docker-machine, Docker Toolbox). Colima, Podman machine and Rancher Desktop on macOS run a distribution kernel with no name of its
 # own, so only the daily path measurement can tell: a marker for them would also match hosts that are on the LAN.
-KERNEL_MARKERS = ('linuxkit', 'moby', 'microsoft', 'wsl2', 'orbstack', 'boot2docker')
+from cvengine_scanner.flags import KERNEL_MARKERS  # noqa: E402 - the same list a Sentinel reads its own kernel against
 PATH_CACHE_KEY = 'cvengine:os-path'
 PATH_TTL = 8 * 86400  # a verdict is kept this long; the daily check renews it
 

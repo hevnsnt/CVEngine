@@ -301,13 +301,6 @@ class WatchdogTests(unittest.TestCase):
 
 
 class CallerReactionTests(unittest.TestCase):
-    def test_nuclei_light_profile_lowers_concurrency_and_rate(self):
-        from cveFeed import nuclei_scan
-        normal, light = nuclei_scan.build_flags(), nuclei_scan.build_flags(profile='light')
-        self.assertEqual(normal[normal.index('-c') + 1], '40')
-        self.assertEqual((light[light.index('-c') + 1], light[light.index('-rl') + 1], light[light.index('-bs') + 1]), ('10', '50', '10'))
-        self.assertEqual(nuclei_scan.build_flags(['rce', 'apache'], 'light')[-2:], ['-tags', 'apache,rce'])
-
     def test_nmap_chunks_are_halved_after_a_memory_kill_and_everything_is_scanned(self):
         from cveFeed import nmap_scan
         calls = []

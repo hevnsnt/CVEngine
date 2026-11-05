@@ -386,6 +386,16 @@ class PerformanceReviewTests(SimpleTestCase):
             self.assertEqual(performance_review.failure_cause(text), 'other', text)
         self.assertEqual(performance_review.failure_cause('nmap on 1 address waited too long for memory (10 MB free)'), 'capacity')
 
+    def test_failure_cause_separates_capacity_from_configuration(self):
+        for message in ('nmap on web1 waited too long for memory (210 MB free, needs 600 MB)', 'Nuclei timed out',
+                        'probe exceeded its total time budget', 'Nuclei exited with status -9', 'nmap exited with status 137'):
+            self.assertEqual(performance_review.failure_cause(message), 'capacity', message)
+        for message in ('Nuclei template library is unavailable', 'No installed Nuclei templates passed the read-only policy',
+                        'invalid probe URL', 'www.example.com is not scanned: the program has not confirmed automated testing'):
+            self.assertEqual(performance_review.failure_cause(message), 'configuration', message)
+        for message in ('nmap exited with status 1', 'nmap returned no XML report', '', None):
+            self.assertEqual(performance_review.failure_cause(message), 'other', message)
+
 
 class MemoryPressureResponseTests(SimpleTestCase):
     def test_the_error_is_a_memory_busy_for_waiting_but_carries_its_kind_for_the_wording(self):

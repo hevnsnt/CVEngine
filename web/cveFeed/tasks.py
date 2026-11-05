@@ -16,13 +16,6 @@ from cveFeed.models import CVEEntry
 logger = logging.getLogger(__name__)
 
 
-@app.task(name='assessment_review', bind=False, queue='cve_feed_queue')
-def assessment_review_task(review_id=None):
-    """Three-hour AI coverage review, continued in bounded project pages."""
-    from cveFeed.assessment_review import run_page
-    return run_page(review_id)
-
-
 @app.task(name='rediscover_archived_hosts', bind=False, queue='cve_feed_queue')
 def rediscover_archived_hosts(run_id=None):
     from cveFeed.archive_rediscovery import run_page
@@ -45,8 +38,8 @@ def review_unresolved_hosts(run_id=None):
 
 @app.task(name='top_up_host_assessments', bind=False, queue='discovery_queue')
 def top_up_host_assessments():
-    """Every few minutes: enqueue due host assessments directly (no model call), draining a coverage backlog far
-    faster than the three-hour AI review's one-due-host-per-project-per-window pace (see cveFeed.coverage_topup)."""
+    """Every few minutes: enqueue due host assessments directly (no model call), so a coverage backlog drains in hours (see
+    cveFeed.coverage_topup)."""
     from cveFeed.coverage_topup import top_up
     return top_up()
 
@@ -73,6 +66,14 @@ def testssl_sweep():
     a minute-per-port test never holds up the feed workers."""
     from cveFeed import testssl_scan
     return testssl_scan.sweep_all()
+
+
+@app.task(name='secrets_validate_hosts', bind=False, queue='vhost_queue')
+def secrets_validate_hosts(project_id, hosts, user_id=None):
+    """A person asked to validate a secret (``agentapi.secrets_api.request_validation``): the built-in scanner reads its hosts again and checks what it
+    finds with the allow-listed read-only validators (see ``cveFeed.secrets_validation``). On the slow, polite queue: it waits for the scanner."""
+    from cveFeed import secrets_scan
+    return secrets_scan.validate_hosts(project_id, hosts, user_id)
 
 
 @app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
@@ -1740,6 +1741,8 @@ def weekly_deep_nuclei():
     from overlapping another. The cursor and successful-only seven-day ledger make
     progress durable without queuing thousands of deep jobs at once.
     """
+    from cvengine_scanner import flags as scan_flags
+
     from cveFeed import activity, ledger, nuclei_scan
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
@@ -1787,7 +1790,7 @@ def weekly_deep_nuclei():
             if sub.name not in hostnames:
                 continue
             targets = [sub.name] + [f'{sub.name}:{port}' for host, port in sorted(ports)
-                                    if host == sub.name and port not in nuclei_scan.DEFAULT_PORTS][:20]
+                                    if host == sub.name and port not in scan_flags.NUCLEI_DEFAULT_PORTS][:20]
             BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=sub.pk, updated_at=timezone.now())
             run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
                                project=project_id, status='running', scan_id=sub.scan_history_id)

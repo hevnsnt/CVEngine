@@ -134,7 +134,7 @@ def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_b
 
 def start_in_stored_modes(domains, quiet=False, initiated_by=None):
     """Queue discovery of each domain in the mode stored on it (``Domain.discovery_mode``): the way every start that nobody asked for
-    one by one goes (the work conductor, the assessment review, a Tailscale sweep, a move), so a target added as passive is never
+    one by one goes (the work conductor, a Tailscale sweep, a move), so a target added as passive is never
     rescanned in standard. A manual only target ("just add it, do not scan yet") is left out. Returns the scans of the rest; targets
     of one mode are queued together, each group in the order given."""
     from targetApp.models import Domain
@@ -845,6 +845,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                           fallback={'routes': 0})
     if stopped(scan_id):
         return gone
+    from cveFeed import secrets_scan
+
+    def run_secrets():  # Kingfisher over the routes just probed and the front pages' own scripts, in a scanner only (docs/SECRETS-PLAN.md 6.1)
+        try:
+            return secrets_scan.run_for_scan(scan_id, force=bool(retest or force))
+        except resources.ScannerUnavailable as exc:  # no scanner takes it, and it never runs here: the stage waits, the hosts stay due
+            return _waiting_for_scanner(scan, 'Secrets scan', exc, {'hosts': 0})
+    secrets_result = _stage(scan, 'Secrets scan (Kingfisher)', 'secrets_scan', run_secrets, fallback={'hosts': 0})
+    if stopped(scan_id):
+        return gone
     from cveFeed import probes, wpscan_scan
     probe_kwargs = {k: v for k, v in (('get', probe_get), ('nmap_runner', probe_nmap)) if v}
     if retest or force:
@@ -933,7 +943,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     found['failed_stages'] = failed_names
     if hygiene and not hygiene_host:
         run_hygiene_task.delay(scan.domain_id)  # certificates and email authentication for what was just found
-    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result,
+    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
               'correlation': correlation, 'nuclei_targeted': targeted_result, 'triage': triage_result,
               'asset_changes': changes_result}
     if hygiene_result is not None:

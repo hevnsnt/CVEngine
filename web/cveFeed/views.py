@@ -367,6 +367,7 @@ SECTIONS = {
     'vulns': 'Findings',
     'matches': 'CVE matches',
     'hygiene': 'Hygiene',
+    'secrets': 'Secrets',
     'suppliers': 'Suppliers',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
