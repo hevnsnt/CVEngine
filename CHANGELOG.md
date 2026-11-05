@@ -19,6 +19,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
   The defences follow the attacks SpikeStrip and wraith describe. Settings, AI model has the switches (`GET/PUT /cve/api/settings/reviewer`); `CVENGINE_REVIEWER=0` turns it off. Migrations `cveFeed.0144` and `cveFeed.0145` add the review, alert and settings tables and the two schedules.
 
+- **Seven more scan tools run on the scanner** (Sentinel contract version 3, [docs/SCANNER-ARCHITECTURE.md](docs/SCANNER-ARCHITECTURE.md#b-tool-work-that-became-sentinel-kinds-in-contract-version-3)). The background full port sweep (`nmap_full`), the nmap service probe (`nmap_verify`), the node2shell check, the RDP screenshot (`rdp_shot`), the database exposure check (`db_probe`), the scan path check (`path_probe`) and the AI template check (`nuclei_validate`) are now Sentinel kinds, and the wafw00f stage dispatches the `waf` kind it already had. Each stage asks a scanner first and runs here only when `CVENGINE_LOCAL_FALLBACK` allows it; otherwise it waits and its targets stay due. The path check and the template check go only to the built-in scanner. A Sentinel asks for the new kinds only from a server that has them, so 1.3 servers are unaffected.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes

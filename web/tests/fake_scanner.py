@@ -354,6 +354,15 @@ LOCAL_RUNNERS = {
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'waf': ('cveFeed.waf_scan.run_wafw00f',),
+    'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
+    'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
+                    'cveFeed.nmap_scan.run_nmap_args'),
+    'node2shell': ('cveFeed.node2shell_scan.run_check',),
+    'rdp_shot': ('cveFeed.rdp_shot.capture',),
+    'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
+    'path_probe': ('cveFeed.path_probe.send_probe',),
+    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -364,6 +373,14 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
+    'waf': ('route-probe',),
+    'nmap_full': ('nmap-full-bg',),
+    'nmap_verify': ('nmap',),
+    'node2shell': ('route-probe',),
+    'rdp_shot': (),
+    'db_probe': ('route-probe',),
+    'path_probe': (),
+    'nuclei_validate': ('template-test',),
 }
 
 

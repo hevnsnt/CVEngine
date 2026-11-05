@@ -60,6 +60,11 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60)}  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
+# Kinds only the built-in scanner takes: what they measure or run belongs to this install, not to a network a Sentinel was set up for. ``path_probe``
+# measures the path this install's scans leave from (``cveFeed.os_detection`` keeps one verdict for it), and ``nuclei_validate`` runs an AI-written
+# template the server has not approved yet, on the scanner's own loopback or against a host, where the server ran it before.
+BUILTIN_KINDS = ('path_probe', 'nuclei_validate')
+BUILTIN = 'built-in only'  # the refusal reason of such a task offered to any other Sentinel
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
@@ -768,7 +773,9 @@ class SentinelEff:
         if task.kind not in self.caps:
             return 'capability', task.kind
         if task.secret_ref and not self.builtin:
-            return 'capability', SIGNED_IN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
+            return 'capability', SIGNED_IN
+        if task.kind in BUILTIN_KINDS and not self.builtin:
+            return 'capability', BUILTIN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
@@ -831,6 +838,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones. ``builtin_only`` keeps only the
     built-in scanner: the candidates for signed-in work, which no other Sentinel may be offered."""
     now = now or timezone.now()
+    builtin_only = builtin_only or kind in BUILTIN_KINDS
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False)
     if builtin_only:
@@ -923,6 +931,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     kind and its policy denies it), ``offline`` (an active one has it and none is live), ``withheld`` (a live one has it and keeps failing it, or is too old
     to run it), ``inactive`` (one has it but is pending or suspended) or ``never`` (none ever declared it). Left off, the cheap answer a dispatch gate needs."""
     now = now or timezone.now()
+    builtin_only = builtin_only or kind in BUILTIN_KINDS  # a kind only the built-in scanner takes has no other slots
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if builtin_only:
         own = builtin_pk()
@@ -2046,19 +2055,174 @@ def _clean_waf_result(body):
     return {'products': out, 'generic': body.get('generic') is True}
 
 
+def _clean_nmap_report(body):
+    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.nmap_scan.parse_xml``, hardened
+    against a custom ENTITY declaration, is the one reader of an nmap report, local or not). Only the size is bounded here."""
+    return _clean_nmap_udp_result(body)
+
+
+MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT and what cveFeed.node2shell_scan keeps of a response
+
+
+def _clean_node2shell_result(body):
+    """The vendored node2shell detector's verdict on one URL (``cveFeed.node2shell_scan.run_check``'s shape): ``vulnerable`` is True, False or None
+    (inconclusive), and only the verdict, the reason, the status code and a bounded excerpt of the response are kept. A ``vulnerable`` that is not
+    a boolean is read as inconclusive, never as a finding."""
+    vulnerable = body.get('vulnerable')
+    if 'vulnerable' not in body or vulnerable not in (True, False, None):
+        raise ApiError(400, 'vulnerable must be true, false or null')
+    status = body.get('status_code')
+    return {'vulnerable': vulnerable, 'verdict': _text(body.get('verdict'), 40), 'reason': _text(body.get('reason'), 300),
+            'status_code': status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None,
+            'evidence': _text(body.get('evidence'), MAX_NODE2SHELL_EVIDENCE)}
+
+
+MAX_RDP_IMAGE_BYTES = 4 * 1024 * 1024  # matches cveFeed.rdp_shot.MAX_IMAGE_BYTES
+MAX_RDP_IMAGE_SIDE = 4096  # a capture is 1024x768; a PNG that claims more is not one, and is never handed to an image library
+_PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+
+
+def _clean_rdp_shot_result(body):
+    """An RDP pre-authentication screenshot: ``painted`` and, when it painted, the PNG (base64). The image is checked before anything opens it: valid
+    base64, at most ``MAX_RDP_IMAGE_BYTES``, a PNG signature and an ``IHDR`` whose sides are at most ``MAX_RDP_IMAGE_SIDE``, so a hostile host or
+    Sentinel cannot hand the server's image library a decompression bomb. A capture that fails these is refused; a frame with nothing painted
+    carries no image."""
+    import struct
+    if not isinstance(body.get('painted'), bool):
+        raise ApiError(400, 'painted must be true or false')
+    if not body['painted']:
+        return {'painted': False}
+    raw = body.get('image')
+    if not isinstance(raw, str) or not raw or len(raw) > (MAX_RDP_IMAGE_BYTES + 2) // 3 * 4:
+        raise ApiError(400, f'image must be a base64 PNG of at most {MAX_RDP_IMAGE_BYTES} bytes')
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, 'image is not valid base64') from None
+    if len(data) > MAX_RDP_IMAGE_BYTES or len(data) < 33 or not data.startswith(_PNG_SIGNATURE) or data[12:16] != b'IHDR':
+        raise ApiError(400, 'image is not a PNG')
+    width, height = struct.unpack('>II', data[16:24])
+    if not (0 < width <= MAX_RDP_IMAGE_SIDE and 0 < height <= MAX_RDP_IMAGE_SIDE):
+        raise ApiError(400, f'image sides must be at most {MAX_RDP_IMAGE_SIDE} pixels')
+    return {'painted': True, 'image': raw}
+
+
+def _clean_db_probe_result(body):
+    """One credential-less database probe: ``open`` (True: the one attempt was let through; None: the Sentinel has no client for this database) and
+    the short reply it kept as evidence (a version, or a count of database names, never their content)."""
+    opened = body.get('open')
+    if 'open' not in body or opened not in (True, False, None):
+        raise ApiError(400, 'open must be true, false or null')
+    return {'open': opened, 'evidence': _text(body.get('evidence'), 300) if opened else ''}
+
+
+MAX_PATH_TARGETS = 8  # matches cveFeed.path_probe.MAX_TARGETS
+
+
+def _clean_path_probe_result(body):
+    """The path survey of the built-in scanner (``cveFeed.path_probe.survey``'s shape): for each probed address, whether the plain SYN and the
+    FIN+PSH+URG segment drew a reset. A row that is not well formed is dropped; ``odd`` is None where it was not sent."""
+    rows = body.get('results')
+    if not isinstance(rows, list) or len(rows) > MAX_PATH_TARGETS:
+        raise ApiError(400, f'results must be a list of at most {MAX_PATH_TARGETS} entries')
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or _address(row.get('ip')) is None or not isinstance(row.get('plain'), bool):
+            continue
+        port = row.get('port')
+        if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+            continue
+        odd = row.get('odd') if row['plain'] and isinstance(row.get('odd'), bool) else None
+        out.append({'ip': _address(row['ip']), 'port': port, 'plain': row['plain'], 'odd': odd})
+    return {'results': out}
+
+
+_HIT_STR = {'template-id': 200, 'template': 500, 'matcher-name': 200, 'matched-at': 500, 'host': 500, 'ip': 60, 'type': 20, 'request': 8000,
+            'response': 8000, 'curl-command': 8000}
+MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most targets one template test names
+
+
+def _clean_hit(hit):
+    """The first nuclei result line of a host, as ``cveFeed.templategen._trim_hit`` keeps it, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    and the validation record read. Anything else is dropped."""
+    if not isinstance(hit, dict):
+        return None
+    out = {key: _text(hit.get(key), limit) for key, limit in _HIT_STR.items() if isinstance(hit.get(key), str)}
+    if isinstance(hit.get('matcher-status'), bool):
+        out['matcher-status'] = hit['matcher-status']
+    extracted = hit.get('extracted-results')
+    if isinstance(extracted, list):
+        out['extracted-results'] = [_text(e, 500) for e in extracted if isinstance(e, str)][:MAX_EXTRACTED]
+    info = hit.get('info') if isinstance(hit.get('info'), dict) else {}
+    clean_info = {'name': _text(info.get('name'), 200), 'description': _text(info.get('description'), 500),
+                  'severity': info.get('severity') if info.get('severity') in _SEVERITIES else 'unknown',
+                  'tags': [_text(t, 40) for t in (info.get('tags') if isinstance(info.get('tags'), list) else []) if isinstance(t, str)][:MAX_TAGS]}
+    classification = info.get('classification') if isinstance(info.get('classification'), dict) else {}
+    cves = classification.get('cve-id')
+    clean_info['classification'] = {'cve-id': [_text(c, 40) for c in cves if isinstance(c, str)][:MAX_CVE_IDS] if isinstance(cves, list) else []}
+    out['info'] = clean_info
+    return out
+
+
+def _clean_nuclei_validate_result(body):
+    """An AI-written or approved template's check on the built-in scanner. Mode ``validate``: whether ``nuclei -validate`` accepted it, its output, and
+    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``cveFeed.templategen._run_template``'s shape), a
+    hit counted only with its result line. Which mode it was is the task's, so both halves are cleaned and the caller reads its own."""
+    out = {}
+    if 'valid' in body:
+        out['valid'] = body.get('valid') is True
+        out['output'] = _text(body.get('output'), 2000)
+        out['fixture_ok'] = body.get('fixture_ok') if isinstance(body.get('fixture_ok'), bool) else None
+        out['fixture_note'] = _text(body.get('fixture_note'), 300)
+    if 'outcomes' in body:
+        rows = body.get('outcomes')
+        if not isinstance(rows, list) or len(rows) > MAX_TEMPLATE_OUTCOMES:
+            raise ApiError(400, f'outcomes must be a list of at most {MAX_TEMPLATE_OUTCOMES} entries')
+        kept = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get('host'), str) or not row['host'].strip():
+                continue
+            hit = _clean_hit(row.get('hit'))
+            item = {'host': _text(row['host'], 500), 'vulnerable': row.get('vulnerable') is True and hit is not None,
+                    'output': _text(row.get('output'), 2000), 'hit': hit if row.get('vulnerable') is True else None}
+            if row.get('error'):
+                item['error'] = _text(row['error'], 300)
+            kept.append(item)
+        out['outcomes'] = kept
+    if not out:
+        raise ApiError(400, 'a nuclei_validate result carries valid (validate) or outcomes (test)')
+    return out
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result, 'waf': _clean_waf_result}
+             'discover': _clean_discover_result, 'waf': _clean_waf_result, 'nmap_full': _clean_nmap_report, 'nmap_verify': _clean_nmap_report,
+             'node2shell': _clean_node2shell_result, 'rdp_shot': _clean_rdp_shot_result, 'db_probe': _clean_db_probe_result,
+             'path_probe': _clean_path_probe_result, 'nuclei_validate': _clean_nuclei_validate_result}
 
 
 def _bind_to_task(kind, result, task):
     """``result`` (already typed and clipped) cut down to what ``task`` actually asked about: an nmap host or naabu address that was not among the
     task's addresses, or a nuclei finding on a host that was not among its targets, is dropped (and counted in ``dropped``), never stored. Without
     this a Sentinel scoped to one project could write port rows for any address of the organization, which are per organization, not per project."""
-    if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+    if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result
     target = task.target if isinstance(task.target, dict) else {}
+    if kind == 'path_probe':
+        asked = {(_address(t.get('ip')), t.get('port')) for t in target.get('targets') or [] if isinstance(t, dict)}
+        kept = [r for r in result['results'] if (r['ip'], r['port']) in asked]
+        dropped = len(result['results']) - len(kept)
+        result = {**result, 'results': kept}
+        return {**result, 'dropped': dropped} if dropped else result
+    if kind == 'nuclei_validate':
+        if 'outcomes' not in result:
+            return result
+        asked = [t for t in target.get('targets') or [] if isinstance(t, str)]
+        kept = [o for o in result['outcomes'] if o['host'] in asked]
+        dropped = len(result['outcomes']) - len(kept)
+        result = {**result, 'outcomes': kept}
+        return {**result, 'dropped': dropped} if dropped else result
     if kind in ('nmap', 'naabu'):
         asked = {a for a in map(_address, [*(target.get('addresses') or []), *(task.ips or [])]) if a}
         if kind == 'nmap':

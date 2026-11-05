@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
 INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design: never part of a vantage-point warning
-NO_STAGE = ('waf',)  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (drop when one does)
+NO_STAGE = ()  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (empty since 1.4: every kind has a stage)
 
 
 def _empty():
@@ -40,7 +40,7 @@ def _compute(now):
         return _empty()
     offered, denied, live_pks = set(), set(), set()
     for eff in sentinel_broker._live_scanners(now):
-        offered |= eff.caps
+        offered |= eff.caps if eff.builtin else eff.caps - set(sentinel_broker.BUILTIN_KINDS)  # only the built-in scanner takes those
         live_pks.add(eff.agent.pk)
         # a kind it has (declared, or turned off on its machine) and its policy turns off
         denied |= {k for k in eff.denied if k in (eff.agent.capabilities or []) or eff.policy[k]['machine']}

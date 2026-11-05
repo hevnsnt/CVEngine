@@ -207,15 +207,25 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
         return xml
 
     from cveFeed import local_egress
+    from reNgine.resources import ScannerUnavailable
     running = activity.log('run_check', f'Background full port scan of {address} (all 65,535 TCP ports; this can take a while)',
                            project=project, status='running')
+    hosts = None  # the Sentinel's host records when a scanner swept it
     try:
-        with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
-            # the egress governor: a budgeted port (25 by default) over its hourly budget is left out of this sweep and probed later by the
-            # paced catch-up pass; within budget the sweep is exactly as before
-            held = local_egress.plan([address], set(local_egress.budgets()), 'full port sweep').get(address)
-            flags = local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, held) if held else nmap_scan.FULL_PORT_FLAGS
-            nmap_scan.scan_in_chunks(capture, [address], flags, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
+        if runner is None:  # an injected runner (a test) is never second-guessed
+            hosts = _sentinel_sweep(ip, project)
+        if hosts is not None:
+            nmap_scan.persist_inventory(hosts, org_id=ip.org_id)
+        else:
+            with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
+                # the egress governor: a budgeted port (25 by default) over its hourly budget is left out of this sweep and probed later by the
+                # paced catch-up pass; within budget the sweep is exactly as before
+                held = local_egress.plan([address], set(local_egress.budgets()), 'full port sweep').get(address)
+                flags = local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, held) if held else nmap_scan.FULL_PORT_FLAGS
+                nmap_scan.scan_in_chunks(capture, [address], flags, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
+    except ScannerUnavailable as exc:  # no scanner could take it and it may not run here: not the address's failure, it is swept later
+        activity.settle(running, 'done', message=f'Background full port scan of {address} is waiting: no scanner could take this work ({exc.kind})')
+        return {'ip': address, 'ok': False, 'error': 'ScannerUnavailable'}
     except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
         from reNgine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
@@ -225,11 +235,10 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
                         + (f'; next try after {retry:%Y-%m-%d %H:%M} UTC' if retry else ''))
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
     found, timedout = set(), False
-    for xml in seen:
-        for host in nmap_scan.parse_xml(xml):
-            if host.get('ip') == address:
-                found.update(_open_tcp(host))
-                timedout = timedout or bool(host.get('timedout'))
+    for host in hosts if hosts is not None else [h for xml in seen for h in nmap_scan.parse_xml(xml)]:
+        if host.get('ip') == address:
+            found.update(_open_tcp(host))
+            timedout = timedout or bool(host.get('timedout'))
     if timedout:  # --host-timeout cut the sweep short: the ports above are a partial answer, not a clean sweep of 65,535
         retry = _back_off(ip)
         activity.settle(running, 'failed', message=f'Background full port scan of {address}: nmap gave up on the host at its time limit '
@@ -270,6 +279,23 @@ def _advance(ip, ports):
     if ports is not None:
         fields['full_scan_ports'] = ports
     IpAddress.objects.filter(pk=ip.pk).update(**fields)
+
+
+def _sentinel_sweep(ip, project_id):
+    """The host records of a sweep of ``ip`` on a scanner (``sentinel_dispatch.try_nmap_full``), or ``None`` to sweep it here. The address's scope is
+    read again first, as a local sweep does after its resource wait."""
+    from agentapi import sentinel_dispatch
+    _require_current_scope([ip.address], ip.org_id)
+    return sentinel_dispatch.try_nmap_full(sentinel_dispatch._project_of(project_id), ip.address)
+
+
+def _sentinel_fingerprint(ip, project_id, ports):
+    """The host records of the -sV pass on ``ports`` of ``ip`` on a scanner (``nmap_verify`` at the intensity of ``FINGERPRINT_FLAGS``), or ``None`` to
+    run it here."""
+    from agentapi import sentinel_dispatch
+    _require_current_scope([ip.address], ip.org_id)
+    target = sentinel_dispatch.nmap_verify_target(ip.address, ports, intensity=int(FINGERPRINT_FLAGS[FINGERPRINT_FLAGS.index('--version-intensity') + 1]))
+    return sentinel_dispatch.try_nmap_verify(sentinel_dispatch._project_of(project_id), target)
 
 
 def _sweep_runner(targets, flags, host_timeout, org_id=None):
@@ -316,15 +342,19 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
     out = {'ports': ports, 'capped': len(set(new_ports)) > len(ports)}
     try:
         from cveFeed import local_egress
-        with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
-            held = local_egress.plan([ip.address], set(ports), 'new port fingerprint').get(ip.address, frozenset())
-            wanted = [p for p in ports if p not in held]  # a held port is owed to the paced catch-up pass, which fingerprints it
-            fingerprinted = {'ports': 0}
-            if wanted:
-                flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(wanted)]
-                fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
-                                                         nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
-        out['fingerprinted'] = fingerprinted.get('ports', 0)
+        hosts = _sentinel_fingerprint(ip, project, ports) if runner is None else None  # an injected runner (a test) is never second-guessed
+        if hosts is not None:
+            out['fingerprinted'] = nmap_scan.persist_inventory(hosts, org_id=ip.org_id).get('ports', 0)
+        else:
+            with local_egress.context(kind='nmap-full', project=project, org_id=ip.org_id):
+                held = local_egress.plan([ip.address], set(ports), 'new port fingerprint').get(ip.address, frozenset())
+                wanted = [p for p in ports if p not in held]  # a held port is owed to the paced catch-up pass, which fingerprints it
+                fingerprinted = {'ports': 0}
+                if wanted:
+                    flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(wanted)]
+                    fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
+                                                             nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
+            out['fingerprinted'] = fingerprinted.get('ports', 0)
     except Exception as exc:  # noqa: BLE001 - the ports are recorded; their versions arrive with the next fingerprint
         logger.warning('could not fingerprint new ports %s on %s', ports, ip.address, exc_info=True)
         out['fingerprint_error'] = str(exc)[:200]

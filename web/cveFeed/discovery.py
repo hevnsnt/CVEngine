@@ -701,7 +701,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if retest or force:
         rdp_kwargs['force'] = True
     rdp_result = None
-    if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
+    if (rdp_capturer or rdp_shot.runnable(scan.domain.project_id)) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
         if stopped(scan_id):
@@ -741,7 +741,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if retest or force:
         waf_kwargs['force'] = True
     waf_result = None
-    if waf_scan.enabled() and (waf_runner or waf_scan.installed()) and waf_scan.web_sites(scan):  # the product behind a host's firewall
+    if waf_scan.enabled() and (waf_runner or waf_scan.runnable(scan.domain.project_id)) and waf_scan.web_sites(scan):  # the product behind a host's firewall
         waf_result = _stage(scan, 'WAF fingerprint (wafw00f)', 'wafw00f', lambda: waf_scan.run_for_scan(scan_id, **waf_kwargs),
                             fallback={'checked': 0})
         if stopped(scan_id):
