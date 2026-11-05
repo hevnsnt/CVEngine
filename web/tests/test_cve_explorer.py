@@ -80,7 +80,7 @@ class QueryShapeTests(TestCase):
 
 	def test_the_product_expression_is_the_one_the_index_covers(self):
 		from importlib import import_module
-		migration = import_module('cveFeed.migrations.0147_cve_explorer_search_index')
+		migration = import_module('cveFeed.migrations.0149_cve_explorer_search_index')
 		self.assertIn(cve_explorer.PRODUCTS_SQL, migration.PRODUCTS_INDEX)
 		self.assertIn(cve_explorer.TITLE_SQL, migration.TITLE_INDEX)
 
