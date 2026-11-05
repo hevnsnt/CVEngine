@@ -12,7 +12,7 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import scanner_state, sentinel_dispatch
+from agentapi import scanner_state, sentinel_contract, sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import conductor, testssl_scan, udp_scan, wpscan_scan
@@ -58,7 +58,7 @@ class SentinelWorld(FallbackEnv):
         self.project = Project.objects.create(name='W', slug='waiting-p', insert_date=timezone.now(), org=self.org)
         self.count = 0
 
-    def sentinel(self, capabilities, status='active', seen='now', token_revoked=False):
+    def sentinel(self, capabilities, status='active', seen='now', token_revoked=False, contract=None):
         self.count += 1
         user = User.objects.create_user(f'waiting-owner-{self.count}', password='x')
         token, _raw = create_token(user, f'waiting-token-{self.count}')
@@ -67,7 +67,8 @@ class SentinelWorld(FallbackEnv):
             token.save(update_fields=['revoked'])
         last_seen = {'now': timezone.now(), 'old': timezone.now() - timedelta(hours=2), None: None}[seen]
         return Agent.objects.create(token=token, name=f'sentinel-{self.count}', kind='scanner', status=status, capabilities=capabilities,
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen)
+                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen,
+                                    info={'contract_version': contract} if contract is not None else {})
 
 
 class HelperTests(SentinelWorld, TestCase):
@@ -133,7 +134,7 @@ class HelperTests(SentinelWorld, TestCase):
 
     def test_a_live_sentinel_for_every_kind_is_not_offline(self):
         self.policy('none')
-        self.sentinel(ALL_KINDS)
+        self.sentinel(ALL_KINDS, contract=sentinel_contract.version())  # a kind newer than what a Sentinel declares is never offered it
         self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
     def test_a_registered_sentinel_that_is_not_live_waits_but_was_seen(self):
@@ -382,7 +383,7 @@ class SystemStatusTests(SentinelWorld, TestCase):
 
     def test_a_live_scanner_for_everything_is_quiet(self):
         self.policy('none')
-        self.sentinel(ALL_KINDS)
+        self.sentinel(ALL_KINDS, contract=sentinel_contract.version())
         scanner = self.status(self.t_root)['scanning']['scanner']
         self.assertFalse(scanner['offline'])
 

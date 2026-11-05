@@ -354,6 +354,8 @@ LOCAL_RUNNERS = {
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
+    'dns_resolve': ('cveFeed.discovery.resolve_names',),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -364,6 +366,8 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
+    'http_probe': (),  # in-process requests: no heavy job
+    'dns_resolve': (),
 }
 
 

@@ -6,6 +6,11 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Added
 
+- **Version probes and discovery lookups on the scanner** (contract version 3). The version and identity probes run as the `http_probe` kind and the
+  discovery pipeline's DNS lookups as `dns_resolve`, on a Sentinel that declares contract 3. Each task carries a scope policy the server computes
+  (the names it may ask, what is excluded, the address rules), and the Sentinel holds every hop to it, redirects and script reads included, and
+  reports the hosts it touched. With no such Sentinel, or with the kinds left on `CVENGINE_LOCAL_FALLBACK`, they run here as before.
+
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
   - **Operations check** (Haiku 5.5 by default). It runs four times a day and covers idle Sentinels, scanning that ran on the server instead of the Sentinels, nuclei template freshness, Sentinel and scan failures, the server's own problems, AI-written templates waiting for review, and failing AI calls. Problems become admin alerts, a banner for App Admins; the server raises and resolves them every 30 minutes even without an AI. The reviewer adds a diagnosis to each alert and may give idle Sentinels work or fetch new nuclei templates, only when a check offers that.

@@ -28,6 +28,8 @@ export const SENTINEL_KINDS = [
   "wpscan",
   "openvas",
   "discover",
+  "http_probe",
+  "dns_resolve",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -40,6 +42,8 @@ const KIND_WORDS = {
   wpscan: "WPScan",
   openvas: "OpenVAS",
   discover: "internal discovery",
+  http_probe: "version probes",
+  dns_resolve: "name resolution",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {

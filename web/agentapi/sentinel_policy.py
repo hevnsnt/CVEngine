@@ -28,7 +28,8 @@ MODES = ('allow', 'deny', 'prefer')
 SHIPPED_BUILTIN = {'openvas': {'mode': 'deny', 'max_concurrent': None}}  # the built-in scanner does not run OpenVAS until an administrator says so
 # The words an administrator reads, for the messages the server writes (the interface has the same list).
 # A kind is named by its own name with the underscores read as spaces, except where an administrator knows it by another word.
-LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF detection'}
+LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF detection', 'http_probe': 'version probes',
+          'dns_resolve': 'name resolution'}
 SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'default')
 
 
