@@ -73,7 +73,6 @@ SCOPES = {
     'cveFeed.DeferredRetest': 'project_id',
     'cveFeed.OnDemandValidation': 'project_id',
     'cveFeed.AutomaticValidation': 'project_id',
-    'cveFeed.AssessmentReviewDecision': 'project_id',
     'cveFeed.StatsSnapshot': 'project_id',
     'cveFeed.ProjectSettings': 'project_id',
     'cveFeed.RunZeroSync': 'project_id',

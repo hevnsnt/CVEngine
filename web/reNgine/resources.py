@@ -405,23 +405,9 @@ def base_cap(kind):
 
 
 def max_concurrent(kind):
-    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it now, through ``base_cap``: the step the old
-    three-hour review kept in Redis (``cvengine:adaptive:max:<kind>``) is no longer read, so a leftover one changes nothing."""
+    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it, through ``base_cap``: the step the retired
+    capacity review kept in Redis (``cvengine:adaptive:max:<kind>``) is not read, so a leftover one changes nothing."""
     return max(1, base_cap(kind))
-
-
-def adaptive_bounds(kind, baseline=None):
-    """The range the three-hour review's candidate is judged against (cveFeed.performance_review, which now only reports). The cap an App Admin
-    saved is the default maximum; HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen it as before. The auto-tuner has its own range per kind
-    (cveFeed.autotune.envelope), which HEAVY_TUNE_MIN/MAX_<KIND> also narrow or widen."""
-    baseline = baseline or base_cap(kind)
-    saved = _admin_cap(kind)
-    suffix = kind.upper().replace('-', '_')
-    env_low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
-    env_high = int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline)
-    if saved is None:
-        return env_low, max(env_low, env_high)
-    return min(env_low, saved), max(env_high, saved)
 
 
 def cost_mb(kind):

@@ -165,23 +165,6 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(next(row for row in data['workers'] if row['worker'] == 'cve_feed_worker')['active'], 1)
 		self.assertNotIn('private-secret-marker', str(data))
 
-	def test_assessment_review_status_is_app_admin_only_and_bounded(self):
-		from datetime import timedelta
-		from cveFeed.models import AssessmentReview, AssessmentReviewDecision
-		now = timezone.now()
-		review = AssessmentReview.objects.create(period_start=now-timedelta(hours=3), period_end=now,
-			status='completed', total_projects=2, reviewed_projects=2, queued_actions=1,
-			performance={'status': 'no_change', 'reason': 'Insufficient telemetry'})
-		AssessmentReviewDecision.objects.create(review=review, project=self.pa, action='triage', status='queued',
-			reason='pending findings')
-		with mock.patch('reNgine.celery.app.control.inspect') as inspector:
-			inspector.return_value.active_queues.return_value = {}
-			status, data = api(client_for(self.root), 'GET', 'health')
-		self.assertEqual(status, 200)
-		self.assertEqual(data['assessment_review']['id'], review.id)
-		self.assertEqual(data['assessment_review']['recent_decisions'][0]['project'], self.pa.slug)
-		self.assertEqual(api(client_for(self.admin_a), 'GET', 'health')[0], 403)
-
 	def test_archive_rediscovery_health_reports_real_progress(self):
 		from cveFeed.models import ArchiveRediscovery, HostState
 		domain = Domain.objects.create(name='health-archive.example', project=self.pa, insert_date=timezone.now())
@@ -472,7 +455,6 @@ class AccountAndPasswordTests(TestCase):
 		self.assertTrue({'account.password_change', 'account.mfa_enable', 'token.create', 'token.revoke'} <= seen, seen)
 		self.assertTrue(all(r.actor_name == 'jane' for r in AuditLog.objects.filter(action__startswith='token.')))
 		self.assertNotIn('zz-token-name', json.dumps(list(AuditLog.objects.values_list('detail', 'target'))))  # no token name or secret
-
 
 
 class ClassicRetiredTests(TestCase):

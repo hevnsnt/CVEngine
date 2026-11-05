@@ -22,6 +22,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   The defences follow the attacks SpikeStrip and wraith describe. Settings, AI model has the switches (`GET/PUT /cve/api/settings/reviewer`); `CVENGINE_REVIEWER=0` turns it off. Migrations `cveFeed.0144` and `cveFeed.0145` add the review, alert and settings tables and the two schedules.
 - **The AI reviewer container makes the triage's model calls** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#the-pipelines-ai-jobs)). The triage of every finding and its local-check suggestions no longer call the AI provider from the web and Celery containers: they queue an AI job (`AIJob`, migration `cveFeed.0146`, with a five-minute housekeeping schedule), the container takes it over the new `/api/v1/reviewer/jobs/next` and `/api/v1/reviewer/jobs/<id>/result` routes (reviewer token only), makes the request the server used to make (every provider, the same reply limits, structured output, reasoning and Ollama settings, ported to `cvengine_reviewer.llm`), and posts the reply back; the server checks it with the same validator and applies it as before, with the same budgets, caps, ceilings and the one repair of a rejected reply. With `CVENGINE_REVIEWER=0` the jobs wait and Settings > AI model says AI is waiting for the reviewer container. Auto-fire picks its hosts from the answers already stored; a question it queues is applied when it lands. The reviewer image's unit tests run in CI.
 
+### Removed
+
+- **The three-hourly AI assessment review is retired.** The AI reviewer's operations check ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#operations-check-in-detail)) replaces it, and the deterministic coverage top-up and the auto-tuner already did the rest of its work. Migration `cveFeed.0148` removes its schedule and its two tables (`AssessmentReview`, `AssessmentReviewDecision`); the capacity report it kept (`performance_review.review`) and the Scheduler health panel that showed both go with it. The coverage query it shared moves to `cveFeed.coverage_topup`.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes

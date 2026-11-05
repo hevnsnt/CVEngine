@@ -16,13 +16,6 @@ from cveFeed.models import CVEEntry
 logger = logging.getLogger(__name__)
 
 
-@app.task(name='assessment_review', bind=False, queue='cve_feed_queue')
-def assessment_review_task(review_id=None):
-    """Three-hour AI coverage review, continued in bounded project pages."""
-    from cveFeed.assessment_review import run_page
-    return run_page(review_id)
-
-
 @app.task(name='rediscover_archived_hosts', bind=False, queue='cve_feed_queue')
 def rediscover_archived_hosts(run_id=None):
     from cveFeed.archive_rediscovery import run_page
@@ -45,8 +38,8 @@ def review_unresolved_hosts(run_id=None):
 
 @app.task(name='top_up_host_assessments', bind=False, queue='discovery_queue')
 def top_up_host_assessments():
-    """Every few minutes: enqueue due host assessments directly (no model call), draining a coverage backlog far
-    faster than the three-hour AI review's one-due-host-per-project-per-window pace (see cveFeed.coverage_topup)."""
+    """Every few minutes: enqueue due host assessments directly (no model call), so a coverage backlog drains in hours (see
+    cveFeed.coverage_topup)."""
     from cveFeed.coverage_topup import top_up
     return top_up()
 

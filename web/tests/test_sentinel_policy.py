@@ -363,7 +363,7 @@ class ProjectRotationTests(TestCase):
         seen = []
         with mock.patch.object(coverage_topup, 'PROJECT_LIMIT', 2), mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
                 mock.patch('cveFeed.unresolved_archive.recheck', return_value={}), \
-                mock.patch('cveFeed.assessment_review.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
+                mock.patch('cveFeed.coverage_topup.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
                 mock.patch('cveFeed.host_assessment.active_count', return_value=0):
             for _ in range(4):
                 coverage_topup.top_up()

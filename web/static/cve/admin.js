@@ -1038,22 +1038,6 @@ async function healthTab(panel) {
       { label: "Oldest", render: (r) => shortDate(r[1].oldest) },
     ], Object.entries(data.jobs).filter(([kind]) => kind !== "scans")));
     output.append(el("p", "note", `${data.jobs.scans.pending} scans queued; ${data.jobs.scans.running} running.`));
-    output.append(el("h3", "", "Three-hour assessment review"));
-    const review = data.assessment_review;
-    output.append(el("p", "note", data.scanning_paused ? "Scanning is paused; review dispatch waits for resume." :
-      review ? `Review #${review.id} · ${review.status} · ${review.reviewed}/${review.total} project summaries processed · ${review.model_calls} AI attempts · ${review.actions} actions queued · ${review.errors} deferred or failed. Started ${shortDate(review.started_at)}.${review.note ? ` ${review.note}` : ""}` :
-        "No assessment review has run yet. The three-hour Beat schedule appears below."));
-    if (review) {
-      const performance = review.performance || {};
-      output.append(el("p", "note", `Capacity review: ${performance.status || "pending"}. ${performance.reason || "No measurement yet."}`));
-      if (performance.status === "changed") output.append(el("p", "note", `${performance.kind}: admission cap ${performance.before} → ${performance.after}${performance.rollback ? " (rollback)" : ""}.`));
-      if (review.recent_decisions.length) output.append(table([
-        { label: "Project", render: (r) => r.project },
-        { label: "Decision", render: (r) => r.action },
-        { label: "Status", render: (r) => r.status },
-        { label: "Why / job", render: (r) => `${r.reason}${r.job_id ? ` · job #${r.job_id}` : ""}` },
-      ], review.recent_decisions));
-    }
     const archived = data.archive_rediscovery;
     if (archived) {
       output.append(el("h3", "", "Archived asset rediscovery"));

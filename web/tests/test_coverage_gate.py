@@ -11,7 +11,6 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from django.utils import timezone
 
-from cveFeed import assessment_review as ar
 from cveFeed import coverage_topup, fullscan, udp_scan
 from cveFeed.models import ScanControl
 from dashboard.models import Org, Project
@@ -24,7 +23,7 @@ def fully_covered(domain, engine, host):
     """A Subdomain with every core stage completed: not part of any backlog."""
     scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2, results_dir='/tmp')
     sub = Subdomain.objects.create(target_domain=domain, scan_history=scan, name=host)
-    for stage in ar.HOST_STAGES:
+    for stage in coverage_topup.HOST_STAGES:
         ScanActivity.objects.create(scan_of=scan, name=stage, title=stage, status=2, time=timezone.now())
     return sub
 

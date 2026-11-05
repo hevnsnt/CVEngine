@@ -134,7 +134,7 @@ def start_discovery(domain, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_b
 
 def start_in_stored_modes(domains, quiet=False, initiated_by=None):
     """Queue discovery of each domain in the mode stored on it (``Domain.discovery_mode``): the way every start that nobody asked for
-    one by one goes (the work conductor, the assessment review, a Tailscale sweep, a move), so a target added as passive is never
+    one by one goes (the work conductor, a Tailscale sweep, a move), so a target added as passive is never
     rescanned in standard. A manual only target ("just add it, do not scan yet") is left out. Returns the scans of the rest; targets
     of one mode are queued together, each group in the order given."""
     from targetApp.models import Domain
