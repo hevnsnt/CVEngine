@@ -5,6 +5,8 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import nmap_scan
 from cveFeed.models import AgentActivity
 from dashboard.models import Org, Project
@@ -170,7 +172,7 @@ class RunNmapForScanTests(TestCase):
 		result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
 		self.assertEqual([c[1:] for c in calls], [(nmap_scan.FAST_FLAGS, nmap_scan.HOST_TIMEOUT_FAST)])
 		self.assertEqual(nmap_scan.FAST_FLAGS, ['-sV', '--version-intensity', '7', '-O', '--osscan-limit', '--top-ports', '1000', '-Pn',
-			'-T4', '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', '--script', ','.join(nmap_scan.NSE_SCRIPTS),
+			'-T4', '--max-retries', '2', '--min-hostgroup', '32', '--defeat-rst-ratelimit', '--script', ','.join(scan_flags.NSE_SCRIPTS),
 			'--script-timeout', '30s'])
 		self.assertEqual(calls[0][0], ['192.0.2.10'])  # IPs only, never the hostname
 		self.assertEqual(result, {'targets': 1, 'reused': 0, 'fast': {'ports': 1, 'hosts_with_os': 1}})

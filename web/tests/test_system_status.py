@@ -236,7 +236,7 @@ class SystemStatusTests(TestCase):
 		self.assertEqual(data['overall'], 'degraded')
 		self.assertEqual(data['system']['broker'], {'error': 'ConnectionError'})
 		self.assertTrue(any(p.startswith('broker:') for p in data['problems']))
-		self.assertNotIn('secret', str(data))  # the error text itself is never returned
+		self.assertNotIn('secret', str(data).replace("'secrets_scan'", "'<kind>'"))  # the error text itself is never returned
 		self.assertTrue(data['system']['database']['ok'])  # the other probes still ran
 
 	def test_workers_that_do_not_answer_are_a_problem(self):
@@ -323,7 +323,7 @@ class SystemStatusTests(TestCase):
 
 	def test_no_address_or_credential_is_returned(self):
 		_, data = self.run_status(self.t_root)
-		text = str(data).lower()
+		text = str(data).lower().replace("'secrets_scan'", "'<kind>'")  # a task kind's name, listed per kind, is not a credential
 		for word in ('redis://', 'postgres://', 'password', 'secret', 'api_key'):
 			self.assertNotIn(word, text)
 

@@ -335,7 +335,7 @@ class FeatureGateTests(SecretBase):
         status, out = call(self.t['builtin'], 'POST', '/api/v1/sentinel/tasks/next', {'kinds': ['nuclei_targeted']})
         self.assertEqual(status, 200, out)
         self.assertIsNone(out.get('task'))
-        self.assertEqual(sentinels.capacity_state(self.pa, 'nuclei_targeted', builtin_only=True)['state'], 'none')
+        self.assertEqual(sentinels.capacity_state(self.pa, 'nuclei_targeted', builtin_only=True, secret=True)['state'], 'none')
 
     def test_the_offer_says_it_is_signed_in_and_carries_no_value(self):
         self.task(agent=None, status='queued')

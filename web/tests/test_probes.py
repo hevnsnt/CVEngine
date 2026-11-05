@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase, TestCase
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import probes
 from cveFeed.models import ProbeObservation, ServiceRun
 from startScan.models import IpAddress, Port, Subdomain, Technology
@@ -185,8 +187,7 @@ class NmapProbeTests(SimpleTestCase):
         argv = probes.nmap_argv('203.0.113.5', 443, 'https')
         self.assertEqual(argv[1:6], ['-sV', '--version-all', '-Pn', '-p', '443'])
         scripts = argv[argv.index('--script') + 1].split(',')
-        from cveFeed import nmap_scan
-        self.assertTrue(set(scripts) <= nmap_scan.NSE_SCRIPT_SET)
+        self.assertTrue(set(scripts) <= scan_flags.NSE_SCRIPT_SET)
         self.assertNotIn('--script=', ' '.join(argv))
         self.assertEqual(argv[-1], '203.0.113.5')
 

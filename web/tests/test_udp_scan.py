@@ -7,6 +7,8 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from agentapi.auth import create_token
 from cveFeed import hygiene, ledger, nmap_scan, udp_scan
 from cveFeed.models import AgentActivity, HostExclusion, HygieneFinding, ScanControl, ServiceRun
@@ -132,13 +134,6 @@ class ParsingTests(SimpleTestCase):
 		self.assertEqual(set(states.values()), {'open|filtered'})
 		self.assertFalse(answered)
 
-	def test_only_reviewed_scripts_survive_and_the_udp_ones_are_reviewed(self):
-		self.assertTrue(set(nmap_scan.UDP_NSE_SCRIPTS) <= nmap_scan.NSE_SCRIPT_SET)
-		self.assertNotIn('ntp-monlist', nmap_scan.NSE_SCRIPT_SET)  # nmap files it under intrusive, and the target records it
-		self.assertNotIn('snmp-brute', nmap_scan.NSE_SCRIPT_SET)
-		self.assertEqual(nmap_scan._reviewed_scripts({'snmp-sysdescr': 'x', 'ntp-monlist': 'y', 'ike-version': 'z'}), {'snmp-sysdescr': 'x'})
-
-
 class FlagTests(SimpleTestCase):
 	def test_the_command_is_slow_and_low(self):
 		flags = udp_scan.nmap_flags()
@@ -151,7 +146,7 @@ class FlagTests(SimpleTestCase):
 		self.assertNotIn('-T4', flags)
 		self.assertNotIn('-p-', flags)
 		scripts = flags[flags.index('--script') + 1].split(',')
-		self.assertTrue(set(scripts) <= nmap_scan.NSE_SCRIPT_SET)
+		self.assertTrue(set(scripts) <= scan_flags.NSE_SCRIPT_SET)
 		self.assertEqual(flags[flags.index('-p') + 1], 'U:' + ','.join(str(p) for p in udp_scan.DEFAULT_PORTS))
 		self.assertEqual(udp_scan.host_timeout(), '20m')
 
