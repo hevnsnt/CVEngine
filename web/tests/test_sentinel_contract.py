@@ -16,7 +16,7 @@ from agentapi.services import ApiError
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
-           'dns_resolve': 'dns_resolve', 'error': 'nmap'}
+           'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap'}
 
 
 V1_SHA256 = {
@@ -73,7 +73,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery', 'secrets_scan'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
