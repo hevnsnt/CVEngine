@@ -20,6 +20,7 @@ from dashboard.models import Org, Project
 from startScan.models import Subdomain, Technology
 from targetApp.models import Domain
 from tests.test_client_library_detection import JQUERY_11023
+from tests import ai_queue
 
 HOST = 'www.example.com'
 PAGE = f'https://{HOST}/'
@@ -156,7 +157,7 @@ class Base(TestCase):
 
 	def triage_all(self, said='likely'):
 		pairs = triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
-		triage.run_triage(pairs, provider=self.provider(said) if said else None)
+		ai_queue.run_triage(pairs, provider=self.provider(said) if said else None)
 		return {row.match_id: row for row in Triage.objects.all()}
 
 	def without_rule(self):
@@ -379,7 +380,7 @@ class ExistingRowsTests(Base):
 		self.assertEqual(self.settle_all(), 0)
 		self.assertEqual(Triage.objects.get(pk=row.pk).updated_at, stamp)
 		provider = self.provider('likely')
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		provider.complete.assert_not_called()
 		self.assertEqual(Triage.objects.get(pk=row.pk).classification, 'confirmed')
 

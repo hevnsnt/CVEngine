@@ -43,7 +43,8 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200,
+                      'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
@@ -229,7 +230,8 @@ class _Dispatch:
     """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
     several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
 
-    def __init__(self, project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, label=None, siblings=None):
+    def __init__(self, project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, label=None, siblings=None,
+                 secret_ref=None):
         from agentapi.models import SentinelTask
         from cveFeed import activity
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
@@ -237,7 +239,8 @@ class _Dispatch:
         targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
         self.task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
-                                                ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
+                                                ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by,
+                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is never offered to another Sentinel
         self.label = label or _label(host, ips)
         self.busy = capacity['state'] == 'busy'
         self.entry = activity.log('run_check', (f'Queued {kind} work for {self.label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one'

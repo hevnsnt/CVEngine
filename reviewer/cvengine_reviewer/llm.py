@@ -1,18 +1,31 @@
-"""One model call: a fixed system prompt, one user message, one JSON answer. No tools are ever offered to the model, so nothing it writes
-can make a request, read a file or run a command; it can only answer.
+"""Model calls. No tools are ever offered to the model, so nothing it writes can make a request, read a file or run a command; it can only
+answer.
 
-Anthropic is called through its SDK, with the answer constrained to the schema (``output_config.format``) and the system prompt cached.
-OpenAI-compatible servers (OpenAI, OpenRouter, vLLM, LM Studio) and Ollama are called with the standard library, asking for the same
-schema where the server supports it. Every answer is checked again by ``guard.parse_reply``.
+Two paths:
+
+* ``call`` serves the reviewer's own two jobs (finding review, operations check): a fixed system prompt, one user message, one JSON answer.
+  Anthropic is called through its SDK, with the answer constrained to the schema (``output_config.format``) and the system prompt cached.
+  OpenAI-compatible servers and Ollama are called with the standard library, asking for the same schema where the server supports it.
+  Every answer is checked again by ``guard.parse_reply``.
+* ``complete`` serves the pipeline's AI jobs (triage, validation planning, template drafting, detection authoring, the RDP reading and the
+  rest, docs/AI-REVIEWER.md). It is the request logic the server used itself before 1.4 (web/reNgine/ai_providers.py), ported: the same
+  endpoints, bodies, reply limits, pinned temperature and seed for a self-hosted server, structured output with its step-down ladder, the
+  reasoning setting, Ollama's context window and keep-alive, images, and the same error categories. The server checks the answer.
 
 The provider key is used only as the provider's auth header. It is never put into a prompt, a log line or an error message.
 """
+import base64
+import http.client
 import json
 import logging
+import re
+import socket
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-from cvengine_reviewer import guard
+from cvengine_reviewer import guard, profiles
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +39,16 @@ MAX_REPLY_BYTES = 200_000
 
 
 class ModelError(RuntimeError):
-    """The call failed; ``category`` says how (auth, refused, truncated, http, network, shape)."""
+    """The call failed; ``category`` says how (``call``: auth, refused, truncated, http, network, shape; ``complete``: the server's
+    categories, provider_auth, output_truncated and the rest). ``http_status``, ``stop_reason`` and ``hint`` (the start of a refused
+    request's body, lower-cased, read only to tell what was refused) are set where known."""
 
-    def __init__(self, message, category):
+    def __init__(self, message, category, http_status=None, stop_reason=None, hint=''):
         super().__init__(message)
         self.category = category
+        self.http_status = http_status
+        self.stop_reason = stop_reason
+        self.hint = hint
 
 
 def call(provider, system, user, schema, max_tokens, effort='medium'):
@@ -144,3 +162,505 @@ def _ollama(provider, system, user, schema, max_tokens):
         raise ModelError('the answer was cut off at the reply limit', 'truncated')
     return text or '', {'input_tokens': int(data.get('prompt_eval_count') or 0), 'output_tokens': int(data.get('eval_count') or 0)}, \
         str(data.get('model') or provider.get('model') or '')
+
+
+# ===================================================================================================== the pipeline's AI jobs: ``complete``
+#
+# Ported from the server's own provider layer (web/reNgine/ai_providers.py, as it was before 1.4), so a job asks exactly what the server
+# used to ask. The server resolves the operator's settings (the Settings page, then the CVENGINE_AI_* variables of its .env) and hands
+# them over in the job block of its configuration as ``runtime``; nothing here reads the environment.
+
+ANTHROPIC_URL = profiles.PROFILES['anthropic'].default_base
+ANTHROPIC_VERSION = '2023-06-01'
+REQUEST_TIMEOUT = 120
+PROVIDER_TIMEOUT = {'lmstudio': 300}  # LM Studio may load a model on its first request
+CONNECT_TIMEOUT = 10
+LIST_TIMEOUT = 30
+MAX_COMPLETION_BYTES = 2_000_000
+MAX_LIST_BYTES = 8_000_000
+CEILING = 32768  # the largest reply limit ever sent
+RANGES = {'request_timeout': (10, 3600), 'connect_timeout': (1, 300), 'max_tokens': (64, CEILING), 'context_tokens': (512, 1048576)}
+STRUCTURED_MODES = ('auto', 'all', 'off')
+KEEP_ALIVE = re.compile(r'^(?:-1|0|\d{1,5}[smh])$')
+OPENROUTER_HEADERS = {'HTTP-Referer': 'https://github.com/hevnsnt/CVEngine', 'X-Title': 'CVEngine'}
+_NAMES_STRUCTURE = re.compile(r'response_format|json_schema|json_object|schema|grammar|format|guided|structured')
+_NON_CHAT = re.compile(r'embed|image|audio|tts|whisper|realtime|moderation|transcribe|search|dall|sora|codex|davinci|babbage|computer-use')
+_CHEAP_TIERS = (('nano', 0), ('haiku', 0), ('luna', 0), ('flash-lite', 0), ('lite', 0), ('mini', 1), ('flash', 1))
+_DATED = re.compile(r'-(?:\d{4}-\d{2}-\d{2}|\d{8})$')
+_STRUCTURED = {}  # (provider, base_url, model) -> (expires, level): where a server that refused a level starts, for an hour
+_RESOLVED = {}  # (provider, base_url) -> (expires, model): the default model of a provider that has one
+_NOTED = set()
+
+
+def _note_once(*key):
+    if key in _NOTED:
+        return False
+    _NOTED.add(key)
+    return True
+
+
+def _number(name, value):
+    low, high = RANGES[name]
+    if isinstance(value, bool) or value in (None, ''):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if low <= value <= high else None
+
+
+class Target:
+    """One provider as the job block of the server's configuration describes it: ``{provider, base_url, api_key, model, runtime}``."""
+
+    def __init__(self, block):
+        self.name = str(block.get('provider') or '')
+        self.profile = profiles.PROFILES.get(self.name)
+        if self.profile is None:
+            raise ModelError(f'unknown AI provider: {self.name[:40]!r}', 'provider_error')
+        self.base_url = str(block.get('base_url') or '').strip()
+        if self.base_url and not re.match(r'^https?://', self.base_url, re.I):
+            raise ModelError('the server URL must start with http:// or https://', 'provider_error')
+        if self.profile.needs_url and not self.base_url:
+            raise ModelError(f'{self.name} needs the server URL', 'provider_error')
+        self.api_key = str(block.get('api_key') or '')
+        if self.profile.needs_key and not self.api_key:
+            raise ModelError(f'{self.name} requires an API key', 'provider_error')
+        self.model = str(block.get('model') or '')
+        runtime = block.get('runtime') if isinstance(block.get('runtime'), dict) else {}
+        self.request_timeout = _number('request_timeout', runtime.get('request_timeout')) or PROVIDER_TIMEOUT.get(self.name, REQUEST_TIMEOUT)
+        self.connect_timeout = _number('connect_timeout', runtime.get('connect_timeout')) or CONNECT_TIMEOUT
+        self.max_tokens = _number('max_tokens', runtime.get('max_tokens'))
+        self.context_tokens = _number('context_tokens', runtime.get('context_tokens'))
+        mode = str(runtime.get('structured_mode') or 'auto')
+        self.structured_mode = mode if mode in STRUCTURED_MODES else 'auto'
+        level = runtime.get('reasoning')
+        self.reasoning = level if level in profiles.REASONING_LEVELS else None
+        keep = str(runtime.get('keep_alive') or '')
+        self.keep_alive = keep if KEEP_ALIVE.match(keep) else ''
+
+
+# ----------------------------------------------------------------------------------------------------------------------------- HTTP
+
+class _ConnectTimeout(OSError):
+    """The server was not reached within the connect timeout (told apart from a slow answer)."""
+
+
+def _connection(base, connect_timeout):
+    class Connection(base):
+        def connect(self):
+            answer_timeout, self.timeout = self.timeout, connect_timeout
+            try:
+                super().connect()
+            except (TimeoutError, socket.timeout) as exc:
+                raise _ConnectTimeout('connect timed out') from exc
+            finally:
+                self.timeout = answer_timeout
+            if self.sock is not None:
+                self.sock.settimeout(answer_timeout)
+    return Connection
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, connect_timeout):
+        super().__init__()
+        self._connect_timeout = connect_timeout
+
+    def http_open(self, req):
+        return self.do_open(_connection(http.client.HTTPConnection, self._connect_timeout), req)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, connect_timeout):
+        super().__init__()
+        self._connect_timeout = connect_timeout
+
+    def https_open(self, req):
+        return self.do_open(_connection(http.client.HTTPSConnection, self._connect_timeout), req, context=self._context)
+
+
+def _http(name, url, headers, body, timeout, connect_timeout, limit):
+    """One request (POST when ``body`` is given, else GET); the parsed JSON answer. Raises ModelError with the server's categories."""
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(url, data=data, method='POST' if data is not None else 'GET',
+                                     headers={'Accept': 'application/json', **({'Content-Type': 'application/json'} if data else {}), **headers})
+    opener = urllib.request.build_opener(_HTTPHandler(connect_timeout), _HTTPSHandler(connect_timeout))
+    try:
+        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - the provider the admin configured
+            raw = response.read(limit + 1)
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            hint = exc.read(400).decode('utf-8', 'replace').lower()
+        except (OSError, ValueError):
+            hint = ''
+        category = 'provider_auth' if status in (401, 403) else 'provider_rate_limit' if status == 429 else 'provider_http'
+        raise ModelError(f'{name} HTTP request failed (status {status})', category, http_status=status, hint=hint) from None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, _ConnectTimeout):
+            raise ModelError(f'{name} connection timed out', 'provider_connect_timeout') from None
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise ModelError(f'{name} request timed out', 'provider_timeout') from None
+        raise ModelError(f'{name} connection failed', 'provider_network') from None
+    except (TimeoutError, socket.timeout):
+        raise ModelError(f'{name} request timed out', 'provider_timeout') from None
+    except (OSError, http.client.HTTPException):
+        raise ModelError(f'{name} connection failed', 'provider_network') from None
+    if len(raw) > limit:
+        raise ModelError(f'{name} sent an oversized reply', 'provider_shape')
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise ModelError(f'{name} returned invalid JSON', 'provider_json') from None
+
+
+# ---------------------------------------------------------------------------------------------------------------------- the model
+
+def pick_cheapest_newest(models):
+    """From [{'id', 'created'}] the newest model in the cheapest tier (nano/haiku/luna, then mini/flash); non-chat models are ignored and an
+    undated alias beats a dated snapshot."""
+    chat = [m for m in models if m.get('id') and not _NON_CHAT.search(m['id'].lower())]
+
+    def tier(m):
+        return min((rank for word, rank in _CHEAP_TIERS if word in m['id'].lower()), default=9)
+    if not chat:
+        return None
+    best = min(tier(m) for m in chat)
+    pool = [m for m in chat if tier(m) == best]
+    pool = [m for m in pool if not _DATED.search(m['id'])] or pool
+    return max(pool, key=lambda m: (m.get('created') or 0, m['id']))['id']
+
+
+def _epoch(value):
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp())
+    except ValueError:
+        return 0
+
+
+def _openai_base(target):
+    base = (target.base_url or target.profile.default_base).rstrip('/')
+    return base[:-len('/chat/completions')] if base.endswith('/chat/completions') else base
+
+
+def _anthropic_url(target):
+    """Anthropic's own messages endpoint unless a base URL is set: a bare address (or one ending in /v1) is the server and the endpoint is
+    under it; an address with any other path is used as written."""
+    if not target.base_url:
+        return ANTHROPIC_URL
+    url = target.base_url
+    path = urllib.parse.urlsplit(url).path.rstrip('/')
+    if not path:
+        return url.rstrip('/') + '/v1/messages'
+    if path == '/v1':
+        return url.rstrip('/') + '/messages'
+    return url
+
+
+def _headers(target):
+    if target.profile.transport == 'anthropic':
+        return {'x-api-key': target.api_key, 'anthropic-version': ANTHROPIC_VERSION}
+    if target.profile.transport == 'ollama':
+        return {}
+    headers = {'Authorization': f'Bearer {target.api_key}'} if target.api_key else {}
+    return {**headers, **OPENROUTER_HEADERS} if target.name == 'openrouter' else headers
+
+
+def list_models(target):
+    """[{'id', 'created'}], newest first. Raises ModelError (category provider_error)."""
+    try:
+        if target.profile.transport == 'anthropic':
+            base = _anthropic_url(target).split('/v1/')[0]
+            data = _http(target.name, f'{base}/v1/models?limit=1000', _headers(target), None, LIST_TIMEOUT, target.connect_timeout, MAX_LIST_BYTES)
+            models = [{'id': m['id'], 'created': _epoch(m.get('created_at'))} for m in data.get('data', []) if isinstance(m, dict) and m.get('id')]
+        elif target.profile.transport == 'ollama':
+            data = _http(target.name, f'{target.base_url.rstrip("/")}/api/tags', {}, None, LIST_TIMEOUT, target.connect_timeout, MAX_LIST_BYTES)
+            models = [{'id': m['name'], 'created': _epoch(m.get('modified_at'))} for m in data.get('models', []) if isinstance(m, dict) and m.get('name')]
+        else:
+            data = _http(target.name, f'{_openai_base(target)}/models', _headers(target), None, LIST_TIMEOUT, target.connect_timeout, MAX_LIST_BYTES)
+            models = [{'id': m['id'], 'created': _epoch(m.get('created'))} for m in data.get('data', []) if isinstance(m, dict) and m.get('id')]
+            if target.name == 'lmstudio':  # LM Studio lists the embedding models it holds beside the chat ones
+                models = [m for m in models if 'embed' not in m['id'].lower()]
+    except ModelError as exc:
+        raise ModelError(f'{target.name} model list failed', 'provider_error', http_status=exc.http_status) from None
+    except (AttributeError, TypeError) as exc:
+        raise ModelError(f'{target.name} model list has an unexpected shape', 'provider_error') from exc
+    return sorted(models, key=lambda m: (-m['created'], str(m['id'])))
+
+
+def resolve_model(target):
+    """The model to ask when the operator chose none: the provider's only model (a self-hosted server serving one), or for Anthropic and
+    OpenAI the newest of the cheapest tier from their list (an hour in memory), else the profile's default."""
+    if target.model:
+        return target.model
+    if not target.profile.default_model:
+        models = list_models(target)
+        if len(models) == 1:
+            target.model = str(models[0]['id'])
+            return target.model
+        raise ModelError(f'choose a model for {target.name}: it serves more than one, or none could be listed', 'provider_error')
+    key = (target.name, target.base_url)
+    cached = _RESOLVED.get(key)
+    if cached and cached[0] > time.time():
+        target.model = cached[1]
+        return target.model
+    try:
+        chosen = pick_cheapest_newest(list_models(target))
+    except ModelError:
+        chosen = None
+    target.model = chosen or target.profile.default_model
+    _RESOLVED[key] = (time.time() + 3600, target.model)
+    return target.model
+
+
+# ------------------------------------------------------------------------------------------------------------------ request shape
+
+def reply_limit(target, options, factor=None):
+    """The reply limit to send, or None to send none: the operator's, else (Anthropic and the self-hosted servers) the stage's own limit for a
+    self-hosted server, else the profile's default; OpenAI and OpenRouter get none. ``factor`` lengthens it for a retry after a cut-off."""
+    cap = target.max_tokens
+    if cap is None and target.profile.reply_cap:
+        cap = (_number('max_tokens', options.get('max_tokens')) if target.profile.reply_cap_by_stage else None) or target.profile.reply_cap
+    if cap and factor:
+        cap = min(CEILING, cap * int(factor))
+    return cap
+
+
+def reasoning_fields(target, cap):
+    if target.reasoning is None:
+        return {}
+    fields, why = profiles.reasoning_plan(target.name, target.model, target.reasoning, cap)
+    if why and _note_once(target.name, target.model, why):
+        logger.warning('the reasoning setting (%s) is ignored for %s %s: %s', target.reasoning, target.name, target.model or '(default model)', why)
+    return fields
+
+
+def structured_levels(target, schema):
+    """The structured-output levels to try, best first, or () when this request carries no schema or this provider is not sent one."""
+    profile = target.profile
+    if not schema or target.structured_mode == 'off' or not profile.structured:
+        return ()
+    if not profile.structured_default and target.structured_mode != 'all':
+        return ()
+    levels = profile.structured
+    cached = _STRUCTURED.get((target.name, target.base_url, target.model))
+    if cached and cached[0] > time.time() and cached[1] in levels:
+        return levels[levels.index(cached[1]):]
+    return levels
+
+
+def _refused_structure(error):
+    return error.http_status in (400, 422) and bool(_NAMES_STRUCTURE.search(error.hint or ''))
+
+
+def _openai_options(target, options, factor):
+    out = {}
+    cap = reply_limit(target, options, factor)
+    if cap:
+        host = (urllib.parse.urlsplit(_openai_base(target)).hostname or '').lower()
+        out['max_completion_tokens' if host == 'api.openai.com' else 'max_tokens'] = cap
+    if target.profile.temperature_ok and options.get('temperature') is not None:
+        out['temperature'] = options['temperature']
+    if target.profile.seed_ok and options.get('seed') is not None:
+        out['seed'] = options['seed']
+    return {**out, **reasoning_fields(target, cap)}
+
+
+def _keep_alive_value(text):
+    """Ollama reads a string as a Go duration, which cannot say "unload now" or "never unload": those go as the integers 0 and -1."""
+    return int(text) if re.fullmatch(r'-?\d+', text) else text
+
+
+def _ollama_options(target, options, factor):
+    out = {}
+    cap = reply_limit(target, options, factor)
+    if cap:
+        out['num_predict'] = cap
+    if target.context_tokens:
+        out['num_ctx'] = target.context_tokens
+    for key, allowed in (('temperature', target.profile.temperature_ok), ('seed', target.profile.seed_ok)):
+        if allowed and options.get(key) is not None:
+            out[key] = options[key]
+    keep = {'keep_alive': _keep_alive_value(target.keep_alive)} if target.keep_alive else {}
+    return {**({'options': out} if out else {}), **keep, **reasoning_fields(target, cap)}
+
+
+def _anthropic_text(data):
+    if not isinstance(data, dict):
+        raise ModelError('unexpected anthropic response shape', 'provider_shape')
+    if data.get('stop_reason') == 'max_tokens':
+        raise ModelError('anthropic response exceeded the output token limit', 'output_truncated', stop_reason='max_tokens')
+    try:
+        answer = ''.join(b.get('text', '') for b in data['content'] if b.get('type') == 'text')
+    except (KeyError, TypeError, AttributeError):
+        raise ModelError('unexpected anthropic response shape', 'provider_shape') from None
+    if not answer.strip():
+        raise ModelError('anthropic response contained no text', 'empty_response', stop_reason=str(data.get('stop_reason') or '')[:40])
+    return answer
+
+
+def _openai_text(data, name):
+    try:
+        choice = data['choices'][0]
+        text = choice['message']['content']
+    except (KeyError, IndexError, TypeError):
+        raise ModelError(f'unexpected {name} response shape', 'provider_shape') from None
+    if isinstance(choice, dict) and choice.get('finish_reason') == 'length':
+        raise ModelError(f'{name} response exceeded the output token limit', 'output_truncated', stop_reason='length')
+    if not isinstance(text, str) or not text.strip():
+        reason = choice.get('finish_reason') if isinstance(choice, dict) else None
+        raise ModelError(f'{name} response contained no text', 'empty_response', stop_reason=str(reason or '')[:40])
+    return text
+
+
+def _ollama_text(data):
+    try:
+        text = data['message']['content']
+    except (KeyError, TypeError):
+        raise ModelError('unexpected ollama response shape', 'provider_shape') from None
+    if data.get('done_reason') == 'length':
+        raise ModelError('ollama response exceeded the output token limit', 'output_truncated', stop_reason='length')
+    if not isinstance(text, str) or not text.strip():
+        raise ModelError('ollama response contained no text', 'empty_response', stop_reason=str(data.get('done_reason') or '')[:40])
+    return text
+
+
+def _text(target, data):
+    transport = target.profile.transport
+    if transport == 'anthropic':
+        return _anthropic_text(data)
+    if transport == 'ollama':
+        return _ollama_text(data)
+    return _openai_text(data, target.name)
+
+
+def _usage(target, data):
+    """``(input, output, cache read, cache write)`` tokens of one answer, None where the provider did not say."""
+    def number(value):
+        try:
+            value = int(value)
+            return value if value >= 0 else None
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(data, dict):
+        return None, None, None, None
+    raw = data.get('usage') or {'prompt_tokens': data.get('prompt_eval_count'), 'completion_tokens': data.get('eval_count')}
+    if not isinstance(raw, dict):
+        return None, None, None, None
+    if target.name == 'anthropic':
+        return tuple(number(raw.get(key)) for key in ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
+    details = raw.get('prompt_tokens_details') if isinstance(raw.get('prompt_tokens_details'), dict) else {}
+    return (number(raw.get('prompt_tokens') if 'prompt_tokens' in raw else raw.get('input_tokens')),
+            number(raw.get('completion_tokens') if 'completion_tokens' in raw else raw.get('output_tokens')),
+            number(details.get('cached_tokens')), None)
+
+
+def _request(target, system, user, schema, options, image, factor, level):
+    """``(url, headers, body)`` of one completion at structured level ``level``."""
+    transport, model = target.profile.transport, target.model
+    if transport == 'anthropic':
+        cap = reply_limit(target, options, factor)
+        if image:
+            content = [{'type': 'image', 'source': {'type': 'base64', 'media_type': image['media_type'], 'data': image['data']}},
+                       {'type': 'text', 'text': user}]
+        else:
+            content = user
+        body = {'model': model, 'max_tokens': cap, 'system': system, 'messages': [{'role': 'user', 'content': content}],
+                **reasoning_fields(target, cap)}
+        return _anthropic_url(target), _headers(target), body
+    if transport == 'ollama':
+        message = {'role': 'user', 'content': user, **({'images': [image['data']]} if image else {})}
+        body = {'model': model, 'stream': False, 'messages': [{'role': 'system', 'content': system}, message],
+                **_ollama_options(target, options, factor)}
+        if level == 'json_schema':
+            body['format'] = schema
+        elif level == 'json':
+            body['format'] = 'json'
+        return f'{target.base_url.rstrip("/")}/api/chat', {}, body
+    if image:
+        url = f"data:{image['media_type']};base64,{image['data']}"
+        content = [{'type': 'text', 'text': user}, {'type': 'image_url', 'image_url': {'url': url}}]
+    else:
+        content = user
+    body = {'model': model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}],
+            **_openai_options(target, options, factor)}
+    if level == 'json_schema':
+        body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': str(options.get('schema_name') or 'answer')[:40],
+                                                                           'strict': True, 'schema': schema}}
+    elif level == 'json_object':
+        body['response_format'] = {'type': 'json_object'}
+    if target.name == 'openrouter' and level != 'none':
+        body['provider'] = {'require_parameters': True}  # only an endpoint that takes the field, not one that ignores it
+    return f'{_openai_base(target)}/chat/completions', _headers(target), body
+
+
+def _attempt(target, system, user, schema, options, image, factor, calls):
+    """One completion as the server's ``complete()`` made it (stepping down the structured ladder when the server refuses a level or answers
+    nothing under it); one entry in ``calls`` with its usage, outcome and time."""
+    record = {'status': 'failed', 'category': '', 'model': target.model}
+    started, tick, last = time.time(), time.monotonic(), {}
+    try:
+        levels = () if image else structured_levels(target, schema)
+        levels = levels or ('none',)
+        while True:
+            url, headers, body = _request(target, system, user, schema, options, image, factor, levels[0])
+            try:
+                last['data'] = _http(target.name, url, headers, body, target.request_timeout, target.connect_timeout, MAX_COMPLETION_BYTES)
+                if levels[0] != 'none' and len(levels) > 1:
+                    _text(target, last['data'])  # an empty answer under a constraint is a reason to ask without it
+                break
+            except ModelError as error:
+                if len(levels) > 1 and levels[0] != 'none' and (_refused_structure(error) or error.category == 'empty_response'):
+                    _STRUCTURED[(target.name, target.base_url, target.model)] = (time.time() + 3600, levels[1])
+                    logger.info('%s does not take structured output (%s); using %s', target.name, levels[0], levels[1])
+                    levels = levels[1:]
+                    continue
+                raise
+        text = _text(target, last['data'])
+        if target.profile.transport == 'ollama':
+            used = last['data'].get('prompt_eval_count') if isinstance(last['data'], dict) else None
+            if target.context_tokens and isinstance(used, int) and used >= 0.95 * target.context_tokens:
+                logger.warning('ollama read %d prompt tokens of a %d token context window: the start of the prompt may have been cut; raise '
+                               'the context setting (Settings, AI model)', used, target.context_tokens)
+        record['status'] = 'succeeded'
+        return text
+    except ModelError as error:
+        record['category'] = error.category
+        raise
+    finally:
+        counts = _usage(target, last.get('data'))
+        actual = last.get('data', {}).get('model') if isinstance(last.get('data'), dict) else ''
+        record.update(input_tokens=counts[0], output_tokens=counts[1], cache_read_tokens=counts[2], cache_write_tokens=counts[3],
+                      actual_model=str(actual or '')[:200], started_at=int(started), duration_ms=max(0, int((time.monotonic() - tick) * 1000)))
+        calls.append(record)
+
+
+def complete(block, system, user, schema=None, options=None, image=None):
+    """One answer for a pipeline job: ``(text, calls, model)``. ``block`` is the job block of the server's configuration, ``options`` the
+    job's (``temperature`` and ``seed`` pinned for a self-hosted server, ``max_tokens`` the stage's own reply limit, ``retry_truncated``,
+    ``schema_name``), ``image`` ``{media_type, data (base64)}``. A reply cut off at a limit that was sent is asked once more with twice the
+    limit when the job allows it. Raises ModelError, with the calls made so far in ``error.calls``."""
+    options = dict(options or {})
+    calls = []
+    try:
+        target = Target(block)
+        try:
+            resolve_model(target)
+        except ModelError as error:
+            calls.append({'status': 'failed', 'category': error.category, 'model': target.model, 'started_at': int(time.time()), 'duration_ms': 0})
+            raise
+        try:
+            return _attempt(target, system, user, schema, options, image, None, calls), calls, target.model
+        except ModelError as error:
+            if error.category != 'output_truncated' or not options.get('retry_truncated'):
+                raise
+            sent = reply_limit(target, options)
+            if not sent or reply_limit(target, options, 2) == sent:  # nothing was sent to lengthen, or it is at the ceiling already
+                raise
+        return _attempt(target, system, user, schema, options, image, 2, calls), calls, target.model
+    except ModelError as error:
+        error.calls = calls
+        raise
