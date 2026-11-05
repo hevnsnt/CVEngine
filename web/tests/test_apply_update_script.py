@@ -35,9 +35,12 @@ case " $* " in
     esac; echo; exit 0;;
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
+    if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
+  *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
+  *" --force-recreate reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
   *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
     if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
@@ -563,6 +566,37 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
         return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_an_install_with_the_ai_reviewer_builds_and_restarts_it_and_its_failure_never_fails_the_update(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'has_reviewer').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml build reviewer', calls)
+        recreate = 'docker compose -f docker-compose.yml up -d --no-deps --force-recreate reviewer'
+        self.assertIn(recreate, calls)
+        self.assertGreater(calls.index(recreate), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        # a reviewer that cannot be built or started is logged; the update is still done
+        self.git('reset', '--hard', self.prev, cwd=self.work)
+        for path in self.work.glob('web/.update-*'):
+            path.unlink()
+        (self.stub / 'calls.log').unlink()
+        (self.stub / 'reviewer_fails').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('could not build the AI reviewer image', log)
+        self.assertIn('could not start the AI reviewer', log)
+
+    def test_an_install_without_the_ai_reviewer_never_asks_for_it(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse([c for c in self.calls() if 'reviewer' in c])
 
     def test_too_little_disk_space_stops_the_update_before_anything_is_built_and_says_so(self):
         self.new = self.publish_deploy_file()

@@ -83,6 +83,11 @@ deploy_steps() {
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
   "${compose[@]}" build web celery celery-beat || return 1
+  # The AI reviewer has its own small image (docs/AI-REVIEWER.md). A failed build never fails the update: scanning does not need it, and the
+  # next update builds it again.
+  if grep -qx reviewer <<<"$listed"; then
+    "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
+  fi
   maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
@@ -117,6 +122,11 @@ deploy_steps() {
   # for scans) when celery is recreated. Only present when the profile is on.
   if grep -qx tailscale <<<"$listed"; then
     "${compose[@]}" up -d --no-deps --force-recreate tailscale || log "could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail"
+  fi
+  # The AI reviewer is recreated after the application (it waits for the server's token on its own); it is not in verify_running, and its
+  # failing to start never fails the update.
+  if grep -qx reviewer <<<"$listed"; then
+    "${compose[@]}" up -d --no-deps --force-recreate reviewer || log "could not start the AI reviewer (docker compose up -d reviewer); scanning is not affected"
   fi
   verify_running "${services[@]}" || return 1
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
