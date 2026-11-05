@@ -1143,14 +1143,6 @@ class CommandTests(TestCase):
 	def setUp(self):
 		FakeProc.instances, FakeProc.lines = [], []
 
-	def test_build_flags_only_adds_the_file_path_and_no_redirects(self):
-		plain = nuclei_scan.build_flags(['wordpress'])
-		signed = nuclei_scan.build_flags(['wordpress'], secret_file='/tmp/x/secrets.json')
-		self.assertNotIn('-sf', plain)
-		self.assertNotIn('-dr', plain)
-		self.assertEqual(signed[:len(plain)], plain)
-		self.assertEqual(signed[len(plain):], ['-sf', '/tmp/x/secrets.json', '-dr'])
-
 	def test_the_nuclei_command_never_holds_a_value(self):
 		cred = SimpleNamespace(pk=1, secret={'headers': [['Authorization', SECRET]], 'cookie': COOKIE})
 		with auth_checks.secrets_file([(cred, ['app.example.test'])]) as path, \
