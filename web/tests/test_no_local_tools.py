@@ -278,6 +278,9 @@ ALLOWED = {
         'Dockerfile',
         'agentapi/mcp.py',
         'agentapi/rest.py',
+        'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
+        'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
+        'agentapi/sentinel_stream.py',  # 1.4 bbot on a Sentinel: hands the run to a Sentinel and takes its batches, runs nothing
         'agentapi/services.py',
         'celery-entrypoint.sh',
         'cveFeed/admin_api.py',
@@ -324,6 +327,7 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'wafw00f': [
+        'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
         'agentapi/sentinel_broker.py',
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',

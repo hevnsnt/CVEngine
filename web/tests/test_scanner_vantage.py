@@ -77,11 +77,13 @@ class VantageWarningTests(VantageBase):
         self.proxy_on()
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan to the built-in scanner, which does not "
+        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, waf, bbot_discovery, nuclei_validate to "
+                                 "the built-in scanner, which does not "
                                  "use this server's egress proxy; those scans will start from the scanner's network instead.")
 
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
-        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan'  # nmap, naabu and udp use raw sockets: the proxy never applied
+        # nmap, naabu, udp and the other raw-socket or in-process kinds never took the proxy; wafw00f (waf), bbot and nuclei (nuclei_validate's test) do
+        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,nuclei_validate'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -99,7 +101,8 @@ class VantageWarningTests(VantageBase):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas to the built-in scanner, which does not use the '
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, nmap_full, nmap_verify, '
+                      'node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, which does not use the '
                       'Tailscale network; those scans will start from the scanner\'s network instead.', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
 
@@ -147,7 +150,7 @@ class VantageWarningTests(VantageBase):
         self.assertEqual(scanner_state.vantage_warnings(), [])
         os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = '1'
         for sentence in scanner_state.vantage_warnings():
-            self.assertNotIn('discover', sentence)
+            self.assertNotRegex(sentence, r'\bdiscover\b')  # bbot_discovery is named; the internal sweep (discover) never is
 
     def test_a_proxy_setting_that_cannot_be_read_is_not_a_warning_and_not_an_error(self):
         os.environ[ENV] = 'none'

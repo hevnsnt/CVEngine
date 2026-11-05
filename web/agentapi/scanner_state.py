@@ -68,10 +68,13 @@ def _compute(now):
     return out
 
 
+TOOL_OF = {'waf': 'wafw00f'}  # a kind whose tool goes by another name than the kind
+
+
 def _uses_proxy(kind, tools):
-    """Whether a run of ``kind`` takes the egress proxy: its tool (the kind's name, or the part before the first underscore) is one of
+    """Whether a run of ``kind`` takes the egress proxy: its tool (``TOOL_OF``, else the kind's name or the part before the first underscore) is one of
     ``egress_proxy.TOOLS``. A kind that runs on raw sockets never did, so the proxy is no part of its vantage point."""
-    return kind in tools or kind.split('_')[0] in tools
+    return TOOL_OF.get(kind, kind) in tools or kind.split('_')[0] in tools
 
 
 def _tailscale_enabled():

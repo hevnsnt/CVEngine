@@ -65,7 +65,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
 | `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | built-in scanner only (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. One task per project that holds the addresses |
 | `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | built-in scanner only. The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
-| `reNgine/bbot.py`, `cveFeed/discovery.py` (875) | bbot, a streaming producer for up to six hours, screenshots as files | a streamed job type | not built: phase 7 |
+| `reNgine/bbot.py`, `cveFeed/discovery.py` | bbot, a streaming producer for up to six hours | `bbot_discovery` | a streamed task, also contract version 3 (see **bbot** under Target shape) |
 
 ### C. In-process network probes (Python in server workers)
 
@@ -124,6 +124,13 @@ which send nothing to the target and need no vantage point.
   floor). The scanner enforces it on every hop and reports the hosts it touched. Today each hop asks the database.
 - **bbot**: a streamed job type. Partial results are posted as the run goes, screenshots travel as blobs, and the server
   can stop it. It does not fit "one result per task".
+  - *Built (server side):* the `bbot_discovery` kind, contract version 3, with `$defs/partials` (the batches) and `$defs/scope_policy` (what the
+    scanner may touch). `POST /api/v1/sentinel/tasks/<id>/partial` (`agentapi.sentinel_stream.report_partial`) takes numbered batches once and in
+    order, holds them to the task's scope and stores them as `SentinelPartial` rows; `sentinel_stream.dispatch_stream` (the discovery stage) reads
+    them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
+    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind and runs bbot here otherwise, through the same
+    `_no_local` decision as every other kind. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
+    scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
@@ -152,7 +159,8 @@ which send nothing to the target and need no vantage point.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. The kinds of section B exist since contract version 3 (1.4), so each can now be moved like the others.
 6. Extract the shared library and delete the server's copies of the parsers and flags.
-7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
+7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
+   **bbot** above); the local run stays as the fallback until its telemetry shows none.
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).

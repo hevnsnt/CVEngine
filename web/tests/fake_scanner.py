@@ -354,6 +354,7 @@ LOCAL_RUNNERS = {
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
     'waf': ('cveFeed.waf_scan.run_wafw00f',),
     'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
     'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
@@ -373,6 +374,7 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
+    'bbot_discovery': ('bbot-standard', 'bbot-deep', 'bbot-passive'),
     'waf': ('route-probe',),
     'nmap_full': ('nmap-full-bg',),
     'nmap_verify': ('nmap',),

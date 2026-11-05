@@ -18,7 +18,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {

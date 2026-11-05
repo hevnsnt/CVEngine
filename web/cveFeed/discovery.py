@@ -272,7 +272,7 @@ def outside_exact_host(event, domain):
 MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
 
 
-def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
+def _report_no_web_pages(scan, mode, web_events, bbot_scan_name='', on_sentinel=False):
     """One activity line when a standard or deep discovery found many hosts and bbot reported no web page at all (no URL and no HTTP_RESPONSE event).
     Its web module (``http``) is what turns a host into a URL, so without it a discovery records no endpoint, no HTTP status and no page title, and
     gowitness has nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
@@ -285,9 +285,10 @@ def _report_no_web_pages(scan, mode, web_events, bbot_scan_name=''):
     if hosts < MIN_HOSTS_FOR_WEB_CHECK:
         return
     where = f'~/.bbot/scans/{bbot_scan_name}/scan.log' if bbot_scan_name else "bbot's scan.log"
+    where += ' on the Sentinel that ran it' if on_sentinel else ' in the celery container'
     activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but bbot reported no web page for any of them '
                  f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. bbot\'s web module may have failed '
-                 f'to start or reach the hosts: look in {where} in the celery container (docs/PIPELINE.md, "When discovery finds no web pages"). '
+                 f'to start or reach the hosts: look in {where} (docs/PIPELINE.md, "When discovery finds no web pages"). '
                  'Web screenshots and the route checks make their own requests and are not affected.',
                  project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
 
@@ -302,6 +303,89 @@ def _report_screenshot_failure(hard_failures, scan):
     reason = ((reasons[0] or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
     activity.log('discovery', f'Screenshots unavailable: the gowitness module failed to set up ({reason}); '
                  'no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
+
+
+def persist_screenshot_blobs(scan, screenshots):
+    """Write each screenshot a Sentinel sent with a bbot discovery batch (``sentinel_stream.clean_partial`` already checked its host, name, type and
+    size) into this scan's scan-results storage and record it on the matching Subdomain, as ``persist_screenshots`` does for a local run's files.
+    A screenshot whose host has no Subdomain in this scan, or whose bytes cannot be written, is skipped quietly."""
+    if not screenshots:
+        return
+    import base64
+    from cveFeed import shots
+    from startScan.models import Subdomain
+    dest_dir = os.path.join(settings.MEDIA_ROOT, f'{scan.domain.name}_{scan.id}', 'screenshots')
+    hashed = 0
+    shots.warn_unavailable(scan)
+    for shot in screenshots:
+        subdomain = Subdomain.objects.filter(scan_history=scan, name=shot.get('host') or '').first()
+        name = os.path.basename(str(shot.get('filename') or ''))
+        if not subdomain or not name or name.startswith('.'):
+            continue
+        try:
+            raw = base64.b64decode(shot.get('data') or '', validate=True)
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, f'sentinel-{name}')
+            with open(dest + '.part', 'wb') as out:
+                out.write(raw)
+            os.replace(dest + '.part', dest)
+        except (OSError, ValueError):
+            logger.exception('could not store a Sentinel screenshot of %s for scan %s', subdomain.name, scan.id)
+            continue
+        subdomain.screenshot_path = os.path.relpath(dest, settings.MEDIA_ROOT)
+        if hashed < shots.MAX_HASH_PER_FLUSH:
+            subdomain.screenshot_hash = shots.dhash_file(dest)
+            hashed += 1
+        subdomain.save(update_fields=['screenshot_path', 'screenshot_hash'])
+
+
+def batch_result(batch):
+    """A Sentinel's batch (``sentinel_stream.clean_partial``) as the ``BbotResult`` and live feed lines a local run builds from bbot's events."""
+    result = bbot_lib.BbotResult(
+        subdomains=set(batch.get('subdomains') or ()), ips=set(batch.get('ips') or ()),
+        ports={(p['host'], p['port']) for p in batch.get('ports') or ()}, urls={(u['url'], u['status']) for u in batch.get('urls') or ()},
+        technologies={(t['host'], t['technology']) for t in batch.get('technologies') or ()},
+        resolutions={(r['name'], r['ip']) for r in batch.get('resolutions') or ()},
+        edges={(e['parent'], e['child']) for e in batch.get('edges') or ()},
+        findings=[dict(f) for f in batch.get('findings') or ()], http=[dict(h) for h in batch.get('http') or ()])
+    observed = [bbot_lib.Observed(type=e['type'], label=e['label'], host=e['host'], parent_host=e['parent_host'], module=e['module'])
+                for e in batch.get('events') or ()]
+    return result, observed
+
+
+def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
+    """Run the discovery on a Sentinel that declares ``bbot_discovery`` (contract version 3), persisting each batch it posts as it arrives, through the
+    same code as a local run's flushes. ``None`` when no Sentinel did any of it (run it here; ``sentinel_dispatch``'s one decision already recorded
+    the fallback, or raised ``ScannerUnavailable`` when bbot may not run here). Otherwise ``{stored, mode, scan_name, web_events, problems,
+    hard_failures, incomplete}``; ``incomplete`` says why a run stopped part way after it found something (empty for a whole run).
+
+    A project's API keys for bbot's modules are never in the task: such a task names them by reference and only the built-in scanner is offered it
+    (it reads them once through the secure read)."""
+    from agentapi import sentinel_stream
+    domain = scan.domain
+    api_keys = bool(extra_args and any(a != bbot_lib.TRUFFLEHOG_FLAG for a in extra_args))
+    trufflehog = bbot_lib.TRUFFLEHOG_FLAG in extra_args
+    target = sentinel_stream.bbot_target(domain, mode, discovery_timeout(), api_keys=api_keys, trufflehog=trufflehog)
+    state = {'stored': stored}
+
+    def on_partial(batch):
+        result, observed = batch_result(batch)
+        fresh = [o for o in observed if (o.type, o.label) not in shown]
+        shown.update((o.type, o.label) for o in fresh)
+        state['stored'] = _flush(scan, ctx, result, fresh, '', state['stored'])
+        persist_screenshot_blobs(scan, batch.get('screenshots'))
+
+    out = sentinel_stream.dispatch_stream(domain.project, sentinel_stream.KIND, target, scan, on_partial, label=domain.name,
+                                          secret_ref=sentinel_stream.keys_ref(domain.project_id) if api_keys and domain.project_id else None,
+                                          builtin_only=api_keys)
+    if out is None:
+        return None
+    final = out['result'] or {}
+    return {'stored': state['stored'], 'mode': final.get('mode') or mode, 'scan_name': final.get('scan_name') or '',
+            'web_events': final.get('web_events') or {'URL': 0, 'HTTP_RESPONSE': 0},
+            'problems': [(p['module'], p['reason']) for p in final.get('problems') or ()],
+            'hard_failures': [(p['module'], p['reason']) for p in final.get('hard_failures') or ()],
+            'incomplete': final.get('incomplete') or ('' if out['result'] is not None else out.get('error') or 'the Sentinel did not finish the run')}
 
 
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
@@ -323,7 +407,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     status, error, partial = SUCCESS, '', ''
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import MemoryKill, ScanAborted
+    from reNgine.resources import MemoryKill, ScanAborted, ScannerUnavailable
     stored = DiscoveryEvent.objects.filter(scan=scan).count()  # once; _flush is then told the running total
     running = activity.log('discovery', f'bbot is discovering {scan.domain.name}', project=scan.domain.project_id,
                            status='running', scan_id=scan.id)
@@ -344,7 +428,11 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
             raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
                              'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
-        for attempt, run_mode in enumerate(modes):
+        remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)  # a Sentinel that runs bbot, else None: run it here
+        if remote is not None:
+            stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']
+            problems[:], hard_failures[:], partial = remote['problems'], remote['hard_failures'], remote['incomplete'][:290]
+        for attempt, run_mode in enumerate(modes if remote is None else ()):
             try:
                 for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
                                strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
@@ -374,11 +462,14 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
                 raise
         stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
         _report_key_problems(problems, extra_args, scan)
-        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name)
+        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name, on_sentinel=remote is not None)
         _report_screenshot_failure(hard_failures, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
+    except ScannerUnavailable as exc:  # bbot may not run here (CVENGINE_LOCAL_FALLBACK) and no Sentinel could take it: nothing ran, the target stays due
+        status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
+        logger.warning('discovery of scan %s is waiting for a scanner: %s', scan_id, exc)
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('bbot discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]

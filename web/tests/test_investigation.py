@@ -13,6 +13,7 @@ from startScan.models import IpAddress, Port, Subdomain, Technology, Waf
 from tests.test_probes import answers, page
 from tests.test_route_auth import RouteFixture
 from tests.test_triage import reply
+from tests import ai_queue
 
 
 class ContextFixture(RouteFixture):
@@ -128,7 +129,7 @@ class PromptTests(ContextFixture, TestCase):
 
     def run_triage(self, provider):
         match = self.match()
-        return match, triage.run_triage(triage.track(triage.with_cves([match])), provider=provider)
+        return match, ai_queue.run_triage(triage.track(triage.with_cves([match])), provider=provider)
 
     def test_the_triage_prompt_carries_the_host_context_as_a_second_untrusted_block(self):
         self.observe('version', 'nginx', 'hidden')
@@ -184,7 +185,7 @@ class ClosureGroundsTests(ContextFixture, TestCase):
         provider = mock.Mock(model='m')
         provider.name = 'anthropic'
         provider.complete.return_value = reply(text)
-        triage.run_triage(triage.track(triage.with_cves([self.match])), provider=provider)
+        ai_queue.run_triage(triage.track(triage.with_cves([self.match])), provider=provider)
         self.match.refresh_from_db()
         return Triage.objects.get(match=self.match)
 
@@ -376,7 +377,7 @@ class TechnologyIngestTests(SimpleTestCase):
         self.assertEqual(tech_name_from({'template-id': 'x', 'info': {'name': 'Nginx Version'}, 'extracted-results': ['unknown']}), 'Nginx')
 
     def test_the_prompt_builder_accepts_no_context_for_other_kinds(self):
-        text = ai_providers.build_triage_prompt('nuclei', {'name': 'x'})
+        text = ai_queue.triage_prompt('nuclei', {'name': 'x'})
         self.assertNotIn('HOST_CONTEXT', text)
 
 

@@ -12,6 +12,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
+from tests import ai_queue
 
 
 def call(token, method, path, body=None):
@@ -1936,7 +1937,7 @@ class TriageApiTests(TestCase):
 			findings = triage.with_cves(CVEMatch.objects.filter(subdomain__target_domain=self.da).select_related('subdomain__target_domain'))
 			findings += triage.vulnerabilities(__import__('startScan.models', fromlist=['Vulnerability']).Vulnerability.objects.filter(target_domain=self.da))
 			findings += [self.route, self.hyg]
-			triage.run_triage(triage.track(findings), provider=provider)
+			ai_queue.run_triage(triage.track(findings), provider=provider)
 
 	def get(self, path, token=None):
 		return call(token or self.t_alice, 'GET', f'/api/v1/projects/proj-a/{path}')

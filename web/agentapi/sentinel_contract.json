@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hevnsnt/CVEngine/agentapi/sentinel_contract.json",
   "title": "cvENGINE Sentinel result contract",
-  "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
+  "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -821,6 +821,128 @@
               "required": [
                 "products",
                 "generic"
+              ]
+            }
+          }
+        ]
+      },
+      "bbot_discovery": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "partials": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000,
+                "description": "the seq of the last batch sent: the server refuses a final result before it has every batch"
+              },
+              "mode": {
+                "enum": [
+                  "passive",
+                  "standard",
+                  "deep"
+                ],
+                "description": "the mode the run finished in (a run that ran out of memory is retried one step lighter)"
+              },
+              "incomplete": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "bbot stopped part way (a crash or the time limit) after it had found something; empty for a whole run"
+              },
+              "scan_name": {
+                "type": "string",
+                "maxLength": 100,
+                "pattern": "^[A-Za-z0-9_.-]*$"
+              },
+              "web_events": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "URL": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "HTTP_RESPONSE": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "URL",
+                  "HTTP_RESPONSE"
+                ]
+              },
+              "problems": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "module": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "module",
+                    "reason"
+                  ]
+                },
+                "description": "modules bbot skipped at start-up (a rejected or missing key)"
+              },
+              "hard_failures": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "module": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "module",
+                    "reason"
+                  ]
+                },
+                "description": "modules whose set-up failed (gowitness without a working browser)"
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "partials",
+                "mode"
               ]
             }
           }
@@ -1693,6 +1815,94 @@
           }
         }
       },
+      "bbot_discovery": {
+        "type": "object",
+        "required": [
+          "domain",
+          "mode",
+          "presets",
+          "require_flags",
+          "exclude_modules",
+          "force",
+          "strict_scope",
+          "timeout_seconds",
+          "api_keys",
+          "trufflehog",
+          "scope"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          "mode": {
+            "enum": [
+              "passive",
+              "standard",
+              "deep"
+            ]
+          },
+          "presets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "subdomain-enum",
+                "web",
+                "web-screenshots",
+                "kitchen-sink"
+              ]
+            }
+          },
+          "require_flags": {
+            "type": "array",
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "passive",
+                "safe"
+              ]
+            }
+          },
+          "exclude_modules": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,40}$"
+            }
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "strict_scope": {
+            "type": "boolean",
+            "description": "bbot's --strict-scope: the target's subdomains are not in scope either"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 86400,
+            "description": "the whole run, lighter retries included"
+          },
+          "api_keys": {
+            "type": "boolean",
+            "description": "the project has API keys for bbot modules. They are never in the target: only the built-in scanner is offered such a task, and it reads them once through POST /api/v1/sentinel/tasks/{id}/secret"
+          },
+          "trufflehog": {
+            "type": "boolean",
+            "description": "bbot's trufflehog module may run (it verifies a found secret against its issuer); never for a bug bounty project"
+          },
+          "scope": {
+            "$ref": "#/$defs/scope_policy"
+          }
+        }
+      },
       "nmap_full": {
         "description": "one address: every TCP port, open ports only",
         "type": "object",
@@ -1879,6 +2089,430 @@
             "items": {
               "type": "string",
               "maxLength": 500
+            }
+          }
+        }
+      }
+    },
+    "scope_policy": {
+      "type": "object",
+      "description": "What a scanner may touch, carried in the task and enforced by the scanner on every hop, on top of its own floor (never loopback, link-local, metadata or, unless it is internal, private space). The server applies the same rules again to everything it stores.",
+      "required": [
+        "in_scope_domains",
+        "exact_host",
+        "exclusions",
+        "deny_ranges",
+        "bounty"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "in_scope_domains": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          "description": "a name is in scope when it is one of these or under one, on a dot boundary"
+        },
+        "exact_host": {
+          "type": "boolean",
+          "description": "the target was added as exactly one host: no name under it is in scope"
+        },
+        "exclusions": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "subtree": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "host",
+              "subtree"
+            ]
+          }
+        },
+        "deny_ranges": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50
+          },
+          "description": "CIDR ranges never touched: the internal ranges the project declared (only a Sentinel inside them scans them, as targets of their own) and a bug bounty program's out-of-scope addresses"
+        },
+        "bounty": {
+          "type": "boolean",
+          "description": "the project works a bug bounty program: no module that uses a found credential runs"
+        }
+      }
+    },
+    "partials": {
+      "bbot_discovery": {
+        "type": "object",
+        "description": "One batch of what a running bbot discovery found since the last one, POSTed to /api/v1/sentinel/tasks/{id}/partial. seq starts at 1 and grows by one per batch; a batch the server already has (seq at or below the last one it took) is answered again as a duplicate and stored once. Every list is what bbot reported in scope since the previous batch.",
+        "required": [
+          "seq"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "scan_name": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9_.-]*$",
+            "description": "bbot's own name for the run"
+          },
+          "subdomains": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 260
+            }
+          },
+          "ips": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            }
+          },
+          "ports": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              },
+              "required": [
+                "host",
+                "port"
+              ]
+            }
+          },
+          "urls": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 999
+                }
+              },
+              "required": [
+                "url",
+                "status"
+              ]
+            }
+          },
+          "technologies": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "technology": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "host",
+                "technology"
+              ]
+            }
+          },
+          "resolutions": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "ip": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                }
+              },
+              "required": [
+                "name",
+                "ip"
+              ]
+            }
+          },
+          "edges": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "parent": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "child": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "required": [
+                "parent",
+                "child"
+              ]
+            }
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "informational": {
+                  "type": "boolean"
+                },
+                "severity": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4
+                },
+                "host": {
+                  "type": "string",
+                  "maxLength": 260
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "module": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "name",
+                "informational",
+                "severity",
+                "host",
+                "url",
+                "description",
+                "module"
+              ]
+            }
+          },
+          "http": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "maxLength": 260
+                },
+                "url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 999
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "webserver": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "content_type": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "location": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "host",
+                "url",
+                "port",
+                "status",
+                "title",
+                "webserver",
+                "content_type",
+                "location"
+              ]
+            }
+          },
+          "events": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "enum": [
+                    "DNS_NAME",
+                    "IP_ADDRESS",
+                    "OPEN_TCP_PORT",
+                    "URL",
+                    "TECHNOLOGY",
+                    "WAF",
+                    "FINDING",
+                    "VULNERABILITY",
+                    "STORAGE_BUCKET",
+                    "EMAIL_ADDRESS",
+                    "ASN",
+                    "SOCIAL",
+                    "CODE_REPOSITORY",
+                    "WEBSCREENSHOT",
+                    "PROTOCOL"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "host": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "parent_host": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "module": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "type",
+                "label",
+                "host",
+                "parent_host",
+                "module"
+              ]
+            }
+          },
+          "screenshots": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "filename": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._-]{1,120}$"
+                },
+                "content_type": {
+                  "enum": [
+                    "image/png",
+                    "image/jpeg"
+                  ]
+                },
+                "data": {
+                  "type": "string",
+                  "minLength": 4,
+                  "maxLength": 2796204,
+                  "contentEncoding": "base64",
+                  "description": "the image file, base64; at most 2 MiB before encoding"
+                }
+              },
+              "required": [
+                "host",
+                "url",
+                "filename",
+                "content_type",
+                "data"
+              ]
             }
           }
         }
