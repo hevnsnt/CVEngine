@@ -1324,40 +1324,6 @@ class ScanControl(models.Model):
         return cls.objects.get_or_create(pk=1)[0]
 
 
-class AssessmentReview(models.Model):
-    """Checkpointed three-hour assessment review; decisions live in AssessmentReviewDecision."""
-
-    status = models.CharField(max_length=16, default='queued')
-    period_start = models.DateTimeField()
-    period_end = models.DateTimeField()
-    cursor_project_id = models.PositiveIntegerField(default=0)
-    total_projects = models.PositiveIntegerField(default=0)
-    reviewed_projects = models.PositiveIntegerField(default=0)
-    model_calls = models.PositiveIntegerField(default=0)
-    queued_actions = models.PositiveIntegerField(default=0)
-    error_count = models.PositiveIntegerField(default=0)
-    performance = models.JSONField(default=dict, blank=True)
-    error = models.CharField(max_length=200, blank=True, default='')
-    lease_until = models.DateTimeField(null=True, blank=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class AssessmentReviewDecision(models.Model):
-    review = models.ForeignKey(AssessmentReview, on_delete=models.CASCADE, related_name='decisions')
-    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE)
-    action = models.CharField(max_length=32, default='none')
-    status = models.CharField(max_length=16, default='no_action')
-    reason = models.CharField(max_length=300, blank=True, default='')
-    evidence = models.JSONField(default=dict, blank=True)
-    job_id = models.PositiveIntegerField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=('review', 'project'), name='one_assessment_decision_per_project')]
-
-
 # --- Bug bounty ----------------------------------------------------------------------------------
 # The program catalogue is public data (see cveFeed.bounty_data) and belongs to no project. Engagements and reports belong to one
 # project each and are listed in tenancy.scope.SCOPES.

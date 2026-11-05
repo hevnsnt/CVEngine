@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {actionsFor, stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -60,3 +60,14 @@ test('pending and active cards keep their buttons', () => {
   assert.deepEqual(actionsFor({state: 'pending', status: 'pending', can_manage: true, held_by: HELD.held_by}), ['approve', 'delete', 'suspend', 'revoke']);
   assert.deepEqual(actionsFor({state: 'idle', status: 'active', can_manage: true, held_by: null}), ['suspend', 'revoke']);
 });
+
+test('the stages waiting without a worker read as one sentence, and nothing at all when none waits (Q4)', () => {
+  assert.equal(stageRunsText({waiting: 0, resumed_1h: 0}), '');
+  assert.equal(stageRunsText(undefined), '');
+  const text = stageRunsText({waiting: 3, waiting_by_kind: {nmap_scan: 2, 'sweep.testssl': 1}, oldest_wait_seconds: 125,
+                              callback_latency_p50_seconds: 0.4, callback_latency_p95_seconds: 2, freed_seconds_1h: 3720, resumed_1h: 9});
+  assert.match(text, /^3 stages wait on Sentinels without holding a worker \(nmap 2, TLS audit 1\), the oldest for 2m 5s/);
+  assert.match(text, /continues 0s after its last task typically, 2s at worst/);
+  assert.match(text, /1h 2m of worker time given back in the last hour\.$/);
+});
+

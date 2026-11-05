@@ -58,6 +58,12 @@ def log(kind, message, project=None, cve_id='', status='done', **detail):
         from django.db.models import F
         from cveFeed.models import AgentActivity
         message = message[:500]
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        if run is not None:  # a stage continued by a later pass says again what its first pass said: the line it wrote then stands
+            earlier = run.repeated_activity(kind, message, _project_id(project), detail.get('scan_id'), status)
+            if earlier is not None:
+                return earlier
         same = _repeat_of(kind, message, _project_id(project), detail.get('scan_id'), status)
         if same is not None:
             AgentActivity.objects.filter(pk=same.pk).update(repeat=F('repeat') + 1, created_at=timezone.now(), finished_at=timezone.now())
@@ -67,6 +73,8 @@ def log(kind, message, project=None, cve_id='', status='done', **detail):
             kind=kind, message=message, status=status, project_id=_project_id(project),
             cve_id=cve_id or '', detail=detail,
             finished_at=None if status == 'running' else timezone.now())
+        if run is not None:
+            run.note_activity(entry)
         return entry
     except Exception:  # noqa: BLE001
         logger.warning('could not record %s activity', kind, exc_info=True)  # the message is not logged: it may name what a scan found

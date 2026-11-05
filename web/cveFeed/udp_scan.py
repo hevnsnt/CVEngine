@@ -590,8 +590,32 @@ def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
             return {'skipped': reason}
     if resources.global_pause_requested(fail_closed=True):
         return {'skipped': 'scanning is paused'}
-    scanned, started, waiting = [], clock(), set()
-    with resources.redis_claim(CLAIM_KEY, f'udpscan-{os.getpid()}', CLAIM_TTL) as held:
+    from agentapi import stage_runs
+    if runner is None and pipeline is None:
+        # an address a Sentinel scans is waited for without holding the worker (agentapi.stage_runs): the callback goes on with the next one
+        if stage_runs.enabled() and stage_runs.busy('sweep.udp'):
+            return {'skipped': 'another UDP sweep is running (it waits on a Sentinel)'}
+        return stage_runs.run('sweep.udp', {}, first=lambda: _sweep(None, None, clock))
+    return _sweep(runner, pipeline, clock)
+
+
+def _resume_sweep(context):
+    return _sweep(None, None, time.monotonic)
+
+
+def _sweep(runner, pipeline, clock):
+    from agentapi import stage_runs
+    from reNgine import resources
+    from startScan.models import IpAddress
+    in_run = stage_runs.current() is not None
+    if in_run:  # the passes of one firing share its time budget, its place and the addresses it found no scanner for
+        clock = time.time
+        started = stage_runs.once('udp:started', time.time)
+    else:
+        started = clock()
+    scanned, waiting = [], set(stage_runs.recall('udp:waiting', []))
+    claim = stage_runs.claim_kwargs('udp-sweep', f'udpscan-{os.getpid()}')
+    with resources.redis_claim(CLAIM_KEY, claim.pop('owner'), CLAIM_TTL, **claim) as held:
         if held is not True:
             return {'skipped': f'another UDP sweep is running ({held})'}
         record_status('ok')
@@ -599,13 +623,18 @@ def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
             if resources.global_pause_requested(fail_closed=True):
                 scanned.append({'skipped': 'scanning is paused'})
                 break
-            ip = pick(waiting) if waiting else pick()
+            current = stage_runs.recall('udp:current')
+            ip = IpAddress.objects.filter(pk=current).first() if current else None
+            ip = ip or (pick(waiting) if waiting else pick())
             if ip is None:
                 break
+            stage_runs.remember('udp:current', ip.pk)  # the address a later pass continues with, if this one waits on a Sentinel
             outcome = scan_ip(ip, runner=runner, pipeline=pipeline)
+            stage_runs.remember('udp:current', None)
             scanned.append(outcome)
             if outcome.get('waiting'):  # no scanner could take it, so it is still due: not picked again by this firing (it would fail at once, over and over)
                 waiting.add(ip.pk)
+                stage_runs.remember('udp:waiting', sorted(waiting))
                 if len(waiting) >= MAX_WAITING:  # a scanner that is down is down for everyone: the next firing asks again
                     break
     return {'scanned': scanned}
@@ -624,3 +653,11 @@ def kick():
     except Exception:  # noqa: BLE001 - the TCP sweep's firing must never fail because of this
         logger.warning('could not queue the UDP sweep', exc_info=True)
         return False
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('sweep.udp', queue='udp_queue')(_resume_sweep)
+
+
+_register()

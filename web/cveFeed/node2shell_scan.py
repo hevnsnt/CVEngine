@@ -91,7 +91,7 @@ def run_check(url, timeout_s=None):
         return {'vulnerable': None, 'verdict': 'ERROR', 'error': str(exc)[:200], 'reason': str(exc)[:200]}
 
 
-def run_for_scan(scan_id, checker=run_check, force=False):
+def run_for_scan(scan_id, checker=None, force=False):
     """Run the node2shell check against every Node.js or Express host this scan found, bounded per scan and
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
     dict; never raises."""
@@ -109,22 +109,41 @@ def run_for_scan(scan_id, checker=run_check, force=False):
     todo = [(s, u) for s, u in sites if s.name not in covered][:max_hosts()]
     if not todo:
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}
+    from agentapi import sentinel_dispatch
+    try:
+        sentinel = checker is None and sentinel_dispatch.scanner_or_local(project, 'node2shell')  # an injected checker (a test) is never second-guessed
+        checker = checker or run_check
+    except resources.ScannerUnavailable as exc:  # no scanner can take it and the detector may not run here: the hosts stay due
+        return {'checked': len(sites), 'tested': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log('run_check', f'Checking {len(todo)} host(s) of {domain.name} for {CVE_ID} '
                            '(about 23 MB uploaded per host; read-only, no credential sent)',
                            project=project, status='running', scan_id=scan.id)
     vulnerable = errors = 0
+
+    def note(sub, url, result):
+        nonlocal vulnerable, errors
+        ledger.record(SERVICE, [sub.name], project.id, scan)
+        if result.get('vulnerable') is True:
+            vulnerable += 1
+            _record_finding(scan, sub, url, result)
+        elif result.get('vulnerable') is None:
+            errors += 1
+    local = todo
     try:
-        # under the resource gate like the other scanner stages: a global pause or a stopped scan ends the loop between hosts
-        with resources.heavy_job('route-probe', label=domain.name) as job:
-            for sub, url in todo:
-                job.raise_if_killed()
-                result = checker(url)
-                ledger.record(SERVICE, [sub.name], project.id, scan)
-                if result.get('vulnerable') is True:
-                    vulnerable += 1
-                    _record_finding(scan, sub, url, result)
-                elif result.get('vulnerable') is None:
-                    errors += 1
+        if sentinel:  # the detector runs on a scanner (vendored there the way it is here); a host no Sentinel finished runs here when it may
+            local = []
+            for index, result in sentinel_dispatch.dispatch_each(project, 'node2shell', todo, lambda site: {'url': site[1]}, scan=scan,
+                                                                 label_of=lambda site: site[0].name):
+                if result is None:
+                    local.append(todo[index])
+                else:
+                    note(*todo[index], sentinel_dispatch.node2shell_outcome(result))
+        if local:
+            # under the resource gate like the other scanner stages: a global pause or a stopped scan ends the loop between hosts
+            with resources.heavy_job('route-probe', label=domain.name) as job:
+                for sub, url in local:
+                    job.raise_if_killed()
+                    note(sub, url, checker(url))
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'node2shell check for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '

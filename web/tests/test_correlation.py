@@ -142,6 +142,22 @@ class TestVendorTokens(unittest.TestCase):
         self.assertEqual(parse_cpe("cpe:2.3:a:f5:nginx:1.18.0:*:*:*:*:*:*:*"), ("f5", "nginx", "1.18.0"))
         self.assertIsNone(parse_cpe("cpe:/o:canonical:ubuntu_linux"))
 
+    def test_bind_cpe_reaches_isc_bind9_advisory(self):
+        advisory = FakeCVE(15, [{"vendor": "ISC", "product": "BIND9",
+                                 "ranges": [{"introduced": "9.11.0", "fixed": "9.11.31"}]}])
+        cpe = "cpe:/a:isc:bind:9.11.3-1ubuntu1.11"
+        self.assertEqual(_hits([advisory], "ISC BIND", "9.11.3-1ubuntu1.11", cpe), [(15, True, 0.85)])
+        self.assertEqual(_hits([advisory], "BIND", "9.11.3"), [(15, True, 0.85)])
+        self.assertEqual(_hits([advisory], "ISC BIND", "9.11.3"), [(15, True, 0.85)])
+        self.assertEqual(_hits([advisory], "ISC BIND", "9.11.31", cpe), [(15, False, 0.0)])
+        unbounded = FakeCVE(17, [{"vendor": "ISC", "product": "BIND9", "ranges": []}])
+        self.assertEqual(_hits([unbounded], "ISC BIND", "9.11.3", cpe), [(17, None, 0.4)])
+
+    def test_bind_alias_does_not_match_another_vendor_without_cpe(self):
+        unrelated = FakeCVE(16, [{"vendor": "example", "product": "BIND9",
+                                  "ranges": [{"introduced": "9.11.0", "fixed": "9.11.31"}]}])
+        self.assertEqual(_hits([unrelated], "ISC BIND", "9.11.3"), [])
+
     def test_cpe_vendor_must_agree(self):
         oracle = FakeCVE(14, [{"vendor": "oracle", "product": "http_server", "ranges": [{"introduced": "1.0", "fixed": "9.0"}]}])
         self.assertEqual(_hits([oracle], "x", "2.4.52", cpe="cpe:/a:apache:http_server:2.4.52"), [])

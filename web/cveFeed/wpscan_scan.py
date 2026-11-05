@@ -740,6 +740,11 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
                            project=project, status='running', scan_id=scan.id)
     errors, scanned, token_ok = [], [], bool(token)
     no_scanner = None
+    if real_runner and runner is not run_wpscan_process:
+        # waiting on Sentinels without the worker (agentapi.stage_runs): every site's task is sent first, and the loop below runs once they are all
+        # in, so this stage's summary covers every site (outside a StageRun this does nothing and each site waits in turn, as before)
+        from agentapi import sentinel_dispatch
+        sentinel_dispatch.prefetch_wpscan(domain.project, scan, [_base_of(by_name[h]) for h in todo], token, internal=internal)
     started = time.monotonic()
     for index, host in enumerate(todo):
         if time.monotonic() - started > stage_seconds():
@@ -866,11 +871,31 @@ def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None
     if waiting:  # no scanner can run it and this server may not: asked again at the same attempt a little later, with no run and no activity line
         _requeue_quick(scan, only, attempt)
         return {'skipped': waiting}
-    with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', f'quick-{os.getpid()}', 600) as holder:
+    if runner is None and sleep is None and probe_get is None:
+        # the sites a Sentinel scans are waited for without holding the worker (agentapi.stage_runs): the callback finishes the pass
+        from agentapi import stage_runs
+        context = {'scan_id': scan_id, 'hosts': sorted(only), 'attempt': attempt}
+        return stage_runs.run('wpscan.quick', context, first=lambda: _quick(scan, only, attempt), project=scan.domain.project_id, scan=scan_id)
+    return _quick(scan, only, attempt, runner=runner, sleep=sleep, probe_get=probe_get)
+
+
+def _resume_quick(context):
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').filter(pk=context['scan_id']).first()
+    if scan is None:
+        return {'skipped': 'the scan is gone'}
+    return _quick(scan, set(context['hosts']), context['attempt'])
+
+
+def _quick(scan, only, attempt, runner=None, sleep=None, probe_get=None):
+    from agentapi import stage_runs
+    from reNgine import resources
+    claim = stage_runs.claim_kwargs('wpscan-quick', f'quick-{os.getpid()}')
+    with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', claim.pop('owner'), 600, **claim) as holder:
         if holder is not True:
             queue_quick(scan, only, attempt)
             return {'skipped': 'another quick pass is running for this project'}
-        return run_wpscan(scan_id, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
+        return run_wpscan(scan.pk, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
 
 
 # ----------------------------------------------------------------------------- the thorough pass
@@ -1017,3 +1042,11 @@ def _probe_positive(project_id, host):
 def _hint(reason, token):
     return ('the edge refused or challenged WPScan (' + _redact(reason, token)[:120] + '). Allow the scanner\'s address or user agent in the WAF or '
             'bot rules for this host, then rescan; cvENGINE never tries to get past a challenge')
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('wpscan.quick', queue='wpscan_queue')(_resume_quick)
+
+
+_register()

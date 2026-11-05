@@ -307,7 +307,6 @@ ALLOWED = {
         'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
-        'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
         'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing
@@ -331,6 +330,7 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'wafw00f': [
+        'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
         'agentapi/sentinel_broker.py',
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',

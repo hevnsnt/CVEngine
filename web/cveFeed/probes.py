@@ -876,6 +876,22 @@ def run_nmap_probe(ip, port, service='', runner=None):
     return observations_from_nmap(inventory, int(port)), inventory
 
 
+def nmap_scripts(service=''):
+    """The reviewed scripts the nmap probe runs for ``service``, as a list of names: the ones ``probe_nmap_flags`` (cvengine_scanner.flags) gives a local run,
+    so a probe on the scanner runs the same set."""
+    flags = probe_nmap_flags(1, service)
+    return flags[flags.index('--script') + 1].split(',')
+
+
+def _sentinel_nmap_probe(project_id, target):
+    """The nmap probe of ``target`` on a scanner (an ``nmap_verify`` task: ``--version-all`` with the same safe scripts as ``nmap_argv``): the host
+    records cut to the probed address, or ``None`` to run it here. Raises ``ScannerUnavailable`` when it may not run here."""
+    from agentapi import sentinel_dispatch
+    task = sentinel_dispatch.nmap_verify_target(target['ip'], [target['port']], version_all=True, scripts=nmap_scripts(target.get('service', '')),
+                                                host_timeout=90)
+    return sentinel_dispatch.try_nmap_verify(sentinel_dispatch._project_of(project_id), task)
+
+
 # ----------------------------------------------------------------------------- recording
 
 def record(project_id, domain_id, host, probe_id, observations, now=None):
@@ -1012,7 +1028,11 @@ def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep
             raise ValueError('probe destination is not allowed')
 
         from cveFeed import nmap_scan
-        found, inventory = run_nmap_probe(target['ip'], target['port'], target.get('service', ''), runner=nmap_runner)
+        inventory = _sentinel_nmap_probe(project_id, target) if nmap_runner is None else None  # an injected runner (a test) is never second-guessed
+        if inventory is not None:
+            found = observations_from_nmap(inventory, int(target['port']))
+        else:
+            found, inventory = run_nmap_probe(target['ip'], target['port'], target.get('service', ''), runner=nmap_runner)
         nmap_scan.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
     else:
         reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
@@ -1097,7 +1117,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
                     found = apply_remote(project, domain.id, sub, entry, found)
                 else:
                     found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
-            except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
+            except (local_egress.PortHeld, resources.ScannerUnavailable) as exc:  # held here, or waiting for a scanner: not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1
                 continue

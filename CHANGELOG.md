@@ -6,6 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Added
 
+- **Scan stages no longer hold a worker while a Sentinel works** ([docs/SCANNER-ARCHITECTURE.md](docs/SCANNER-ARCHITECTURE.md#asynchronous-stages-queue-q4)). A stage that hands work to a Sentinel records its wait (`StageRun`) and frees its Celery worker; a callback continues the scan the moment the last task is reported, with the same budgets, fallbacks and telemetry as before. A restart loses nothing: a minute tick re-drives any wait it left. Sentinels' long polls and stage waits are woken through Redis instead of polling. The system status and the Sentinels page show the stages waiting, the oldest wait, the callback latency and the worker time given back. `CVENGINE_ASYNC_STAGES=0` restores the blocking wait.
 - **bbot discovery on a Sentinel** (contract version 3, kind `bbot_discovery`). A discovery can now run on a Sentinel that declares the kind, as a streamed task: the Sentinel posts numbered batches of what it found to the new `POST /api/v1/sentinel/tasks/{id}/partial` while bbot runs, and the server stores each one as it arrives, so hosts, the live feed and screenshots appear during the run as they do for a local one. Each batch is held again to the scope the task carried (the target, the organization's exclusions, a bug bounty program's out-of-scope entries, the internal ranges), stored once and in order, and a stop of the scan ends the run at its next batch. A project's API keys for bbot's modules never go in a task: only the built-in scanner is offered such a run, and it reads them once through the audited secure read. With no Sentinel for the kind, discovery runs on the server as before (`CVENGINE_LOCAL_FALLBACK` governs it like every other kind). [docs/AGENT-API.md](docs/AGENT-API.md)
 - **Version probes and discovery lookups on the scanner** (contract version 3). The version and identity probes run as the `http_probe` kind and the
   discovery pipeline's DNS lookups as `dns_resolve`, on a Sentinel that declares contract 3. Each task carries a scope policy the server computes
@@ -39,6 +40,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 - **A browser key no longer scores like a password.** A host whose secrets the inventory knows is scored by its worst counting secret: a server secret 25, a browser key 5 (it was 25 for any credential pattern). The score line reads "Server credential served on /" or "Browser key served on /".
 
+- **Seven more scan tools run on the scanner** (Sentinel contract version 3, [docs/SCANNER-ARCHITECTURE.md](docs/SCANNER-ARCHITECTURE.md#b-tool-work-that-became-sentinel-kinds-in-contract-version-3)). The background full port sweep (`nmap_full`), the nmap service probe (`nmap_verify`), the node2shell check, the RDP screenshot (`rdp_shot`), the database exposure check (`db_probe`), the scan path check (`path_probe`) and the AI template check (`nuclei_validate`) are now Sentinel kinds, and the wafw00f stage dispatches the `waf` kind it already had. Each stage asks a scanner first and runs here only when `CVENGINE_LOCAL_FALLBACK` allows it; otherwise it waits and its targets stay due. The path check and the template check go only to the built-in scanner. A Sentinel asks for the new kinds only from a server that has them, so 1.3 servers are unaffected.
+
 ### Changed
 
 - **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in
@@ -46,6 +49,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   parser, and the scan flags and policy constants (nuclei's `-etags dos`, the reviewed NSE scripts, the UDP port list, the probe ports). The
   server's own copies are gone, so a Sentinel and the server scan and read a host the same way. Nothing changes in what is run, found or stored.
 - **More AI work goes through the AI reviewer container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#the-pipelines-ai-jobs)): detection records and CVE guidance, the auto-tuner's advisor, the RDP login-screen reading (the screenshot travels in the job) and nuclei template drafts are queued as AI jobs and applied when the answer lands, with the same validation, budgets and gates as before. `update_cve_detection` with `guidance` now answers at once with `revision: {state: queued}`; the record changes when the revision lands. The auto-tuner applies its advisor's answer in the round after it was asked, judged against the range in force then.
+
+### Removed
+
+- **The three-hourly AI assessment review is retired.** The AI reviewer's operations check ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#operations-check-in-detail)) replaces it, and the deterministic coverage top-up and the auto-tuner already did the rest of its work. Migration `cveFeed.0148` removes its schedule and its two tables (`AssessmentReview`, `AssessmentReviewDecision`); the capacity report it kept (`performance_review.review`) and the Scheduler health panel that showed both go with it. The coverage query it shared moves to `cveFeed.coverage_topup`.
 
 ## v1.3.5 (2026-11-04)
 

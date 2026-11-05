@@ -10,7 +10,7 @@ no model call for them.
 | Job | Default model (Anthropic) | When it runs | What it does |
 | --- | --- | --- | --- |
 | **Finding review** | `claude-sonnet-5-5` | Continuously, in small batches, up to a daily cap | Reads every open finding once: Fire, Smoke and Ice CVE matches, scanner findings (nuclei, database exposure, bbot) and hygiene findings. It judges each one false positive or true finding (open, in progress, fixed or accepted risk), and closes the false positives with a closing note that says why. A finding is read again only when its host or its evidence changes. |
-| **Operations check** | `claude-haiku-5-5` | Four times a day (by default at 03:00, 09:00, 15:00 and 21:00 UTC) | Reads the work queue, Sentinel load and errors, the share of scanning done locally, nuclei template freshness, AI-written templates waiting for review, failed scans and the server's own problems. It writes the admin an alert that diagnoses each problem and says what to do. It may also start a fix from a short fixed list: give idle Sentinels work, or fetch new nuclei templates. |
+| **Operations check** | `claude-haiku-5-5` | Four times a day (by default at 03:00, 09:00, 15:00 and 21:00 UTC); it replaces the three-hourly AI assessment review of 1.3, which is retired | Reads the work queue, Sentinel load and errors, the share of scanning done locally, nuclei template freshness, AI-written templates waiting for review, failed scans and the server's own problems. It writes the admin an alert that diagnoses each problem and says what to do. It may also start a fix from a short fixed list: give idle Sentinels work, or fetch new nuclei templates. |
 
 With another provider (OpenAI, OpenRouter, vLLM, LM Studio, Ollama), both jobs use the provider's configured model unless a model is named for the
 job in **Settings > AI model > AI reviewer**.
@@ -227,4 +227,3 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 - Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, nuclei targeting, and the
   connection test and model list of Settings > AI model. Then the server makes no model call at all.
-- Retire the three-hourly assessment review, which the operations job replaces.

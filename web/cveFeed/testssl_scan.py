@@ -464,11 +464,19 @@ def sweep(project_id, runner=None, resolve=None):
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
     resolve = resolve or _address
-    owner = f'testssl-{os.getpid()}'
-    with resources.redis_claim(f'cvengine:testssl:{project_id}', owner, 300) as holder:
+    from agentapi import stage_runs
+    claim = stage_runs.claim_kwargs('testssl-project', f'testssl-{os.getpid()}')
+    with resources.redis_claim(f'cvengine:testssl:{project_id}', claim.pop('owner'), 300, **claim) as holder:
         if holder is not True:
             return {**summary, 'skipped': 'another TLS audit is running for this project'}
-        for host, port, starttls, domain_id in due(project_id, limit=max_targets()):
+        # When a target waits on a Sentinel without the worker (agentapi.stage_runs), the pass that continues the sweep takes the same batch up at
+        # the target it stopped at: the ones before it are done
+        batch = stage_runs.once(f'testssl:{project_id}:batch', lambda: due(project_id, limit=max_targets()))
+        start = stage_runs.recall(f'testssl:{project_id}:at', 0)
+        for index, (host, port, starttls, domain_id) in enumerate(batch):
+            if index < start:
+                continue
+            stage_runs.remember(f'testssl:{project_id}:at', index)
             if resources.global_pause_requested(fail_closed=True):
                 return {**summary, 'skipped': 'scanning is paused: the targets stay due'}
             sub = _latest_row(project_id, host)
@@ -550,15 +558,28 @@ def _why(items):
 
 
 def sweep_all(runner=None):
-    """Every project's due targets. One sweep at a time; the work is spread over days by ``max_targets`` per run."""
+    """Every project's due targets. One sweep at a time; the work is spread over days by ``max_targets`` per run. A target a Sentinel tests is
+    waited for without holding the worker (``agentapi.stage_runs``): the sweep's callback goes on with the next one."""
     from cveFeed import ledger
-    from dashboard.models import Project
-    from agentapi import scanner_state
+    from agentapi import scanner_state, stage_runs
     waiting = scanner_state.skip_note('testssl')
     if waiting:
         return {'skipped': waiting}
+    if runner is None and stage_runs.enabled() and stage_runs.busy('sweep.testssl'):
+        return {'skipped': 'another sweep is running (it waits on a Sentinel)'}
     if not ledger.sweep_claim('testssl', 3 * 60 * 60):
         return {'skipped': 'another sweep is running'}
+    if runner is None:
+        return stage_runs.run('sweep.testssl', {}, first=lambda: _sweep_projects(None))
+    return _sweep_projects(runner)
+
+
+def _resume_sweep(context):
+    return _sweep_projects(None)
+
+
+def _sweep_projects(runner):
+    from dashboard.models import Project
     totals = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     for project_id in Project.objects.values_list('id', flat=True):
         part = sweep(project_id, runner=runner)
@@ -568,3 +589,11 @@ def sweep_all(runner=None):
             totals['skipped'] = part['skipped']
             break
     return totals
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('sweep.testssl', queue='testssl_queue')(_resume_sweep)
+
+
+_register()
