@@ -271,7 +271,7 @@ def plan_checks(subject, signature, template=('', '')):
             argv = [templategen.NUCLEI_BIN, '-t', path, '-u', host, '-ni', '-rl', templategen.RATE_LIMIT, '-timeout', '10',
                     '-retries', '0', '-duc']
             checks.append(_check('nuclei_template', f'nuclei template for {subject["cve_id"]}', argv, shlex.join(argv), host, host,
-                                 signature, templategen.RUN_TIMEOUT, template=path, cve_id=subject['cve_id']))
+                                 signature, templategen.RUN_TIMEOUT, template=path, cve_id=subject['cve_id'], project_id=subject.get('project_id')))
         elif why and why != 'no template covers this CVE':
             notes.append(why)
         if subject.get('local_component_only'):
@@ -441,7 +441,7 @@ def _trim(value, limit=EVIDENCE_CAP):
 def run_nuclei_template(check):
     """Run the planned template against the one host (see templategen.run_template: -ni, -rl 10, -timeout 10, no retries)."""
     from cveFeed import templategen
-    outcome = templategen._run_template_with_retry(check['params']['template'], [check['target']])[0]
+    outcome = templategen._run_template_with_retry(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
     if outcome.get('vulnerable') and not outcome.get('error'):
         outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
     return _result_from_outcome(outcome)

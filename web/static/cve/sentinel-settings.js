@@ -29,8 +29,16 @@ export const SENTINEL_KINDS = [
   "openvas",
   "discover",
   "bbot_discovery",
+  "waf",
   "http_probe",
   "dns_resolve",
+  "nmap_full",
+  "nmap_verify",
+  "node2shell",
+  "rdp_shot",
+  "db_probe",
+  "path_probe",
+  "nuclei_validate",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -43,9 +51,17 @@ const KIND_WORDS = {
   wpscan: "WPScan",
   openvas: "OpenVAS",
   discover: "internal discovery",
+  waf: "WAF fingerprint",
   bbot_discovery: "bbot discovery",
   http_probe: "version probes",
   dns_resolve: "name resolution",
+  nmap_full: "full port sweep",
+  nmap_verify: "service version probe",
+  node2shell: "node2shell check",
+  rdp_shot: "RDP screenshot",
+  db_probe: "database exposure probe",
+  path_probe: "scan path check",
+  nuclei_validate: "template check",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {

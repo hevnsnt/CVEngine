@@ -39,7 +39,7 @@ the code or the docs show it. **Assumption** means it is inferred and has to be 
 
 ---
 
-## 1. The case that started this: "Google API Key" on am.eu.fs.viq.zebra.com
+## 1. The case that started this: "Google API Key" on a customer host (app.example.com)
 
 ### 1.1 What found it (proven)
 

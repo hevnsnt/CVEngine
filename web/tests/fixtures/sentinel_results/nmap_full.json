@@ -1,0 +1,4 @@
+{
+  "outcome": "done",
+  "xml": "<?xml version=\"1.0\"?>\n<nmaprun scanner=\"nmap\" args=\"nmap -p- --open -T4 -Pn\" version=\"7.95\"><host><status state=\"up\"/><address addr=\"192.0.2.10\" addrtype=\"ipv4\"/><ports><extraports state=\"closed\" count=\"65532\"/><port protocol=\"tcp\" portid=\"22\"><state state=\"open\"/><service name=\"ssh\" method=\"table\" conf=\"3\"/></port><port protocol=\"tcp\" portid=\"443\"><state state=\"open\"/><service name=\"https\" method=\"table\" conf=\"3\"/></port><port protocol=\"tcp\" portid=\"8443\"><state state=\"open\"/><service name=\"https-alt\" method=\"table\" conf=\"3\"/></port></ports></host><runstats><finished exit=\"success\"/></runstats></nmaprun>\n"
+}
