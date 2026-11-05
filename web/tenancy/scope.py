@@ -59,6 +59,7 @@ SCOPES = {
     'cveFeed.BountyReportEvent': 'report__project_id',
     'agentapi.AgentTask': 'project_id',
     'agentapi.SentinelTask': 'project_id',
+    'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
     'cveFeed.FindingAuditEvent': 'project_id',

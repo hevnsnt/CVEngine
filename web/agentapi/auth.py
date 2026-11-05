@@ -21,8 +21,9 @@ TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL, SCOPE_REVIEWER)
 USER_TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY)  # what a person may ask for; a sentinel token is only ever minted by an enrollment (sentinel_broker.bootstrap), a reviewer token only by agentapi.builtin_reviewer
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/(?P<slug>[-\w]+)/inventory/?$')
 # The Sentinel loop and nothing else: register/identity/unregister, heartbeat, the template policy and its bundle, and lease/accept/report/release of its own tasks
+# (with the partial results a streamed task posts while it runs)
 # (and ``secret``, the built-in scanner's single-use read of a stored credential: the route answers 403 to any other Sentinel itself, see sentinel_broker.read_secret).
-SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|release|secret))?)?/?$')
+SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|partial|release|secret))?)?/?$')
 # The AI reviewer container (docs/AI-REVIEWER.md) and nothing else: its configuration, review packets and verdicts, the operations snapshot
 # and report. The routes themselves also refuse any other token and any session (agentapi.reviewer_api), so the two checks guard each other.
 REVIEWER_PATH = re.compile(r'^/api/v1/reviewer/(?:config|findings/next|findings/t\d{1,12}/verdict|ops/snapshot|ops/report)/?$')
