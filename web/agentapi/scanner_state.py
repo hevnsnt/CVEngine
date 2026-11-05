@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
 INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design: never part of a vantage-point warning
-NO_STAGE = ('waf',)  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (drop when one does)
+NO_STAGE = ()  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (empty since 1.4: every kind has a stage)
 
 
 def _empty():
@@ -35,12 +35,15 @@ def _compute(now):
     from agentapi import sentinel_broker, sentinel_dispatch
     from agentapi.models import Agent, SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE]
+    # A kind with no local path at all (sentinel_dispatch.NEVER_LOCAL) counts once the install has moved work off this server: while every
+    # other kind still runs here, its stage waits and says so in its own activity line, and nothing is "offline" for it.
+    local_all = not (set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL) - set(NO_STAGE) - set(allowed))
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and not (local_all and k in sentinel_dispatch.NEVER_LOCAL)]
     if not off:
         return _empty()
     offered, denied, live_pks = set(), set(), set()
     for eff in sentinel_broker._live_scanners(now):
-        offered |= eff.caps
+        offered |= eff.caps if eff.builtin else eff.caps - set(sentinel_broker.BUILTIN_KINDS)  # only the built-in scanner takes those
         live_pks.add(eff.agent.pk)
         # a kind it has (declared, or turned off on its machine) and its policy turns off
         denied |= {k for k in eff.denied if k in (eff.agent.capabilities or []) or eff.policy[k]['machine']}
@@ -68,14 +71,15 @@ def _compute(now):
     return out
 
 
-IN_PROCESS_PROXIED = ('http_probe', 'bucket_check')  # in-process requests through cveFeed.pinned_transport, which takes the egress proxy
+TOOL_OF = {'waf': 'wafw00f'}  # a kind whose tool goes by another name than the kind
+IN_PROCESS_PROXIED = ('http_probe', 'bucket_check')  # the in-process requests (version probes, bucket checks) go through cveFeed.pinned_transport, which takes the egress proxy
 
 
 def _uses_proxy(kind, tools):
-    """Whether a run of ``kind`` takes the egress proxy: its tool (the kind's name, or the part before the first underscore) is one of
+    """Whether a run of ``kind`` takes the egress proxy: its tool (``TOOL_OF``, else the kind's name or the part before the first underscore) is one of
     ``egress_proxy.TOOLS``, or it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw sockets, or only asks
     a resolver, never did, so the proxy is no part of its vantage point."""
-    return kind in tools or kind.split('_')[0] in tools or kind in IN_PROCESS_PROXIED
+    return TOOL_OF.get(kind, kind) in tools or kind.split('_')[0] in tools or kind in IN_PROCESS_PROXIED
 
 
 def _tailscale_enabled():
@@ -98,7 +102,7 @@ def vantage_warnings():
     from agentapi import sentinel_dispatch
     from agentapi.models import SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY]
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY and k not in sentinel_dispatch.NEVER_LOCAL]
     if not off:
         return []
 

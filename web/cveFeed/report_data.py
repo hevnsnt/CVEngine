@@ -405,6 +405,30 @@ def _method(project, names, addresses):
 
 # --- the whole report ----------------------------------------------------------------------------------------------------------
 
+MAX_SECRETS = 100  # inventory rows printed in one report, worst first
+
+
+def _secrets(project, names, include_closed):
+    """``(total, rows)``: the project's exposed secrets (cveFeed.secrets_inventory), worst first, at most MAX_SECRETS. Masked values only: the
+    report never holds a secret. For a host report, the ones that host serves."""
+    from cveFeed import secrets_catalog, secrets_inventory
+    from cveFeed.models import SecretFinding
+    qs = SecretFinding.objects.filter(project=project)
+    if not include_closed:
+        qs = qs.exclude(status__in=secrets_catalog.QUIET_STATUSES)
+    if names is not None:
+        qs = qs.filter(occurrences__host__in=sorted(names), occurrences__retired_at__isnull=True).distinct()
+    total = qs.count()
+    rows = []
+    for s in qs.order_by('-severity', '-last_seen', 'id')[:MAX_SECRETS]:
+        kind = secrets_inventory.kind_of(s)
+        hosts = sorted(set(s.occurrences.filter(retired_at__isnull=True).values_list('host', flat=True)))
+        rows.append({'severity': secrets_catalog.LEVELS[max(0, min(4, s.severity))], 'label': clean(kind.label, 120), 'masked': clean(s.masked, 80),
+                     'class': secrets_catalog.CLASS_WORDS.get(s.klass, ''), 'status': s.status.replace('_', ' '), 'basis': clean(s.severity_basis, 300),
+                     'remediation': clean(kind.remediation, 400), 'hosts': ', '.join(clean(h, 120) for h in hosts[:5]) + (f' and {len(hosts) - 5} more' if len(hosts) > 5 else '')})
+    return total, rows
+
+
 def collect(project, host=None, include_closed=False, now=None):
     """Everything one report prints, for the whole project or for one host (``host``: its exact name). Raises LookupError for a host the
     project's current inventory does not hold."""
@@ -429,6 +453,7 @@ def collect(project, host=None, include_closed=False, now=None):
     detailed = _findings(sources, caps['findings'])
     hygiene = _hygiene(sources['hygiene'], caps['hygiene'])
     _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
+    secrets_total, secrets = _secrets(project, names, include_closed)
     org = project.org
     return {
         'title': 'Host security report' if host else 'Security exposure report', 'subject': clean(host or project.name, 200),
@@ -441,7 +466,7 @@ def collect(project, host=None, include_closed=False, now=None):
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
                     'status_counts': _status_counts(sources),
                     'top': detailed[:TOP_RISKS]},
-        'hosts': hosts, 'findings': detailed, 'hygiene': hygiene,
+        'hosts': hosts, 'findings': detailed, 'hygiene': hygiene, 'secrets': secrets, 'secrets_total': secrets_total,
         'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),
                  'hygiene_omitted': max(0, hygiene_total - sum(len(g['items']) for g in hygiene)),
                  'hygiene_shown': sum(len(g['items']) for g in hygiene)},

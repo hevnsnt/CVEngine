@@ -532,11 +532,21 @@ def _sentinels(problems):
     with sentinel_broker.memoised_rights():  # the live Sentinels' rights are built once for both answers below
         by_kind = sentinel_broker.kinds_overview(now)
         load = sentinel_broker.load_overview(now)
+    from agentapi import stage_runs
+    waiting_stages = stage_runs.metrics(now)
+    stuck = (waiting_stages['oldest_wait_seconds'] or 0) > STAGE_RUN_OLD_SECONDS
+    if stuck:
+        problems.append(f"sentinels: a stage has waited on Sentinels for {waiting_stages['oldest_wait_seconds'] // 60} minutes "
+                        f"({waiting_stages['waiting']} stage(s) waiting)")
     return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'stage_runs': waiting_stages,  # Q4: the stages waiting on Sentinels without a worker, by kind, the oldest wait, callback latency, worker slots freed
            'by_kind': by_kind,  # per kind: the live Sentinels offering it, the free slots under the per-kind caps, and why none does
            'load': load,  # how the live Sentinels share the work: each one's load now and utilisation, queue waits and tasks in the last hour; the queue depth and waits per kind
            'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],
                               'at': _iso(r['finished_at'])} for r in recent_errors]}
+
+
+STAGE_RUN_OLD_SECONDS = 4 * 3600  # a stage waiting longer than the longest completion budget (an hour) plus its queue wait is a problem worth a line
 
 
 def _egress(problems):

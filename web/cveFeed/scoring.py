@@ -10,7 +10,7 @@ the Hosts page, search and the graph already read.
 | CVE matches whose affected version range is not known (kept for review): 1 each, KEV or not | all of them | 2 |
 | Open findings: critical/high 25, medium 10, low 3; under the KEV heat policy a finding that names CVEs counts by its heat instead, and so does one a cap holds below its severity (``threat.finding_heat``: fire 25, smoke 10, ice 3) | worst | 25 |
 | Route auth: open admin or API-like path 15, open front page 5, login page 5, SSO or session required 0 | worst | 15 |
-| Sensitive data on a route (cveFeed.sensitive.sensitive_score) | worst route | 25 |
+| Sensitive data on a route (cveFeed.sensitive.sensitive_score); for a host the secrets inventory covers, its worst counting secret instead of the routes' credential samples: server secret (high or critical) 25, medium 10, low or a browser key 5 | worst | 25 |
 | Hygiene (expired or weak certificate, SPF, DKIM, DMARC, TLS, cleartext Telnet, FTP and r-services): critical 20, high 15, medium 8, low 3; each further medium or worse issue adds 2 | worst plus extras | 20 |
 | Exposure: any public IP 10 | | 10 |
 | Recency: new or returned in the last 7 days 10, port opened or version changed 5 | | 10 |
@@ -95,13 +95,32 @@ def _route_line(routes):
     return [best] if best else []
 
 
-def _sensitive_line(routes):
-    worst = max(routes, key=lambda r: r.get('sensitive_score') or 0, default=None)
-    points = (worst or {}).get('sensitive_score') or 0
-    if points <= 0:
-        return []
-    what = {25: 'Credentials served', 15: 'Personal data served'}.get(points, 'Contact details or internal identifiers served')
-    return [{'label': f'{what} on {worst.get("path") or "/"}', 'points': min(points, SENSITIVE_CAP)}]
+SECRET_POINTS = {4: 25, 3: 25, 2: 10, 1: 5, 0: 5}  # by the inventory row's severity (cveFeed.secrets_catalog.severity)
+SECRET_WORDS = {'S': 'Server credential', 'P': 'Browser key', 'I': 'Token or identifier'}
+
+
+def _route_points(route, covered):
+    """A route's sensitive score; on a host the secrets inventory covers, without its credentials (the inventory rates those)."""
+    if not covered or not route.get('sensitive'):
+        return route.get('sensitive_score') or 0
+    from cveFeed import sensitive
+    return sensitive.sensitive_score({k: v for k, v in route['sensitive'].items() if k not in sensitive.CREDENTIAL_TYPES})
+
+
+def _sensitive_line(routes, secrets=(), covered=False):
+    """The worst of: the routes' sensitive data, and (for a host the inventory covers) its worst counting secret. ``secrets`` [{severity, klass,
+    path}] from ``secrets_inventory.host_secrets``."""
+    lines = []
+    worst = max(routes, key=lambda r: _route_points(r, covered), default=None)
+    points = _route_points(worst, covered) if worst else 0
+    if points > 0:
+        what = {25: 'Credentials served', 15: 'Personal data served'}.get(points, 'Contact details or internal identifiers served')
+        lines.append({'label': f'{what} on {worst.get("path") or "/"}', 'points': min(points, SENSITIVE_CAP)})
+    if secrets:
+        top = max(secrets, key=lambda s: (SECRET_POINTS.get(s.get('severity'), 0), s.get('klass') == 'S', s.get('severity') or 0))
+        lines.append({'label': f'{SECRET_WORDS.get(top.get("klass"), "Secret")} served on {top.get("path") or "/"}',
+                      'points': min(SECRET_POINTS.get(top.get('severity'), 0), SENSITIVE_CAP)})
+    return [max(lines, key=lambda line: line['points'])] if lines else []
 
 
 def _hygiene_lines(issues):
@@ -119,7 +138,8 @@ def _hygiene_lines(issues):
 
 def score_host(inputs):
     """``(score, detail)`` for one host. ``inputs``: ``cves`` [{id, temp, ai_verdict, version_unknown}] (matches the AI has not ruled out),
-    ``findings`` [{severity, name}] (open), ``hygiene`` [{severity, title}] (open hygiene findings of the host), ``routes`` [{path, auth_state, sensitive_score}], ``public_ip`` bool,
+    ``findings`` [{severity, name}] (open), ``hygiene`` [{severity, title}] (open hygiene findings of the host), ``routes`` [{path, auth_state, sensitive_score, sensitive}], ``secrets`` [{severity, klass, path}] (counting inventory secrets the host
+    serves) and ``secrets_covered`` (the inventory covers the host, so route credential samples do not score), ``public_ip`` bool,
     ``recent`` [change kinds in the last 7 days], ``zombie_host`` and ``zombie_route`` bools. ``detail`` is the ordered list of
     ``{'label', 'points'}`` that add up to the score (at most 100)."""
     detail = _cve_lines(inputs.get('cves') or [])
@@ -136,7 +156,7 @@ def score_host(inputs):
     detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
     detail += _capped(_route_line(routes), ROUTE_CAP)
-    detail += _sensitive_line(routes)
+    detail += _sensitive_line(routes, inputs.get('secrets') or (), bool(inputs.get('secrets_covered')))
     if inputs.get('public_ip'):
         detail.append({'label': 'Public IP observed in inventory (service reachability unverified)', 'points': EXPOSURE_POINTS})
     recent = set(inputs.get('recent') or [])
@@ -245,8 +265,11 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
                   .exclude(remediation_status__in=CLOSED).values('host', 'severity', 'title')):
             hygiene.setdefault(h['host'].lower(), []).append(h)
-        for r in RouteAuth.objects.filter(project_id=project_id, host__in=chunk).values('host', 'path', 'auth_state', 'sensitive_score', 'zombie_since'):
+        for r in RouteAuth.objects.filter(project_id=project_id, host__in=chunk).values('host', 'path', 'auth_state', 'sensitive_score', 'sensitive',
+                                                                                         'zombie_since'):
             routes.setdefault(r['host'], []).append(r)
+        from cveFeed import secrets_inventory
+        secrets, covered = secrets_inventory.host_secrets(project_id, chunk)
         since = now - timedelta(days=RECENT_DAYS)
         for r in AssetChange.objects.filter(project_id=project_id, host__in=chunk, detected_at__gte=since,
                                             kind__in=RECENT_NEW_KINDS + RECENT_CHANGE_KINDS).values('host', 'kind'):
@@ -261,7 +284,8 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         for name, sub in subs.items():
             inputs = {'cves': _cve_inputs(sub),
                       'findings': [_finding_input(v, hot) for v in sub.vulnerability_set.all() if finding_is_live(v)],
-                      'hygiene': hygiene.get(name, []), 'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ())}
+                      'hygiene': hygiene.get(name, []), 'routes': routes.get(name, []), 'public_ip': _has_public_ip(sub), 'recent': recent.get(name, ()),
+                      'secrets': secrets.get(name, []), 'secrets_covered': name in covered}
             inputs.update(zombies.get(name, {}))
             scores[name] = score_host(inputs)
         rows = []

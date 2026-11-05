@@ -549,6 +549,12 @@ def plan_routes(h, ev):
     return [Unit(h.name, [Run(when, ledger.ttl('route-auth'), True)] if when else [])]
 
 
+def plan_secrets(h, ev):
+    if not h.web:
+        return 'no web service'
+    return _targetable(h) or _one(h, ev, ('secrets-scan',))
+
+
 def plan_probes(h, ev):
     if not h.unversioned:
         return 'no product seen without a version'
@@ -823,6 +829,7 @@ CHECKS = (
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
     Check('waf', 'WAF fingerprint (wafw00f)', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),
     Check('web-routes', 'Web route auth check', plan_routes, kinds=('route-auth',), stages=('route_auth_scan',)),
+    Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
     Check('wp-detect', 'WordPress detection probe', plan_wp_probe, kinds=('wp-probe',)),
     Check('wpscan', 'WPScan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
@@ -846,6 +853,7 @@ EXCLUDED = {
     'kinds': {
         'retest': 'a re-test of a changed host runs the checks above again; it is not a check of its own',
         'validate': 'validation of a CVE match is recorded on the match, not on the host',
+        'secrets-validate': 'opt-in validation of found secrets: part of the secrets scan of a host, limited once a week per host',
         'buckets': 'cloud storage candidates belong to the project (found in page content and DNS), not to one host',
         'buckets-failed': 'the retry window of the cloud storage sweep',
         'supplier': 'a third-party supplier host card; suppliers are not owned hosts and are deliberately kept out of this registry',

@@ -74,8 +74,13 @@ def clear_egress_state():
 
 
 def hermetic_egress():
-    """Pin the egress settings off for the test run and clear the egress Redis keys before each test (Django's SimpleTestCase and its subclasses)."""
+    """Pin the egress settings off for the test run and clear the egress Redis keys before each test (Django's SimpleTestCase and its subclasses).
+
+    Stages also run blocking in tests (``CVENGINE_ASYNC_STAGES=0`` unless the run sets it): a test's transaction never commits, so a StageRun's
+    callback is never queued, and a test that calls a pipeline expects its result. The tests of asynchronous stages switch it on themselves
+    (``tests.fake_scanner.FakeScanner(async_stages=True)`` and ``drain``)."""
     os.environ.update(EGRESS_TEST_ENV)
+    os.environ.setdefault('CVENGINE_ASYNC_STAGES', '0')
     from django.test import SimpleTestCase
     if getattr(SimpleTestCase, '_egress_hermetic', False):
         return

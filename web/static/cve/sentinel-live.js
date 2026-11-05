@@ -18,7 +18,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", bucket_check: "cloud storage checks" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check", bucket_check: "cloud storage checks" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {
@@ -207,7 +207,29 @@ function summary(data) {
     return d;
   };
   bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
+  if (data.stage_runs) bar.append(cell(data.stage_runs.waiting, "stages waiting, no worker held"));
   return bar;
+}
+
+const STAGE = { nmap_scan: "nmap", nuclei_light_scan: "nuclei (light)", nuclei_targeted_scan: "nuclei (targeted)", wpscan: "WPScan",
+  "sweep.testssl": "TLS audit", "sweep.udp": "UDP sweep", "nuclei.weekly": "weekly deep nuclei", "wpscan.quick": "WPScan quick pass",
+  "internal.discover": "internal discovery", "openvas.import": "OpenVAS" };
+
+// The asynchronous stages (queue Q4): the scan stages that handed their work to Sentinels and gave their worker back while they wait, from
+// GET sentinels/live `stage_runs`. One sentence, or "" when nothing waits and nothing came back in the last hour.
+export function stageRunsText(m) {
+  if (!m || (!m.waiting && !m.resumed_1h)) return "";
+  const parts = [];
+  if (m.waiting) {
+    const kinds = Object.entries(m.waiting_by_kind || {}).map(([k, n]) => `${STAGE[k] || k} ${n}`).join(", ");
+    parts.push(`${m.waiting} stage${m.waiting === 1 ? "" : "s"} wait${m.waiting === 1 ? "s" : ""} on Sentinels without holding a worker (${kinds})` +
+      (m.oldest_wait_seconds != null ? `, the oldest for ${span(m.oldest_wait_seconds)}` : ""));
+  }
+  if (m.callback_latency_p50_seconds != null) {
+    parts.push(`a finished stage continues ${span(m.callback_latency_p50_seconds)} after its last task typically, ${span(m.callback_latency_p95_seconds)} at worst`);
+  }
+  if (m.freed_seconds_1h) parts.push(`${span(m.freed_seconds_1h)} of worker time given back in the last hour`);
+  return parts.join("; ") + ".";
 }
 
 function openvasQueue(queue) {
@@ -381,7 +403,11 @@ export function sentinelLive(mount) {
     if (!data.results.length) {
       mount.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
       if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
-    } else mount.append(summary(data));
+    } else {
+      mount.append(summary(data));
+      const waits = stageRunsText(data.stage_runs);
+      if (waits) mount.append(el("p", "note sl-stage-runs", waits));
+    }
     if (data.openvas) mount.append(openvasQueue(data.openvas));
     const drawn = groups(data);
     drawn.forEach((g) => mount.append(section(g, reload, details)));

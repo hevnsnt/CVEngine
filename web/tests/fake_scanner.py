@@ -97,6 +97,9 @@ class _Clock:
     def monotonic(self):
         return _real_time.monotonic() + self.offset
 
+    def time(self):  # the wall clock a StageRun writes its budgets in moves with the virtual one
+        return _real_time.time() + self.offset
+
     def sleep(self, seconds):
         self.offset += max(0.0, float(seconds))  # the budgets see the time pass; the test does not wait for it
         self.fake.serve_once()
@@ -115,7 +118,8 @@ class FakeScanner:
     ``contract_version``: the one it reports (default: the server's current). ``mode`` / ``modes``: how it behaves (see the module docstring).
     ``responders``: ``{kind: callable(task) -> dict | dict}``. ``max_concurrent``: its slots. ``error``: the text a ``fail`` task reports."""
 
-    def __init__(self, kinds=None, contract_version=None, mode='ok', modes=None, responders=None, max_concurrent=4, error=DEFAULT_ERROR):
+    def __init__(self, kinds=None, contract_version=None, mode='ok', modes=None, responders=None, max_concurrent=4, error=DEFAULT_ERROR,
+                 async_stages=False):
         from agentapi import sentinel_contract
         self.kinds = list(kinds) if kinds is not None else [k for k in sentinel_contract.KINDS if _has_fixture(k)]
         self.contract_version = sentinel_contract.version() if contract_version is None else contract_version
@@ -126,6 +130,8 @@ class FakeScanner:
         self.errors = []  # what went wrong inside a serve (re-raised by stop(): a stage's own ``except Exception`` must not hide it)
         self.agent = None
         self._stack = None
+        self.async_stages = async_stages  # stages give their worker back while they wait (agentapi.stage_runs); ``drain`` continues them
+        self.clock = None
 
     # -- lifecycle
 
@@ -154,7 +160,11 @@ class FakeScanner:
             from agentapi.models import Agent
             self.agent = Agent.objects.select_related('token__user').get(pk=out['id'])
             assert self.agent.token.user_id == admin.pk
-            stack.enter_context(mock.patch('agentapi.sentinel_dispatch.time', _Clock(self)))
+            self.clock = _Clock(self)
+            stack.enter_context(mock.patch('agentapi.sentinel_dispatch.time', self.clock))
+            # The test suite runs stages blocking (reNgine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
+            # continues them with ``drain()``.
+            stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_ASYNC_STAGES': '1' if self.async_stages else '0'}))
         except BaseException:
             stack.close()
             raise
@@ -292,6 +302,30 @@ class FakeScanner:
             self.errors.append(f'{type(exc).__name__}: {exc}')
             raise
 
+    def drain(self, rounds=60, step=2.0):
+        """With ``async_stages``: do what the server's workers do for stages that wait without one, until no StageRun is open. Each round serves what
+        is queued (which wakes the run waiting on it), runs the callback of every run that is ready (``stage_runs.resume``, in this thread), or,
+        when nothing is ready, moves the virtual clock on by ``step`` seconds and drives every waiting run (``stage_runs.drive``: the claim and
+        completion budgets). Returns the results of the callbacks, in order."""
+        from agentapi import stage_runs
+        from agentapi.models import StageRun
+        results = []
+        for _ in range(rounds):
+            while self.serve_once() is not None:
+                pass
+            ready = list(StageRun.objects.filter(state='ready').order_by('id').values_list('pk', flat=True))
+            if ready:
+                results += [stage_runs.resume(pk) for pk in ready]
+                continue
+            waiting = list(StageRun.objects.filter(state='waiting').order_by('id').values_list('pk', flat=True))
+            if not waiting:
+                break
+            if self.clock is not None:
+                self.clock.offset += step
+            for pk in waiting:
+                stage_runs.drive(pk)
+        return results
+
     def tasks(self, kind=None):
         """The ``SentinelTask`` rows of this fake, oldest first (``kind`` narrows them)."""
         from agentapi.models import SentinelTask
@@ -358,6 +392,16 @@ LOCAL_RUNNERS = {
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
+    'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'waf': ('cveFeed.waf_scan.run_wafw00f',),
+    'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
+    'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
+                    'cveFeed.nmap_scan.run_nmap_args'),
+    'node2shell': ('cveFeed.node2shell_scan.run_check',),
+    'rdp_shot': ('cveFeed.rdp_shot.capture',),
+    'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
+    'path_probe': ('cveFeed.path_probe.send_probe',),
+    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -372,6 +416,15 @@ HEAVY_KINDS = {
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
     'bucket_check': (),
+    'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
+    'waf': ('route-probe',),
+    'nmap_full': ('nmap-full-bg',),
+    'nmap_verify': ('nmap',),
+    'node2shell': ('route-probe',),
+    'rdp_shot': (),
+    'db_probe': ('route-probe',),
+    'path_probe': (),
+    'nuclei_validate': ('template-test',),
 }
 
 

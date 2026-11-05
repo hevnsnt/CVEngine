@@ -215,6 +215,11 @@ CHECKS = {
 }
 
 
+# the database of each label, by the name a ``db_probe`` task gives it (the scanner runs the same one-attempt check)
+DB_KEYS = {'Redis': 'redis', 'Memcached': 'memcached', 'PostgreSQL': 'postgres', 'Elasticsearch': 'elastic', 'CouchDB': 'couchdb', 'MySQL': 'mysql',
+           'MongoDB': 'mongodb'}
+
+
 def checker_for(port, table=None):
     """(label, check_fn) for a Port that looks like one of the databases above, else (None, None)."""
     text = f'{port.service_name or ""} {port.product or ""}'.lower()
@@ -264,58 +269,91 @@ def run_db_exposure_checks(scan_id, checks=None):
                     targets.append((sub, ip.address, port, label, fn))
     if not targets:
         return {'checked': 0, 'exposed': 0}
+    groups = {}
+    for sub, host, port, label, fn in targets:
+        groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
+    from agentapi import sentinel_dispatch
+    try:
+        # the probes go to a scanner (the table is the real one: a test's own checkers are never second-guessed); the findings are made here
+        sentinel = checks is None and sentinel_dispatch.scanner_or_local(domain.project, 'db_probe')
+    except resources.ScannerUnavailable as exc:  # no scanner can take it and no connection may be opened from here: the services stay due
+        return {'checked': 0, 'exposed': 0, 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log(
         'run_check', f'Checking {len(targets)} database service(s) on {domain.name} for missing authentication',
         project=project, status='running', scan_id=scan.id)
     exposed = checked = 0
+
+    def found_open(host, number, label, subs, reply):
+        """One service let the credential-less attempt through: a critical finding on every host still in scope that answers on it."""
+        nonlocal exposed
+        banned = _excluded_names(project)
+        subs = [sub for sub in subs if normalize(sub.name) not in banned]
+        if not subs:
+            return
+        exposed += 1
+        for sub in subs:
+            vuln, created = save_vulnerability(
+                target_domain=domain, scan_history=scan, subdomain=sub, source='db_exposure',
+                template_id=f'db-exposure-{label.lower()}', name=f'Unauthenticated {label} exposure',
+                severity=NUCLEI_SEVERITY_MAP['critical'],
+                description=f'{label} on {host}:{number} accepted a connection with no credentials at all.'
+                            + (f' The server replied: {reply}' if reply else ''),
+                impact=f'Anyone who can reach {host}:{number} has the same access as a fully authenticated client.',
+                remediation=f'Require authentication on this {label} instance and restrict network access to trusted hosts only.',
+                extracted_results=[reply] if reply else [], http_url=f'{label.lower()}://{host}:{number}')
+            if created:
+                activity.log('validate', f'{label} on {host}:{number} has no authentication required'
+                             + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+
+    def in_scope(host, subs):
+        # Exclusion is organization-wide even when its author could not purge this project's records. Recheck at dispatch, not only while planning.
+        banned = _excluded_names(project)
+        subs = [sub for sub in subs if normalize(sub.name) not in banned]
+        return subs if subs and is_scannable_ip(host, project=project) else []
+
     # Names that share an address share the service: one probe per (address, port), and the finding goes to every host that
     # answers on it, each with the same evidence (one critical per host stays visible on each host's page).
-    groups = {}
-    for sub, host, port, label, fn in targets:
-        groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
+    local = list(groups.items())
     try:
-        # under the resource gate like the other scanner stages: a pause or a stopped scan ends the stage between connections
-        with resources.heavy_job('route-probe', label=domain.name) as job:
-            for (host, number, label), (fn, subs) in groups.items():
-                job.raise_if_killed()
-                # Exclusion is organization-wide even when its author could not purge
-                # this project's records. Recheck at dispatch, not only while planning.
-                banned = _excluded_names(project)
-                subs = [sub for sub in subs if normalize(sub.name) not in banned]
-                if not subs or not is_scannable_ip(host, project=project):
+        if sentinel:
+            due = [(key, value) for key, value in groups.items() if in_scope(key[0], value[1]) and key[2] in DB_KEYS]
+            local = [(key, value) for key, value in groups.items() if (key, value) not in due and in_scope(key[0], value[1])]  # a checker no scanner has
+            left = []
+            for index, result in sentinel_dispatch.dispatch_each(
+                    domain.project, 'db_probe', due, lambda item: ({'address': item[0][0], 'port': item[0][1], 'db': DB_KEYS[item[0][2]]}
+                                                                   if in_scope(item[0][0], item[1][1]) else None), scan=scan,
+                    label_of=lambda item: f'{item[0][2]} on {item[0][0]}:{item[0][1]}', ips_of=lambda item: [item[0][0]]):
+                (host, number, label), (_fn, subs) = due[index]
+                if result is None or result.get('open') is None:
+                    left.append(due[index])  # no Sentinel did it, or it has no client for this database: here, when the kind may run here
                     continue
-                held = local_egress.admit_one(number, 'db-exposure', host)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
-                if held:
-                    logger.info('db exposure check of %s:%s not run from this server: %s', host, number, local_egress.held_text(number, held))
-                    continue
-                local_egress.record_one(number, 'db-exposure', project=project, address=host)
                 checked += 1
-                try:
-                    is_open = fn(host, number)
-                except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
-                    logger.exception('db exposure check %s failed for %s:%s', label, host, number)
-                    continue
-                if not is_open:
-                    continue
-                reply = EVIDENCE.pop((host, number), '')
-                banned = _excluded_names(project)
-                subs = [sub for sub in subs if normalize(sub.name) not in banned]
-                if not subs:
-                    continue
-                exposed += 1
-                for sub in subs:
-                    vuln, created = save_vulnerability(
-                        target_domain=domain, scan_history=scan, subdomain=sub, source='db_exposure',
-                        template_id=f'db-exposure-{label.lower()}', name=f'Unauthenticated {label} exposure',
-                        severity=NUCLEI_SEVERITY_MAP['critical'],
-                        description=f'{label} on {host}:{number} accepted a connection with no credentials at all.'
-                                    + (f' The server replied: {reply}' if reply else ''),
-                        impact=f'Anyone who can reach {host}:{number} has the same access as a fully authenticated client.',
-                        remediation=f'Require authentication on this {label} instance and restrict network access to trusted hosts only.',
-                        extracted_results=[reply] if reply else [], http_url=f'{label.lower()}://{host}:{number}')
-                    if created:
-                        activity.log('validate', f'{label} on {host}:{number} has no authentication required'
-                                     + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+                if result.get('open') is True:
+                    found_open(host, number, label, subs, result.get('evidence') or '')
+            local += left
+            if local and not sentinel_dispatch.fallback_allowed('db_probe'):
+                local = []  # a checker no scanner has may not run here either: it stays due
+        if local:
+            # under the resource gate like the other scanner stages: a pause or a stopped scan ends the stage between connections
+            with resources.heavy_job('route-probe', label=domain.name) as job:
+                for (host, number, label), (fn, subs) in local:
+                    job.raise_if_killed()
+                    subs = in_scope(host, subs)
+                    if not subs:
+                        continue
+                    held = local_egress.admit_one(number, 'db-exposure', host)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
+                    if held:
+                        logger.info('db exposure check of %s:%s not run from this server: %s', host, number, local_egress.held_text(number, held))
+                        continue
+                    local_egress.record_one(number, 'db-exposure', project=project, address=host)
+                    checked += 1
+                    try:
+                        is_open = fn(host, number)
+                    except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
+                        logger.exception('db exposure check %s failed for %s:%s', label, host, number)
+                        continue
+                    if is_open:
+                        found_open(host, number, label, subs, EVIDENCE.pop((host, number), ''))
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the rest is checked on the next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'Database exposure check for {domain.name} is waiting: no scanner could take this work ({exc.kind}): '

@@ -265,7 +265,12 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': env.int('CELERY_VISIBIL
 # every start, so its cadence follows CVENGINE_LIVE_REFRESH_SECONDS and its row is switched off by CVENGINE_LIVE_REFRESH=0 (reNgine/livecache_config.py).
 from reNgine import livecache_config as _livecache  # noqa: E402
 
-CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry()}
+# the stage runs' safety net (agentapi.stage_runs.tick): a stage that waits on Sentinels without its worker is driven by its own countdown; this
+# re-drives what a restart or a lost message left behind. The message expires after two minutes, so a stopped worker gets no backlog of ticks.
+from celery.schedules import schedule as _every  # noqa: E402
+CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry(),
+                        'cvengine-stage-runs': {'task': 'stage_runs_tick', 'schedule': _every(run_every=60),
+                                                'options': {'queue': 'cve_feed_queue', 'expire_seconds': 120}}}
 
 '''
 ROLES and PERMISSIONS

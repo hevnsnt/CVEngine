@@ -8,6 +8,8 @@ import os
 import time
 from unittest import mock
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import local_egress, naabu_scan, nmap_scan, testssl_scan
 from cveFeed.models import AgentActivity, ServiceRun
 from dashboard.models import Org, Project
@@ -112,7 +114,7 @@ class CommandLineTests(SimpleTestCase):
         self.assertEqual(local_egress.nmap_exclude(flags, {25}), ['-sV', '-p', '22,80,443', '-Pn', '--exclude-ports', '25'])
         self.assertEqual(local_egress.nmap_exclude(['-sV', '-p', '20-30'], {25}), ['-sV', '-p', '20-24,26-30', '--exclude-ports', '25'])
         self.assertEqual(local_egress.nmap_exclude(nmap_scan.FAST_FLAGS, {25}), [*nmap_scan.FAST_FLAGS, '--exclude-ports', '25'])
-        self.assertEqual(local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, {25, 587}), [*nmap_scan.FULL_PORT_FLAGS, '--exclude-ports', '25,587'])
+        self.assertEqual(local_egress.nmap_exclude(scan_flags.NMAP_FULL_PORT_FLAGS, {25, 587}), [*scan_flags.NMAP_FULL_PORT_FLAGS, '--exclude-ports', '25,587'])
         self.assertIsNone(local_egress.nmap_exclude(['-sV', '-p', '25'], {25}))  # nothing else to scan
         self.assertEqual(local_egress.nmap_exclude(flags, set()), flags)
         udp = ['-sU', '-sV', '-p', 'U:25,161']
@@ -126,8 +128,8 @@ class CommandLineTests(SimpleTestCase):
     def test_the_plan_estimate(self):
         self.assertEqual(local_egress.nmap_plan_ports(['-p', '22,25,80'])[0], 3)
         self.assertIn(25, local_egress.nmap_plan_ports(['-p', '22,25,80'])[1])
-        self.assertEqual(local_egress.nmap_plan_ports(nmap_scan.FULL_PORT_FLAGS)[0], 65535)
-        self.assertEqual(local_egress.nmap_plan_ports([*nmap_scan.FULL_PORT_FLAGS, '--exclude-ports', '25'])[0], 65534)
+        self.assertEqual(local_egress.nmap_plan_ports(scan_flags.NMAP_FULL_PORT_FLAGS)[0], 65535)
+        self.assertEqual(local_egress.nmap_plan_ports([*scan_flags.NMAP_FULL_PORT_FLAGS, '--exclude-ports', '25'])[0], 65534)
         self.assertNotIn(25, local_egress.nmap_plan_ports([*nmap_scan.FAST_FLAGS, '--exclude-ports', '25'])[1])
         self.assertEqual(local_egress.nmap_plan_ports(['-sU', '-p', 'U:161']), (0, set()))
 
@@ -1335,7 +1337,7 @@ class SentOnlyOnceStartedTests(Clean, TestCase):
         self.addCleanup(os.unlink, handle.name)
         with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')), mock.patch('targetApp.target_types.refuse_local'), \
                 mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
-                mock.patch.object(nuclei_scan, 'build_flags', return_value=[]):
+                mock.patch.object(nuclei_scan, 'nuclei_flags', return_value=[]):
             with self.assertRaises(MemoryBusy):
                 list(nuclei_scan.stream_nuclei(handle.name))
         self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
@@ -1357,7 +1359,7 @@ class SentOnlyOnceStartedTests(Clean, TestCase):
         popen.return_value.returncode = 0
         with mock.patch('reNgine.resources.heavy_job', return_value=_Job()), mock.patch('targetApp.target_types.refuse_local'), \
                 mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
-                mock.patch.object(nuclei_scan, 'build_flags', return_value=[]), mock.patch.object(nuclei_scan.subprocess, 'Popen', popen):
+                mock.patch.object(nuclei_scan, 'nuclei_flags', return_value=[]), mock.patch.object(nuclei_scan.subprocess, 'Popen', popen):
             try:
                 list(nuclei_scan.stream_nuclei(handle.name))
             except Exception:  # noqa: BLE001 - the fake process is not a real nuclei; only the order matters here

@@ -307,18 +307,6 @@ class OtherAutomaticPathsTests(DiscoveryModeBase):
 		from startScan.models import Subdomain
 		self.assertTrue(Subdomain.objects.filter(target_domain=manual, name='new.manual.ct.test').exists())  # still recorded
 
-	def test_the_assessment_review_rediscovers_in_the_stored_mode_and_skips_manual_targets(self):
-		from cveFeed import assessment_review as ar
-		passive = self.domain('review.example.test', mode='passive')
-		with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-			status, scan_id, _ = ar.dispatch(self.p1, {'due_discovery_target_id': passive.id}, 'discover')
-		self.assertEqual(status, 'queued')
-		self.assertEqual(self.modes_run(), {'review.example.test': 'passive'})
-		manual = self.domain('review-manual.example.test', self.p2, 'manual')
-		with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-			self.assertEqual(ar.dispatch(self.p2, {'due_discovery_target_id': manual.id}, 'discover')[0], 'stale')
-		self.assertEqual(len(self.delay.call_args_list), 1)
-
 	def test_a_moved_target_is_scanned_in_its_own_mode(self):
 		from agentapi.target_move import move_target
 		from agentapi.services import Ctx

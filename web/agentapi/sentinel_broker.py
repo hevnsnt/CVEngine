@@ -63,6 +63,11 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
          'partial': (240, 60)}  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
+# Kinds only the built-in scanner takes: what they measure or run belongs to this install, not to a network a Sentinel was set up for. ``path_probe``
+# measures the path this install's scans leave from (``cveFeed.os_detection`` keeps one verdict for it), and ``nuclei_validate`` runs an AI-written
+# template the server has not approved yet, on the scanner's own loopback or against a host, where the server ran it before.
+BUILTIN_KINDS = ('path_probe', 'nuclei_validate')
+BUILTIN = 'built-in only'  # the refusal reason of such a task offered to any other Sentinel
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
@@ -694,7 +699,7 @@ def _address(value):
 
 def _bare(host):
     """The hostname or address inside a nuclei target or result host (a bare host, ``host:port`` or a URL), lowercased."""
-    from cveFeed.nuclei_scan import host_of
+    from cvengine_scanner.flags import host_of
     return host_of({'host': host if isinstance(host, str) else ''})
 
 
@@ -714,6 +719,8 @@ def task_hosts(task):
         raw.append(urlsplit(target['url']).hostname or '')
     if isinstance(target.get('hosts'), dict):
         raw += [k for k in target['hosts'] if isinstance(k, str)]
+    elif isinstance(target.get('hosts'), list):  # a secrets_scan batch
+        raw += [h.get('host') for h in target['hosts'] if isinstance(h, dict)]
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     names, ips = [], []
@@ -774,6 +781,10 @@ class SentinelEff:
             return 'capability', task.kind
         if task.secret_ref and not self.builtin:
             return 'capability', SIGNED_IN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
+        if validating(task) and not self.builtin:
+            return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
+        if task.kind in BUILTIN_KINDS and not self.builtin:
+            return 'capability', BUILTIN  # path_probe and nuclei_validate measure or run what belongs to this install
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
@@ -799,6 +810,15 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+VALIDATING = 'secret validation (built-in scanner only)'
+VALIDATING_Q = Q(kind='secrets_scan', target__validate=True)  # a secrets scan that validates what it finds (cveFeed.secrets_validation)
+
+
+def validating(task):
+    """Whether ``task`` is a secrets scan told to validate what it finds: offered to the built-in scanner only, like signed-in work."""
+    return task.kind == 'secrets_scan' and isinstance(task.target, dict) and task.target.get('validate') is True
 
 
 def builtin_pk():
@@ -836,6 +856,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones. ``builtin_only`` keeps only the
     built-in scanner: the candidates for signed-in work, which no other Sentinel may be offered."""
     now = now or timezone.now()
+    builtin_only = builtin_only or kind in BUILTIN_KINDS
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False)
     if builtin_only:
@@ -928,6 +949,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     kind and its policy denies it), ``offline`` (an active one has it and none is live), ``withheld`` (a live one has it and keeps failing it, or is too old
     to run it), ``inactive`` (one has it but is pending or suspended) or ``never`` (none ever declared it). Left off, the cheap answer a dispatch gate needs."""
     now = now or timezone.now()
+    builtin_only = builtin_only or kind in BUILTIN_KINDS  # a kind only the built-in scanner takes has no other slots
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if builtin_only:
         own = builtin_pk()
@@ -955,7 +977,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
         if not builtin_only:
-            waiting = waiting.filter(secret_ref__isnull=True)
+            waiting = waiting.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)
         if exclude is not None:
             waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
@@ -1213,7 +1235,7 @@ def queued_for(agent, now=None):
         return {}
     queued = SentinelTask.objects.filter(status='queued', kind__in=eff.caps, project__slug__in=eff.projects)
     if not eff.builtin:
-        queued = queued.filter(secret_ref__isnull=True)  # signed-in work is not this Sentinel's to take
+        queued = queued.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)  # signed-in and validating work is not this Sentinel's to take
     return {kind: n for kind, n in queued.values_list('kind').annotate(n=Count('id'))}
 
 
@@ -1279,8 +1301,17 @@ def expire(task, reason=None, actor=None):
     if won:
         audit.record(actor, 'sentinel.task.expire', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=task.agent_id,
                      trace_id=task.trace_id, reason=reason)
+        _ended(task, task.agent_id)
     task.refresh_from_db()
     return task
+
+
+def _ended(task, agent_id=None):
+    """A task ended (reported, failed, expired, cancelled, released): wake the stage waiting for it (a blocking wait through Redis, a StageRun
+    through its callback) and the long poll of the Sentinel whose slot it held. Never raises."""
+    from agentapi import sentinel_notify, stage_runs
+    sentinel_notify.task_changed(task, agent_id)
+    stage_runs.task_ended(task)
 
 
 def reap_expired(now=None):
@@ -1370,7 +1401,7 @@ def prune_enrollments(now=None):
 def _claimable(eff, kinds, now):
     queued = SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects)
     if not eff.builtin:
-        queued = queued.filter(secret_ref__isnull=True)  # a task that needs a stored credential is never offered to any Sentinel but the built-in one
+        queued = queued.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)  # a task that needs a stored credential, or validates found secrets, is never offered to any Sentinel but the built-in one
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -1523,7 +1554,7 @@ def _claim(agent, kinds, now):
                 continue
             if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
                 continue  # only a Sentinel inside the private network can reach it
-            if task.secret_ref and not eff.builtin:
+            if (task.secret_ref or validating(task)) and not eff.builtin:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
             cap = eff.kind_caps.get(task.kind)
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
@@ -1544,6 +1575,8 @@ def _claim(agent, kinds, now):
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
                 task.refresh_from_db()
+                from agentapi import sentinel_notify
+                sentinel_notify.task_changed(task)  # the stage waiting for it starts its completion clock at once
                 audit.record(agent.token.user, 'sentinel.task.claim', _target(task), org=task.project.org_id, task_id=task.pk,
                              trace_id=task.trace_id, agent_id=agent.pk, agent=agent.name)
                 return task, ''
@@ -1576,13 +1609,31 @@ def next_task(ctx, body=None):
             claimed, why = _try_claim(agent, kinds, now)
             if claimed or time.monotonic() >= deadline:
                 break
-            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            _await_work(agent, why, max(0.0, deadline - time.monotonic()))
             agent.refresh_from_db()
             if agent.status != 'active':
                 raise ApiError(403, f'no work can be assigned: the agent is {agent.status}')
     if not claimed:
         return {'task': None, 'reason': why, 'retry_after_seconds': 5 if wait == 0 or held else 1}
     return {'task': task_payload(claimed), 'reason': ''}
+
+
+HELD_BACK = 'no eligible work is queued right now ('  # the start of ``_claim``'s answer when a task was held back for another Sentinel
+
+
+def _await_work(agent, why, left):
+    """Wait, inside a long poll, until there may be work for this Sentinel: a wake-up (``sentinel_notify``: a task it could take was queued, or one
+    of its own ended and freed a slot) or the safety interval (``CVENGINE_SENTINEL_WAKE_POLL_SECONDS``), whichever comes first. A task held back for
+    a Sentinel that prefers it, or a less loaded one, becomes this Sentinel's by time alone, so then it looks again after one second, as it always
+    did. Without Redis it sleeps one second."""
+    from agentapi import sentinel_notify
+    if (why or '').startswith(HELD_BACK) or time.sleep is not _REAL_SLEEP:
+        time.sleep(min(1.0, left))
+        return
+    sentinel_notify.wait_agent(agent.pk, min(float(sentinel_notify.safety_seconds()), left), sleep=lambda s: time.sleep(min(1.0, s)))
+
+
+_REAL_SLEEP = time.sleep
 
 
 def _int(value):
@@ -1822,7 +1873,7 @@ def _clean_naabu_result(body):
     ports = body.get('ports')
     if not isinstance(ports, dict) or len(ports) > MAX_ADDRESSES:
         raise ApiError(400, f'ports must be an object of at most {MAX_ADDRESSES} addresses')
-    from cveFeed.naabu_scan import MAX_OPEN_PER_IP
+    from cvengine_scanner.flags import MAX_OPEN_PER_IP
     out = {}
     for ip, values in ports.items():
         ip = _address(ip) if isinstance(ip, str) else None
@@ -2065,12 +2116,162 @@ def _clean_waf_result(body):
     return {'products': out, 'generic': body.get('generic') is True}
 
 
+def _clean_nmap_report(body):
+    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.nmap_scan.parse_xml``, hardened
+    against a custom ENTITY declaration, is the one reader of an nmap report, local or not). Only the size is bounded here."""
+    return _clean_nmap_udp_result(body)
+
+
+MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT and what cveFeed.node2shell_scan keeps of a response
+
+
+def _clean_node2shell_result(body):
+    """The vendored node2shell detector's verdict on one URL (``cveFeed.node2shell_scan.run_check``'s shape): ``vulnerable`` is True, False or None
+    (inconclusive), and only the verdict, the reason, the status code and a bounded excerpt of the response are kept. A ``vulnerable`` that is not
+    a boolean is read as inconclusive, never as a finding."""
+    vulnerable = body.get('vulnerable')
+    if 'vulnerable' not in body or vulnerable not in (True, False, None):
+        raise ApiError(400, 'vulnerable must be true, false or null')
+    status = body.get('status_code')
+    return {'vulnerable': vulnerable, 'verdict': _text(body.get('verdict'), 40), 'reason': _text(body.get('reason'), 300),
+            'status_code': status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None,
+            'evidence': _text(body.get('evidence'), MAX_NODE2SHELL_EVIDENCE)}
+
+
+MAX_RDP_IMAGE_BYTES = 4 * 1024 * 1024  # matches cveFeed.rdp_shot.MAX_IMAGE_BYTES
+MAX_RDP_IMAGE_SIDE = 4096  # a capture is 1024x768; a PNG that claims more is not one, and is never handed to an image library
+_PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+
+
+def _clean_rdp_shot_result(body):
+    """An RDP pre-authentication screenshot: ``painted`` and, when it painted, the PNG (base64). The image is checked before anything opens it: valid
+    base64, at most ``MAX_RDP_IMAGE_BYTES``, a PNG signature and an ``IHDR`` whose sides are at most ``MAX_RDP_IMAGE_SIDE``, so a hostile host or
+    Sentinel cannot hand the server's image library a decompression bomb. A capture that fails these is refused; a frame with nothing painted
+    carries no image."""
+    import struct
+    if not isinstance(body.get('painted'), bool):
+        raise ApiError(400, 'painted must be true or false')
+    if not body['painted']:
+        return {'painted': False}
+    raw = body.get('image')
+    if not isinstance(raw, str) or not raw or len(raw) > (MAX_RDP_IMAGE_BYTES + 2) // 3 * 4:
+        raise ApiError(400, f'image must be a base64 PNG of at most {MAX_RDP_IMAGE_BYTES} bytes')
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, 'image is not valid base64') from None
+    if len(data) > MAX_RDP_IMAGE_BYTES or len(data) < 33 or not data.startswith(_PNG_SIGNATURE) or data[12:16] != b'IHDR':
+        raise ApiError(400, 'image is not a PNG')
+    width, height = struct.unpack('>II', data[16:24])
+    if not (0 < width <= MAX_RDP_IMAGE_SIDE and 0 < height <= MAX_RDP_IMAGE_SIDE):
+        raise ApiError(400, f'image sides must be at most {MAX_RDP_IMAGE_SIDE} pixels')
+    return {'painted': True, 'image': raw}
+
+
+def _clean_db_probe_result(body):
+    """One credential-less database probe: ``open`` (True: the one attempt was let through; None: the Sentinel has no client for this database) and
+    the short reply it kept as evidence (a version, or a count of database names, never their content)."""
+    opened = body.get('open')
+    if 'open' not in body or opened not in (True, False, None):
+        raise ApiError(400, 'open must be true, false or null')
+    return {'open': opened, 'evidence': _text(body.get('evidence'), 300) if opened else ''}
+
+
+MAX_PATH_TARGETS = 8  # matches cveFeed.path_probe.MAX_TARGETS
+
+
+def _clean_path_probe_result(body):
+    """The path survey of the built-in scanner (``cveFeed.path_probe.survey``'s shape): for each probed address, whether the plain SYN and the
+    FIN+PSH+URG segment drew a reset. A row that is not well formed is dropped; ``odd`` is None where it was not sent."""
+    rows = body.get('results')
+    if not isinstance(rows, list) or len(rows) > MAX_PATH_TARGETS:
+        raise ApiError(400, f'results must be a list of at most {MAX_PATH_TARGETS} entries')
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or _address(row.get('ip')) is None or not isinstance(row.get('plain'), bool):
+            continue
+        port = row.get('port')
+        if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+            continue
+        odd = row.get('odd') if row['plain'] and isinstance(row.get('odd'), bool) else None
+        out.append({'ip': _address(row['ip']), 'port': port, 'plain': row['plain'], 'odd': odd})
+    return {'results': out}
+
+
+_HIT_STR = {'template-id': 200, 'template': 500, 'matcher-name': 200, 'matched-at': 500, 'host': 500, 'ip': 60, 'type': 20, 'request': 8000,
+            'response': 8000, 'curl-command': 8000}
+MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most targets one template test names
+
+
+def _clean_hit(hit):
+    """The first nuclei result line of a host, as ``cveFeed.templategen._trim_hit`` keeps it, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    and the validation record read. Anything else is dropped."""
+    if not isinstance(hit, dict):
+        return None
+    out = {key: _text(hit.get(key), limit) for key, limit in _HIT_STR.items() if isinstance(hit.get(key), str)}
+    if isinstance(hit.get('matcher-status'), bool):
+        out['matcher-status'] = hit['matcher-status']
+    extracted = hit.get('extracted-results')
+    if isinstance(extracted, list):
+        out['extracted-results'] = [_text(e, 500) for e in extracted if isinstance(e, str)][:MAX_EXTRACTED]
+    info = hit.get('info') if isinstance(hit.get('info'), dict) else {}
+    clean_info = {'name': _text(info.get('name'), 200), 'description': _text(info.get('description'), 500),
+                  'severity': info.get('severity') if info.get('severity') in _SEVERITIES else 'unknown',
+                  'tags': [_text(t, 40) for t in (info.get('tags') if isinstance(info.get('tags'), list) else []) if isinstance(t, str)][:MAX_TAGS]}
+    classification = info.get('classification') if isinstance(info.get('classification'), dict) else {}
+    cves = classification.get('cve-id')
+    clean_info['classification'] = {'cve-id': [_text(c, 40) for c in cves if isinstance(c, str)][:MAX_CVE_IDS] if isinstance(cves, list) else []}
+    out['info'] = clean_info
+    return out
+
+
+def _clean_nuclei_validate_result(body):
+    """An AI-written or approved template's check on the built-in scanner. Mode ``validate``: whether ``nuclei -validate`` accepted it, its output, and
+    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``cveFeed.templategen._run_template``'s shape), a
+    hit counted only with its result line. Which mode it was is the task's, so both halves are cleaned and the caller reads its own."""
+    out = {}
+    if 'valid' in body:
+        out['valid'] = body.get('valid') is True
+        out['output'] = _text(body.get('output'), 2000)
+        out['fixture_ok'] = body.get('fixture_ok') if isinstance(body.get('fixture_ok'), bool) else None
+        out['fixture_note'] = _text(body.get('fixture_note'), 300)
+    if 'outcomes' in body:
+        rows = body.get('outcomes')
+        if not isinstance(rows, list) or len(rows) > MAX_TEMPLATE_OUTCOMES:
+            raise ApiError(400, f'outcomes must be a list of at most {MAX_TEMPLATE_OUTCOMES} entries')
+        kept = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get('host'), str) or not row['host'].strip():
+                continue
+            hit = _clean_hit(row.get('hit'))
+            item = {'host': _text(row['host'], 500), 'vulnerable': row.get('vulnerable') is True and hit is not None,
+                    'output': _text(row.get('output'), 2000), 'hit': hit if row.get('vulnerable') is True else None}
+            if row.get('error'):
+                item['error'] = _text(row['error'], 300)
+            kept.append(item)
+        out['outcomes'] = kept
+    if not out:
+        raise ApiError(400, 'a nuclei_validate result carries valid (validate) or outcomes (test)')
+    return out
+
+
+def _clean_secrets_scan_result(body):
+    """A Sentinel's Kingfisher run over a batch of web hosts (``cveFeed.secrets_scan.clean_result``): the findings with their values (filed in the
+    inventory, fingerprinted and masked, and never stored as sent), what it fetched, the storage it saw referenced and its counts. A validation
+    response is never kept; ``_bind_to_task`` then holds every URL to the task's own hosts."""
+    from cveFeed.secrets_scan import clean_result
+    return clean_result(body)
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result, 'waf': _clean_waf_result,
+             'discover': _clean_discover_result, 'waf': _clean_waf_result, 'secrets_scan': _clean_secrets_scan_result,
              'bbot_discovery': sentinel_stream.clean_bbot_result,
              'http_probe': probe_results.clean_http_probe, 'dns_resolve': probe_results.clean_dns_resolve,
+             'nmap_full': _clean_nmap_report, 'nmap_verify': _clean_nmap_report, 'node2shell': _clean_node2shell_result,
+             'rdp_shot': _clean_rdp_shot_result, 'db_probe': _clean_db_probe_result, 'path_probe': _clean_path_probe_result,
+             'nuclei_validate': _clean_nuclei_validate_result,
              'bucket_check': probe_results.clean_bucket_check}
 
 
@@ -2078,11 +2279,28 @@ def _bind_to_task(kind, result, task):
     """``result`` (already typed and clipped) cut down to what ``task`` actually asked about: an nmap host or naabu address that was not among the
     task's addresses, or a nuclei finding on a host that was not among its targets, is dropped (and counted in ``dropped``), never stored. Without
     this a Sentinel scoped to one project could write port rows for any address of the organization, which are per organization, not per project."""
+    if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
+        from cveFeed.secrets_scan import clean_result as clean_secrets
+        return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'bucket_check'):
         return probe_results.bind(kind, result, task)
-    if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+    if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result
     target = task.target if isinstance(task.target, dict) else {}
+    if kind == 'path_probe':
+        asked = {(_address(t.get('ip')), t.get('port')) for t in target.get('targets') or [] if isinstance(t, dict)}
+        kept = [r for r in result['results'] if (r['ip'], r['port']) in asked]
+        dropped = len(result['results']) - len(kept)
+        result = {**result, 'results': kept}
+        return {**result, 'dropped': dropped} if dropped else result
+    if kind == 'nuclei_validate':
+        if 'outcomes' not in result:
+            return result
+        asked = [t for t in target.get('targets') or [] if isinstance(t, str)]
+        kept = [o for o in result['outcomes'] if o['host'] in asked]
+        dropped = len(result['outcomes']) - len(kept)
+        result = {**result, 'outcomes': kept}
+        return {**result, 'dropped': dropped} if dropped else result
     if kind in ('nmap', 'naabu'):
         asked = {a for a in map(_address, [*(target.get('addresses') or []), *(task.ips or [])]) if a}
         if kind == 'nmap':
@@ -2203,6 +2421,7 @@ def report_result(ctx, task_id, body):
                                                             error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome='rejected')
+    _ended(task, agent.pk)
     if rejected is not None:
         raise rejected
     task.refresh_from_db()
@@ -2420,8 +2639,10 @@ def _live_overview(ctx):
             'load': {'held': len(mine), **activity['agents'][agent.pk]}})
     from cveFeed import internal_view, openvas_scan
     networks = internal_view.declared_networks()
+    from agentapi import stage_runs
     return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
+            'stage_runs': stage_runs.metrics(now, project_ids=allowed),  # the stages waiting on Sentinels without a worker (the caller's projects)
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
             'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
 
@@ -2504,5 +2725,6 @@ def cancel_task(ctx, slug, task_id):
         raise ApiError(409, 'the task already finished')
     audit.record(ctx.user, 'sentinel.task.cancel', _target(task), org=project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=task.agent_id)
+    _ended(task, task.agent_id)
     task.refresh_from_db()
     return task_brief(task)

@@ -16,7 +16,9 @@ from agentapi.services import ApiError
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
-           'dns_resolve': 'dns_resolve', 'bucket_check': 'bucket_check', 'error': 'nmap'}
+           'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify', 'node2shell': 'node2shell',
+           'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate',
+           'bucket_check': 'bucket_check'}
 
 
 V1_SHA256 = {
@@ -34,7 +36,8 @@ V2_SHA256 = {  # v1's files unchanged, and waf, copied when version 3 added bbot
     **V1_SHA256,
     'waf.json': '109fd92d329180c9ee7ba2e64337de0bd677023c6a85532e3154dd60aa69bcec',
 }
-PASSES_THROUGH =('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp')  # unchanged by the server (openvas and wpscan fill in defaults)
+PASSES_THROUGH = ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'nmap_full', 'nmap_verify', 'node2shell', 'rdp_shot',
+                  'db_probe', 'path_probe', 'nuclei_validate')  # unchanged by the server (openvas and wpscan fill in defaults)
 
 
 def fixture(name):
@@ -73,7 +76,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery', 'secrets_scan'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
@@ -128,7 +131,7 @@ class FrozenFixtureTests(SimpleTestCase):
         self.assertIn(f'v{contract.min_supported()}', FROZEN)
 
     def test_a_frozen_set_is_never_edited(self):
-        """The hashes of ``v1/`` as it was copied from the fixtures of contract version 1. A fixture that needs to change belongs in a new version's set."""
+        """The hashes of ``v1/`` and ``v2/`` as they were copied from the fixtures of contract versions 1 and 2. A fixture that needs to change belongs in a new version's set."""
         for folder, want in ((V1, V1_SHA256), (V2, V2_SHA256)):
             digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.glob('*.json')}
             self.assertEqual(digests, want, folder.name)

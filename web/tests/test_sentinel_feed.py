@@ -10,7 +10,6 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from agentapi.models import Agent
-from cveFeed import assessment_review as ar
 from cveFeed import coverage_topup, hosting, host_assessment, nmap_scan, unresolved_archive
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project
@@ -108,7 +107,7 @@ class Base(TestCase):
 
 class NoAddressTests(Base):
     def due(self):
-        return ar.host_coverage_due(self.project, self.now, limit=50, need_count=False)[1]
+        return coverage_topup.host_coverage_due(self.project, self.now, limit=50, need_count=False)[1]
 
     def test_a_host_with_no_scannable_address_is_not_a_first_pass_backlog_and_does_not_gate_the_deep_sweeps(self):
         waiting = self.host('real')
@@ -222,7 +221,7 @@ class RefreshTests(Base):
 
     def setUp(self):
         super().setUp()
-        mock.patch('cveFeed.assessment_review.host_coverage_due', return_value=(0, [])).start()  # every host has its first pass
+        mock.patch('cveFeed.coverage_topup.host_coverage_due', return_value=(0, [])).start()  # every host has its first pass
         sender = mock.patch('cveFeed.tasks.assess_host.apply_async').start()
         sender.return_value.id = 'task'
 

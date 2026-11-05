@@ -9,6 +9,8 @@ import yaml
 from django.test import TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import ledger, nuclei_scan, templategen, triage, validation
 from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate, ServiceRun, Triage
 from dashboard.models import Org, Project
@@ -125,7 +127,7 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 					self.assertEqual(count, 1)
 					self.assertTrue(os.path.isfile(os.path.join(approved, 'safe.yaml')))
 					self.assertFalse(os.path.exists(os.path.join(approved, 'write.yaml')))
-					self.assertIn('-ni', nuclei_scan.build_flags(templates_dir=approved))
+					self.assertIn('-ni', scan_flags.nuclei_flags(templates_dir=approved))
 				finally:
 					shutil.rmtree(approved, ignore_errors=True)
 

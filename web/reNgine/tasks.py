@@ -567,6 +567,11 @@ def save_vulnerability(**vuln_data):
 	# remove nulls
 	vuln_data = replace_nulls(vuln_data)
 
+	# A token template or a bbot secret module carries the secret itself: it goes to the secrets inventory and the finding keeps only its mask
+	# (docs/SECRETS-PLAN.md 8.3). Taken out before anything is stored or compared.
+	from cveFeed import secrets_inventory
+	secret_values = secrets_inventory.take_from_finding(vuln_data, tags)
+
 	# One row per finding: the key is where and what (host, template, name, URL, matcher), never the response body, which
 	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again. A finding an
 	# earlier scan (or another target of the project) filed on the same host is that same row, moved onto this scan
@@ -629,6 +634,9 @@ def save_vulnerability(**vuln_data):
 	if subscan:
 		vuln.vuln_subscan_ids.add(subscan)
 		vuln.save()
+
+	if secret_values:
+		secrets_inventory.feed_finding_quietly(vuln, secret_values)
 
 	return vuln, was_created
 

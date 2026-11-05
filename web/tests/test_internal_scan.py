@@ -9,7 +9,7 @@ from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
-from cveFeed import assessment_review, coverage_topup, host_assessment, internal_scan
+from cveFeed import coverage_topup, host_assessment, internal_scan
 from cveFeed.models import HostAssessment, ServiceRun
 from cveFeed.discovery import FAILED, QUEUED, SUCCESS
 from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram, HostExclusion
@@ -114,7 +114,7 @@ class RunTests(Base):
         # Even an incomplete internal stage belongs to the Sentinel scan cadence,
         # rather than the external host-assessment queue or deep-scan gate.
         ScanActivity.objects.filter(scan_of=scan, name='cve_correlation').update(status=FAILED)
-        self.assertEqual(assessment_review.host_coverage_due(self.pa, timezone.now()), (0, []))
+        self.assertEqual(coverage_topup.host_coverage_due(self.pa, timezone.now()), (0, []))
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
                 mock.patch('cveFeed.unresolved_archive.recheck', return_value=0), \
                 mock.patch('cveFeed.tasks.assess_host.apply_async') as external:

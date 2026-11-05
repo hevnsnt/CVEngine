@@ -617,7 +617,7 @@ def scheduler_health(request, actor):
     from datetime import timedelta
     from django_celery_beat.models import PeriodicTask
     from cveFeed.models import (AutomaticValidation, DeferredRetest, OnDemandValidation, AgentActivity,
-                                AssessmentReview, ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
+                                ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
     from reNgine.celery import app
     from startScan.models import ScanHistory
 
@@ -690,19 +690,6 @@ def scheduler_health(request, actor):
     for row in AgentActivity.objects.order_by('-id').values('created_at', 'kind', 'status')[:1000]:
         if row['status'] in activity and activity[row['status']] is None:
             activity[row['status']] = {'at': row['created_at'].isoformat(), 'stage': row['kind']}
-    latest_review = AssessmentReview.objects.order_by('-id').first()
-    review = None
-    if latest_review:
-        decisions = list(latest_review.decisions.select_related('project').order_by('-id')[:20])
-        review = {'id': latest_review.pk, 'status': latest_review.status,
-                  'started_at': latest_review.started_at.isoformat() if latest_review.started_at else None,
-                  'finished_at': latest_review.finished_at.isoformat() if latest_review.finished_at else None,
-                  'reviewed': latest_review.reviewed_projects, 'total': latest_review.total_projects,
-                  'cursor_project_id': latest_review.cursor_project_id, 'model_calls': latest_review.model_calls,
-                  'actions': latest_review.queued_actions, 'errors': latest_review.error_count,
-                  'performance': latest_review.performance, 'note': latest_review.error,
-                  'recent_decisions': [{'project': d.project.slug, 'action': d.action, 'status': d.status,
-                                        'reason': d.reason, 'job_id': d.job_id} for d in decisions]}
     from cveFeed.scan_control import pause_requested
     latest_archive = ArchiveRediscovery.objects.order_by('-id').first()
     archive = {'archived_hosts': HostState.objects.filter(archived_at__isnull=False).count(),
@@ -733,7 +720,7 @@ def scheduler_health(request, actor):
     # by minutes even when it is); no heartbeat at all means beat predates it or Redis cannot be read, which proves nothing
     beat = {'state': 'unknown' if age is None else ('running' if age <= BEAT_SILENT_SECONDS else 'silent'), 'seconds_since_tick': age}
     return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers, 'beat': beat,
-            'scanning_paused': pause_requested(), 'assessment_review': review, 'archive_rediscovery': archive,
+            'scanning_paused': pause_requested(), 'archive_rediscovery': archive,
             'inactive_archive_review': inactive,
             'scheduler_process': 'unknown', 'scheduler_note': 'Last dispatch comes from Beat; this web request cannot inspect its process.',
             'schedules': schedules, 'jobs': jobs, 'last_activity': activity, 'activity_window': 1000}

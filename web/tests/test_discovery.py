@@ -5,6 +5,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import activity, discovery
 from cveFeed.models import AgentActivity, CVEEntry, DiscoveryEvent
 from dashboard.models import Org, Project, UserProfile
@@ -598,7 +600,7 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(ns.host_of({'host': 'https://Www.Example.test:8443/x'}), 'www.example.test')
 		self.assertEqual(ns.host_of({'host': 'www.example.test:8443'}), 'www.example.test')
 		self.assertEqual(ns.host_of({'host': 'www.example.test'}), 'www.example.test')
-		self.assertIn('info', ns.SEVERITIES.split(','))  # info severity is scanned
+		self.assertIn('info', scan_flags.NUCLEI_SEVERITIES.split(','))  # info severity is scanned
 
 	def _pipeline(self, events=EVENTS, **overrides):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
@@ -666,7 +668,7 @@ class NucleiStageTests(TestCase):
 		scan, out = self._pipeline(light_stream=lambda path, **k: calls.append('light') or iter([]),
 			targeted_stream=lambda path, **k: calls.append('targeted') or iter([]))
 		self.assertEqual(list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True)),
-			['bbot_discovery', 'nmap_scan', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'version_probes', 'wpscan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
+			['bbot_discovery', 'nmap_scan', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'secrets_scan', 'version_probes', 'wpscan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
 		self.assertEqual(calls, ['light', 'targeted'])
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='triage').title, 'AI triage and validation')
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_light_scan').title, 'Nuclei HTTP and technology pass')
