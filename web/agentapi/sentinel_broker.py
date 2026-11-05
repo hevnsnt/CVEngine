@@ -711,6 +711,8 @@ def task_hosts(task):
         raw.append(urlsplit(target['url']).hostname or '')
     if isinstance(target.get('hosts'), dict):
         raw += [k for k in target['hosts'] if isinstance(k, str)]
+    elif isinstance(target.get('hosts'), list):  # a secrets_scan batch
+        raw += [h.get('host') for h in target['hosts'] if isinstance(h, dict)]
     names, ips = [], []
     for value in raw:
         if not isinstance(value, str) or not value.strip():
@@ -769,6 +771,8 @@ class SentinelEff:
             return 'capability', task.kind
         if task.secret_ref and not self.builtin:
             return 'capability', SIGNED_IN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
+        if validating(task) and not self.builtin:
+            return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
@@ -794,6 +798,15 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+VALIDATING = 'secret validation (built-in scanner only)'
+VALIDATING_Q = Q(kind='secrets_scan', target__validate=True)  # a secrets scan that validates what it finds (cveFeed.secrets_validation)
+
+
+def validating(task):
+    """Whether ``task`` is a secrets scan told to validate what it finds: offered to the built-in scanner only, like signed-in work."""
+    return task.kind == 'secrets_scan' and isinstance(task.target, dict) and task.target.get('validate') is True
 
 
 def builtin_pk():
@@ -950,7 +963,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
         if not builtin_only:
-            waiting = waiting.filter(secret_ref__isnull=True)
+            waiting = waiting.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)
         if exclude is not None:
             waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
@@ -1208,7 +1221,7 @@ def queued_for(agent, now=None):
         return {}
     queued = SentinelTask.objects.filter(status='queued', kind__in=eff.caps, project__slug__in=eff.projects)
     if not eff.builtin:
-        queued = queued.filter(secret_ref__isnull=True)  # signed-in work is not this Sentinel's to take
+        queued = queued.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)  # signed-in and validating work is not this Sentinel's to take
     return {kind: n for kind, n in queued.values_list('kind').annotate(n=Count('id'))}
 
 
@@ -1363,7 +1376,7 @@ def prune_enrollments(now=None):
 def _claimable(eff, kinds, now):
     queued = SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects)
     if not eff.builtin:
-        queued = queued.filter(secret_ref__isnull=True)  # a task that needs a stored credential is never offered to any Sentinel but the built-in one
+        queued = queued.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)  # a task that needs a stored credential, or validates found secrets, is never offered to any Sentinel but the built-in one
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -1516,7 +1529,7 @@ def _claim(agent, kinds, now):
                 continue
             if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
                 continue  # only a Sentinel inside the private network can reach it
-            if task.secret_ref and not eff.builtin:
+            if (task.secret_ref or validating(task)) and not eff.builtin:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
             cap = eff.kind_caps.get(task.kind)
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
@@ -2046,16 +2059,27 @@ def _clean_waf_result(body):
     return {'products': out, 'generic': body.get('generic') is True}
 
 
+def _clean_secrets_scan_result(body):
+    """A Sentinel's Kingfisher run over a batch of web hosts (``cveFeed.secrets_scan.clean_result``): the findings with their values (filed in the
+    inventory, fingerprinted and masked, and never stored as sent), what it fetched, the storage it saw referenced and its counts. A validation
+    response is never kept; ``_bind_to_task`` then holds every URL to the task's own hosts."""
+    from cveFeed.secrets_scan import clean_result
+    return clean_result(body)
+
+
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result, 'waf': _clean_waf_result}
+             'discover': _clean_discover_result, 'waf': _clean_waf_result, 'secrets_scan': _clean_secrets_scan_result}
 
 
 def _bind_to_task(kind, result, task):
     """``result`` (already typed and clipped) cut down to what ``task`` actually asked about: an nmap host or naabu address that was not among the
     task's addresses, or a nuclei finding on a host that was not among its targets, is dropped (and counted in ``dropped``), never stored. Without
     this a Sentinel scoped to one project could write port rows for any address of the organization, which are per organization, not per project."""
+    if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
+        from cveFeed.secrets_scan import clean_result as clean_secrets
+        return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
         return result
     target = task.target if isinstance(task.target, dict) else {}

@@ -96,6 +96,24 @@ jobs:
       - name: No migration number used twice
         # makemigrations --check passes when the second file depends on the first (one leaf); two files with one number still leave the run order unclear
         run: python scripts/check_migrations.py
+      - name: Pinned Kingfisher rule bundle (secret validation allow-list)
+        # tests/test_secrets_validation.py recomputes the hash of every allow-listed validator from the rule bundle the Sentinel image pins: the
+        # attested release asset, checked against the sha256 in web/cveFeed/data/secrets_validation_allowlist.json (docs/SECRETS-PLAN.md 5.2)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(python -c "import json; print(json.load(open('web/cveFeed/data/secrets_validation_allowlist.json'))['kingfisher_version'])")
+          pinned=$(python -c "import json; print(json.load(open('web/cveFeed/data/secrets_validation_allowlist.json'))['rule_bundle_sha256'])")
+          dir="$RUNNER_TEMP/kingfisher-rules"
+          mkdir -p "$dir"
+          cd "$dir"
+          gh release download "v$version" --repo mongodb/kingfisher --pattern kingfisher-rule-bundle.tgz --pattern multiple.intoto.jsonl
+          gh attestation verify kingfisher-rule-bundle.tgz --repo mongodb/kingfisher \
+            --signer-workflow mongodb/kingfisher/.github/workflows/release.yml --source-ref "refs/tags/v$version" --bundle multiple.intoto.jsonl
+          printf '%s  %s\n' "$pinned" kingfisher-rule-bundle.tgz | sha256sum --check --status
+          tar xzf kingfisher-rule-bundle.tgz
+          printf 'CVENGINE_KINGFISHER_RULES=%s\n' "$dir/generated/rules" >> "$GITHUB_ENV"
       - name: Django test suite
         working-directory: web
         env:

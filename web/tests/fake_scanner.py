@@ -354,6 +354,7 @@ LOCAL_RUNNERS = {
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -364,6 +365,7 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
+    'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
 }
 
 

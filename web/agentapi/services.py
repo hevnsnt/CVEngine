@@ -1990,7 +1990,7 @@ def _mark_zombies(project, page):
             h['archive_checked_at'] = _iso(row.get('archive_checked_at'))
             h['archive_check_status'] = row.get('archive_check_status') or ''
             h['archive_assessment_id'] = row.get('archive_assessment_id')
-        return page
+        return _mark_secrets(project, page)
     states = {row['host']: row for row in HostState.objects.filter(project=project, host__in=names).values(
         'host', 'zombie_since', 'archived_at', 'archive_reason', 'pinned', 'archive_checked_at',
         'archive_check_status', 'archive_assessment_id')}
@@ -2003,6 +2003,24 @@ def _mark_zombies(project, page):
         h['archive_checked_at'] = _iso(row.get('archive_checked_at'))
         h['archive_check_status'] = row.get('archive_check_status') or ''
         h['archive_assessment_id'] = row.get('archive_assessment_id')
+    return _mark_secrets(project, page)
+
+
+def _mark_secrets(project, page):
+    """Set ``secrets`` on a page of hosts: how many exposed secrets that count (cveFeed.secrets_inventory) each one serves now, for the host's
+    Secrets chip. One query for the page."""
+    from django.db.models import Count
+
+    from cveFeed import secrets_catalog
+    from cveFeed.models import SecretOccurrence
+    names = {h['host'].lower() for h in page['results']}
+    rows = (_scoped(SecretOccurrence.objects.all(), project, 'project').filter(host__in=names, retired_at__isnull=True)
+            .exclude(finding__status__in=secrets_catalog.QUIET_STATUSES).values('project__slug', 'host')
+            .annotate(n=Count('finding', distinct=True)))
+    counts = {(r['project__slug'], r['host']): r['n'] for r in rows}
+    for h in page['results']:
+        key = (h['project'] if _is_all(project) else project.slug, h['host'].lower())
+        h['secrets'] = counts.get(key, 0)
     return page
 
 
@@ -2048,7 +2066,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country', 'alias', 'note')
+                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
@@ -2255,6 +2273,18 @@ def _term_filter(field, value, project=None):
             raise ApiError(400, 'sensitive: takes any, credentials, pii or internal')
         routes = RouteAuth.objects.filter(sensitive_score__gt=0) if kind == 'any' else RouteAuth.objects.filter(sensitive__has_any_keys=list(sensitive.TYPE_GROUPS[kind]))
         return _hosts_named_in(routes, project)
+    if field == 'secret':  # hosts that serve an exposed secret now (the secrets inventory): any, a class, live, or a provider
+        from cveFeed import secrets_catalog
+        from cveFeed.models import SecretOccurrence
+        kind = value.lower()
+        rows = SecretOccurrence.objects.filter(retired_at__isnull=True).exclude(finding__status__in=secrets_catalog.QUIET_STATUSES)
+        if kind in ('p', 's', 'i'):
+            rows = rows.filter(finding__klass=kind.upper())
+        elif kind == 'live':
+            rows = rows.filter(finding__status='live')
+        elif kind != 'any':
+            rows = rows.filter(finding__provider__iexact=value)
+        return _hosts_named_in(rows, project)
     raise ApiError(400, f'unknown field {field}:')
 
 
@@ -2365,6 +2395,8 @@ def _why_matched(sub, terms):
             reasons.append(f'auth {v}')
         if field == 'sensitive':
             reasons.append(f'sensitive {v}')
+        if field == 'secret':
+            reasons.append(f'secret {v}')
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
     return list(dict.fromkeys(reasons))[:8]
@@ -2511,7 +2543,8 @@ def search_hosts(ctx, slug, params):
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
     page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
-    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``zombie:`` (yes, no) and ``country:`` (ISO code
+    session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``secret:`` (any, p, s, i, live or a provider such as
+    google: hosts that serve an exposed secret the inventory counts), ``zombie:`` (yes, no) and ``country:`` (ISO code
     or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
     negates; quote a phrase; a bare word followed by a dotted version (``wordpress 7.1``) is that product at that release, a version on its own
     keeps matching any text that contains it. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
@@ -4200,6 +4233,14 @@ def _finding_summary(kind, obj):
     return (obj.title, obj.host, obj.domain.name, obj.severity)
 
 
+def _tracked_secrets(vuln):
+    """The secrets inventory rows a nuclei token or bbot secret finding fed (cveFeed.secrets_inventory): masked, never the value."""
+    from cveFeed import secrets_inventory
+    return [{'id': s.pk, 'masked': s.masked, 'label': secrets_inventory.kind_of(s).label, 'class': s.klass, 'status': s.status,
+             'severity': SEVERITY_NAMES.get(s.severity, 'unknown'), 'severity_basis': s.severity_basis}
+            for s in secrets_inventory.tracked(vuln.pk)]
+
+
 def finding_detail(ctx, slug, kind, finding_id):
     """Everything about one finding: why it matters, how it was found (the evidence chain), when it was first and last seen with the
     host's change history, the AI classification (and the model's own words when the rules overrode it), the fix, and every
@@ -4289,6 +4330,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'closure_note': closed.get('closure_note'), 'closed_by': closed.get('closed_by'), 'closed_at': closed.get('closed_at'),
         'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
+        'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'confirm': _confirm_guide(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,

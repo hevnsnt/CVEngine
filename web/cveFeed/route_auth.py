@@ -321,7 +321,9 @@ def analyse(result):
     content_type = (result.get('content_type') or '')[:100]
     body = result.get('body') or ''
     found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
-    return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
+    credentials = sensitive.credential_values(body) if any(t in found for t in sensitive.CREDENTIAL_TYPES) else []
+    return {'credentials': credentials,  # raw values for the secrets inventory (_persist), held in memory, never stored
+            'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
             'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
             # what the page was, for comparing it with the answer to a path that cannot exist (cveFeed.soft404); held in memory, never stored
             # the front page is never compared with a path that cannot exist (_against_missing_page): no fingerprint, so a 300 KB page is not
@@ -392,7 +394,7 @@ def _against_missing_page(answer, url, probe, known):
         if missing is not None and soft404.same(fp, missing):
             evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind,
                                                             'note': 'the same answer as for a path that cannot exist'}}
-            return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0}
+            return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0, 'credentials': []}
     return answer
 
 
@@ -404,6 +406,33 @@ def _read_route(probe, url):
     if (urlparse(url).path or '/') == '/' and isinstance(probe, functools.partial) and probe.func is probe_url:
         return probe(url, max_bytes=ROOT_READ_BYTES)
     return probe(url)
+
+
+MAX_SCRIPT_URLS = 8
+
+
+def script_urls(entries, page_url):
+    """The front page's scripts on its own host (same scheme, host and port), absolute, without query strings, at most MAX_SCRIPT_URLS: what the
+    secrets scan reads besides the routes. A script on any other host is left to the library reader's own vetting."""
+    from urllib.parse import urljoin
+    base = urlparse(page_url)
+    out = []
+    for entry in entries or ():
+        src = (entry.get('url') or entry.get('src')) if isinstance(entry, dict) else entry
+        if not isinstance(src, str) or not src.strip():
+            continue
+        try:
+            url = urlparse(urljoin(page_url, src.strip()))
+        except ValueError:
+            continue
+        if url.scheme not in ('http', 'https') or (url.scheme, url.netloc.lower()) != (base.scheme, base.netloc.lower()):
+            continue
+        clean = url._replace(query='', fragment='').geturl()[:2000]
+        if clean not in out:
+            out.append(clean)
+        if len(out) >= MAX_SCRIPT_URLS:
+            break
+    return out
 
 
 def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, reader=None, target=None):
@@ -419,6 +448,9 @@ def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, 
     entries, page_url = page.get('scripts') or [], page.get('page') or ''
     if not entries:
         return
+    own = script_urls(entries, page_url)
+    if own:
+        evidence['script_urls'] = own  # the page's own scripts, read again by the secrets_scan stage (cveFeed.secrets_stage)
     budget = budget if budget is not None else {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
     if isinstance(probe, functools.partial) and probe.func is probe_url:
         probe = functools.partial(probe, max_bytes=js_libraries.MAX_SCRIPT_BYTES)  # a library file is read further than a page
@@ -809,7 +841,26 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
     for part in _chunks(old_rows):
         RouteAuth.objects.bulk_update(part, list(STORED_FIELDS), batch_size=CHUNK)
     link_technologies(scan, probed)
+    _feed_inventory(scan, project, probed, now)
     return {'by_state': by_state, 'sensitive': sum(1 for r in probed.values() if r['sensitive_score'] > 0)}
+
+
+def _feed_inventory(scan, project, probed, now):
+    """The credentials each probed body served go to the secrets inventory (cveFeed.secrets_inventory), fingerprinted and masked there; a route read
+    again that no longer serves one retires its route occurrence. The raw values are dropped from ``probed`` here, whatever happens."""
+    from cveFeed import secrets_inventory
+    seen = {}
+    for url, result in probed.items():
+        values = result.pop('credentials', None) or []
+        seen[url] = set()
+        try:
+            seen[url].update(row.id for row in secrets_inventory.from_route(project, scan.domain_id, scan.id, url, values, now=now))
+        except Exception:  # noqa: BLE001 - an inventory problem must not lose the route check
+            logger.exception('could not file the credentials served on %s in the secrets inventory', url)
+    try:
+        secrets_inventory.retire_missing(project, 'route', seen, now=now)
+    except Exception:  # noqa: BLE001
+        logger.exception('could not retire route secrets of project %s', project)
 
 
 def link_technologies(scan, probed):

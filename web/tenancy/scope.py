@@ -75,6 +75,9 @@ SCOPES = {
     'cveFeed.StatsSnapshot': 'project_id',
     'cveFeed.ProjectSettings': 'project_id',
     'cveFeed.RunZeroSync': 'project_id',
+    'cveFeed.SecretFinding': 'project_id',  # the exposed-secrets inventory (cveFeed.secrets_inventory)
+    'cveFeed.SecretOccurrence': 'project_id',
+    'cveFeed.ResourceRef': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
 NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential'}  # system-wide (or organization-wide) entries have no project

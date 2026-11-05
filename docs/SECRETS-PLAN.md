@@ -1,12 +1,37 @@
 # Exposed secrets for 1.4: a secrets inventory built on Kingfisher
 
-Status: plan for `1.4-develop`. Nothing in the Kingfisher work is built yet. It sits next to [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md) (the 1.4
+Status: **built for `1.4-develop`** (S1 to S7, with the Sentinel half in `hevnsnt/cvENGINE-sentinel`). "Built in 1.4" below lists where the
+code differs from this plan and why; the rest of the document is the plan as it was reviewed. It sits next to [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md) (the 1.4
 one-scanner plan from PR #278) and follows that plan's decisions: the scanning moves into the Sentinel, the built-in Sentinel does any work that touches a
 credential, the shared code lives in `cvengine_scanner`, and the server decides policy and stores results. Slices S1 to S7 below target `1.4-develop`.
 Slice S0 is a data-handling bug fix, not a Kingfisher feature, and is not part of this branch's work: its first half (stop secrets reaching the AI provider,
 gate bbot's trufflehog) is being done separately on `develop` for 1.3.2, and its at-rest masking half is planned for 1.3.3 or 1.4 (section 12).
 
-Sources read: `hevnsnt/CVEngine` `origin/develop` @ `c06b407`, `origin/1.4-develop` @ `e0f8c74`, `hevnsnt/cvengine-sentinel` @ `458997d`,
+### Built in 1.4: where the code differs from the plan
+
+- **Where the code is.** Server: `cveFeed/secrets_catalog.py` (mapping, masks, severity), `secrets_inventory.py` (fingerprint key, `record`,
+  feeders, retirement, scoring input), `secrets_scan.py` (the stage, the target, `clean_result`, `persist`), `secrets_validation.py` (the three
+  locks), `secret_rules.py` (custom rules and skip lists), `agentapi/secrets_api.py` (REST and MCP), `static/cve/secrets.js` (the Secrets page),
+  the backfill `backfill_secrets_inventory` and migration `cveFeed.0146`. Sentinel: `cvengine_scanner/secrets.py` and `client/tools.py
+  run_secrets_scan`.
+- **No `value_enc`.** Re-validation from a stored value is deferred to 1.5 (section 12), and validation happens in the built-in scanner while it
+  holds the value (5.2), so nothing in 1.4 would read a stored copy. Storing one anyway would only add exposure; the column is left out, and
+  with it the 30-day purge. 1.5 adds it with the feature that reads it.
+- **The 7-day validation limit is per host, not per secret.** The scanner cannot compute the inventory's keyed fingerprint (it has no install
+  key), so it cannot tell which values were validated last week. A host is validated at most once per `CVENGINE_TTL_SECRETS_VALIDATE` (7 days);
+  a person's "Validate now" ignores the window. Kingfisher itself validates each distinct value once per run.
+- **Settings names.** The ledger services are `secrets-scan` and `secrets-validate`, so the windows are `CVENGINE_TTL_SECRETS_SCAN` and
+  `CVENGINE_TTL_SECRETS_VALIDATE` (the ledger derives the variable from the service name).
+- **Validating tasks.** A `secrets_scan` task with `validate: true` is held to the built-in scanner the same way signed-in work is
+  (`sentinel_broker.validating`): refused to any other Sentinel, left out of its queue, and not counted against another Sentinel's slots. The task
+  also names the Kingfisher version the allow-list was reviewed against (`validate_kingfisher`); a scanner running another version detects only.
+- **Validation outcomes.** The server keeps an outcome only for an allow-listed rule of a task that was told to validate
+  (`secrets_validation.allowed_outcome`); any other finding is `not_attempted`, whatever the Sentinel says.
+- **Scoring.** By the inventory row's severity: critical or high 25, medium 10, low or info 5. A browser key alone is therefore 5, a server secret
+  25 (8.2); a host the inventory covers no longer scores its routes' credential samples, but still scores their personal data.
+- **Contract version.** `secrets_scan` is `kind_since: 3`, and `min_supported_contract_version` stays 1.
+
+ `hevnsnt/CVEngine` `origin/develop` @ `c06b407`, `origin/1.4-develop` @ `e0f8c74`, `hevnsnt/cvengine-sentinel` @ `458997d`,
 `mongodb/kingfisher` @ `67c1ad7` (v2.16.0), `projectdiscovery/nuclei-templates` HEAD (sparse checkout of `http/exposures/tokens` and `file/keys`),
 and bbot 3.0.2 as installed from PyPI (the version `web/Dockerfile:15` pins). Citations are `file:line` on `origin/1.4-develop` @ `e0f8c74` (re-based from `develop`, where the lines differ in the files that diverged); `develop` is named
 where a claim is about it. **Proven** means

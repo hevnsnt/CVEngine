@@ -52,6 +52,9 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
 | triage | `GET projects/{slug}/triage`, `POST .../findings/{kind}/{id}/retriage` | `list_triage`, `retriage_finding` |
 | hygiene (`?status=` `open`, the default, `resolved`, or `pending`: a missing SPF or DMARC record only one resolver saw, held back until two resolvers or the next run agree) | `GET projects/{slug}/hygiene`, `certificates`, `POST .../hygiene/run` | `list_hygiene_findings`, `list_certificates`, `run_hygiene_checks` |
+| exposed secrets (masked values only, never the value; `?status=` `open`, the default, `quiet`, `all` or one status, `class=P|S|I`, `provider=`, `severity=`, `host=`, `q=`) | `GET projects/{slug}/secrets`, `GET .../secrets/{id}`, `POST .../secrets/{id}/status` (a write role, audited), `POST .../secrets/{id}/validate` (Org Admin or App Admin, a project with validation on, never a bug bounty project; 202) | `list_secrets`, `get_secret`, `set_secret_status`, `request_secret_validation` |
+| secret validation switch (Org Admin or App Admin, with the attestation word for word; audited) | `GET/PUT projects/{slug}/secrets/settings` | none |
+| secrets scan rules (App Admin: custom Kingfisher rules, detection only, and skip words) | `GET/PUT secrets/rules` | none |
 | CVEs | `GET cves?tier=fire`, `GET cves/{id}`, `GET cves/{id}/detection` | `list_cves`, `get_cve`, `get_cve_detection` |
 | matches | `GET projects/{slug}/matches`, `PATCH .../matches/{id}` | `list_cve_matches`, `update_remediation_status` |
 | remediation status (`open`, `in_progress`, `fixed`, `accepted_risk`, `false_positive`) and the closure note | `PATCH projects/{slug}/findings/{match,vulnerability,hygiene}/{id}`, `POST .../findings/status` (bulk) | `update_finding_status`, `bulk_update_finding_status` |
@@ -81,6 +84,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | agent administration | `GET agents`, `GET/PATCH/DELETE agents/{id}` | `list_agents`, `get_agent`, `update_agent`, `delete_agent` |
 | Sentinel identity | `GET/PUT/DELETE sentinel`, `POST sentinel/heartbeat`, `POST sentinels/bootstrap` (no token needed) | `register_sentinel`, `unregister_sentinel`, `sentinel_heartbeat` |
 | Sentinel template policy (Sentinel token only) | `GET sentinel/template-policy`, `GET sentinel/template-policy/bundle` | none |
+| Sentinel secret rules (Sentinel token only: the custom rules a `secrets_scan` task's `rules_bundle_sha256` names, as YAML, `ETag` the sha256, `If-None-Match` answers `304`, `404` when there are none) | `GET sentinel/secret-rules/bundle` | none |
 | Sentinel work | `POST sentinel/tasks/next`, `GET sentinel/tasks/{id}`, `POST sentinel/tasks/{id}/accept`, `.../result`, `.../release` | `get_next_sentinel_task`, `get_sentinel_task`, `accept_sentinel_task`, `report_sentinel_task_result`, `release_sentinel_task` |
 | Sentinel fleet and dispatch settings | `GET sentinels/live` (what each Sentinel you manage is doing now), `GET sentinels/dispatch`, `GET/PUT sentinels/defaults` | `get_sentinel_dispatch`, `get_sentinel_defaults`, `set_sentinel_defaults` (`sentinels/live` is REST only) |
 | Auto-tuning (App Admin) | `GET tuning`, `GET tuning/decisions`, `PUT tuning/mode`, `POST tuning/decisions/{id}/apply`, `POST tuning/decisions/{id}/revert`, `POST tuning/release` | `get_tuning_status`, `list_tuning_decisions`, `set_tuning_mode`, `apply_tuning_suggestion`, `revert_tuning_decision`, `release_tuning_pin` |
@@ -304,6 +308,7 @@ Hosts carry `score` (0 to 100) and `score_detail`, and come highest score first 
 | `vuln:rce`, `sev:high` | finding name, severity |
 | `auth:<state>` | hosts with a web route in that state (any state listed under Routes) |
 | `sensitive:any`, `sensitive:credentials`, `sensitive:pii`, `sensitive:internal` | hosts with a route serving that kind of sensitive data |
+| `secret:any`, `secret:s`, `secret:p`, `secret:i`, `secret:live`, `secret:<provider>` | hosts that serve an exposed secret the inventory counts (a class, a validated live one, or a provider) |
 | `zombie:yes`, `zombie:no` | hosts whose name is gone but whose last address answers |
 | `country:US`, `country:Germany` | the ISO code or name of a host IP's geolocated country |
 | `-term`, `"apache tomcat"` | negate a term, or match a phrase |

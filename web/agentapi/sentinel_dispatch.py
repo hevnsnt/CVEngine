@@ -43,7 +43,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'secrets_scan': 1800}
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
@@ -55,6 +55,7 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
+NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 
 
@@ -64,7 +65,7 @@ def _parse_local_fallback():
     from agentapi.models import SentinelTask
     raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
     if raw in ('', 'all', '*'):
-        return set(SentinelTask.KINDS), []
+        return set(SentinelTask.KINDS) - set(NEVER_LOCAL), []
     if raw == 'none':
         return set(), []
     names = [k.strip() for k in raw.split(',') if k.strip()]
@@ -73,7 +74,7 @@ def _parse_local_fallback():
         _WARNED_FALLBACK.add(raw)
         logger.warning('%s names kinds that do not exist and are ignored: %s (valid: %s)', LOCAL_FALLBACK_ENV, ', '.join(unknown),
                        ', '.join(SentinelTask.KINDS))
-    return {k for k in names if k in SentinelTask.KINDS}, unknown
+    return {k for k in names if k in SentinelTask.KINDS and k not in NEVER_LOCAL}, unknown
 
 
 def local_fallback_kinds():

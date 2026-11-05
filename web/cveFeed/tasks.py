@@ -75,6 +75,14 @@ def testssl_sweep():
     return testssl_scan.sweep_all()
 
 
+@app.task(name='secrets_validate_hosts', bind=False, queue='vhost_queue')
+def secrets_validate_hosts(project_id, hosts, user_id=None):
+    """A person asked to validate a secret (``agentapi.secrets_api.request_validation``): the built-in scanner reads its hosts again and checks what it
+    finds with the allow-listed read-only validators (see ``cveFeed.secrets_validation``). On the slow, polite queue: it waits for the scanner."""
+    from cveFeed import secrets_scan
+    return secrets_scan.validate_hosts(project_id, hosts, user_id)
+
+
 @app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
 def bucket_sweep():
     """Daily: the cloud storage exposure check of every project's due buckets, a few requests per second (see ``cveFeed.bucket_scan``). It has a
