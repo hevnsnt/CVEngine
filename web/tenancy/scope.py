@@ -60,6 +60,7 @@ SCOPES = {
     'agentapi.AgentTask': 'project_id',
     'agentapi.SentinelTask': 'project_id',
     'agentapi.StageRun': 'project_id',  # a sweep over every project waits with no project (NULLABLE)
+    'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
     'cveFeed.FindingAuditEvent': 'project_id',
@@ -69,6 +70,7 @@ SCOPES = {
     'cveFeed.RdpScreenshot': 'project_id',
     'cveFeed.HostScreenshot': 'project_id',
     'cveFeed.TriageCall': 'project_id',
+    'cveFeed.AIJob': 'project_id',  # a pipeline model call the AI reviewer container makes (cveFeed.ai_jobs); a CVE-wide one has none
     'cveFeed.DeferredRetest': 'project_id',
     'cveFeed.OnDemandValidation': 'project_id',
     'cveFeed.AutomaticValidation': 'project_id',
@@ -78,7 +80,7 @@ SCOPES = {
     'cveFeed.RunZeroSync': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.

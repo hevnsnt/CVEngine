@@ -401,7 +401,7 @@ File upload settings
 # A finite cap on form fields (Django's own default is 1000): a body of `a=&a=&...` costs CPU linear in the field count, and /login/ takes
 # one without authentication. Set above the default so the larger bulk forms still post.
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 5000
-# nginx caps every request at 4 MB except a Sentinel's task result (24 MB, config/nginx/rengine.conf); the application accepts what nginx lets through
+# nginx caps every request at 4 MB except a Sentinel's task result and partial batches (24 MB, config/nginx/rengine.conf); the application accepts what nginx lets through
 DATA_UPLOAD_MAX_MEMORY_SIZE = 24 * 1024 * 1024
 
 '''

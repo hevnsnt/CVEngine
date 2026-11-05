@@ -15,7 +15,7 @@ from agentapi.services import ApiError
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'sentinel_results'
 KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'testssl': 'testssl', 'nmap_udp': 'nmap_udp', 'wpscan': 'wpscan',
-           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'error': 'nmap'}
+           'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'error': 'nmap'}
 
 
 V1_SHA256 = {
@@ -28,6 +28,10 @@ V1_SHA256 = {
     'openvas.json': '1f6166c56867cd631e6789455e5d83a2d47be7a5a3fdfb5b4e8988413862b224',
     'testssl.json': '0c3e9354aa1432420761aece78877e727bfca1b760dd22e26dac1769c0ba5d80',
     'wpscan.json': '548ae1d7ad40e9c5a81bf183a39fba3b3b7a270d92380da8602384db0d53b736',
+}
+V2_SHA256 = {  # v1's files unchanged, and waf, copied when version 3 added bbot_discovery
+    **V1_SHA256,
+    'waf.json': '109fd92d329180c9ee7ba2e64337de0bd677023c6a85532e3154dd60aa69bcec',
 }
 PASSES_THROUGH =('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp')  # unchanged by the server (openvas and wpscan fill in defaults)
 
@@ -68,7 +72,7 @@ class FixtureTests(SimpleTestCase):
 
     def test_a_good_result_goes_through_the_server_unchanged(self):
         """The server clips and drops; a correct client never loses anything to it. openvas is left out: its cleaner fills in defaults."""
-        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf'):
+        for name in ('nmap', 'naabu', 'nuclei_light', 'testssl', 'discover', 'nmap_udp', 'waf', 'bbot_discovery'):
             sent = fixture(name)
             self.assertEqual(broker.clean_result(KIND_OF[name], sent), sent, name)
 
@@ -78,7 +82,8 @@ class FixtureTests(SimpleTestCase):
 
 
 V1 = FIXTURES / 'v1'
-FROZEN = {'v1': V1}  # contract version -> its frozen fixtures: a bump to N copies the then-current set into v<N>/ and adds it here
+V2 = FIXTURES / 'v2'
+FROZEN = {'v1': V1, 'v2': V2}  # contract version -> its frozen fixtures: a bump to N copies the then-current set into v<N>/ and adds it here
 
 
 class KindRegistryTests(SimpleTestCase):
@@ -123,8 +128,9 @@ class FrozenFixtureTests(SimpleTestCase):
 
     def test_a_frozen_set_is_never_edited(self):
         """The hashes of ``v1/`` as it was copied from the fixtures of contract version 1. A fixture that needs to change belongs in a new version's set."""
-        digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in V1.glob('*.json')}
-        self.assertEqual(digests, V1_SHA256)
+        for folder, want in ((V1, V1_SHA256), (V2, V2_SHA256)):
+            digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.glob('*.json')}
+            self.assertEqual(digests, want, folder.name)
 
     def test_the_server_accepts_every_frozen_fixture_and_it_is_in_contract(self):
         for v, path in self.frozen():
@@ -219,7 +225,8 @@ class WafContractTests(SimpleTestCase):
         self.assertGreaterEqual(contract.version(), 2)
         self.assertEqual(contract.min_supported(), 1)
         self.assertEqual(contract.kind_since('waf'), 2)
-        self.assertEqual({k: v for k, v in contract.load()['kind_since'].items() if k != 'waf'}, {k: 1 for k in SentinelTask.KINDS if k != 'waf'})
+        newer = {'waf', *contract.STREAMED}  # contract version 3 added bbot_discovery, and nothing older changed with it
+        self.assertEqual({k: v for k, v in contract.load()['kind_since'].items() if k not in newer}, {k: 1 for k in SentinelTask.KINDS if k not in newer})
 
 
 class ContractMatchesTheServerTests(SimpleTestCase):

@@ -3,8 +3,8 @@
 Deterministic candidate generation first: match each discovered Technology (and
 its version, when reNgine captured one) against the product/package names and
 version ranges in `CVEEntry.affected`. Candidates become `CVEMatch` rows with a
-heuristic confidence; the user's chosen AI model can then confirm each one
-(`ai_confirm_match`), which is what makes exposure precise rather than noisy.
+heuristic confidence; the AI triage (cveFeed.triage) then judges each one,
+which is what makes exposure precise rather than noisy.
 
 The version/name helpers are pure Python (no Django import) so they are unit
 testable on their own.
@@ -1622,44 +1622,3 @@ def candidate_subdomains(product_index, base=None):
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
     qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")
-
-
-def ai_confirm_match(match, provider=None):
-    """Triage one CVEMatch with the user's chosen AI model and store the result as the legacy ``ai_verdict``.
-
-    The model's answer goes through the same rules as every finding (cveFeed.triage.apply_rules): confirmed, likely and
-    needs_validation map to affected, affected and uncertain; likely_false_positive and not_applicable map to not_affected, but never
-    for a match with hard evidence (a version inside the affected range, a template hit, a distribution tracker listing the package as
-    affected), which stays at least uncertain. ``provider`` defaults to the one configured in AIProviderSettings; with none configured
-    (or on a provider error) the match is returned unconfirmed, so deterministic correlation still works without an API key.
-    This is the stateless single-match form; auto-fire and the pipeline use cveFeed.triage, which also shares one answer per signature.
-    """
-    from reNgine.ai_providers import AIProviderError, triage_finding
-    try:
-        if provider is None:
-            from reNgine.ai_settings import get_configured_provider
-            provider = get_configured_provider()
-        if provider is None:
-            return match
-        from cveFeed import activity, triage
-        cve = match.cve_entry
-        host = match.subdomain.name if match.subdomain else ""
-        described = triage.describe_cve_match(match)
-        domain = getattr(match.subdomain, 'target_domain', None)
-        project = getattr(domain, 'project_id', None)
-        with activity.step('confirm', f'Asking {provider.name} whether {host or "a host"} is affected by {cve.cve_id}',
-                           project=project, cve_id=cve.cve_id) as handle:
-            answer = triage_finding(provider, 'cve_match', described['payload'])
-            outcome = triage.apply_rules('cve_match', described['facts'], answer['parsed'])
-            handle.done_message = (f'{host}: {outcome["classification"].replace("_", " ")} for {cve.cve_id}'
-                                   f' ({outcome["reason"][:120]})')
-    except AIProviderError as e:
-        logger.warning("AI confirmation skipped for match %s: %s", match.pk, e)
-        return match
-    match.ai_verdict = triage.verdict_for(outcome["classification"])
-    match.ai_reason = outcome["reason"][:2000]
-    match.ai_model = answer["model"]
-    match.save(update_fields=["ai_verdict", "ai_reason", "ai_model", "updated_at"])
-    from cveFeed import scoring
-    scoring.rescore_for_matches([match])  # a verdict moves the host's score
-    return match

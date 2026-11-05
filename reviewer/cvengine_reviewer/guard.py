@@ -14,7 +14,7 @@ import secrets
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]')
 _MARKER = re.compile(r'<<<|>>>')
 _LINK = re.compile(r'\b(?:https?|ftp|file|javascript|data):\S*|\bwww\.\S+', re.I)
-MAX_FENCED = 60_000  # characters of untrusted data in one prompt
+MAX_FENCED = 120_000  # characters of untrusted data in one fenced block
 
 
 class ReplyError(ValueError):

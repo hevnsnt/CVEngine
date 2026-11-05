@@ -119,15 +119,26 @@ def reviews_today(now=None):
     return FindingReview.objects.filter(created_at__gte=start).count()
 
 
+JOB_WORKERS = 4  # pipeline jobs the container runs side by side
+
+
 def config(now=None):
-    """What the reviewer container needs to work: whether it may, the provider and key, the model of each job, its limits."""
+    """What the reviewer container needs to work: whether it may review and run the pipeline's AI jobs, the provider and key, the model
+    of each job, the request settings, its limits. The pipeline's jobs (cveFeed.ai_jobs) are served whenever an AI provider is configured,
+    whatever the review setting says; the finding review and the operations check need it on too."""
+    from cveFeed import ai_jobs
     from reNgine.ai_providers import reachable_url
     row, provider = settings_row(), provider_row()
     on = enabled(row, provider)
+    jobs_on, jobs_why = ai_jobs.serving()
     out = {'enabled': on, 'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max,
            'reviews_left_today': max(0, row.review_daily_max - reviews_today(now)), 'ops_due': bool(on and ops_due(row, now)),
            'packet_limit': PACKET_LIMIT, 'note_max': NOTE_MAX, 'verdicts': list(VERDICTS), 'confidences': list(CONFIDENCES),
-           'reason_codes': list(REASON_CODES)}
+           'reason_codes': list(REASON_CODES), 'jobs_enabled': jobs_on, 'job_workers': JOB_WORKERS}
+    if jobs_on:
+        out['jobs'] = ai_jobs.provider_block(ai_jobs.provider_row())
+    else:
+        out['jobs_why'] = jobs_why
     if not on:
         out['why'] = ('turned off in .env (CVENGINE_REVIEWER=0)' if not env_enabled() else
                       'turned off in Settings' if not row.enabled else 'no AI provider is configured' if not provider else

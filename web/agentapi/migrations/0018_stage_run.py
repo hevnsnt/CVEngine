@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("agentapi", "0016_sentinel_defaults_external_kinds_db_default"),
+        ("agentapi", "0017_sentinel_partials"),
         ("dashboard", "0031_ai_provider_request_settings"),
         ("startScan", "0025_scanhistory_discovery_mode"),
     ]

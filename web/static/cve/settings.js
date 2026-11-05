@@ -126,10 +126,13 @@ async function reviewerCard() {
     : `${r.working ? "Working" : "Not working (see the AI model above, or a pause)"}. Models in force: ${(r.models_in_force || {}).review || "none"} for findings, `
       + `${(r.models_in_force || {}).ops || "none"} for operations. Reviewed today: ${r.reviews_today}. `
       + `Last call from the container: ${container.last_seen || "never"}. Last operations check: ${r.last_ops_at || "never"}.`;
+  const jobs = r.ai_jobs || {};
+  const waiting = el("p", "note", jobs.message || `AI jobs queued for the container: ${jobs.queued || 0}.`);
   return card(
     "AI reviewer",
-    el("p", "note", "A separate, locked-down container reviews every open finding once (again only when its host or evidence changes) and checks the server's operations a few times a day, raising admin alerts. It closes a false positive only when the server finds no hard evidence, nobody worked the finding, and no text aimed at AI agents in its evidence."),
+    el("p", "note", "A separate, locked-down container reviews every open finding once (again only when its host or evidence changes) and checks the server's operations a few times a day, raising admin alerts. It closes a false positive only when the server finds no hard evidence, nobody worked the finding, and no text aimed at AI agents in its evidence. It also answers the questions the AI triage queues for it; while it is off they wait."),
     status,
+    waiting,
     on.wrap,
     close.wrap,
     field("Model for finding review", reviewModel, "Leave empty for the default."),

@@ -938,13 +938,15 @@ MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+-]{0,100}$')
 
 def reviewer_get(request):
     from agentapi import builtin_reviewer
-    from cveFeed import reviewer
+    from cveFeed import ai_jobs, reviewer
     row, provider = reviewer.settings_row(), reviewer.provider_row()
     out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
            'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
            'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
+    jobs = ai_jobs.waiting()
+    out['ai_jobs'] = {**jobs, 'message': ai_jobs.waiting_message(jobs)}
     if provider is not None:
         out['models_in_force'] = {'review': reviewer.model_for('review', row, provider), 'ops': reviewer.model_for('ops', row, provider)}
     return out

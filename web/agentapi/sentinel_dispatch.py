@@ -43,7 +43,8 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200}
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200,
+                      'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
@@ -272,7 +273,8 @@ class _Dispatch:
     """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
     several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
 
-    def __init__(self, project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, label=None, siblings=None):
+    def __init__(self, project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, label=None, siblings=None,
+                 secret_ref=None):
         from agentapi.models import SentinelTask
         from cveFeed import activity
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
@@ -280,7 +282,8 @@ class _Dispatch:
         targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
         self.task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
-                                                ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by)
+                                                ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by,
+                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is never offered to another Sentinel
         self.label = label or _label(host, ips)
         self.busy = capacity['state'] == 'busy'
         self.entry = activity.log('run_check', (f'Queued {kind} work for {self.label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one'
@@ -400,10 +403,11 @@ class _Dispatch:
         age = (timezone.now() - self.task.created_at).total_seconds()
         return max(0, min(self.queue_budget, sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY - age))
 
-    def pause(self, now, interval=None):
-        """Seconds to wait before the next look: the poll interval (``_poll_interval``), or less when a budget ends sooner."""
+    def pause(self, now, interval=DISPATCH_POLL_INTERVAL):
+        """Seconds to wait before the next look: ``interval`` (a plain sleep polls every half second; a wait woken through Redis passes
+        ``_poll_interval()``), or less when a budget ends sooner."""
         horizon = self.run_deadline if self.run_deadline is not None else self.claim_deadline
-        return min(_poll_interval() if interval is None else interval, max(0.0, horizon - now))
+        return min(interval, max(0.0, horizon - now))
 
     def settle(self):
         """Close the activity line of the task that is over, saying what became of it."""
@@ -510,7 +514,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none'
         if work.step(now, none_left):
             break
-        _wait([work.task.pk], min(work.pause(now), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
+        _wait([work.task.pk], min(work.pause(now, _poll_interval()), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
     work.settle()
     if outcome is not None:
         outcome['no_scanner'] = work.vanished
@@ -658,7 +662,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
                 yield index, result
             if flying:
                 bound = min(REFILL_EVERY if pending and not halted else REAP_EVERY, STOP_CHECK_EVERY if scan is not None else REAP_EVERY)
-                _wait([d.task.pk for d in flying.values()], min([d.pause(now) for d in flying.values()] + [_poll_interval(), bound]))
+                _wait([d.task.pk for d in flying.values()], min([d.pause(now, _poll_interval()) for d in flying.values()] + [bound]))
     finally:
         for d in flying.values():
             d.cancel('the stage stopped before the task finished')

@@ -3,7 +3,9 @@
 cvENGINE 1.4 adds an **AI reviewer**: its own container. It works the way a careful outside analyst does, but it is boxed in so that text from a
 scanned host cannot steer it, reach the AI provider's key, or touch cvENGINE's code or database.
 
-It runs two jobs, and each job has its own model setting:
+It runs two jobs of its own, and each has its own model setting. It also answers the questions the pipeline puts to a model (the
+**pipeline's AI jobs**, below): the triage of each finding and its local-check suggestions are asked through it, so the main server makes
+no model call for them.
 
 | Job | Default model (Anthropic) | When it runs | What it does |
 | --- | --- | --- | --- |
@@ -41,8 +43,8 @@ reviewer is built on the assumption that every scanned byte is hostile.
         │  (web, celery)      │
         │                     │   /api/v1/reviewer/*  (reviewer token only)
         │  policy gates  ◄────┼──────────────┐
-        └─────────────────────┘              │ review packets out (sanitised, host names removed)
-                                             │ verdicts in (enums + one short note)
+        └─────────────────────┘              │ review packets and AI jobs out (sanitised, host names removed)
+                                             │ verdicts (enums + one short note) and answers in, checked by the server
                                    ┌─────────┴──────────┐
                                    │ reviewer container │── HTTPS ──► AI provider
                                    │ no source, no DB,  │
@@ -52,7 +54,9 @@ reviewer is built on the assumption that every scanned byte is hostile.
 
 1. **The model has no tools.** It cannot fetch a URL, run a command, read a file or call cvENGINE. It reads one packet and returns one JSON
    object, which the provider constrains to a schema where it can (`output_config.format` on Anthropic, `json_schema` elsewhere). The reviewer
-   then checks the object again itself. Nothing the model writes is ever executed, loaded as YAML or code, or used to build a request.
+   then checks the object again itself. Nothing the model writes is ever executed, loaded as YAML or code, or used to build a request. The
+   answer to a pipeline job goes back to the server as text, and the server checks it with the stage's own validator before anything is
+   stored (below).
 2. **Every answer is a choice from a fixed list.** The verdict, the confidence and the reason are enums. The only free text is a closing note of
    up to 1,200 characters, and the server cleans it before storing it: markup characters and links are removed, and the note is refused if it
    repeats a marker planted in the evidence.
@@ -86,9 +90,60 @@ reviewer is built on the assumption that every scanned byte is hostile.
    other path, and on `/mcp/`.
 8. **The provider key stays out of the prompt.** The server keeps the key encrypted in its database and hands it only to a `reviewer`-scope
    token. The reviewer holds it in memory and sends it only as the provider's auth header. It is never in a prompt, a log line or an error
-   message. A model cannot leak what it never sees, and it has no tool through which it could send anything anywhere.
+   message. A model cannot leak what it never sees, and it has no tool through which it could send anything anywhere. The pipeline's
+   AI jobs use the key the same way: the container is where it is used, and where the provider is reached from, for every call that has
+   moved; the web and Celery containers no longer send it anywhere for those.
 9. **Its words are shown as text.** Alerts and closing notes are rendered with `textContent` or Django's auto-escaping, never as HTML or
    Markdown. Links are removed from notes, so a note in a customer report can never carry a planted link.
+
+## The pipeline's AI jobs
+
+Before 1.4 the server called the AI provider itself, from the Celery workers, wherever the pipeline needed a model's answer. Those calls
+move into the reviewer container, so the provider key is used, and the provider is reached, from one boxed-in place. The stages queue
+**AI jobs** instead (`cveFeed.ai_jobs`, the `AIJob` table, scoped to a project where the work has one) and carry on; the answer is applied
+when it lands.
+
+1. **The stage queues a job.** It does everything it did before the call (the budgets, the caps, the deterministic ceilings, the claim on
+   the evidence signature) and then queues one job: the stage's fixed system prompt; its parts in order, text cvENGINE wrote itself and
+   data that came from a scanned host, a scanner or a feed; the answer schema; the request options (a pinned temperature and seed for a
+   self-hosted server, the stage's own reply limit, whether a reply cut off at the limit is asked once more with twice the limit); and, for
+   the RDP reading, one bounded image. Every string is masked for secrets first, as every prompt was. What the continuation needs (the claim,
+   the rows, the facts the question was asked on) stays on the server and never leaves it.
+2. **The container takes it.** `GET /api/v1/reviewer/jobs/next` hands out up to 20 queued jobs, most urgent and oldest first, each leased
+   to the container for a while with a fresh lease token. A stage may hold a job back on a day whose budget is spent: a triage queued on an
+   earlier day is counted again against today's caps when it is handed out, so a reviewer that was off for a week never spends more than a
+   day's budget in a day.
+3. **The container asks the model.** It fences each untrusted part between nonce markers (`guard.fence`), adds the trusted text as written,
+   and makes the request the server used to make (`cvengine_reviewer.llm.complete`, ported from the server's provider layer): the same
+   endpoints and bodies for Anthropic, the OpenAI-compatible servers (OpenAI, OpenRouter, vLLM, LM Studio) and Ollama, the same reply
+   limits, structured output with its step-down when a server refuses it, the reasoning setting, Ollama's context window and keep-alive, and
+   the same error categories. The provider settings stay where they were (Settings > AI model); the server resolves them, the `CVENGINE_AI_*`
+   variables of its `.env` included, and hands them over in the job block of `GET config`.
+4. **It posts the answer back.** `POST /api/v1/reviewer/jobs/<id>/result` carries the reply text, or the failure by category, and the
+   token counts of each call (recorded as AI usage under the job's stage). An answer whose lease is not the job's current one is refused.
+5. **The server checks and applies it.** A Celery task continues the stage: the stage's own validator checks the reply (`validate_triage`
+   for a triage), and the answer is applied exactly as the stage applied it when it asked the model itself, through the same rules
+   (`apply_rules`, the version-only ceiling, the heat caps, the tenancy rules on shared answers). A reply the validator rejects goes back to
+   the model once, with why it was rejected and the reply fenced (`finding_triage_repair`); a second rejection, or a provider failure, is
+   handled as a provider error was: the rows go to `error` with a diagnostic and the sweep asks again. Once applied, the job keeps its
+   counts and drops its question and answer.
+
+Nothing is lost on the way. A lease that runs out puts the job back in the queue (three times, then it fails and the stage asks again); an
+answer whose Celery task was lost is applied by the housekeeping pass every five minutes; a job nobody answers within a week expires and its
+stage asks again. Work that was in flight in the old code when an update restarted the server is simply asked again: its claim runs out
+after ten minutes and the triage sweep queues it.
+
+**When the reviewer is off.** With no AI provider configured, the stages queue nothing and behave as they always did without AI. With a
+provider but no reviewer to serve the queue (`CVENGINE_REVIEWER=0`, the container stopped, scanning paused), jobs wait and nothing fails.
+The reviewer card in Settings > AI model says "AI is waiting for the reviewer container" and why, and so does the server's status (an admin
+alert after fifteen minutes).
+
+Which stages go through the queue in this release:
+
+| Stage | Kind | Usage stage |
+| --- | --- | --- |
+| Triage of every finding (CVE matches, scanner, route and hygiene findings) | `triage` | `finding_triage`, `finding_triage_repair` |
+| Local-check suggestions for a match no external check can settle | `local_checks` | `local_check_suggestion` |
 
 ## Finding review in detail
 
@@ -156,14 +211,17 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 | Route | Purpose |
 | --- | --- |
-| `GET config` | Enabled flag, the provider, base URL, key and model per job, the limits, and whether the operations job is due |
+| `GET config` | Enabled flag, the provider, base URL, key and model per job, the limits, and whether the operations job is due; `jobs_enabled` and the job block (provider, address, key, model and request settings) for the pipeline's AI jobs |
 | `GET findings/next?limit=N` | Up to N review packets, each leased for 15 minutes |
 | `POST findings/<ref>/verdict` | One verdict. The answer says whether it was applied, recorded, held (and why) or stale |
 | `GET ops/snapshot` | The checks above |
 | `POST ops/report` | Diagnoses and requested actions. The answer says what was run |
+| `GET jobs/next?limit=N` | Up to N (at most 20) of the pipeline's queued AI jobs, each leased with a fresh lease token |
+| `POST jobs/<id>/result` | The answer to one job, or its failure category, with the lease token and the calls' token counts |
 
 ## Later
 
-- Move the pipeline's own AI calls (triage, validation planning, template drafting, detection authoring, the RDP reading) into the reviewer
-  container, so the main server makes no model calls at all.
+- Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, template drafting, detection and
+  guidance authoring, the RDP reading, nuclei targeting, the auto-tuner's advisor, the assessment AI and the connection test. Then the server
+  makes no model call at all.
 - Retire the three-hourly assessment review, which the operations job replaces.

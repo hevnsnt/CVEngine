@@ -141,6 +141,9 @@ class SentinelTask(models.Model):
     secret_ref = models.CharField(max_length=40, null=True, blank=True)
     secret_read_at = models.DateTimeField(null=True, blank=True)
     trace_id = models.CharField(max_length=32, default=new_trace_id, db_default='', db_index=False)  # rows from before it existed read ''
+    # A streamed kind (``sentinel_contract.STREAMED``: bbot_discovery) posts numbered batches while it runs (``SentinelPartial``): the seq of the last
+    # batch the server took. A batch at or below it is a retry of one already stored; the next must be exactly one more.
+    partial_seq = models.PositiveIntegerField(default=0, db_default=0)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -153,6 +156,24 @@ class SentinelTask(models.Model):
 
     def __str__(self):
         return f'sentinel task #{self.pk} {self.kind} ({self.status})'
+
+
+class SentinelPartial(models.Model):
+    """One batch of partial results a streamed task posted while it ran (``sentinel_broker.report_partial``), typed and clipped by
+    ``sentinel_broker.clean_partial``, waiting for the stage that dispatched the task (``sentinel_dispatch.dispatch_stream``) to persist it. That
+    stage reads the batches in ``seq`` order and deletes each once it is stored, so a row lives for seconds; what is left when a stage went away
+    goes with its task (cascade, and the task's retention)."""
+    task = models.ForeignKey(SentinelTask, on_delete=models.CASCADE, related_name='partials')
+    seq = models.PositiveIntegerField()
+    body = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['task', 'seq']
+        constraints = [models.UniqueConstraint(fields=['task', 'seq'], name='sentinelpartial_task_seq_uniq')]
+
+    def __str__(self):
+        return f'partial {self.seq} of sentinel task #{self.task_id}'
 
 
 class ScannerFallback(models.Model):

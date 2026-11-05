@@ -20,6 +20,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain
 from targetApp.models import Domain
+from tests import ai_queue
 
 
 class Base(TestCase):
@@ -765,7 +766,7 @@ class HostTextSignatureTests(Base):
 
     def reviewed_row(self, match, provider):
         (row, d), = triage.track(triage.with_cves([match]))
-        triage.run_triage([(row, d)], provider=provider)
+        ai_queue.run_triage([(row, d)], provider=provider)
         row.refresh_from_db()
         self.assertEqual((row.status, bool(row.classification)), ('triaged', True))
         self.kept = row.classification  # whatever the rules made of the answer: the record that has to survive a re-review
@@ -793,7 +794,7 @@ class HostTextSignatureTests(Base):
         (row2, d2), = triage.track(triage.with_cves([second]))
         self.assertEqual((row2.status, row2.classification, row2.carried_from), ('triaged', self.kept, first.pk))
         self.assertEqual(row2.signature, row.signature)
-        stats = triage.run_triage([(row2, d2)], provider=provider)
+        stats = ai_queue.run_triage([(row2, d2)], provider=provider)
         self.assertEqual(provider.complete.call_count, 1)
         self.assertEqual(stats['asked'], 0)
         # and the same row tracked again (the sweep, a validation) is not touched either
@@ -810,7 +811,7 @@ class HostTextSignatureTests(Base):
         (row2, d2), = triage.track(triage.with_cves([second]))
         self.assertEqual((row2.status, row2.classification), ('pending', self.kept))  # asked again, the record kept meanwhile
         self.assertNotEqual(row2.signature, row.signature)
-        triage.run_triage([(row2, d2)], provider=provider)
+        ai_queue.run_triage([(row2, d2)], provider=provider)
         self.assertEqual(provider.complete.call_count, 2)
 
     def with_headers(self, headers, **extra):
@@ -930,7 +931,7 @@ class HostTextSignatureTests(Base):
         rows = {m.pk: pair for m in (dated, plain) for pair in triage.track(triage.with_cves([CVEMatch.objects.get(pk=m.pk)]))}
         for pk, (row, d) in rows.items():
             self.assertEqual((row.status, row.classification, row.verdict_id is not None), ('pending', self.kept, True))  # queued, the record kept
-        stats = triage.run_triage(list(rows.values()), provider=provider)
+        stats = ai_queue.run_triage(list(rows.values()), provider=provider)
         self.assertEqual((stats['asked'], stats['cached']), (1, 1))  # the plain host's stored answer applies; the dated host is asked once
         self.assertEqual(provider.complete.call_count, 3)
         for row, _ in rows.values():
@@ -967,7 +968,7 @@ class HostTextSignatureTests(Base):
         """Each cap, set to admit one call more than the four already made today, asks one row and leaves the rest pending with their verdicts."""
         matches, provider, pairs = self.burst()
         with mock.patch.dict('os.environ', {cap: str(limit(TriageCall.objects.count()))}):
-            stats = triage.run_triage(pairs, provider=provider)
+            stats = ai_queue.run_triage(pairs, provider=provider)
         self.assertEqual((stats['asked'], stats['queued']), (1, 3))
         self.assertEqual(provider.complete.call_count, 5)
         self.assertEqual(Triage.objects.filter(status='pending', classification=self.kept).count(), 3)  # waiting, verdicts kept

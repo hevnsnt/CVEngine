@@ -18,7 +18,11 @@ The model never decides alone. ``apply_rules`` is the deterministic layer over i
 
 One AI call serves every finding with the same evidence signature (a hash of the evidence, never a hostname), so fifty hosts
 running the same nginx for one CVE are one question; a changed signature resets the verdict and the host is rescored. Prompts carry
-only cleaned, structured evidence (see reNgine.ai_providers.build_triage_prompt) with the host's own names redacted.
+only cleaned, structured evidence (see reNgine.ai_providers.triage_parts) with the host's own names redacted.
+
+The question is not asked here: it is queued for the AI reviewer container (cveFeed.ai_jobs), which makes every model call. ``run_triage``
+reserves the budget and queues one job per signature; when the answer lands, ``job_answer`` checks it (``validate_triage``), queues the one
+repair when it is unusable, and applies it to every row of the signature exactly as an answer was applied when the server asked itself.
 
 The builders and ``apply_rules`` are pure (duck-typed on the model fields) so they are unit tested without a database.
 """
@@ -34,7 +38,7 @@ from django.utils import timezone
 
 from cveFeed import match_policy
 from cveFeed.secret_redaction import mask_extracted, redact_text
-from reNgine.ai_providers import AIProviderError, clean_text, triage_finding
+from reNgine.ai_providers import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -1361,8 +1365,9 @@ def _count_repair(claim, kind):
                               finished_at=now)
 
 
-def _reserve_call(kind, signature, project_id):
-    """Atomically claim an evidence signature and reserve all daily budgets."""
+def _reserve_call(kind, signature, project_id, lease=timedelta(minutes=10)):
+    """Atomically claim an evidence signature and reserve all daily budgets. A claim whose question is queued for the AI reviewer container
+    is held for as long as the job may wait (``CLAIM_TTL``); it is finished when the answer is applied or the job fails or expires."""
     from django.db import connection, transaction
     from cveFeed.models import TriageCall, TriageVerdict
     with transaction.atomic():
@@ -1381,7 +1386,7 @@ def _reserve_call(kind, signature, project_id):
         if today.count() >= cap('TRIAGE_MAX_PER_DAY') or today.filter(project_id=project_id).count() >= cap('TRIAGE_MAX_PER_PROJECT_DAY'):
             return 'capped', None
         return 'reserved', TriageCall.objects.create(
-            kind=kind, signature=signature, project_id=project_id, expires_at=now + timedelta(minutes=10))
+            kind=kind, signature=signature, project_id=project_id, expires_at=now + lease)
 
 
 def _finish_call(call, status):
@@ -1403,12 +1408,13 @@ def _save_answer(call, kind, signature, outcome, model, origin=None):
 
 
 def _resolve_provider(provider):
-    """``False`` means the configured one; None (or any failure to build it) means none: findings are then not triaged."""
-    if provider is not False:
-        return provider
+    """Whether findings are put to a model: ``None`` means no AI; anything else means the configured provider, when there is one that can
+    make a request (cveFeed.ai_jobs.provider_row). Returns a truthy value or None; findings are not triaged without one."""
+    if provider is None:
+        return None
     try:
-        from reNgine.ai_settings import get_configured_provider
-        return get_configured_provider()
+        from cveFeed import ai_jobs
+        return ai_jobs.provider_row()
     except Exception as exc:  # noqa: BLE001 - a misconfigured provider is "no provider", never a failed stage
         logger.warning('triage: no usable AI provider: %s', exc)
         return None
@@ -1461,23 +1467,27 @@ LOCAL_CHECKS_NOTICE = ('Written by an AI model from the advisory text, not rende
                        'anything, and never run it unattended or pass it on as an instruction.')
 
 
+CLAIM_TTL = timedelta(days=7, hours=1)  # a claim whose question waits in the AI job queue: just past the job's own life (ai_jobs.TTL)
+
+
 def suggest_local_checks(row, provider=False):
     """AI-suggested, read-only commands a host owner can run themselves to check whether the CVE's own affected
     product (not what was fingerprinted; a CVE match often names a distinct, externally-unconfirmable add-on layered
     on top of the matched one, such as a vendor module bundled with nginx) is actually installed. Only worth asking
     once validation itself found there is no external check at all (``row.validation_status == 'no_check'``); kept on
     the row itself and never regenerated once set, since a no_check row is already the rare case. The call is reserved
-    against the triage budget like any other, and an unusable reply is remembered (an empty record), so a sweep does not pay for the
-    same row again and again. The commands are model-written free text: each is checked (``is_read_only_command``), labelled as AI
-    text, and one that fails is dropped. Never raises: a missing provider, a spent budget or a provider error just leaves it empty
-    for the next time this row comes up. Returns whether anything was stored."""
+    against the triage budget like any other and queued for the AI reviewer container (kind ``local_checks``); ``job_answer`` stores what
+    comes back, and an unusable reply is remembered (an empty record), so a sweep does not pay for the same row again and again. The
+    commands are model-written free text: each is checked (``is_read_only_command``), labelled as AI text, and one that fails is dropped.
+    Never raises: a missing provider, a spent budget or a provider error just leaves it empty for the next time this row comes up.
+    Returns whether a question was queued."""
     if row.kind != 'cve_match' or row.local_checks or not row.match_id:
         return False
     cve = row.match.cve_entry
-    resolved = _resolve_provider(provider)
-    if resolved is None:
+    if _resolve_provider(provider) is None:
         return False
-    from reNgine.ai_providers import AIProviderError, suggest_local_checks as ask
+    from cveFeed import ai_jobs
+    from reNgine.ai_providers import LOCAL_CHECK_SYSTEM_PROMPT, local_check_parts
     context = {
         'cve_id': cve.cve_id, 'title': cve.title,
         'affected': [{k: item.get(k) for k in ('vendor', 'product') if isinstance(item.get(k), str) and item.get(k)}
@@ -1486,26 +1496,38 @@ def suggest_local_checks(row, provider=False):
     }
     signature = hashlib.sha256(f'local-checks:{cve.cve_id}:{row.match.matched_product}:{row.pk}'.encode()).hexdigest()[:40]
     try:
-        admission, claim = _reserve_call('local_checks', signature, row.project_id)
+        admission, claim = _reserve_call('local_checks', signature, row.project_id, lease=CLAIM_TTL)
     except Exception:  # noqa: BLE001 - a suggestion is advisory
         logger.exception('local-check suggestion: could not reserve provider budget')
         return False
     if admission != 'reserved':
         return False
     try:
-        answer = ask(resolved, context)
-    except AIProviderError as exc:
+        ai_jobs.enqueue('local_checks', 'local_check_suggestion', system=LOCAL_CHECK_SYSTEM_PROMPT, parts=local_check_parts(context),
+                        context={'claim': claim.pk, 'triage': row.pk, 'cve_id': cve.cve_id}, project=row.project_id,
+                        dedupe=f'local_checks:{signature}', priority=7)
+    except Exception:  # noqa: BLE001
         _finish_call(claim, 'failed')
-        logger.warning('local-check suggestion failed for %s: %s', cve.cve_id, exc)
+        logger.exception('local-check suggestion: could not queue the question')
         return False
-    _finish_call(claim, 'succeeded')
-    parsed = answer['parsed']
+    return True
+
+
+def _local_checks_answer(job, text):
+    from cveFeed.models import Triage
+    from reNgine.ai_providers import parse_local_checks
+    claim = _claim_of(job)
+    if claim is not None:
+        _finish_call(claim, 'succeeded')
+    row = Triage.objects.filter(pk=job.context.get('triage')).first()
+    if row is None or row.local_checks:
+        return None
+    parsed = parse_local_checks(text)
     commands = [{**c, 'ai_suggested': True} for c in (parsed or {}).get('commands', []) if is_read_only_command(c['command'])]
-    stored = {'commands': commands, 'caveat': (parsed or {}).get('caveat', ''), 'model': answer['model'],
-              'generated_at': timezone.now().isoformat(), 'source': 'ai', 'untrusted': True, 'notice': LOCAL_CHECKS_NOTICE}
-    row.local_checks = stored
+    row.local_checks = {'commands': commands, 'caveat': (parsed or {}).get('caveat', ''), 'model': _job_model(job),
+                        'generated_at': timezone.now().isoformat(), 'source': 'ai', 'untrusted': True, 'notice': LOCAL_CHECKS_NOTICE}
     row.save(update_fields=['local_checks', 'updated_at'])
-    return bool(commands or stored['caveat'])
+    return None
 
 
 def _store_verdict(kind, signature, outcome, model, origin=None):
@@ -1906,12 +1928,168 @@ def _error_diagnostic(error, stage, group, provider=None, claim=None):
     return data
 
 
+def _after_apply(applied, released):
+    """What follows applying verdicts: the hosts of the matches whose legacy verdict moved are rescored, and the matches triage stopped
+    holding at smoke are offered to ``notify.fire_confirmed``."""
+    if applied:
+        from cveFeed import scoring
+        from cveFeed.models import CVEMatch
+        scoring.rescore_for_matches(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')
+                                    .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
+    if released:
+        # triage no longer holds these at smoke (threat.triage_cap): one that is fire now and was never paged under the rule in force is
+        # paged once, as a confirmation (a template hit was paged when it landed and is left out there)
+        from cveFeed import notify
+        notify.fire_confirmed(released)
+
+
+def _ask(key, group, claim):
+    """Queue the question of one signature group for the AI reviewer container. The job carries what the continuation needs: the claim,
+    the facts the question was asked on (``apply_rules`` judges the answer against them), where it was asked, and each row with the
+    signature it had, so a row whose evidence changes meanwhile is left for the next pass."""
+    from cveFeed import ai_jobs
+    from reNgine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
+    row, d = group[0]
+    context = {'claim': claim.pk, 'kind': key[0], 'signature': key[1], 'origin': [row.project_id, row.host],
+               'finding_kind': d['kind'], 'facts': d['facts'], 'rows': [[r.pk, rd['signature']] for r, rd in group]}
+    return ai_jobs.enqueue('triage', 'finding_triage', system=TRIAGE_SYSTEM_PROMPT,
+                           parts=triage_parts(d['kind'], d['payload'], d.get('host_context') or None), schema=triage_schema(),
+                           options=TRIAGE_OPTIONS, context=context, project=row.project_id, dedupe=f'triage:{key[0]}:{key[1]}', priority=3)
+
+
+# --------------------------------------------------------------------------------------------- the answers (cveFeed.ai_jobs)
+
+def _claim_of(job):
+    from cveFeed.models import TriageCall
+    return TriageCall.objects.filter(pk=job.context.get('claim')).first()
+
+
+def _job_model(job):
+    return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
+
+
+def _job_group(job):
+    """The rows of a job's signature group as they stand now, each with its description, keeping only those whose evidence still has the
+    signature they were asked with (``_apply`` re-reads them once more)."""
+    from cveFeed.models import Triage
+    want = {int(pk): sig for pk, sig in job.context.get('rows') or []}
+    rows = list(Triage.objects.filter(pk__in=list(want)))
+    token = _CONTEXT_MEMO.set({})
+    try:
+        found = {(KIND_FK[describe_kind(f)], f.pk): f for f in load_findings(rows)}
+        group = []
+        for row in rows:
+            fk = KIND_FK.get(row.kind)
+            finding = found.get((fk, getattr(row, f'{fk}_id', None))) if fk else None
+            if finding is None:
+                continue
+            d = describe(finding)
+            if row.review_nonce:
+                d['signature'] = effective_signature(d, row.review_nonce)
+            if d['signature'] == want[row.pk]:
+                group.append((row, d))
+    finally:
+        _CONTEXT_MEMO.reset(token)
+    return group
+
+
+def _job_error(job, claim, group, error):
+    """What a provider error did to a group when the server asked itself: the claim fails, the rows go to ``error`` with a diagnostic that
+    holds no reply, prompt, URL or key, and the activity feed says so. The sweep asks again."""
+    from types import SimpleNamespace
+    if claim is not None:
+        _finish_call(claim, 'failed')
+    if not group:
+        return
+    diagnostic = _error_diagnostic(error, 'ai_triage', group, SimpleNamespace(name=job.provider, _model=job.model), claim)
+    logger.warning('triage provider error: %s', diagnostic)
+    _mark(group, 'error', diagnostic)
+    from cveFeed import activity
+    activity.log('confirm', f'AI review failed ({diagnostic["category"]}); diagnostic {diagnostic["id"]}',
+                 project=job.project_id, status='failed', finding_ids=diagnostic['finding_ids'], diagnostic=diagnostic)
+
+
+def _triage_answer(job, text):
+    from types import SimpleNamespace
+    from cveFeed import ai_jobs
+    from reNgine.ai_providers import repair_parts, validate_triage
+    ctx = job.context
+    parsed, reason = validate_triage(text)
+    if parsed is None and job.attempt == 1:
+        # sent back to the model once, with why it was rejected; the second answer is the one that counts
+        return ai_jobs.Retry('finding_triage_repair', repair_parts(job.packet.get('parts') or [], text, reason))
+    claim = _claim_of(job)
+    if job.attempt > 1 and claim is not None:
+        _count_repair(claim, ctx['kind'])
+    group = _job_group(job)
+    if parsed is None:
+        _job_error(job, claim, group, SimpleNamespace(category='schema_invalid', output_length=len(str(text)), digest=ai_jobs.digest(text),
+                                                      reason=reason, attempts=2))
+        return None
+    outcome = apply_rules(ctx['finding_kind'], ctx['facts'], parsed)
+    verdict = _save_answer(claim, ctx['kind'], ctx['signature'], outcome, _job_model(job), tuple(ctx['origin'])) if claim else None
+    if verdict is None:
+        return None  # the claim was given up meanwhile: the rows stay pending and the sweep asks again
+    released = []
+    _after_apply(_apply(verdict, group, released), released)
+    return None
+
+
+def job_answer(job, text):
+    if job.kind == 'local_checks':
+        return _local_checks_answer(job, text)
+    return _triage_answer(job, text)
+
+
+def job_failure(job, category, detail):
+    from types import SimpleNamespace
+    claim = _claim_of(job)
+    if job.kind == 'local_checks':
+        if claim is not None:
+            _finish_call(claim, 'failed')
+        logger.warning('local-check suggestion failed for %s: %s', job.context.get('cve_id'), category)
+        return
+    if job.attempt > 1 and claim is not None:
+        _count_repair(claim, job.context['kind'])
+    error = SimpleNamespace(category=category, http_status=detail.get('http_status'), stop_reason=detail.get('stop_reason'),
+                            attempts=job.attempt if job.attempt > 1 else None)
+    _job_error(job, claim, _job_group(job), error)
+
+
+def job_admit(job):
+    """Whether a queued question may be asked today: one queued on an earlier day is counted again, against today's budgets (a reviewer
+    that was off for a while never spends more than a day's budget in a day). ``'drop'`` when its claim is gone."""
+    from django.db import connection, transaction
+    from cveFeed.models import TriageCall
+    claim = _claim_of(job)
+    if claim is None or claim.status != 'running':
+        return 'drop'
+    if claim.started_at >= _today():
+        return True
+    with transaction.atomic():
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pg_advisory_xact_lock(%s)', [21860073])
+        today = _triage_calls_today()
+        if today.count() >= cap('TRIAGE_MAX_PER_DAY') or today.filter(project_id=claim.project_id).count() >= cap('TRIAGE_MAX_PER_PROJECT_DAY'):
+            return False
+        TriageCall.objects.filter(pk=claim.pk).update(started_at=timezone.now())
+    return True
+
+
+def job_expired(job):
+    claim = _claim_of(job)
+    if claim is not None:
+        _finish_call(claim, 'expired')
+
+
 def run_triage(pairs, provider=False, scan_id=None):
     """Triage ``pairs`` (from ``track``): rows that already have a verdict for their current signature are left alone; the rest are
-    grouped by signature, each group is answered from the stored verdicts or by one model call, within the per-run, per-project and
-    per-day caps. With no provider the rows are marked not_triaged; a provider error marks only that group's rows ``error`` (the
-    sweep retries them); rows over a cap stay ``pending`` ("queued"). Honours the stop flag of ``scan_id``. Never raises for one
-    group's trouble. Returns the counts."""
+    grouped by signature, each group is answered from the stored verdicts or by one question queued for the AI reviewer container
+    (``_ask``; ``asked`` counts them), within the per-run, per-project and per-day caps. The rows of a queued question stay ``pending`` until
+    its answer lands (``job_answer``). With no provider the rows are marked not_triaged; a provider error marks only that group's rows
+    ``error`` when it comes back (the sweep retries them); rows over a cap stay ``pending`` ("queued"). Honours the stop flag of
+    ``scan_id``. Never raises for one group's trouble. Returns the counts."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage, TriageVerdict
     from reNgine import resources
     stats = {'rows': len(pairs), 'asked': 0, 'cached': 0, 'queued': 0, 'not_triaged': 0, 'errors': 0, 'stopped': False}
@@ -2010,7 +2188,7 @@ def run_triage(pairs, provider=False, scan_id=None):
             stats['queued'] += len(group)
             continue
         try:
-            admission, claim = _reserve_call(key[0], key[1], project_id)
+            admission, claim = _reserve_call(key[0], key[1], project_id, lease=CLAIM_TTL)
         except Exception:
             logger.exception('triage: could not reserve provider budget')
             stats['errors'] += len(group)
@@ -2024,59 +2202,26 @@ def run_triage(pairs, provider=False, scan_id=None):
             stats['queued'] += len(group)
             continue
         state['run'] += 1
-        rep_d = group[0][1]
         try:
-            answer = triage_finding(state['provider'], rep_d['kind'], rep_d['payload'], *([rep_d['host_context']] if rep_d.get('host_context') else []))
-            if answer.get('repaired'):
-                _count_repair(claim, key[0])
-        except AIProviderError as exc:
-            _finish_call(claim, 'failed')
-            if (exc.attempts or 1) > 1:
-                _count_repair(claim, key[0])
-            diagnostic = _error_diagnostic(exc, 'ai_triage', group, state['provider'], claim)
-            logger.warning('triage provider error: %s', diagnostic)
-            stats['errors'] += len(group)
-            _mark(group, 'error', diagnostic)
-            from cveFeed import activity
-            activity.log('confirm', f'AI review failed ({diagnostic["category"]}); diagnostic {diagnostic["id"]}',
-                         project=project_id, status='failed', finding_ids=diagnostic['finding_ids'], diagnostic=diagnostic)
-            continue
+            _ask(key, group, claim)
         except Exception:  # noqa: BLE001 - one finding must not stop the others
             _finish_call(claim, 'failed')
-            logger.exception('triage failed for a %s finding', rep_d['kind'])
+            logger.exception('triage: could not queue the question for a %s finding', key[0])
             stats['errors'] += len(group)
             _mark(group, 'error')
             continue
-        try:
-            outcome = apply_rules(rep_d['kind'], rep_d['facts'], answer['parsed'])
-            verdict = _save_answer(claim, key[0], key[1], outcome, answer['model'], (group[0][0].project_id, group[0][0].host))
-            if verdict is None:
-                stats['queued'] += len(group)  # the lease expired while the provider ran
-                continue
-            known[key] = verdict
-            stats['asked'] += 1
-            applied += _apply(verdict, group, released)
-        except Exception:
-            _finish_call(claim, 'failed')
-            logger.exception('triage: could not save provider verdict')
-            stats['errors'] += len(group)
-            _mark(group, 'error')
-    if applied:
-        from cveFeed import scoring
-        from cveFeed.models import CVEMatch
-        scoring.rescore_for_matches(CVEMatch.objects.filter(pk__in=set(applied)).select_related('subdomain__target_domain')
-                                    .order_by('subdomain__target_domain__project_id', 'subdomain__name'))
-    if released:
-        # triage no longer holds these at smoke (threat.triage_cap): one that is fire now and was never paged under the rule in force is
-        # paged once, as a confirmation (a template hit was paged when it landed and is left out there)
-        from cveFeed import notify
-        notify.fire_confirmed(released)
+        stats['asked'] += 1
+        idle = [(row, d) for row, d in group if row.status != 'pending']
+        if idle:
+            _mark(idle, 'pending')  # waiting for the answer (shown as queued); the sweep finds it in flight and leaves it
+    _after_apply(applied, released)
     return stats
 
 
 def triage_matches(matches, cve=None, provider=None):
     """Auto-fire's step: triage ``matches`` of one CVE. The legacy fields on each in-memory match are refreshed, so the caller's
-    host selection sees the mapped ``ai_verdict``. Returns the number of questions put to the model."""
+    host selection sees the mapped ``ai_verdict`` of every answer already stored; a question this queues is answered later, and until then
+    the match is picked by its confidence, as without AI. Returns the number of questions queued."""
     from cveFeed.models import CVEMatch
     matches = list(matches)
     if cve is not None:
