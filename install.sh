@@ -6,27 +6,28 @@
 #
 #   sudo ./install.sh                     # detect this machine's address and use it
 #   sudo ./install.sh --domain scan.example.com   # use a name people will type instead
-#   sudo ./install.sh --builtin-scanner   # opt in to the 1.4 built-in scanner (off by default; the image must be built first)
+#   sudo ./install.sh --no-builtin-scanner   # leave the built-in scanner off (on by default; docs/BUILTIN-SCANNER.md)
 #   sudo ./install.sh -n                # accepted for older scripts; the installer never prompts
 set -uo pipefail
 cd "$(dirname "$0")"
 
 usage() {
-  echo "Usage: sudo $0 [--domain NAME] [--builtin-scanner] [-n] [-h]"
+  echo "Usage: sudo $0 [--domain NAME] [--no-builtin-scanner] [-n] [-h]"
   echo "  --domain NAME  hostname or IPv4 address people will use to reach CVEngine (default: detected)"
-  echo "  --builtin-scanner  opt in to the built-in scanner (1.4, off by default): needs its image built first, see docs/SCANNER-ARCHITECTURE.md"
+  echo "  --no-builtin-scanner  leave the built-in scanner off (it is on by default and runs every scan tool; docs/BUILTIN-SCANNER.md)"
   echo "  -n             accepted and ignored: the installer never asks questions"
   echo "  -h             show this help"
 }
 
 original_args=("$@")
 domain=""
-builtin_scanner=0
+builtin_scanner=''
 while [ $# -gt 0 ]; do
   case $1 in
     --domain) domain=${2:-}; [ -n "$domain" ] || { usage; exit 1; }; shift 2 ;;
     --domain=*) domain=${1#--domain=}; shift ;;
-    --builtin-scanner) builtin_scanner=1; shift ;;
+    --builtin-scanner) shift ;;  # accepted for older scripts: the built-in scanner is on by default
+    --no-builtin-scanner) builtin_scanner=0; shift ;;
     -n) shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 1 ;;
@@ -72,7 +73,8 @@ esac
 
 mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
 if [ "${mem_kb:-0}" -gt 0 ]; then
-  if [ "$mem_kb" -lt 3500000 ]; then warn "only $((mem_kb / 1024)) MB of memory: 4 GB or more is recommended, scans may be killed for lack of memory"
+  if [ "$mem_kb" -lt 3500000 ]; then warn "only $((mem_kb / 1024)) MB of memory: 8 GB or more is recommended, scans may be killed for lack of memory"
+  elif [ "$mem_kb" -lt 7000000 ]; then warn "$((mem_kb / 1024)) MB of memory: 8 GB is recommended with the built-in scanner; its container gets 1 GB here instead of 2 (SCANNER_MEM_LIMIT, docs/DEPLOYMENT.md)"
   else ok "$((mem_kb / 1024)) MB of memory"; fi
 fi
 
@@ -156,6 +158,11 @@ done
 # ---------------------------------------------------------------------------------------------------------------------------
 step "Preparing settings"
 CVENGINE_ENABLE_BUILTIN_SCANNER=$builtin_scanner ./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
+# A small host: the built-in scanner's container ceiling is 1 GB instead of 2 (an owner's own value is kept)
+if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && ! grep -qE '^SCANNER_MEM_LIMIT=' .env; then
+  printf 'SCANNER_MEM_LIMIT=1g\n' >> .env
+  ok "SCANNER_MEM_LIMIT=1g for this host's memory"
+fi
 address=$(grep -E '^DOMAIN_NAME=' .env | tail -n 1 | cut -d= -f2-)
 address=${address:-localhost}
 ok "address: https://$address/"
@@ -196,6 +203,21 @@ admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "C
 # the make command echo ("docker compose ... exec") is noise: keep only the account banner
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
 [ -n "$admin_banner" ] || admin_banner=$admin_output
+
+# The built-in scanner enrols itself with the enrollment the server writes for it, which needs the admin account that now exists: written now
+# instead of at the server's next five-minute round. It then runs every scan tool. A scanner that is slow to come up is not a failed install:
+# the scans that need it wait, and it keeps trying.
+if bash -c '. scripts/scanner.sh && cvengine_scanner_enabled docker compose' 2>/dev/null; then
+  step "Starting the built-in scanner"
+  docker compose exec -T celery python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
+  scanner_ok=1
+  for _ in $(seq 1 36); do
+    if docker compose exec -T scanner python3 -m client.control heartbeat >/dev/null 2>&1; then scanner_ok=0; break; fi
+    sleep 5
+  done
+  if [ "$scanner_ok" -eq 0 ]; then ok "the built-in scanner is enrolled and checking in"
+  else warn "the built-in scanner has not checked in yet; it keeps trying (docker compose logs scanner, and Administration > Sentinels)"; fi
+fi
 
 # The app cannot update itself (it has no Docker access on purpose): a small watcher on this machine applies an update an admin approves in
 # Settings > Updates, within seconds. Without it the Approve button does nothing, so it is part of the install. Skipped when automatic

@@ -2106,3 +2106,52 @@ section.internal[hidden]{display:none}
 .alertbar .ab-text p{margin:2px 0 0;white-space:pre-line;overflow-wrap:anywhere}
 .alertbar .ab-label{font-weight:600}
 .alertbar .ab-more{margin:0;padding:4px var(--gutter);font-size:13px}
+
+/* ---- CVE explorer (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
+.cvx-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.cvx-form{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:center;margin-bottom:14px;padding:12px}
+.cvx-q{position:relative;flex:1 1 320px;min-width:0}
+.cvx-q-icon{position:absolute;left:12px;top:50%;width:18px;height:18px;transform:translateY(-50%);fill:none;stroke:var(--muted);stroke-width:2;stroke-linecap:round;pointer-events:none}
+.cvx-q input{width:100%;min-width:0;padding-left:38px;font-size:16px}
+.cvx-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;min-width:0}
+.cvx-filters select{width:auto;min-width:0}
+.cvx-kev{display:inline-flex;align-items:center;gap:8px;margin:0;font-size:14px;font-weight:600;color:var(--ink-2);cursor:pointer;min-height:40px}
+.cvx-kev input{width:auto;min-height:0;margin:0}
+.cvx-card{padding:0;overflow:hidden}
+.cvx-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid var(--line)}
+.cvx-head h2{font-size:15px;overflow-wrap:anywhere}
+.cvx-list{list-style:none;margin:0;padding:0}
+.cvx-row{position:relative;border-bottom:1px solid var(--line)}
+.cvx-row:last-child{border-bottom:0}
+.cvx-row::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ice)}
+.cvx-row[data-tier="fire"]::before{background:var(--fire)}.cvx-row[data-tier="smoke"]::before{background:var(--smoke)}
+.cvx-open{display:grid;gap:6px;width:100%;padding:13px 18px 13px 21px;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background .1s}
+@media (hover:hover) and (pointer:fine){.cvx-open:hover{background:var(--surface-2)}}
+.cvx-open:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.cvx-top{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;min-width:0}
+.cvx-id{font:700 14px var(--mono);color:var(--ink);overflow-wrap:anywhere}
+.cvx-title{color:var(--ink-2);font-size:14px;overflow-wrap:anywhere}
+.cvx-meta{display:flex;flex-wrap:wrap;gap:4px 14px;font:500 12px var(--mono);color:var(--muted)}
+.cvx-meta .hit{color:var(--fire-ink);font-weight:700}
+.cvx-pager{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 18px;border-top:1px solid var(--line)}
+.cvx-pager[hidden]{display:none}
+.cvx-detail{display:block}
+.cvx-did{font-size:18px;font-weight:700;margin:0 0 8px;overflow-wrap:anywhere}
+.cvx-dtop{display:flex;flex-wrap:wrap;gap:6px}
+.cvx-dtitle{margin:10px 0 0;font-weight:600;overflow-wrap:anywhere}
+.cvx-sec{margin-top:18px}
+.cvx-sec h3{margin:0 0 8px;font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.cvx-sec p{margin:0;font-size:14px;overflow-wrap:anywhere}
+.cvx-more{margin-top:8px;font-size:13px;color:var(--muted)}.cvx-more summary{cursor:pointer;font-weight:600}.cvx-more p{margin-top:6px}
+.cvx-facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 14px;margin:0;font-size:13px}
+.cvx-facts dt{color:var(--muted)}.cvx-facts dd{margin:0;overflow-wrap:anywhere}
+.cvx-affected,.cvx-hosts,.cvx-refs{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.cvx-affected li{display:grid;gap:2px;font-size:14px;overflow-wrap:anywhere}
+.cvx-hosts li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);border-left-width:4px;border-left-color:var(--ice)}
+.cvx-hosts li[data-heat="fire"]{border-left-color:var(--fire)}.cvx-hosts li[data-heat="smoke"]{border-left-color:var(--smoke)}
+.cvx-hosts .host-link{font:600 13px var(--mono);overflow-wrap:anywhere}
+.cvx-hosts .note{grid-column:1;overflow-wrap:anywhere}
+.cvx-hosts .badge{grid-column:2;grid-row:1/3;text-decoration:none}
+.cvx-refs li{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
+.cvx-refs a{min-width:0;overflow-wrap:anywhere;color:var(--ink-2)}
+@media (max-width:639px){.cvx-form{padding:10px}.cvx-filters{width:100%}.cvx-filters select{flex:1}.cvx-open{padding:12px 14px 12px 17px}.cvx-head,.cvx-pager{padding:12px 14px}}

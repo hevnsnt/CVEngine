@@ -1,8 +1,9 @@
 name: 🔁 Upgrade rehearsal
 
 # Installs the version that is released (master), puts data in it, then updates it to the version that is about to be released with the real
-# update scripts, and checks the site, the workers and the data. It runs on every pull request into master (the release), and by hand for any
-# two refs. A release that would crash an existing install should fail here first.
+# update scripts, and checks the site, the workers and the data, and from 1.4 that the built-in scanner came up and enrolled with nobody running
+# anything. It runs on every pull request into master (the release), and by hand for any two refs (1.4: base v1.3.5, candidate 1.4-develop or a
+# branch into it). A release that would crash an existing install should fail here first.
 #
 #   plain   an install with docker-compose.yml only, updated with scripts/update.sh
 #   overlay an install like one behind a host proxy that owns port 443 (an overlay compose file and settings in .env), updated through the

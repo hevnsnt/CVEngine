@@ -387,6 +387,13 @@ class ReplayTests(TestCase):
         self.assertEqual(stage_runs.task_key('nuclei_light', {'targets': ['a'], 'template_policy': {'rev': 1}}),
                          stage_runs.task_key('nuclei_light', {'targets': ['a'], 'template_policy': {'rev': 2}}))
 
+    def test_a_signed_in_dispatch_is_other_work_than_the_same_scan_without_the_sign_in(self):
+        plain = stage_runs.task_key('nuclei_light', {'targets': ['a']})
+        self.assertEqual(plain, stage_runs.task_key('nuclei_light', {'targets': ['a']}, secret_ref=None))  # no sign-in: the key is what it always was
+        signed = stage_runs.task_key('nuclei_light', {'targets': ['a']}, secret_ref='ref-1')
+        self.assertNotEqual(plain, signed)
+        self.assertNotEqual(signed, stage_runs.task_key('nuclei_light', {'targets': ['a']}, secret_ref='ref-2'))
+
     def test_once_outside_a_run_just_calls(self):
         self.assertEqual(stage_runs.once('x', lambda: 5), 5)
         self.assertIsNone(stage_runs.current())
