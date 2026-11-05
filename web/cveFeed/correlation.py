@@ -13,12 +13,13 @@ import logging
 import re
 from functools import cmp_to_key
 
-from cveFeed import cms
+from cvengine_scanner import cms, versions
+
+from cveFeed import cms_evidence
 from cveFeed import distro as distro_lib
 from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
-from cveFeed import versions
 
 logger = logging.getLogger(__name__)
 
@@ -1432,7 +1433,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # script's query or name carried where the file says otherwise, is not matched; a file-name-only version is matched at low confidence
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
-    wrong = cms.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
+    wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:

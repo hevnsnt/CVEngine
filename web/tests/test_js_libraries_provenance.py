@@ -1099,6 +1099,6 @@ class FrontPageReadTests(SimpleTestCase):
                 self.assertLess(time.perf_counter() - started, 3.0, (path, label))
 
     def test_the_csrf_meta_token_is_still_taken_out(self):
-        from cveFeed import soft404
+        from cvengine_scanner import soft404
         page = '<meta name="csrf-token" content="abc123XYZ"><meta name="description" content="keep me">'
         self.assertEqual(soft404.normalise(page), '<meta name="csrf-token" content=""><meta name="description" content="keep me">')

@@ -25,7 +25,9 @@ from urllib.parse import urljoin, urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
+from cvengine_scanner import cms, fingerprint, versions
+
+from cveFeed import js_libraries, local_egress
 
 logger = logging.getLogger(__name__)
 
@@ -396,9 +398,9 @@ def observations_from_page(response, source_prefix='page'):
         hint = source == 'script:filename'  # a library version a script's file name carries: a hint (cveFeed.js_libraries)
         out.append(_observation('version', base, version, outcome='found' if version else 'hidden',
                                 confidence=(js_libraries.CONFIDENCE['filename'] if hint else 0.9) if version else 0.7, source=source, url='/'))
+    scripts = js_libraries.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0]
     found = fingerprint.from_response(response.get('server', ''), response.get('powered_by', ''), response.get('body', ''),
-                                      response.get('content_type', ''), scripts=fingerprint.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0],
-                                      headers=headers)
+                                      response.get('content_type', ''), from_scripts=js_libraries.script_fingerprints(scripts), headers=headers)
     for item in found:
         add(item['name'], item['source'])
     for product in cms.SOURCES:  # a version the front page already carries (Drupal's core scripts); WordPress has its own probe
@@ -446,7 +448,7 @@ def _wordpress_signals(responses):
             if product.lower() == 'wordpress':
                 signals.append(('meta:generator', path))
                 generator = generator or found
-    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cveFeed.cms: best source wins, a library's ?ver= never)
+    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cvengine_scanner.cms: best source wins, a library's ?ver= never)
     pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
     candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
     candidates.sort(key=lambda c: -c[2])
@@ -603,7 +605,7 @@ def _wordpress_responses(base, get, sleep):
 
 def _same_host_scripts(response, pattern=None, limit=4):
     page = response.get('final_url') or response.get('url') or ''
-    _every, local = fingerprint.script_sources(response.get('body', ''), page, limit=40)
+    _every, local = js_libraries.script_sources(response.get('body', ''), page, limit=40)
     return [u for u in local if pattern is None or pattern.search(u)][:limit]
 
 

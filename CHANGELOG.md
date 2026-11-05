@@ -22,6 +22,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   The defences follow the attacks SpikeStrip and wraith describe. Settings, AI model has the switches (`GET/PUT /cve/api/settings/reviewer`); `CVENGINE_REVIEWER=0` turns it off. Migrations `cveFeed.0144` and `cveFeed.0145` add the review, alert and settings tables and the two schedules.
 - **The AI reviewer container makes the triage's model calls** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#the-pipelines-ai-jobs)). The triage of every finding and its local-check suggestions no longer call the AI provider from the web and Celery containers: they queue an AI job (`AIJob`, migration `cveFeed.0146`, with a five-minute housekeeping schedule), the container takes it over the new `/api/v1/reviewer/jobs/next` and `/api/v1/reviewer/jobs/<id>/result` routes (reviewer token only), makes the request the server used to make (every provider, the same reply limits, structured output, reasoning and Ollama settings, ported to `cvengine_reviewer.llm`), and posts the reply back; the server checks it with the same validator and applies it as before, with the same budgets, caps, ceilings and the one repair of a rejected reply. With `CVENGINE_REVIEWER=0` the jobs wait and Settings > AI model says AI is waiting for the reviewer container. Auto-fire picks its hosts from the answers already stored; a question it queues is applied when it lands. The reviewer image's unit tests run in CI.
 
+### Changed
+
+- **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in
+  `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection) and the nmap
+  parser. The server's own copies are gone, so a Sentinel and the server read a host the same way. Nothing changes in what is found or stored.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes
