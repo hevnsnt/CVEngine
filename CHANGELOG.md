@@ -49,6 +49,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection), the nmap
   parser, and the scan flags and policy constants (nuclei's `-etags dos`, the reviewed NSE scripts, the UDP port list, the probe ports). The
   server's own copies are gone, so a Sentinel and the server scan and read a host the same way. Nothing changes in what is run, found or stored.
+- **More AI work goes through the AI reviewer container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#the-pipelines-ai-jobs)): detection records and CVE guidance, the auto-tuner's advisor, the RDP login-screen reading (the screenshot travels in the job) and nuclei template drafts are queued as AI jobs and applied when the answer lands, with the same validation, budgets and gates as before. `update_cve_detection` with `guidance` now answers at once with `revision: {state: queued}`; the record changes when the revision lands. The auto-tuner applies its advisor's answer in the round after it was asked, judged against the range in force then.
 
 ### Removed
 

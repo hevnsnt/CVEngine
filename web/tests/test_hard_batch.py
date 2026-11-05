@@ -142,7 +142,7 @@ class RunTests(TestCase):
 	def test_a_test_started_on_its_own_announces_itself(self):
 		cve = self.cves[0]
 		outcome = {'source': 'existing', 'results': [{'host': 'h0.batch.test', 'vulnerable': True}]}
-		with mock.patch('cveFeed.templategen.run_cve_tests', return_value=outcome), mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cveFeed.templategen.run_cve_tests', return_value=outcome):
 			tasks.template_test_for_cve(cve.pk, ['h0.batch.test'])
 		self.assertEqual(len([m for m in self.messages if 'template test confirmed' in m]), 1)
 
