@@ -304,7 +304,7 @@ class NmapProbeTests(StageBase):
             found = probes.run_one(self.project.id, self.domain.id, sub, {'probe': 'nmap-version-all', 'target': {'ip': IP, 'port': 8443, 'service': 'http'}})
         target = fake.served[0]['target']
         self.assertEqual((target['ports'], target['version_all'], target['host_timeout']), ([8443], True, 90))
-        self.assertEqual(target['scripts'], probes.NMAP_SCRIPTS['http'].split(','))
+        self.assertEqual(target['scripts'], 'http-server-header,http-headers,http-generator,http-title,ssl-cert,banner'.split(','))  # the http set of probe_nmap_flags
         self.assertIn(('nginx', '1.25.3'), [(o['product'], o['version']) for o in found if o['kind'] == 'version'])
 
     def test_offline_the_probe_is_held_not_failed(self):

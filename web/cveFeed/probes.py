@@ -26,6 +26,7 @@ from urllib.parse import urljoin, urlsplit
 from django.utils import timezone
 
 from cvengine_scanner import cms, fingerprint, versions
+from cvengine_scanner.flags import probe_nmap_flags
 
 from cveFeed import js_libraries, local_egress
 
@@ -131,10 +132,6 @@ PROBES = (
 )
 BY_ID = {p['id']: p for p in PROBES}
 IDENTITY_PROBES = ('error-page', 'nginx-variants')  # the probes that say which look-alike product answers, whatever the version
-# the safe scripts for a service (all are in nmap_scan.NSE_SCRIPTS, which is the reviewed list)
-NMAP_SCRIPTS = {'http': 'http-server-header,http-headers,http-generator,http-title,ssl-cert,banner', 'ssh': 'ssh2-enum-algos,ssh-hostkey,banner',
-                'mysql': 'mysql-info', 'redis': 'redis-info', 'memcached': 'memcached-info', 'mongodb': 'mongodb-info',
-                'ms-sql': 'ms-sql-info', 'smtp': 'banner', 'ftp': 'banner,ftp-anon', 'imap': 'banner', 'pop3': 'banner'}
 # products that only look like another product by name: an advisory for one of these is not an advisory for the base product
 LOOKALIKES = {'nginx': {'ingressnginx', 'nginxingress', 'nginxui', 'nginxproxymanager', 'nginxunit', 'nginxrtmpmodule'}}
 LOOKALIKE_VARIANTS = {'nginx': {'nginx-ui', 'nginx-proxy-manager', 'kubernetes-ingress'}}
@@ -262,10 +259,9 @@ def display_for(probe_id, target):
 
 
 def nmap_argv(ip, port, service=''):
+    """The version probe's nmap command for one port: the reviewed scripts for ``service`` (cvengine_scanner.flags.probe_nmap_flags)."""
     from cveFeed import nmap_scan
-    scripts = ','.join(nmap_scripts(service))
-    return [nmap_scan.NMAP_BIN, '-sV', '--version-all', '-Pn', '-p', str(int(port)), '--script', scripts, '--script-timeout', '20s',
-            '--host-timeout', '90s', '-oX', '-', str(ip)]
+    return [nmap_scan.NMAP_BIN, *probe_nmap_flags(port, service), str(ip)]
 
 
 # ----------------------------------------------------------------------------- fetching (one bounded GET, same gates as every probe)
@@ -881,10 +877,10 @@ def run_nmap_probe(ip, port, service='', runner=None):
 
 
 def nmap_scripts(service=''):
-    """The safe scripts of ``nmap_argv`` for ``service``, as a list of names."""
-    name = re.sub(r'^(ssl/|tcp)', '', str(service or '').lower())
-    key = next((k for k in NMAP_SCRIPTS if name.startswith(k)), 'http' if name.startswith('http') or name == 'https' else '')
-    return NMAP_SCRIPTS.get(key, 'banner').split(',')
+    """The reviewed scripts the nmap probe runs for ``service``, as a list of names: the ones ``probe_nmap_flags`` (cvengine_scanner.flags) gives a local run,
+    so a probe on the scanner runs the same set."""
+    flags = probe_nmap_flags(1, service)
+    return flags[flags.index('--script') + 1].split(',')
 
 
 def _sentinel_nmap_probe(project_id, target):

@@ -44,7 +44,8 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
-                      'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300, 'nuclei_validate': 600,
+                      'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
+                      'nuclei_validate': 600,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
@@ -57,6 +58,7 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
+NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 
 
@@ -66,7 +68,7 @@ def _parse_local_fallback():
     from agentapi.models import SentinelTask
     raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
     if raw in ('', 'all', '*'):
-        return set(SentinelTask.KINDS), []
+        return set(SentinelTask.KINDS) - set(NEVER_LOCAL), []
     if raw == 'none':
         return set(), []
     names = [k.strip() for k in raw.split(',') if k.strip()]
@@ -75,7 +77,7 @@ def _parse_local_fallback():
         _WARNED_FALLBACK.add(raw)
         logger.warning('%s names kinds that do not exist and are ignored: %s (valid: %s)', LOCAL_FALLBACK_ENV, ', '.join(unknown),
                        ', '.join(SentinelTask.KINDS))
-    return {k for k in names if k in SentinelTask.KINDS}, unknown
+    return {k for k in names if k in SentinelTask.KINDS and k not in NEVER_LOCAL}, unknown
 
 
 def local_fallback_kinds():
@@ -841,20 +843,21 @@ def _nuclei_target(kind, targets, kwargs):
     """The target of a dispatched nuclei task: the targets, the tags and severities this pass would run with locally, and the template policy the
     local run applies. The light pass is nuclei's technology fingerprint (``-tags tech -severity info``): ``run_light_nuclei`` asks for it with a
     ``tech`` flag only the unwrapped local stream takes, so the Sentinel is told the same here, or it would run the whole template library at
-    every severity and the stage would time out. ``etags`` are the tags the local run always leaves out (``nuclei_scan.BASE_FLAGS``, ``dos``) and
+    every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
     ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
     nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
     ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
     cached, else on the first policy request)."""
+    from cvengine_scanner import flags as scan_flags
+
     from agentapi import template_bundle
     from cveFeed import nuclei_scan
-    # no severities given: the local run's own default (``nuclei_scan.SEVERITIES``, info to critical), sent as a list, since a client given none
+    # no severities given: the local run's own default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included, and the two runs of one pass would not agree
-    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or nuclei_scan.SEVERITIES.split(','))
+    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
     if kind == 'nuclei_light' or kwargs.get('tech'):
         tags, severities = ['tech'], ['info']
-    flags = nuclei_scan.BASE_FLAGS
-    etags = flags[flags.index('-etags') + 1].split(',') if '-etags' in flags else []
+    etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
     rev = nuclei_scan.policy_rev()
     return {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
             'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()}}

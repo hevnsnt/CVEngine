@@ -101,6 +101,8 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_TTL_NMAP_FAST`, `_BBOT`, `_BBOT_DEEP`, `_ROUTE_AUTH`, `_NAABU`, `_WAFW00F`, `_NUCLEI_DEEP_HOST`, `_NUCLEI_DEEP_TARGET` | `168` | nmap fingerprint, discovery, deep discovery of an apex, route checks, naabu, firewall identification, and deep nuclei. Windows are kept per project. |
 | `CVENGINE_TTL_NUCLEI`, `_NUCLEI_LIGHT`, `_NUCLEI_CVE`, `_CT_WATCH`, `_HYGIENE`, `_VALIDATE`, `_RETEST` | `24` | Nuclei runs, certificate watch, hygiene, validation checks, and re-tests, per host. |
 | `CVENGINE_TTL_NUCLEI_AUTH`, `_ROUTE_AUTH_SIGNED` | `24` | Signed-in nuclei runs and signed-in route checks of a target with a stored sign-in, per host (see [PIPELINE.md](PIPELINE.md#authenticated-checks)). |
+| `CVENGINE_TTL_SECRETS_SCAN` | `168` | Hours before a web host's pages and scripts are read again by the secrets scan (Kingfisher, in the scanner; [SECRETS-PLAN.md](SECRETS-PLAN.md)). |
+| `CVENGINE_TTL_SECRETS_VALIDATE` | `168` | Hours before the built-in scanner validates the secrets of a host again, for a project that switched secret validation on. A validation a person asks for ignores it. |
 | `CVENGINE_TTL_NMAP_FULL` | `336` | Hours a background full port scan of an address stays fresh (14 days). |
 | `CVENGINE_DEEP_SWEEP_MAX` | `50` | Apex domains the daily sweep queues for deep discovery. |
 | `CVENGINE_DEEP_SWEEP_PER_PROJECT` | `10` | Of those, at most this many for one project, so a project with hundreds of apexes cannot fill the whole run and leave every other project's deep discovery waiting behind it. The rest go in the following runs. |

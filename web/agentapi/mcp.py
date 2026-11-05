@@ -12,6 +12,7 @@ from django.core.exceptions import RequestDataTooBig
 from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
+from agentapi import secrets_api
 from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
@@ -177,7 +178,7 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) secret: (any|s|p|i|live|<provider>) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
@@ -286,6 +287,21 @@ TOOLS = [
     ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings, and cleartext services (Telnet, FTP, rlogin, a login over plain HTTP). check: spf|dmarc|dkim|tls|caa|cleartext.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'check': {'type': 'string'}, 'status': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_hygiene(c, a.get('project'), a), False),
+    ('list_secrets', 'Exposed secrets (API keys, tokens, private keys) the scans found, worst first. Never returns a value: only the mask (AIza…x7Qz), '
+     'provider, kind, class (P browser key, S server secret, I identifier), severity and where it was seen. status: open|quiet|all|<status>; class: P|S|I.',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'class': {'type': 'string'}, 'provider': {'type': 'string'},
+                          'severity': {'type': 'string'}, 'host': {'type': 'string'}, 'q': {'type': 'string'}}), ['project']),
+     lambda c, a: secrets_api.list_secrets(c, a.get('project'), a), False),
+    ('get_secret', 'One exposed secret: its occurrences, severity basis, remediation and linked findings. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']), lambda c, a: secrets_api.get_secret(c, a.get('project'), a.get('id')), False),
+    ('set_secret_status', 'Record a decision on a secret: status unverified|public_by_design|accepted|revoked|false_positive, with a note. Audited. '
+     'A quiet status takes it out of the host scores. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}, 'status': {'type': 'string'}, 'note': {'type': 'string'}}, ['project', 'id', 'status']),
+     lambda c, a: secrets_api.set_secret_status(c, a.get('project'), a.get('id'), a), True),
+    ('request_secret_validation', 'Org Admin or App Admin, for a project that switched secret validation on (never a bug bounty project): queue a '
+     'read-only identity check of one secret by the built-in scanner, with reviewed validators only. Audited. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']),
+     lambda c, a: secrets_api.request_validation(c, a.get('project'), a.get('id')), True),
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'since': {'type': 'string'}, 'kind': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_changes(c, a.get('project'), a), False),

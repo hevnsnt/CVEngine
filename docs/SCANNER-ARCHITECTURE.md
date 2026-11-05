@@ -58,7 +58,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | Module | What it runs | Kind | Notes |
 |---|---|---|---|
 | `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `nmap_scan.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
-| `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on its reviewed list (`cvengine_scanner.flags.NSE_SCRIPTS`, the server's `nmap_scan.NSE_SCRIPTS`) |
+| `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
 | `cveFeed/waf_scan.py` | wafw00f | `waf` | one task per site at the address the server vetted; the result goes through the same product rules as a local run |
 | `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
 | `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | the PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
@@ -95,7 +95,14 @@ re-exported under its old name. Two parts stay on the server because they are no
 - the CMS version evidence a probe stored (`cveFeed/cms_evidence.py`: `attested`, `superseded`). It reads `ProbeObservation` rows and
   applies the library's `cms.disproven` to them.
 
-The server's copies of the flag builders and policy constants are deleted in a follow-up PR.
+The flag builders and policy constants are the library's too (`cvengine_scanner.flags`), and the server has no copies of them:
+- the nuclei run (`nuclei_flags`, with `-etags dos` always, `NUCLEI_SEVERITIES`, `NUCLEI_DEFAULT_PORTS`, `host_of`);
+- the nmap fingerprint and full-port flags, the reviewed NSE scripts and `reviewed_scripts`, `EXTRA_PORTS` and `TOP_PORTS`;
+- the UDP sweep (`udp_nmap_flags`, `UDP_PORTS`), `port_argument`, `CLOSED_PROBE_PORTS`, `MAX_OPEN_PER_IP`;
+- the version probe's per-service scripts (`probe_nmap_flags`) and `KERNEL_MARKERS`.
+
+A server module still names a constant where its own callers read it (`nmap_scan.FAST_FLAGS`, `udp_scan.DEFAULT_PORTS`, `naabu_scan.port_argument`).
+Each of those names is an import of the library's value, never a copy.
 
 ### E. Stays on the server
 
@@ -170,7 +177,8 @@ which send nothing to the target and need no vantage point.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. The kinds of section B exist since contract version 3 (1.4), so each can now be moved like the others.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
-   and the server imports it for the fingerprint readers and the nmap parser; see section D for the status of the flags.
+   and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
+   source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
    **bbot** above); the local run stays as the fallback until its telemetry shows none.
    Probes in progress: contract version 3 has the scope policy

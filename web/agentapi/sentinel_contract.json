@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -1163,6 +1163,256 @@
           }
         ]
       },
+      "secrets_scan": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "findings": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "rule_id",
+                    "url",
+                    "secret"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "rule_id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._:/-]{0,119}$"
+                    },
+                    "rule_name": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "line": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "confidence": {
+                      "enum": [
+                        "",
+                        "low",
+                        "medium",
+                        "high"
+                      ]
+                    },
+                    "entropy": {
+                      "type": "string",
+                      "maxLength": 20
+                    },
+                    "secret": {
+                      "type": "string",
+                      "minLength": 8,
+                      "maxLength": 8192,
+                      "description": "the value itself, over the authenticated channel only: the server fingerprints and masks it and never stores it"
+                    },
+                    "validation": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "outcome": {
+                          "enum": [
+                            "verified_active",
+                            "assumed",
+                            "locally_derived",
+                            "invalid_material",
+                            "verified_inactive",
+                            "unavailable",
+                            "skipped",
+                            "not_attempted"
+                          ]
+                        }
+                      },
+                      "description": "Kingfisher's validation.outcome only: its response is never sent"
+                    },
+                    "validation_meta": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "restriction": {
+                          "type": "string",
+                          "maxLength": 60
+                        },
+                        "active_google_key": {
+                          "type": "boolean"
+                        },
+                        "gemini_access": {
+                          "type": [
+                            "boolean",
+                            "string"
+                          ],
+                          "maxLength": 60
+                        },
+                        "account_type": {
+                          "type": "string",
+                          "maxLength": 60
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "fetched": {
+                "type": "array",
+                "maxItems": 1000,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "url",
+                    "kind"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "status": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 999
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "content_type": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "kind": {
+                      "enum": [
+                        "page",
+                        "script",
+                        "sourcemap"
+                      ]
+                    },
+                    "sourcemap_of": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "sources_content": {
+                      "type": "boolean",
+                      "description": "a source map that embeds the original sources (sourcesContent)"
+                    }
+                  }
+                }
+              },
+              "references": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "value",
+                    "url"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "s3",
+                        "gcs",
+                        "azure",
+                        "firebase_rtdb",
+                        "firebase_storage",
+                        "gcr",
+                        "ecr",
+                        "ghcr",
+                        "dockerhub",
+                        "url"
+                      ]
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "url": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    }
+                  }
+                }
+              },
+              "stats": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "files": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "findings": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  },
+                  "kingfisher_version": {
+                    "type": "string",
+                    "maxLength": 20
+                  },
+                  "rules_loaded": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "validated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "findings",
+                "fetched"
+              ]
+            }
+          }
+        ]
+      },
       "nmap_full": {
         "allOf": [
           {
@@ -2211,6 +2461,157 @@
           "names",
           "scope"
         ]
+      },
+      "secrets_scan": {
+        "type": "object",
+        "required": [
+          "hosts",
+          "scope",
+          "limits",
+          "validate"
+        ],
+        "additionalProperties": false,
+        "description": "A batch of web hosts whose pages and own scripts the Sentinel fetches (bounded, anonymous, same origin) and scans with Kingfisher, detection only (--no-validate) unless validate is true. validate is only ever true in a task for the built-in scanner, for a project that opted in (cveFeed.secrets_validation): the second Kingfisher pass then loads validate_rules only, and only when the scanner's Kingfisher is validate_kingfisher. rules_bundle_sha256 names the instance's custom rules (GET /api/v1/sentinel/secret-rules/bundle), null when there are none.",
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "type": "object",
+              "required": [
+                "host",
+                "urls"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "urls": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "script_urls": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                }
+              }
+            }
+          },
+          "scope": {
+            "type": "object",
+            "required": [
+              "names"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "names": {
+                "type": "array",
+                "maxItems": 25,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "description": "the only hosts any fetch may reach: the batch's own"
+              },
+              "exclusions": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_scripts_per_host": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8
+              },
+              "max_script_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2097152
+              },
+              "max_map_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8388608
+              },
+              "max_total_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 33554432
+              },
+              "follow_sourcemaps": {
+                "type": "boolean"
+              }
+            }
+          },
+          "validate": {
+            "type": "boolean"
+          },
+          "validate_rules": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._:/-]{0,119}$"
+            }
+          },
+          "validate_kingfisher": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 20
+          },
+          "rules_bundle_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "skip_words": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          "skip_regex": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        }
       },
       "nmap_full": {
         "description": "one address: every TCP port, open ports only",

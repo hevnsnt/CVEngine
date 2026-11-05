@@ -23,6 +23,8 @@ import os
 
 from django.utils import timezone
 
+from cvengine_scanner.flags import NMAP_FULL_PORT_FLAGS, port_argument
+
 logger = logging.getLogger(__name__)
 
 CLAIM_KEY = 'cvengine:fullscan'
@@ -221,7 +223,7 @@ def sweep_ip(ip, runner=None, fingerprint_runner=None, pipeline=None):
                 # the egress governor: a budgeted port (25 by default) over its hourly budget is left out of this sweep and probed later by the
                 # paced catch-up pass; within budget the sweep is exactly as before
                 held = local_egress.plan([address], set(local_egress.budgets()), 'full port sweep').get(address)
-                flags = local_egress.nmap_exclude(nmap_scan.FULL_PORT_FLAGS, held) if held else nmap_scan.FULL_PORT_FLAGS
+                flags = local_egress.nmap_exclude(NMAP_FULL_PORT_FLAGS, held) if held else NMAP_FULL_PORT_FLAGS
                 nmap_scan.scan_in_chunks(capture, [address], flags, nmap_scan.HOST_TIMEOUT_FULL, size=1, org_id=ip.org_id)
     except ScannerUnavailable as exc:  # no scanner could take it and it may not run here: not the address's failure, it is swept later
         activity.settle(running, 'done', message=f'Background full port scan of {address} is waiting: no scanner could take this work ({exc.kind})')
@@ -334,7 +336,7 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
        so findings have a scan to hang on, the per-scan dedupe works, and none of it passes for a full discovery. The re-test ledger
        (one per host per 24 hours) keeps a host that was just tested from being tested again.
     ``pipeline(domain_id, names)`` replaces the queueing of that task (tests run the pipeline inline)."""
-    from cveFeed import activity, ledger, naabu_scan, nmap_scan, retest
+    from cveFeed import activity, ledger, nmap_scan, retest
     from cveFeed.models import ServiceRun
     from datetime import timedelta
     from startScan.models import Subdomain
@@ -351,7 +353,7 @@ def investigate(ip, new_ports, project, runner=None, pipeline=None):
                 wanted = [p for p in ports if p not in held]  # a held port is owed to the paced catch-up pass, which fingerprints it
                 fingerprinted = {'ports': 0}
                 if wanted:
-                    flags = [*FINGERPRINT_FLAGS, '-p', naabu_scan.port_argument(wanted)]
+                    flags = [*FINGERPRINT_FLAGS, '-p', port_argument(wanted)]
                     fingerprinted = nmap_scan.scan_in_chunks(runner or functools.partial(_fingerprint_runner, org_id=ip.org_id), [ip.address], flags,
                                                              nmap_scan.HOST_TIMEOUT_FAST, size=1, org_id=ip.org_id)
             out['fingerprinted'] = fingerprinted.get('ports', 0)

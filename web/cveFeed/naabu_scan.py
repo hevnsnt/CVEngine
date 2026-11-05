@@ -18,11 +18,14 @@ import shutil
 import subprocess
 import tempfile
 
+# The open-port cap (a tarpit or an accept-everything firewall), the compact -p argument and the closed ports OS detection needs are the scanner
+# library's (cvengine_scanner.flags); a Sentinel's naabu and nmap use the same ones.
+from cvengine_scanner.flags import CLOSED_PROBE_PORTS, MAX_OPEN_PER_IP, port_argument  # noqa: E402,F401
+
 logger = logging.getLogger(__name__)
 
 SERVICE = 'naabu'  # ledger service (TTL 7 days)
 DEFAULT_RATE = 1000  # packets per second (CVENGINE_NAABU_RATE)
-MAX_OPEN_PER_IP = 500  # an address with more open ports than this is a tarpit or a firewall that accepts everything
 MAX_PORT_ARG = 6000  # characters of -p argument; beyond that nmap keeps its default flags
 RUN_TIMEOUT_BASE = 600  # seconds, plus per address
 RUN_TIMEOUT_PER_IP = 20
@@ -233,27 +236,6 @@ def persist_open_ports(found, org_id=None):
                  for ip, ports in found.items()]
     if inventory:
         persist_inventory(inventory, source='naabu', org_id=org_id)
-
-
-def port_argument(ports):
-    """A compact nmap -p argument ("22,80,8000-8010") for a set of ports."""
-    ports = sorted(set(ports))
-    parts, start, prev = [], None, None
-    for port in ports + [None]:
-        if start is None:
-            start = prev = port
-        elif port is not None and port == prev + 1:
-            prev = port
-        else:
-            parts.append(str(start) if start == prev else f'{start}-{prev}')
-            start = prev = port
-    return ','.join(parts)
-
-
-# nmap's OS detection (-O --osscan-limit) needs one open and one CLOSED TCP port, and a pass over naabu's open ports alone has no closed one, so the
-# host was never OS-fingerprinted. These unassigned ports are nearly always answered with a reset when the host answers at all: one is enough, two
-# tolerate a firewall that drops one of them.
-CLOSED_PROBE_PORTS = (1, 3)
 
 
 def flags_for(ports_by_ip, base_flags, os_probe=True):

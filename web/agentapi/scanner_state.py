@@ -35,7 +35,10 @@ def _compute(now):
     from agentapi import sentinel_broker, sentinel_dispatch
     from agentapi.models import Agent, SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE]
+    # A kind with no local path at all (sentinel_dispatch.NEVER_LOCAL) counts once the install has moved work off this server: while every
+    # other kind still runs here, its stage waits and says so in its own activity line, and nothing is "offline" for it.
+    local_all = not (set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL) - set(NO_STAGE) - set(allowed))
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and not (local_all and k in sentinel_dispatch.NEVER_LOCAL)]
     if not off:
         return _empty()
     offered, denied, live_pks = set(), set(), set()
@@ -99,7 +102,7 @@ def vantage_warnings():
     from agentapi import sentinel_dispatch
     from agentapi.models import SentinelTask
     allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY]
+    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY and k not in sentinel_dispatch.NEVER_LOCAL]
     if not off:
         return []
 

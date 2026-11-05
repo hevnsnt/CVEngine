@@ -155,7 +155,7 @@ def cve_libraries(cve):
 
 
 def _nse_allowlist():
-    from cveFeed.nmap_scan import NSE_SCRIPTS
+    from cvengine_scanner.flags import NSE_SCRIPTS
     return tuple(NSE_SCRIPTS)
 
 
