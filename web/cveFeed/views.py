@@ -698,6 +698,15 @@ def sentinels_page(request):
                                                       **ui_context(request, 'sentinels')})
 
 
+def cve_explorer_page(request):
+    """The CVE explorer: the whole catalog searched by id or technology (static/cve/explorer.js reads /cve/api/cves). ?q= is the search."""
+    from cveFeed.cve_explorer import SEVERITIES, clean_query
+    severity = request.GET.get('severity', '')
+    return render(request, 'cveFeed/cve_explorer.html', {
+        'q': clean_query(request.GET.get('q', '')), 'severity': severity if severity in SEVERITIES else '',
+        'kev': request.GET.get('kev') == '1', 'severities': SEVERITIES, **ui_context(request, 'cves')})
+
+
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def onboarding(request):
     return render(request, 'cveFeed/onboarding.html', ui_context(request, 'setup'))
@@ -755,6 +764,31 @@ def api_feed(request):
         .values_list('cve_entry').annotate(n=Count('id')))
     return JsonResponse({'items': [serialize_cve(e, counts.get(e.pk, 0)) for e in entries]})
 
+
+
+@require_GET
+@project_scoped
+def api_cves(request):
+    """Search the CVE catalog: ?q= an id, part of one, or a technology; ?severity=critical|high|medium|low; ?kev=1; ?page=. Fifty a page.
+    The catalog is everyone's; each row's ``hosts`` counts only the caller's own hosts (?project= narrows to one project)."""
+    from cveFeed import cve_explorer
+    severity = request.GET.get('severity', '')
+    if severity and severity not in cve_explorer.SEVERITIES:
+        return JsonResponse({'error': f"severity must be one of {', '.join(cve_explorer.SEVERITIES)}"}, status=400)
+    number = request.GET.get('page', '')
+    number = int(number) if number.isdigit() and 0 < int(number) < 10000 else 1
+    return JsonResponse(cve_explorer.page(request.GET.get('q', ''), severity, request.GET.get('kev') == '1', number))
+
+
+@require_GET
+@project_scoped
+def api_cve_detail(request, cve_id):
+    """One CVE for the explorer's detail panel: summary, CVSS, affected ranges, references, and the caller's hosts it matches."""
+    from cveFeed import cve_explorer
+    data = cve_explorer.detail(cve_id)
+    if data is None:
+        return JsonResponse({'error': 'CVE not found'}, status=404)
+    return JsonResponse(data)
 
 def _live_org(request):
     """The organization slug a snapshot's scope carries: the one ``project_scoped`` found to narrow the projects, else ''. A ``?org=`` that names
