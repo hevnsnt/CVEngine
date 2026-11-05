@@ -39,9 +39,9 @@ class BuiltinBase(TestCase):
 
 
 class EnsureTests(BuiltinBase):
-    def test_off_by_default_it_does_nothing(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': ''}):
-            self.assertEqual(builtin.ensure(), {'state': 'disabled'})
+    def test_switched_off_it_does_nothing(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '0'}):
+            self.assertEqual(builtin.ensure(), {'state': 'disabled', 'revoked': 0})
         self.assertFalse(SentinelEnrollment.objects.exists())
         self.assertFalse(os.path.exists(builtin.blob_path()))
 
@@ -129,7 +129,7 @@ class RedeemTests(BuiltinBase):
         self.assertFalse(builtin.status()['live'])
         Agent.objects.update(last_seen=timezone.now())
         self.assertTrue(builtin.status()['live'])
-        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': ''}):
+        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '0'}):
             self.assertEqual(builtin.status(), {'enabled': False})
 
 
@@ -183,8 +183,7 @@ class StartupEnrollmentTests(TestCase):
 
     def test_the_command_does_nothing_while_the_switch_is_off(self):
         out = StringIO()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp}):
-            os.environ.pop('CVENGINE_BUILTIN_SCANNER', None)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp, 'CVENGINE_BUILTIN_SCANNER': '0'}):
             User.objects.create_superuser('root-admin', 'a@example.test', 'x')
             call_command('ensure_builtin_scanner', stdout=out)
             self.assertEqual(os.listdir(tmp), [])

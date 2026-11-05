@@ -87,4 +87,27 @@ else
   bad "the update left the Redis broker without a password"
 fi
 
+# The built-in scanner (docs/BUILTIN-SCANNER.md), on by default from 1.4: where the candidate's compose file has it, the update must have started it
+# with no one running anything, it must have enrolled itself and be heard from, and its heartbeats must reach the server. A first enrollment can
+# take a few minutes after the update (the server writes it when celery starts), so this waits up to ten.
+if dc config --services 2>/dev/null | grep -qx scanner; then
+  grep -qx scanner <<<"$(dc ps --status running --services)" || bad "the built-in scanner is not running after the update"
+  scanner_ok=0
+  for _ in $(seq 1 60); do
+    if dc exec -T scanner python3 -m client.control heartbeat >/dev/null 2>&1 \
+        && dc exec -T web python3 manage.py shell -c "from agentapi import builtin_scanner as b; s = b.status(); raise SystemExit(0 if s.get('enrolled') and s.get('live') else 1)" >/dev/null 2>&1; then
+      scanner_ok=1; break
+    fi
+    sleep 10
+  done
+  if [ "$scanner_ok" = 1 ]; then
+    echo "The built-in scanner enrolled itself and checks in:"
+    dc exec -T web python3 manage.py shell -c "from agentapi import builtin_scanner as b; print(b.status())" || true
+  else
+    bad "the built-in scanner did not enrol and check in within ten minutes of the update"
+    dc exec -T web python3 manage.py shell -c "from agentapi import builtin_scanner as b; print(b.status())" || true
+    dc logs --tail 80 scanner || true
+  fi
+fi
+
 [ "$fail" = 0 ] && echo "The updated install is healthy." || exit 1

@@ -60,14 +60,45 @@ logger = logging.getLogger(__name__)
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
 NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
+# The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
+# here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
+# that no scanner runs would only wait. ``openvas`` (the server's own sidecar runs it, and the built-in scanner has none), ``discover`` (internal
+# ranges, Sentinel-only already) and ``waf`` (no stage dispatches it yet) are not.
+BUILTIN_SCANNER_KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan')
+
+
+def builtin_scanner_enrolled():
+    """Whether the built-in scanner is switched on and has enrolled at least once (one indexed query). Until it has, nothing waits for it: a host whose
+    scanner image could not be pulled, or that has no App Admin yet, goes on scanning here as it always did."""
+    from agentapi import builtin_scanner
+    if not builtin_scanner.enabled():
+        return False
+    try:
+        from agentapi.models import SentinelEnrollment
+        return SentinelEnrollment.objects.filter(builtin=True, used_by_agent__isnull=False).exists()
+    except Exception:  # noqa: BLE001 - a database that cannot be read: the scan that asks fails on its own, and nothing is held back here
+        return False
+
+
+def default_fallback_kinds():
+    """The kinds that may run here when ``CVENGINE_LOCAL_FALLBACK`` is unset: every kind but the built-in scanner's (``BUILTIN_SCANNER_KINDS``) once the
+    built-in scanner is on and has enrolled, so every scan of those goes through a scanner and a scanner restart only makes the work wait; every kind
+    while it is off or has never enrolled."""
+    from agentapi.models import SentinelTask
+    if builtin_scanner_enrolled():
+        return {k for k in SentinelTask.KINDS if k not in BUILTIN_SCANNER_KINDS}
+    return set(SentinelTask.KINDS)
 
 
 def _parse_local_fallback():
     """``(allowed, unknown)``: the kinds ``CVENGINE_LOCAL_FALLBACK`` lets run here, and the names in it that are no kind. An unknown name is ignored (a
-    typo reads as ``none`` for that kind), but never silently: it is warned about once per process and shown in the scanner status."""
+    typo reads as ``none`` for that kind), but never silently: it is warned about once per process and shown in the scanner status. Unset, it is
+    ``default_fallback_kinds()``; ``all`` is the escape hatch that lets every kind run here again."""
     from agentapi.models import SentinelTask
     raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw in ('', 'all', '*'):
+    if raw == '':
+        return default_fallback_kinds() - set(NEVER_LOCAL), []
+    if raw in ('all', '*'):
         return set(SentinelTask.KINDS) - set(NEVER_LOCAL), []
     if raw == 'none':
         return set(), []
@@ -81,8 +112,8 @@ def _parse_local_fallback():
 
 
 def local_fallback_kinds():
-    """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset or ``all`` (every kind,
-    how it has always worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
+    """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset (every kind but the built-in
+    scanner's once it has enrolled, ``default_fallback_kinds``), ``all`` (every kind, how 1.3 worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
     taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead. A name in
     the list that is no kind is ignored (see ``unknown_fallback_kinds``)."""
     return _parse_local_fallback()[0]
@@ -115,7 +146,9 @@ def _no_local(kind, why, reason='no_scanner', project=None, recorded=None):
     one an earlier pass already recorded (a task's own, ``_Dispatch.no_local``), and a decision with no task is matched to the earlier passes by its
     place in the pass (``Pass.fallback_seen``)."""
     if not fallback_allowed(kind):
+        from cveFeed import scanner_wait
         from reNgine.resources import ScannerUnavailable
+        scanner_wait.noted(kind)  # the scan running in this context waited for ``kind``: its hosts are queued again for when a scanner is back
         raise ScannerUnavailable(kind, why)
     if recorded:
         return
@@ -281,6 +314,7 @@ class _Dispatch:
         from agentapi.models import SentinelTask
         from cveFeed import activity
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
+        self.builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task
         self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
         targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
@@ -335,6 +369,7 @@ class _Dispatch:
         self = cls.__new__(cls)
         self.task, self.kind, self.project, self.scan = task, state.get('kind') or task.kind, task.project, task.scan
         self.internal, self.busy, self.timeout = bool(state.get('internal')), bool(state.get('busy')), state.get('timeout') or _dispatch_timeout(task.kind)
+        self.builtin_only = bool(task.secret_ref)  # signed-in work, read from the row it was created with: a restored wait counts the same slots
         self.label = state.get('label') or _label(task.host, task.ips)
         self.entry = AgentActivity.objects.filter(pk=state['entry']).first() if state.get('entry') else None
         self.started = back(state.get('started')) or mono
@@ -376,7 +411,8 @@ class _Dispatch:
         if task.status == 'queued' and now >= self.claim_deadline:
             others = [t.pk for t in self.siblings()] if self.siblings else []
             if (not self.busy and now < self.started + self.queue_budget
-                    and sentinel_broker.capacity_state(self.project, self.kind, self.internal, exclude=[task.pk, *others])['state'] == 'busy'):
+                    and sentinel_broker.capacity_state(self.project, self.kind, self.internal, exclude=[task.pk, *others],
+                                                       builtin_only=self.builtin_only, secret=self.builtin_only)['state'] == 'busy'):
                 self.busy, self.claim_deadline = True, self.started + self.queue_budget  # another stage took the free slot first: wait for the next one
                 return False
             hold = self._sibling_hold()
@@ -470,11 +506,25 @@ class _Dispatch:
 
     @property
     def result(self):
-        return self.task.result if self.task.status == 'done' else None
+        return Result(self.task.result, agent_id=self.task.agent_id) if self.task.status == 'done' else None
+
+
+class Result(dict):
+    """A dispatched task's typed result, as the plain dict every caller reads, plus ``agent_id``: which Sentinel ran it. The built-in scanner scans from
+    this server's own network (it shares celery's network namespace), so a stage treats what it measured as measured here (``ran_here``)."""
+
+    def __init__(self, data, agent_id=None):
+        super().__init__(data or {})
+        self.agent_id = agent_id
+
+    @property
+    def ran_here(self):
+        from agentapi import sentinel_broker
+        return self.agent_id is not None and self.agent_id == sentinel_broker.builtin_pk()
 
 
 def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeout=None, created_by=None, priority=1, redact_target=None,
-                     internal=False, outcome=None):
+                     internal=False, outcome=None, secret_ref=None):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
     timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
@@ -489,21 +539,26 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
 
     ``outcome``, when given, is a dict that is told why a ``None`` came back: ``outcome['no_scanner']`` is True when no live, eligible Sentinel
     was there, or the last one went away while the task queued (the serial loop of ``dispatch_many`` records the chunks it then never sends
-    by it)."""
+    by it).
+
+    ``secret_ref`` makes it signed-in work (``sentinel_broker.secret_ref_for``: a reference to a stored credential, never its value): only the built-in
+    scanner, and only one whose image reads stored sign-ins, can take it; it reads the credential once (``sentinel_broker.read_secret``)."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from agentapi import stage_runs
     run = stage_runs.current()
     if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
-        return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome)
-    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)  # why: a ``none`` carries the reason, for the message below
+        return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome,
+                               secret_ref=secret_ref)
+    builtin_only = bool(secret_ref)
+    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if outcome is not None:
             outcome['no_scanner'] = True
         if not internal:  # an internal task never had a local run to fall back to: its caller already fails it
             _no_scanner(kind, project, capacity=capacity)
         return None
-    work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity)
+    work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, secret_ref=secret_ref)
     last_reap = work.started
     while True:
         work.task.refresh_from_db()
@@ -514,7 +569,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
             sentinel_broker.reap_expired()
             last_reap = now
-            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none'
+            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal,
+                                                                                        builtin_only=builtin_only, secret=builtin_only)['state'] == 'none'
         if work.step(now, none_left):
             break
         _wait([work.task.pk], min(work.pause(now, _poll_interval()), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
@@ -679,24 +735,25 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
 
 # --- inside a StageRun (agentapi.stage_runs): the same decisions, with the worker given back while the Sentinels work -----------------
 
-def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome):
+def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome, secret_ref=None):
     """``dispatch_or_none`` inside a StageRun. The first pass that asks creates the task and stops the pass (``Suspend``); the worker is free while
     the Sentinel works and ``stage_runs.drive`` keeps the claim, queue and completion budgets. The pass that runs once the task is over gets here
     again and ends it exactly as the blocking wait did: the activity line closed, the target redacted, ``no_local`` (``ScannerUnavailable`` or one
     fallback row) and the result."""
     from agentapi import sentinel_broker, stage_runs
     from agentapi.models import SentinelTask
-    key = stage_runs.task_key(kind, target, host, ips, internal)
+    key = stage_runs.task_key(kind, target, host, ips, internal, secret_ref=secret_ref)
     work = run.work(key)
     if work is None:
-        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)
+        builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, as in the blocking path
+        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)
         if capacity['state'] == 'none':
             if outcome is not None:
                 outcome['no_scanner'] = True
             if not internal:
                 _no_scanner(kind, project, capacity=capacity)
             return None
-        work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity)
+        work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, secret_ref=secret_ref)
         run.add(key, work)
         run.suspend()
     if not work.finished:
@@ -932,7 +989,10 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
                 finished.update(chunk)
                 inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
                              for host in result.get('hosts', []) if host.get('ip') in chunk]
-                done = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
+                # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
+                # judged and marked as a local scan, cveFeed.os_detection)
+                reliable = None if getattr(result, 'ran_here', False) else result.get('os_reliable') is not False
+                done = persist_inventory(inventory, org_id=org_id, os_reliable=reliable)
                 totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
                 for host in inventory:
                     reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
@@ -1202,8 +1262,10 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
     def stream(targets_file, **kwargs):
         if kwargs.get('secret_file'):
-            # a signed-in pass (cveFeed.auth_nuclei) runs here: the stored credential never goes to a Sentinel, and a dispatched run would be
-            # signed out while its findings were labelled as seen while signed in
+            # a caller that wrote its own secrets file: it never goes to a Sentinel (a dispatched run would be signed out while its findings were
+            # labelled as seen while signed in), so it runs here, when the kind may. cveFeed.auth_nuclei uses ``stream.signed_in`` instead.
+            if not fallback_allowed(kind):
+                _no_local(kind, 'a signed-in run that names its own secrets file runs only on this server', project=project)
             yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
             return
         try:
@@ -1244,7 +1306,38 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             with _targets_file(chunks[index]) as path:
                 yield from stream_nuclei(path, **_local_kwargs(kind, kwargs))
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
+    stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream
+
+
+def signed_in_stream(scan, kind, timeout=None):
+    """``run(items, **kwargs) -> iterable of result-line dicts``: a signed-in nuclei pass (``cveFeed.auth_nuclei``) over ``items`` (``auth_checks.PlanItem``:
+    an origin URL and the stored credential that covers it) through the built-in scanner. One task per credential and chunk of origins, carrying
+    ``secret_ref`` (a reference to the credential, never its value): only the built-in scanner takes it, and reads the credential once through
+    ``POST sentinel/tasks/<id>/secret``. An external Sentinel is never offered it (``sentinel_broker.SentinelEff.refusal``). When no built-in
+    scanner that reads stored sign-ins is live, the pass runs here with a private secrets file as before if nuclei may run here, and waits
+    (``ScannerUnavailable``) when it may not. The lines are redacted by the caller like a local run's."""
+    project = scan.domain.project
+
+    def run(items, **kwargs):
+        from agentapi import sentinel_broker
+        from cveFeed import auth_checks
+        from cveFeed.nuclei_scan import stream_nuclei
+        kwargs = {k: v for k, v in kwargs.items() if k != 'secret_file'}
+        for credential, _domains in auth_checks.entries_for(items):
+            urls = [item.url for item in items if item.credential.pk == credential.pk]
+            for chunk in _chunks(urls):
+                result = dispatch_or_none(project, kind, _nuclei_target(kind, chunk, kwargs), scan=scan, timeout=timeout,
+                                          secret_ref=sentinel_broker.secret_ref_for(credential.pk))
+                if result is not None:
+                    for finding in result.get('findings', []):
+                        yield _finding_to_nuclei_line(finding)
+                    continue
+                # no built-in scanner took it and nuclei may run here (dispatch_or_none raised otherwise): the pass of before, for this chunk
+                chunk_items = [item for item in items if item.url in set(chunk)]
+                with auth_checks.secrets_file(auth_checks.entries_for(chunk_items)) as secret_path, _targets_file(chunk) as path:
+                    yield from stream_nuclei(path, secret_file=secret_path, **_local_kwargs(kind, kwargs))
+    return run
 
 
 # --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------

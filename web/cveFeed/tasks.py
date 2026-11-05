@@ -1719,10 +1719,18 @@ def _finish_retest(outcome, domain_id, names, row_ids, deferred_ids):
     from cveFeed.discovery import SUCCESS
     from cveFeed.models import DeferredRetest
     from cveFeed import ledger, retest
+    from cveFeed import scanner_wait as retest_scanner_wait
     rows = list(DeferredRetest.objects.filter(pk__in=row_ids)) if row_ids else []
     if rows:
         good = outcome.get('status') == SUCCESS and not outcome.get('error')
-        if good:
+        waited = [r.pk for r in rows if r.signature == retest_scanner_wait.SIGNATURE] if outcome.get('scanner_waited') else []
+        if waited:  # hosts queued again because a scanner was missing, and it was missing again: they stay pending, without spending an attempt
+            DeferredRetest.objects.filter(pk__in=waited).update(status='pending', attempts=0, next_attempt_at=timezone.now() + retest_scanner_wait.delay(),
+                                                                updated_at=timezone.now())
+            rows = [r for r in rows if r.pk not in set(waited)]
+        if not rows:
+            pass
+        elif good:
             DeferredRetest.objects.filter(pk__in=[r.pk for r in rows]).update(status='done', updated_at=timezone.now())
             ledger.record(retest.RETEST_SERVICE, [r.host for r in rows], rows[0].project_id, outcome.get('scan_id'))
         else:

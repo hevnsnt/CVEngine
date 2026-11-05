@@ -488,6 +488,12 @@ fi
 if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
+# The built-in scanner's pinned image (scanner.lock.json), pulled while everything keeps running. It never fails the update (scripts/scanner.sh).
+if [[ -f scripts/scanner.sh ]]; then
+    # shellcheck source=scanner.sh
+    . scripts/scanner.sh
+    cvengine_scanner_fetch "${compose[@]}"
+fi
 
 # Freeze consumers, not producers: requests arriving during maintenance stay in Redis for
 # the restarted workers. Each worker's original queues are captured so a failed update can
@@ -866,6 +872,12 @@ while (( SECONDS < deadline )); do
         "$ready_url" || true)
     if [[ "$status" =~ ^[23][0-9][0-9]$ ]] && worker_queues_ready && beat_ready; then
         python3 scripts/update-state.py commit "$(git rev-parse HEAD)"
+        # The built-in scanner, now that the server answers: recreated after celery (it shares celery's network namespace), kept on the new image
+        # only once a heartbeat of it reaches the server, else put back on the previous one. It never fails the update.
+        if declare -F cvengine_scanner_start >/dev/null; then
+            step 'Starting the built-in scanner'
+            cvengine_scanner_start "${compose[@]}"
+        fi
         dispatch_paused=0
         requeued=''
         if [[ -s $requeue_file ]]; then

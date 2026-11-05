@@ -207,7 +207,14 @@ deploy_builtin() {
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
-  verify_running "${services[@]}"
+  verify_running "${services[@]}" || return 1
+  # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated after celery, put back on the previous image when
+  # it sends no heartbeat. Never a failed update. A checkout with scripts/update-deploy.sh does the same there.
+  if [ -f scripts/scanner.sh ]; then
+    . scripts/scanner.sh
+    cvengine_scanner_fetch "${compose[@]}"
+    cvengine_scanner_start "${compose[@]}"
+  fi
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.

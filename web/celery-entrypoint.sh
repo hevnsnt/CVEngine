@@ -6,7 +6,7 @@ until python3 manage.py migrate --check >/dev/null 2>&1; do
     sleep 3
 done
 
-# The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). A no-op when CVENGINE_BUILTIN_SCANNER is not set,
+# The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). CVENGINE_BUILTIN_SCANNER=0 revokes it instead,
 # and never a reason for the container not to start.
 python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
 # The same for the AI reviewer container's token (docs/AI-REVIEWER.md); CVENGINE_REVIEWER=0 revokes it instead.

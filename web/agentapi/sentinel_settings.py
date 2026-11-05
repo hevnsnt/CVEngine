@@ -269,18 +269,65 @@ def set_managed(agent, raw, actor, now=None):
 
 
 def reply(agent):
-    """What a Sentinel is told about its settings: the effective values and their fingerprint."""
+    """What a Sentinel is told about its settings: the effective values and their fingerprint. The built-in scanner is also told ``vantage``
+    (``builtin_vantage``): this server's egress proxy and the private networks its own scans may reach, so it scans from where the server did. Derived
+    at every reply and stored nowhere, sent to the built-in scanner alone (its token and its enrollment make it that, never what it reports)."""
     values = effective(agent)
+    from agentapi import sentinel_broker
+    if agent.kind == 'scanner' and sentinel_broker.is_builtin(agent):
+        vantage = builtin_vantage()
+        if vantage:
+            values['vantage'] = vantage
     return {'values': values, 'rev': revision(values)}
+
+
+TAILNET_RANGES = ('100.64.0.0/10', 'fd7a:115c:a1e0::/48')  # Tailscale's addresses: the CGNAT range and its unique local IPv6 prefix
+PRIVATE_RANGES = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', 'fc00::/7')
+
+
+def builtin_vantage():
+    """Where this server's own scans leave from, for the built-in scanner (the managed settings channel of risk 6, docs/SCANNER-ARCHITECTURE.md):
+
+    - ``proxies``, ``bypass`` and ``proxy_private``: Settings > Proxy when it is on (``cveFeed.egress_proxy``), the destinations that never go through
+      it (``CVENGINE_PROXY_BYPASS`` and ``NO_PROXY`` as this server reads them) and whether private addresses go through it too
+      (``CVENGINE_PROXY_PRIVATE``). The URLs can carry a login: this goes to the built-in scanner only, over the compose network, and is never stored
+      or logged.
+    - ``private_ranges``: the private networks it may scan although it is not internal, as this server's own scans may: all of private space with
+      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the scanner shares celery's network namespace, where the
+      sidecar's route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
+
+    Empty when none of these is set."""
+    import os
+
+    from agentapi import scanner_state
+    from cveFeed import egress_proxy
+    from targetApp import target_types
+    out = {}
+    specs = egress_proxy.configured()
+    if specs:
+        out['proxies'] = [spec.url for spec in specs]
+        out['bypass'] = [e for var in ('CVENGINE_PROXY_BYPASS', 'NO_PROXY', 'no_proxy') for e in
+                         (item.strip().lower() for item in os.environ.get(var, '').split(',')) if e]
+        out['proxy_private'] = not egress_proxy.private_bypass()
+    if target_types.private_targets_allowed():
+        out['private_ranges'] = list(PRIVATE_RANGES)
+    elif scanner_state.tailscale_enabled():
+        out['private_ranges'] = list(TAILNET_RANGES)
+    return out
 
 
 # --- the Sentinel's own version and its host-side updater ---------------------------------------------------------------------------------
 
 UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
+# What a built-in scanner image can do beyond its kinds (``info.features``; the Sentinel client's ``config.BUILTIN_FEATURES``): ``secret_read``, the
+# single-use read of a stored credential for a signed-in pass, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
+# server does not know is dropped. ``info.builtin`` is what the image says it is; whether a Sentinel IS the built-in scanner is decided by its
+# enrollment (``builtin_scanner.builtin_agent``), never by this.
+FEATURES = ('secret_read', 'vantage')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (agentapi/sentinel_contract.json), its updater's ``update`` state and whether its own GVM stack can scan (``openvas``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (agentapi/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -318,6 +365,16 @@ def clean_info(raw):
                     raise ApiError(400, f'updater.{key} must be text')
                 clean[key] = ''.join(c for c in value if c.isprintable())[:limit]
         out['updater'] = clean
+    builtin = raw.get('builtin')
+    if builtin is not None:
+        if not isinstance(builtin, bool):
+            raise ApiError(400, 'builtin must be true or false')
+        out['builtin'] = builtin
+    features = raw.get('features')
+    if features is not None:
+        if not isinstance(features, list) or len(features) > 20 or not all(isinstance(f, str) for f in features):
+            raise ApiError(400, 'features must be a list of names')
+        out['features'] = sorted({f for f in features if f in FEATURES})
     gvm = raw.get('openvas')
     if gvm is not None:
         if not isinstance(gvm, dict) or not isinstance(gvm.get('ready'), bool):

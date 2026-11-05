@@ -1406,7 +1406,7 @@ class ComposeTests(SimpleTestCase):
         self.openvas = {n: s for n, s in self.services.items() if n.startswith('openvas-')}
 
     def test_every_addon_service_is_in_the_profile_and_the_default_stack_is_unchanged(self):
-        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer'})  # the AI reviewer is part of the default stack (docs/AI-REVIEWER.md)
+        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack
         self.assertGreaterEqual(len(self.openvas), 10)
         for name, service in self.openvas.items():
             self.assertEqual(service['profiles'], ['openvas'], name)
@@ -1514,7 +1514,8 @@ class SupplyChainTests(SimpleTestCase):
 
     def test_the_digests_in_the_docs_are_the_ones_the_compose_file_runs(self):
         doc = (ROOT / 'docs' / 'OPENVAS.md').read_text()
-        for digest in re.findall(r'@sha256:([0-9a-f]{64})', (ROOT / 'docker-compose.yml').read_text()):
+        # the Greenbone images only: the built-in scanner's image is pinned by scanner.lock.json and checked in test_compose
+        for digest in re.findall(r'registry\.community\.greenbone\.net/\S+?@sha256:([0-9a-f]{64})', (ROOT / 'docker-compose.yml').read_text()):
             self.assertIn(digest, doc)
 
 
