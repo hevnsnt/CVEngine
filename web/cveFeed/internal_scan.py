@@ -205,7 +205,33 @@ def _udp(scan, project, ip, org_id, dispatch):
 
 def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     """Run the internal pipeline for one queued scan. ``dispatch`` replaces ``sentinel_dispatch.dispatch_or_none`` in tests, ``nuclei_stream``
-    (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner."""
+    (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner.
+
+    Every stage of it waits on a Sentinel inside the network: without injected seams it does so without holding its worker (``agentapi.stage_runs``),
+    and returns the ``waiting`` marker while it does; the callback (``_resume``) runs it again from where it stopped."""
+    if dispatch is not None or nuclei_stream is not None or wp_runner is not None:
+        return _run(scan_id, dispatch, nuclei_stream, provider, wp_runner)
+    from agentapi import stage_runs
+    from startScan.models import ScanHistory
+    project_id = ScanHistory.objects.filter(pk=scan_id).values_list('domain__project_id', flat=True).first()
+    return stage_runs.run('pipeline.internal', {'scan_id': scan_id, 'provider': provider}, first=lambda: _run(scan_id, None, None, provider, None),
+                          project=project_id, scan=scan_id)
+
+
+def _resume_internal(context):
+    """The completion callback of an internal scan: the same pipeline again, from where it stopped."""
+    scan_id = context['scan_id']
+    try:
+        return _run(scan_id, None, None, context.get('provider', False), None)
+    except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
+        from cveFeed.discovery import FAILED
+        from startScan.models import ScanHistory
+        logger.exception('internal scan %s failed in its callback', scan_id)
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
+
+
+def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     from agentapi import sentinel_dispatch
     from cveFeed import activity
     from cveFeed.discovery import FAILED, RUNNING, SUCCESS, _stage, mark_running
@@ -241,8 +267,9 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     running = activity.log('run_check', f'Internal scan of {ip}: a Sentinel inside the network does the scanning, never this server',
                            project=project.id, status='running', scan_id=scan.id)
     org_id = org_id_of_project(project.id)
-    persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
-                        ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
+    from agentapi import stage_runs
+    stage_runs.once('persist_address', lambda: (persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}), ctx={
+        'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None}), None)[1])
     from cveFeed import nuclei_scan, wpscan_scan
     from targetApp.target_types import internal_scope
     with internal_scope():
@@ -269,3 +296,11 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
                     message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found{("; " + error) if error else ""}' if status == SUCCESS
                              else f'Internal scan of {ip} failed: {error}'))
     return {'scan_id': scan_id, 'status': status, 'error': error or '', 'failed_stages': failed_names, 'nmap': nmap}
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('pipeline.internal', queue='discovery_queue')(_resume_internal)
+
+
+_register()

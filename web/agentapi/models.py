@@ -9,6 +9,7 @@ is the one-time secret an administrator hands a new Sentinel so its first ``regi
 import uuid
 
 from django.db import models
+from django.db.models.functions import Now
 from django.utils import timezone
 
 from agentapi import sentinel_contract
@@ -190,6 +191,46 @@ class ScannerFallback(models.Model):
 
     def __str__(self):
         return f'{self.kind} ran locally ({self.reason})'
+
+
+class StageRun(models.Model):
+    """A scan stage (or a sweep) that handed work to Sentinels and gave its Celery worker back while it waits (``agentapi.stage_runs``, docs/
+    SCANNER-ARCHITECTURE.md, "Asynchronous stages"). ``kind`` is the registered adapter that continues it, ``stage`` the stage it waits in, ``context``
+    what that adapter needs to carry on (JSON: ids and flags, never a credential), ``task_ids`` the SentinelTasks it waits on and ``tasks`` the state of
+    each wait (its budgets, as wall-clock times, and whether its activity line was closed). ``state``: ``running`` (a worker is on it, until
+    ``lease_until``), ``waiting`` (no worker: Sentinels hold its tasks), ``ready`` (every task ended; the completion callback is queued), ``done``,
+    ``failed`` or ``cancelled``. ``deadline`` is when the waiting run must next be looked at (a claim or completion budget ends then)."""
+    STATES = ('running', 'waiting', 'ready', 'done', 'failed', 'cancelled')
+    OPEN_STATES = ('running', 'waiting', 'ready')
+
+    kind = models.CharField(max_length=64, db_default='')
+    stage = models.CharField(max_length=64, blank=True, default='', db_default='')
+    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, null=True, blank=True, related_name='+')
+    scan = models.ForeignKey('startScan.ScanHistory', on_delete=models.CASCADE, null=True, blank=True, related_name='+')
+    context = models.JSONField(default=dict, blank=True, db_default={})
+    task_ids = models.JSONField(default=list, blank=True, db_default=[])
+    tasks = models.JSONField(default=dict, blank=True, db_default={})
+    state = models.CharField(max_length=12, default='running', db_default='running')
+    queue = models.CharField(max_length=40, blank=True, default='', db_default='')
+    rounds = models.PositiveIntegerField(default=0, db_default=0)
+    deadline = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    waiting_since = models.DateTimeField(null=True, blank=True)
+    woke_at = models.DateTimeField(null=True, blank=True)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    history = models.JSONField(default=list, blank=True, db_default=[])  # per wait: seconds waited and the callback latency, for the metrics
+    error = models.CharField(max_length=300, blank=True, default='', db_default='')
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+    updated_at = models.DateTimeField(auto_now=True, db_default=Now())
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [models.Index(fields=['state', 'deadline'], name='stagerun_state_idx'),
+                   models.Index(fields=['scan', 'state'], name='stagerun_scan_idx')]
+
+    def __str__(self):
+        return f'stage run #{self.pk} {self.kind} ({self.state})'
 
 
 class SentinelEnrollment(models.Model):
