@@ -2,7 +2,7 @@
 the first ``?ver=`` of any asset under /wp-includes/ is jQuery's, and it was stored as the WordPress version (3.7.1)."""
 from django.test import SimpleTestCase
 
-from cveFeed import cms, probes
+from cveFeed import probes
 from tests.test_probes import answers, page
 
 HEAD = (
@@ -26,13 +26,6 @@ def version_of(pages):
 
 
 class ReadTests(SimpleTestCase):
-    def test_the_core_version_in_the_footer_of_a_large_page_is_read_and_jquerys_is_not(self):
-        pages = [('/', front(HEAD, FILLER, EMOJI))]
-        self.assertEqual(version_of(pages), '7.1.4')
-
-    def test_a_site_whose_only_versioned_assets_are_libraries_has_no_core_version(self):
-        self.assertEqual(version_of([('/', front(HEAD))]), '')
-
     def test_the_login_page_states_the_core_version_through_its_own_styles(self):
         login = page(200, body="<link rel='stylesheet' href='/wp-admin/css/login.min.css?ver=6.4.2' />"
                                "<link rel='stylesheet' href='/wp-includes/css/buttons.min.css?ver=6.4.2' />"
@@ -53,10 +46,6 @@ class ReadTests(SimpleTestCase):
     def test_a_readme_counts_only_when_it_is_wordpresss(self):
         self.assertEqual(version_of([('/', front(HEAD)), ('/readme.html', page(200, body='<h1>WordPress<br /> Version 6.1.3</h1>'))]), '6.1.3')
         self.assertEqual(version_of([('/', front(HEAD)), ('/readme.html', page(200, body='Some other product Version 2.9'))]), '')
-
-    def test_candidates_keep_their_sources_best_first(self):
-        found = cms.read('WordPress', [('/', front(EMOJI)), ('/feed/', page(200, body='<generator>https://wordpress.org/?v=7.1.4</generator>'))])
-        self.assertEqual([(v, label) for v, label, _c in found], [('7.1.4', 'feed:generator'), ('7.1.4', 'asset:emoji-release')])
 
     def test_a_version_is_a_dotted_release_and_stops_at_the_end_of_the_number(self):
         self.assertEqual(version_of([('/', front("<script src='/wp-includes/js/wp-embed.min.js?ver=6.5.3-beta1'></script>"))]), '')

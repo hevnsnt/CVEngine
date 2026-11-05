@@ -351,7 +351,9 @@ def check_domain(domain, net, pace, budget, pool, stop=lambda: False, now=None):
     """Every check of one supplier name: its host card first (certificate, response headers, technology stack), then the findings. Returns a
     ``DomainResult``; nothing is stored here. ``pool`` is a callable returning the CVE catalog's ``(cve_by_id, product_index)``, read only when
     the stack shows a version."""
-    from cveFeed import route_auth, versions
+    from cvengine_scanner import versions
+
+    from cveFeed import route_auth
     res = DomainResult(domain)
     addresses, state = public_addresses(domain, net)
     res.summary['address'] = state

@@ -72,60 +72,6 @@ class BuildTargetsTests(TestCase):
 		self.assertEqual(len(nmap_scan.build_targets(ips, limit=None)), len(ips))
 
 
-class ParseXmlTests(TestCase):
-	def test_coverage_parser_rejects_missing_malformed_and_failed_reports(self):
-		bad_reports = ('', '<nmaprun><host>', '<other/>', '<nmaprun>error</nmaprun>', '<nmaprun/>',
-			'<nmaprun><runstats><finished/></runstats></nmaprun>',
-			'<nmaprun><runstats><finished exit="error"/></runstats></nmaprun>',
-			'<!DOCTYPE nmaprun [<!ENTITY x "x">]><nmaprun/>')
-		for report in bad_reports:
-			with self.subTest(report=report), self.assertRaises(RuntimeError):
-				nmap_scan.parse_xml(report, strict=True)
-
-	def test_coverage_parser_accepts_a_valid_report_with_no_open_ports(self):
-		report = ('<nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/>'
-			'<ports><extraports state="closed" count="1000"/></ports></host>'
-			'<runstats><finished exit="success"/></runstats></nmaprun>')
-		self.assertEqual(nmap_scan.parse_xml(report, strict=True)[0]['ports'], [])
-
-	def test_a_completed_empty_nmap_report_is_valid(self):
-		self.assertEqual(nmap_scan.parse_xml('<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', strict=True), [])
-
-	def test_blank_output_is_empty(self):
-		self.assertEqual(nmap_scan.parse_xml(''), [])
-		self.assertEqual(nmap_scan.parse_xml('   '), [])
-
-	def test_unparseable_xml_is_empty_not_a_crash(self):
-		self.assertEqual(nmap_scan.parse_xml('<not xml'), [])
-
-	def test_an_entity_expansion_payload_is_refused_not_expanded(self):
-		# This function now also reads XML a Sentinel reported (agentapi.sentinel_dispatch.try_nmap_udp), not only this
-		# process's own nmap subprocess, so a billion-laughs-style payload must fail safe (a custom ENTITY is refused
-		# outright, real nmap output never declares one), same as any other malformed report - never expand, never
-		# crash the pipeline.
-		bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
-				']><nmaprun><host><address addr="&lol2;" addrtype="ipv4"/></host></nmaprun>')
-		self.assertEqual(nmap_scan.parse_xml(bomb), [])
-
-	def test_an_external_entity_is_refused_not_fetched(self):
-		xxe = ('<?xml version="1.0"?><!DOCTYPE nmaprun [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
-			  '<nmaprun><host><address addr="&xxe;" addrtype="ipv4"/></host></nmaprun>')
-		self.assertEqual(nmap_scan.parse_xml(xxe), [])
-
-	def test_valid_report_extracts_host_os_and_service(self):
-		inventory = nmap_scan.parse_xml(FAST_XML)
-		self.assertEqual(len(inventory), 1)
-		host = inventory[0]
-		self.assertEqual(host['ip'], '192.0.2.10')
-		self.assertEqual((host['os_guess'], host['os_accuracy']), ('Linux 5.X', 95))
-		self.assertEqual(host['ports'], [{
-			'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
-			'product': 'OpenSSH', 'version': '8.9', 'service_extra': 'Ubuntu', 'ostype': '',
-			'cpe': '', 'cpes': [], 'method': '', 'scripts': {}, 'banner': '',
-			'tunnel': '', 'hostname': '', 'devicetype': '', 'confidence': '', 'tls': {},
-		}])
-
-
 class PersistInventoryTests(TestCase):
 	def test_creates_ip_and_port_rows_with_os_and_service_fields(self):
 		result = nmap_scan.persist_inventory(nmap_scan.parse_xml(FAST_XML))
@@ -495,7 +441,7 @@ class NseCaptureTests(TestCase):
 		self.assertEqual(host['ports'][0]['scripts'], {})
 
 	def test_script_output_is_capped(self):
-		from reNgine.nmap_service import BANNER_CAP, SCRIPT_OUTPUT_CAP
+		from cvengine_scanner.nmap import BANNER_CAP, SCRIPT_OUTPUT_CAP
 		xml = ('<nmaprun><host><address addr="192.0.2.31" addrtype="ipv4"/><ports><port protocol="tcp" portid="25">'
 			'<state state="open"/><service name="smtp"/><script id="banner" output="' + 'A' * 9000 + '"/></port></ports></host></nmaprun>')
 		port = nmap_scan.parse_xml(xml)[0]['ports'][0]

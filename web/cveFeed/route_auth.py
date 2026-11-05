@@ -19,7 +19,9 @@ import threading
 import time
 from urllib.parse import urljoin, urlparse
 
-from cveFeed import fingerprint, js_libraries, soft404, versions
+from cvengine_scanner import fingerprint, soft404, versions
+
+from cveFeed import js_libraries
 
 logger = logging.getLogger(__name__)
 
@@ -236,10 +238,11 @@ def classify(probe):
             evidence[key] = str(probe[field])[:100]
     page_url = probe.get('url', '')
     root = (urlparse(page_url).path or '/') == '/'
-    scripts = fingerprint.script_sources(body, page_url)[0] if root else []
+    scripts = js_libraries.script_sources(body, page_url)[0] if root else []
     # the script names are hints only (a library and a version a file name carries, never a query string); _read_scripts replaces them
     # with what the files themselves state
-    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''), scripts=scripts,
+    found = fingerprint.from_response(probe.get('server', ''), probe.get('powered_by', ''), body, probe.get('content_type', ''),
+                                      from_scripts=js_libraries.script_fingerprints(scripts),
                                       headers=probe.get('headers'))
     if probe.get('headers') and root:
         evidence['headers'] = probe['headers']  # the root page's kept response headers: host metadata for the AI and the host page
@@ -323,7 +326,7 @@ def analyse(result):
     found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
     return {'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
             'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
-            # what the page was, for comparing it with the answer to a path that cannot exist (cveFeed.soft404); held in memory, never stored
+            # what the page was, for comparing it with the answer to a path that cannot exist (cvengine_scanner.soft404); held in memory, never stored
             # the front page is never compared with a path that cannot exist (_against_missing_page): no fingerprint, so a 300 KB page is not
             # normalised for nothing
             'fp': (None if (urlparse(result.get('url') or '').path or '/') == '/' else
@@ -813,7 +816,7 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
 
 
 def link_technologies(scan, probed):
-    """Record what each host's front page says it runs (see cveFeed.fingerprint) as the host's technologies in this scan, so the
+    """Record what each host's front page says it runs (see cvengine_scanner.fingerprint) as the host's technologies in this scan, so the
     correlation engine reads a PHP version from an X-Powered-By header like any other detected technology. Only the root page of a
     host speaks for the host; names already on the host are left alone. Returns the number of links added."""
     from startScan.models import Subdomain, Technology

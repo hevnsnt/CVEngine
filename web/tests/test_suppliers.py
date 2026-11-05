@@ -9,7 +9,9 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import ledger, probes, route_auth, slow_web, supplier_checks as sc, supplier_scan as ss, supplier_search, versions
+from cvengine_scanner import versions
+
+from cveFeed import ledger, probes, route_auth, slow_web, supplier_checks as sc, supplier_scan as ss, supplier_search
 from cveFeed.models import (BountyEngagement, BountyProgram, CVEEntry, HostExclusion, HygieneFinding, ServiceRun, Supplier, SupplierFinding,
                             SupplierHostCard)
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
