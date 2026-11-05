@@ -529,8 +529,8 @@ def _sentinels(problems):
     if stuck:
         problems.append(f"sentinels: a stage has waited on Sentinels for {waiting_stages['oldest_wait_seconds'] // 60} minutes "
                         f"({waiting_stages['waiting']} stage(s) waiting)")
-    return {'registered': by_status,
-           'stage_runs': waiting_stages,  # Q4: the stages waiting on Sentinels without a worker, by kind, the oldest wait, callback latency, worker slots freed 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+    return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'stage_runs': waiting_stages,  # Q4: the stages waiting on Sentinels without a worker, by kind, the oldest wait, callback latency, worker slots freed
            'by_kind': by_kind,  # per kind: the live Sentinels offering it, the free slots under the per-kind caps, and why none does
            'load': load,  # how the live Sentinels share the work: each one's load now and utilisation, queue waits and tasks in the last hour; the queue depth and waits per kind
            'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],

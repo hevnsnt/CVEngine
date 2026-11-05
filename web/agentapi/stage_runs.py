@@ -9,9 +9,9 @@ How a stage is continued (replay). A stage is ordinary code that calls ``sentine
 StageRun those calls are keyed (``task_key``: the kind and the target): the first time a key is asked for, the task is created and the pass
 stops (``Suspend``, a ``BaseException``, so no ``except Exception`` of the stage swallows it); the callback runs the same stage code again, and
 this time the call finds the task it made, over, and returns its result exactly as the blocking wait would have (the same activity lines, the
-same ``_no_local`` decision and ``ScannerFallback`` row, the same ``ScannerUnavailable``). A stage with two waits in a row (naabu, then nmap)
+same ``_no_local`` decision and ``ScannerFallback`` row, the same ``ScannerUnavailable``). A stage with two waits in a row (the port sweep, then the fingerprint)
 simply stops twice. Everything the stage does before its waits is done again on every pass, so it must be safe to repeat: the ledger makes the
-scan stages so (a naabu sweep that was recorded is not run again), ``once`` keeps a step that is not (a pipeline stage that finished, a row
+scan stages so (a port sweep that was recorded is not run again), ``once`` keeps a step that is not (a pipeline stage that finished, a row
 that was written), activity lines said in an earlier pass are not said again (``activity.log`` asks ``repeated_activity``), a fallback row is
 written once per decision, and a ledger claim taken in a pass is held, not released, while the run waits (``hold_claim``).
 
@@ -792,7 +792,7 @@ def _percentile(values, q):
 
 def metrics(now=None, project_ids=None):
     """What Q4 adds to the utilisation numbers (``GET sentinels/live``, the system status ``sentinels.stage_runs``): ``waiting`` (the runs that wait
-    for Sentinels now) and ``waiting_by_kind`` (by the stage they wait in, e.g. ``nmap_scan`` or ``sweep.testssl``), ``oldest_wait_seconds``,
+    for Sentinels now) and ``waiting_by_kind`` (by the stage a pipeline waits in, else by the adapter of a sweep), ``oldest_wait_seconds``,
     ``ready`` (callbacks queued, not started), ``callback_latency_p50_seconds`` and ``_p95_seconds`` (from the last task ending to the callback
     starting, over the last hour), ``slots_freed`` (the Celery worker slots the waiting runs would hold if they blocked, which is one each) and
     ``freed_seconds_1h`` (the worker time given back in the last hour), plus ``resumed_1h``. ``project_ids`` limits it to those projects (a
