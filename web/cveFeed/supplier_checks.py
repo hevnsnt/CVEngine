@@ -264,7 +264,9 @@ def exposed_postures(domain, scheme, results, front=None):
 def technologies_of(fingerprints):
     """The technology list of a host card from ``route_auth.classify``'s fingerprints (``[{'name': 'PHP:8.1.2', 'source': 'header:x-powered-by'}]``,
     the same fingerprinting owned hosts use): ``[{'name', 'version', 'category', 'source'}]``, version '' when the response states none."""
-    from cveFeed import correlation, fingerprint
+    from cvengine_scanner import fingerprint
+
+    from cveFeed import correlation
     out = []
     for found in fingerprints or []:
         name, version = correlation.split_name_version(found.get('name') or '')

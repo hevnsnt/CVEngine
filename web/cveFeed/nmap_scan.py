@@ -270,52 +270,9 @@ def _check_exit(returncode, stderr):
         raise RuntimeError(f'nmap exited with status {returncode}')
 
 
-def parse_xml(xml_text, strict=False):
-    """nmap XML report text -> extract_nmap_inventory's per-host service records; [] on anything unparseable.
-
-    This function also reads XML a Sentinel reported (``agentapi.sentinel_dispatch.try_nmap_udp``), not only this
-    process's own nmap subprocess, so an entity-expansion or external-entity payload must fail safe here exactly as it
-    would from any other untrusted input, never expand or fetch anything. A real nmap report never declares a custom
-    ENTITY, so one is refused outright before parsing (it is the one thing ``xmltodict.parse``'s own default entity
-    handling does not stop: that default only blocks an *external* DTD/entity fetch, not an all-internal expansion
-    bomb). No extra dependency: a hardened ``expat`` module here would need ``defusedexpat`` (an old, unmaintained C
-    extension), not the unrelated pure-Python ``defusedxml`` package, which has no drop-in ``expat`` module at all.
-
-    ``strict`` is for a scan that will record coverage: missing, invalid or explicitly failed output must raise so
-    its caller records failure and leaves the target due. Display and import callers retain the tolerant default."""
-    import xmltodict
-
-    from reNgine.nmap_service import extract_nmap_inventory
-    if not (xml_text or '').strip():
-        if strict:
-            raise RuntimeError('nmap returned no XML report')
-        return []
-    if '<!ENTITY' in xml_text:
-        logger.warning('refused to parse nmap XML output: it declares a custom ENTITY')
-        if strict:
-            raise RuntimeError('nmap returned an unsafe XML report')
-        return []
-    try:
-        data = xmltodict.parse(xml_text)
-        if not isinstance(data, dict) or 'nmaprun' not in data:
-            raise ValueError('missing nmaprun root')
-        run = data['nmaprun'] or {}
-        if not isinstance(run, dict):
-            raise ValueError('invalid nmaprun root')
-        data['nmaprun'] = run
-        if strict:
-            finished = (run.get('runstats') or {}).get('finished') or {}
-            # Nmap writes this terminal marker even when no hosts or ports are
-            # reported. A bare root can be a truncated process output, not a
-            # completed empty scan, so it must never establish coverage.
-            if not isinstance(finished, dict) or finished.get('@exit') != 'success':
-                raise ValueError('nmap report has no successful completion marker')
-    except Exception:  # noqa: BLE001 - a truncated/partial XML report, or a defused attack payload, must not crash the pipeline
-        logger.warning('could not parse nmap XML output', exc_info=True)
-        if strict:
-            raise RuntimeError('nmap returned an invalid or failed XML report') from None
-        return []
-    return extract_nmap_inventory(data)
+# The one reader of nmap's XML, a local run's or a Sentinel's (hardened against hostile XML; ``ToolOutputError`` is a ``RuntimeError``). Kept
+# under this name because a dozen callers and their tests read it from here.
+from cvengine_scanner.nmap import parse_xml  # noqa: E402,F401
 
 
 def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
