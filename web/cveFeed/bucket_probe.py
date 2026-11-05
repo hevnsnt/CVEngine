@@ -22,8 +22,8 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-S3, GCS, AZURE = 's3', 'gcs', 'azure'
-PROVIDER_LABELS = {S3: 'AWS S3', GCS: 'Google Cloud Storage', AZURE: 'Azure Blob Storage'}
+S3, GCS, AZURE, FIREBASE = 's3', 'gcs', 'azure', 'firebase'
+PROVIDER_LABELS = {S3: 'AWS S3', GCS: 'Google Cloud Storage', AZURE: 'Azure Blob Storage', FIREBASE: 'Firebase Realtime Database'}
 
 MAX_KEYS = 20  # the first listing page, never more: also the most object names kept
 MAX_BODY = 256 * 1024  # a 20-key listing is a few KB; a body past this is cut and still parsed
@@ -33,6 +33,8 @@ REGION = re.compile(r'^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$')  # us-east-1, eu-central-
 S3_NAME = re.compile(r'^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
 GCS_NAME = re.compile(r'^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$')
 AZURE_ACCOUNT = re.compile(r'^[a-z0-9]{3,24}$')
+# a Realtime Database: <name>.firebaseio.com, or <name>.<region>.firebasedatabase.app; the name a reference states is kept as that host
+FIREBASE_DB = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:firebaseio\.com|[a-z0-9-]{2,30}\.firebasedatabase\.app)$')
 AZURE_CONTAINER = re.compile(r'^(?:\$web|\$root|[a-z0-9](?:[a-z0-9]|-(?!-)){1,61}[a-z0-9])$')
 
 # The hosts a request may go to: the storage platforms' own endpoints and nothing else (see ``endpoint_allowed``).
@@ -43,6 +45,7 @@ _ENDPOINTS = (
     re.compile(r'^[a-z0-9-]+\.s3\.[a-z]{2}(?:-[a-z]+)+-\d{1,2}\.amazonaws\.com$'),
     re.compile(r'^storage\.googleapis\.com$'),
     re.compile(r'^[a-z0-9]{3,24}\.blob\.core\.windows\.net$'),
+    FIREBASE_DB,  # a Firebase Realtime Database: one shallow read of its root, never a value (``check_firebase``)
 )
 
 
@@ -399,6 +402,30 @@ def head_object(url, fetch):
 
 # ----------------------------------------------------------------------------- the whole check
 
+def check_firebase(db, fetch):
+    """One anonymous, shallow read of a Realtime Database's root (``.json?shallow=true&limitToFirst=1``): ``public`` when it answers with a JSON object
+    or ``null`` (anyone can read it), ``private`` on 401 (Permission denied), ``missing`` on 404 or a Firebase error that names no database. Nothing
+    of the answer is kept: not a key name, not a value."""
+    import json
+    verdict = Verdict(request_count=1)
+    got = fetch('GET', f'https://{db}/.json?shallow=true&limitToFirst=1&orderBy=%22$key%22')
+    verdict.status = got.status
+    text = _text(got.body)
+    if got.status == 200:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return verdict
+        if parsed is None or isinstance(parsed, dict):
+            verdict.state = 'public'
+        return verdict
+    if got.status == 401 or 'permission denied' in text.lower():
+        verdict.state, verdict.code = 'private', 'PermissionDenied'
+    elif got.status == 404 or (got.status in (400, 423) and 'firebase error' in text.lower()):
+        verdict.state, verdict.code = 'missing', 'NoSuchDatabase'
+    return verdict
+
+
 def check(provider, name, container='', fetch=http_fetch, dns=dns_exists, read_object=True):
     """Check one bucket (or Azure account and container) anonymously. Returns a ``Verdict``; never raises for a network failure (that is
     state ``unknown``). ``fetch(method, url)`` and ``dns(host)`` are replaced in tests."""
@@ -409,6 +436,8 @@ def check(provider, name, container='', fetch=http_fetch, dns=dns_exists, read_o
             verdict = check_gcs(name, fetch)
         elif provider == AZURE:
             verdict = check_azure(name, container, fetch, dns)
+        elif provider == FIREBASE:
+            return check_firebase(name, fetch)  # never an object read: a database answer is not a listing of files
         else:
             raise ValueError('unknown provider')
     except (OSError, ValueError) as exc:  # a refused address, a timeout, a reset: no answer, not a finding either way

@@ -49,6 +49,12 @@ export const FILTERS = [
     values: ["any", "credentials", "pii", "internal"],
   },
   {
+    name: "secret",
+    hint: "serves an exposed secret",
+    example: "secret:s",
+    values: ["any", "s", "p", "i", "live"],
+  },
+  {
     name: "zombie",
     hint: "DNS gone but still answering",
     example: "zombie:yes",

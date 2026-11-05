@@ -216,6 +216,22 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
 </section>
 
 <section class="page">
+  <h2>Exposed secrets</h2>
+  <p class="small mute">API keys, tokens and private keys the hosts serve, one row per secret. Values are never stored or printed: only the format
+    prefix and the last four characters. {% if r.secrets_total > r.secrets|length %}Showing the worst {{ r.secrets|length }} of {{ r.secrets_total }}.{% endif %}</p>
+  {% if r.secrets %}
+  <table class="grid">
+    <thead><tr><th>Severity</th><th>Secret</th><th>Hosts</th><th>Status</th></tr></thead>
+    <tbody>{% for s in r.secrets %}
+      <tr><td><span class="chip c-{{ s.severity }}">{{ s.severity }}</span></td>
+        <td>{{ s.label }} <code>{{ s.masked }}</code> ({{ s.class }})<br><span class="mute small">{{ s.basis }}</span><br><span class="small pre"><b>Fix:</b> {{ s.remediation }}</span></td>
+        <td>{{ s.hosts }}</td><td>{{ s.status }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="mute">No {% if not r.include_closed %}open {% endif %}exposed secrets.</p>{% endif %}
+</section>
+
+<section class="page">
   <h2>Method and validity</h2>
   <h3>What was scanned, and when</h3>
   <dl class="kv" style="grid-template-columns: 42mm 1fr">

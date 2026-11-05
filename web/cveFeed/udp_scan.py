@@ -44,6 +44,8 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 logger = logging.getLogger(__name__)
 
 SERVICE = 'udp-scan'  # ledger: one sweep per IP per week (CVENGINE_TTL_UDP_SCAN, hours)
@@ -61,12 +63,10 @@ MAX_WAITING = 3  # addresses no scanner could take that end a firing: a scanner 
 MAX_FINDING_HOSTS = 10  # names of one address that get its findings
 MAX_PORTS = 64
 UNANSWERED_LIMIT = 2  # sweeps in a row a port that was open may stay silent before it is no longer called open
-VERSION_INTENSITY = '3'  # nmap's default is 7; 3 still tries the probes registered for NTP, SNMP, SSDP and DNS
-SCRIPT_TIMEOUT = '30s'
 OPEN_FILTERED = 'open|filtered'
 
-# The curated list: what matters for exposure, not what is common. Each is documented in docs/PIPELINE.md.
-DEFAULT_PORTS = (53, 67, 68, 69, 123, 137, 161, 500, 514, 623, 1194, 1812, 1813, 1900, 4500, 5060, 5353, 11211)
+# The curated list: what matters for exposure, not what is common (the scanner library's UDP_PORTS; each is documented in docs/PIPELINE.md).
+DEFAULT_PORTS = scan_flags.UDP_PORTS
 PORT_NOTES = {
     53: 'DNS', 67: 'DHCP server', 68: 'DHCP client', 69: 'TFTP', 123: 'NTP', 137: 'NetBIOS name service', 161: 'SNMP',
     500: 'IKE (IPsec VPN)', 514: 'syslog', 623: 'IPMI (BMC)', 1194: 'OpenVPN', 1812: 'RADIUS authentication',
@@ -157,12 +157,9 @@ def ports():
 
 
 def nmap_flags():
-    """The nmap options: UDP scan, service detection at a low intensity (it probes only the ports that did not say closed), no host
-    discovery and no DNS, one retry, a low packet rate, and only the reviewed scripts (cveFeed.nmap_scan.UDP_NSE_SCRIPTS plus nbstat)."""
-    from cveFeed import nmap_scan
-    scripts = ','.join(('nbstat', *nmap_scan.UDP_NSE_SCRIPTS))
-    return ['-sU', '-sV', '--version-intensity', VERSION_INTENSITY, '-Pn', '-n', '--max-retries', '1', '--max-rate', str(max_rate()),
-            '--script', scripts, '--script-timeout', SCRIPT_TIMEOUT, '-p', 'U:' + ','.join(str(p) for p in ports())]
+    """The sweep's nmap options (cvengine_scanner.flags.udp_nmap_flags, which a Sentinel's sweep runs too): UDP scan, service detection at a low
+    intensity, no host discovery and no DNS, one retry, a low packet rate and only the reviewed scripts, over this install's ports and rate."""
+    return scan_flags.udp_nmap_flags(ports(), max_rate())
 
 
 # ----------------------------------------------------------------------------- can this worker do it
@@ -339,7 +336,7 @@ def record_run(ip, host, now=None):
     for rec in host.get('ports', []):
         if rec.get('protocol') != 'udp' or not rec.get('number'):
             continue
-        rec = {**rec, 'scripts': nmap_scan._reviewed_scripts(rec.get('scripts'))}
+        rec = {**rec, 'scripts': scan_flags.reviewed_scripts(rec.get('scripts'))}
         if rec.get('state') == 'open':
             if not rec.get('product'):
                 proved = identify(rec)

@@ -60,6 +60,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
 | `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `catch_all`, `error` | `auth:open` |
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
+| `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
