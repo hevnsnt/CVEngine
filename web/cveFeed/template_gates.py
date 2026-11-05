@@ -7,10 +7,12 @@ only a finding on a host whose product version is still affected, so ``GATES`` n
 release it affects, and a hit on a host whose version is known to be newer is not recorded: neither as a scanner finding (``nuclei_scan``,
 ``auth_nuclei``) nor as a template confirmation of a CVE match (``templategen``).
 
-The host's version is what a probe read (WPScan, the WordPress probe: ``cms.attested``), else what its technologies state once the
-versions the evidence disproves are set aside (``cms.superseded``: jQuery's 3.7.1 read as WordPress'). A host whose version is not known keeps
+The host's version is what a probe read (WPScan, the WordPress probe: ``cms_evidence.attested``), else what its technologies state once the
+versions the evidence disproves are set aside (``cms_evidence.superseded``: jQuery's 3.7.1 read as WordPress'). A host whose version is not known keeps
 the hit: nothing says it is patched."""
-from cveFeed import cms
+from cvengine_scanner import cms
+
+from cveFeed import cms_evidence
 
 # template or CVE id -> (product, the last release it affects): a hit on a host running a newer release is the patched behaviour
 GATES = {
@@ -36,11 +38,11 @@ def host_versions(sub, product):
     k = cms.key(product)
     project = sub.target_domain.project_id if sub.target_domain_id else None
     if project:
-        read = cms.attested(project, sub.name, {k}).get(k)
+        read = cms_evidence.attested(project, sub.name, {k}).get(k)
         if read:
             return set(read)
     technologies = list(sub.technologies.all())
-    wrong = cms.superseded(sub, technologies)
+    wrong = cms_evidence.superseded(sub, technologies)
     out = set()
     for tech in technologies:
         name, version = split_name_version(tech.name)
