@@ -1,5 +1,5 @@
-"""The built-in scanner settings are opt-in: a default install.sh / init-env.sh writes the same .env as before, and the opt-in writes only the
-two settings that are safe before the scanner is live (never CVENGINE_LOCAL_FALLBACK)."""
+"""The built-in scanner is on by default and needs nothing in .env: a default install.sh / init-env.sh writes the same .env as before, and the
+opt-out (--no-builtin-scanner) writes only CVENGINE_BUILTIN_SCANNER=0. CVENGINE_LOCAL_FALLBACK is never written."""
 import os
 import shutil
 import subprocess
@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCANNER_KEYS = ('COMPOSE_PROFILES', 'CVENGINE_BUILTIN_SCANNER', 'CVENGINE_LOCAL_FALLBACK')
+SCANNER_KEYS = ('COMPOSE_PROFILES', 'CVENGINE_BUILTIN_SCANNER', 'CVENGINE_LOCAL_FALLBACK', 'SCANNER_MEM_LIMIT')
 GENERATED = ('POSTGRES_PASSWORD', 'AUTHORITY_PASSWORD', 'CVENGINE_FIELD_KEY', 'REDIS_PASSWORD', 'DOMAIN_NAME')
 STUBS = {
     'id': '#!/bin/sh\n[ "$1" = "-u" ] && echo 0 || /usr/bin/id "$@"\n',
@@ -35,12 +35,12 @@ class EnvExampleTests(unittest.TestCase):
             self.assertNotIn(key, active(text), f'{key} must not be active in .env.example')
         self.assertTrue(commented(text, 'CVENGINE_BUILTIN_SCANNER'))
         self.assertTrue(commented(text, 'CVENGINE_LOCAL_FALLBACK'))
-        self.assertIn('# COMPOSE_PROFILES=builtin-scanner', text)
-        self.assertIn('Set only after the scanner is live', text)
+        self.assertTrue(commented(text, 'SCANNER_MEM_LIMIT'))
+        self.assertNotIn('COMPOSE_PROFILES=builtin-scanner', text)
 
 
 @unittest.skipUnless(shutil.which('bash'), 'needs bash')
-class InitEnvOptInTests(unittest.TestCase):
+class InitEnvTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
@@ -69,39 +69,31 @@ class InitEnvOptInTests(unittest.TestCase):
             self.assertNotIn(key, env)
         self.assertNotIn('scanner', out.lower())
 
-    def test_an_empty_or_zero_opt_in_is_the_default(self):
+    def test_an_empty_or_one_is_the_default(self):
         self.init()
         baseline = {k: v for k, v in self.env().items() if k not in GENERATED}
-        for value in ('', '0'):
+        for value in ('', '1'):
             (self.dir / '.env').unlink(missing_ok=True)
             self.init(CVENGINE_ENABLE_BUILTIN_SCANNER=value)
             self.assertEqual({k: v for k, v in self.env().items() if k not in GENERATED}, baseline)
 
-    def test_opting_in_enables_the_profile_and_the_switch_but_never_the_local_fallback(self):
-        out = self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='1')
+    def test_opting_out_writes_the_switch_off_and_never_the_local_fallback(self):
+        out = self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='0')
         env = self.env()
-        self.assertEqual(env['COMPOSE_PROFILES'], 'builtin-scanner')
-        self.assertEqual(env['CVENGINE_BUILTIN_SCANNER'], '1')
+        self.assertEqual(env['CVENGINE_BUILTIN_SCANNER'], '0')
         self.assertNotIn('CVENGINE_LOCAL_FALLBACK', env)
-        self.assertIn('builtin-scanner', out)
+        self.assertNotIn('COMPOSE_PROFILES', env)
+        self.assertIn('stays off', out)
 
-    def test_opting_in_keeps_the_profiles_already_listed_and_is_idempotent(self):
-        (self.dir / '.env').write_text('COMPOSE_PROFILES=tailscale\nPOSTGRES_PASSWORD=x\nAUTHORITY_PASSWORD=y\n')
-        self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='1')
-        self.assertEqual(self.env()['COMPOSE_PROFILES'], 'tailscale,builtin-scanner')
-        before = (self.dir / '.env').read_text()
-        out = self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='1')
-        self.assertEqual((self.dir / '.env').read_text(), before)
-        self.assertNotIn('Enabled the builtin-scanner', out)
-
-    def test_an_owner_set_local_fallback_is_left_alone(self):
-        (self.dir / '.env').write_text('CVENGINE_LOCAL_FALLBACK=none\nPOSTGRES_PASSWORD=x\nAUTHORITY_PASSWORD=y\n')
-        self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='1')
+    def test_an_owner_set_switch_is_left_alone(self):
+        (self.dir / '.env').write_text('CVENGINE_BUILTIN_SCANNER=1\nCVENGINE_LOCAL_FALLBACK=none\nPOSTGRES_PASSWORD=x\nAUTHORITY_PASSWORD=y\n')
+        self.init(CVENGINE_ENABLE_BUILTIN_SCANNER='0')
+        self.assertEqual(self.env()['CVENGINE_BUILTIN_SCANNER'], '1')
         self.assertEqual(self.env()['CVENGINE_LOCAL_FALLBACK'], 'none')
 
 
 @unittest.skipUnless(shutil.which('bash') and Path('/proc/meminfo').exists(), 'needs bash on Linux')
-class InstallOptInTests(unittest.TestCase):
+class InstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
@@ -120,21 +112,32 @@ class InstallOptInTests(unittest.TestCase):
     def install(self, *args):
         return subprocess.run(['bash', 'install.sh', *args], cwd=self.repo, capture_output=True, text=True, env=self.env, timeout=60)
 
-    def test_a_plain_install_writes_the_same_env_as_init_env_with_no_scanner_settings(self):
+    def scanner_free(self):
+        return {k: v for k, v in active((self.repo / '.env').read_text()).items() if k != 'SCANNER_MEM_LIMIT'}  # set on a small host
+
+    def test_a_plain_install_writes_the_same_env_as_init_env_with_no_scanner_switch(self):
         proc = self.install()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        env = active((self.repo / '.env').read_text())
+        env = self.scanner_free()
         for key in SCANNER_KEYS:
             self.assertNotIn(key, env)
         self.assertEqual(set(env), set(active((ROOT / '.env.example').read_text())))
 
-    def test_the_flag_is_the_only_way_to_turn_it_on(self):
+    def test_the_old_opt_in_flag_is_accepted_and_changes_nothing(self):
         proc = self.install('--builtin-scanner')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        env = active((self.repo / '.env').read_text())
-        self.assertEqual((env['COMPOSE_PROFILES'], env['CVENGINE_BUILTIN_SCANNER']), ('builtin-scanner', '1'))
-        self.assertNotIn('CVENGINE_LOCAL_FALLBACK', env)
+        self.assertNotIn('CVENGINE_BUILTIN_SCANNER', self.scanner_free())
 
-    def test_help_mentions_the_flag(self):
+    def test_the_opt_out_flag_turns_it_off(self):
+        proc = self.install('--no-builtin-scanner')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
+
+    def test_a_small_host_gets_a_smaller_scanner_limit(self):
+        text = (self.repo / 'install.sh').read_text()
+        self.assertIn("printf 'SCANNER_MEM_LIMIT=1g\\n' >> .env", text)
+        self.assertIn('-lt 7000000', text)
+
+    def test_help_mentions_the_opt_out(self):
         proc = self.install('-h')
-        self.assertIn('--builtin-scanner', proc.stdout)
+        self.assertIn('--no-builtin-scanner', proc.stdout)

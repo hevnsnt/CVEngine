@@ -133,13 +133,16 @@ def _jsonable(value):
     return json.loads(json.dumps(value, default=default))
 
 
-def task_key(kind, target, host='', ips=None, internal=False):
+def task_key(kind, target, host='', ips=None, internal=False, secret_ref=None):
     """The identity of one ``dispatch`` call inside a run: the kind and what it is pointed at. What may differ from pass to pass without making
     it other work is left out (a token, which the row loses once it is over; the template policy's revision and bundle)."""
     target = dict(target) if isinstance(target, dict) else {'value': target}
     target.pop('token', None)
     target.pop('template_policy', None)
-    raw = json.dumps([kind, target, host or '', sorted(str(i) for i in ips or []), bool(internal)], sort_keys=True, default=str)
+    parts = [kind, target, host or '', sorted(str(i) for i in ips or []), bool(internal)]
+    if secret_ref:  # signed-in work is other work than the same scan without the sign-in; absent, the key is what it always was
+        parts.append(secret_ref)
+    raw = json.dumps(parts, sort_keys=True, default=str)
     import hashlib
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 

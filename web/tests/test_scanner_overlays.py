@@ -26,7 +26,9 @@ class ScannerOverlayTests(unittest.TestCase):
 
 	def test_host_network_overlay_moves_only_the_celery_container(self):
 		overlay = load('docker-compose.hostnet.yml')
-		self.assertEqual(set(overlay['services']), {'celery', 'redis'})
+		# web is published on loopback only, for the built-in scanner that shares celery's (here the host's) network namespace
+		self.assertEqual(set(overlay['services']), {'celery', 'redis', 'web'})
+		self.assertEqual(overlay['services']['web']['ports'], ['127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000'])
 		celery = overlay['services']['celery']
 		self.assertEqual(celery['network_mode'], 'host')
 		# a container on the host network cannot also join a Docker network
