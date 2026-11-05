@@ -221,7 +221,9 @@ class FakeScanner:
     def heartbeat(self):
         """One real heartbeat: the fake is live (and has declared its contract version) from here until ``go_offline``."""
         from agentapi import sentinel_broker
-        out = sentinel_broker.heartbeat(self._ctx(), {'info': {'contract_version': self.contract_version}})
+        # what the built-in scanner image reports: it is the built-in one, it reads stored sign-ins and it applies the vantage settings
+        out = sentinel_broker.heartbeat(self._ctx(), {'info': {'contract_version': self.contract_version, 'builtin': True,
+                                                               'features': ['secret_read', 'vantage']}})
         self.agent.refresh_from_db()
         self._forget_scanner_state()
         return out

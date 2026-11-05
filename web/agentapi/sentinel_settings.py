@@ -320,7 +320,7 @@ def builtin_vantage():
 
 UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # What a built-in scanner image can do beyond its kinds (``info.features``; the Sentinel client's ``config.BUILTIN_FEATURES``): ``secret_read``, the
-# single-use read of a stored credential for signed-in nuclei, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
+# single-use read of a stored credential for a signed-in pass, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
 # server does not know is dropped. ``info.builtin`` is what the image says it is; whether a Sentinel IS the built-in scanner is decided by its
 # enrollment (``builtin_scanner.builtin_agent``), never by this.
 FEATURES = ('secret_read', 'vantage')
