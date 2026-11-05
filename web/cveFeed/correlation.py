@@ -261,7 +261,8 @@ PRODUCT_ALIASES = {
     "iis": {"internetinformationservices"},
     "eximsmtpd": {"exim"},
     "phpfpm": {"php"},  # PHP's FastCGI process manager is PHP, and its advisories are PHP's
-    "iscbind": {"bind"},
+    "iscbind": {"bind", "bind9"},
+    "bind": {"bind9"},  # ISC's CPE calls the daemon bind; some advisories call it BIND9
     "bind9": {"bind"},
     "nextjs": {"next"},  # the npm package of Next.js is named "next"
     # product strings nmap's service detection really prints, which name the product with extra words the advisory's name lacks: a version seen
@@ -491,7 +492,7 @@ def _vendor_ok(item, *hints):
 
 
 # alias target -> vendor words that must appear when the item names a vendor (Oracle's "HTTP Server" is not Apache's)
-_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",)}
+_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",), "bind9": ("isc",)}
 
 
 def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
