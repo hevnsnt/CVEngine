@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
     waiting for the stage that persists them. The new column has a database default, so code from before it keeps writing tasks during an update."""
 
     dependencies = [
-        ("agentapi", "0015_merge_agent_hold"),
+        ("agentapi", "0016_sentinel_defaults_external_kinds_db_default"),
     ]
 
     operations = [
