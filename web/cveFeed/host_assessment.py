@@ -369,14 +369,50 @@ def execute(job_id, celery_id=None):
         if _unassessable(job):
             result = dict(REFUSED)
         else:
-            result = _diagnosed(job, run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True,
-                                                       force=True, hygiene=True, assessment_id=job_id,
-                                                       by_person=job.requested_by_id is not None))
+            outcome = run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True, force=True, hygiene=True,
+                                        assessment_id=job_id, by_person=job.requested_by_id is not None,
+                                        then=('host_assessment.one', {'job_id': job_id}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # its stages wait on Sentinels without this worker: the callback finishes the assessment
+                return outcome
+            result = _diagnosed(job, outcome)
     except Exception as exc:
         logger.exception('host assessment %s failed', job_id)
         result = _failed(job, exc)
     _finish(job, result)
     return result
+
+
+def _finish_one(result, job_id):
+    """The continuation of an assessment whose stages waited on Sentinels (``agentapi.stage_runs``): what ``execute`` does with the result."""
+    job = HostAssessment.objects.select_related('domain', 'project').filter(pk=job_id).first()
+    if job is not None:
+        _finish(job, _diagnosed(job, result))
+
+
+def _settle_batch(eligible, outcome, statuses):
+    """Give each host of a batch run its own outcome: the one the pipeline named for it, else the run's."""
+    own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
+    for job in eligible:
+        if job.host in own:
+            result = own[job.host]
+        else:  # the host went through the stages: the run's result, with this host's own count of what resolved
+            result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
+        status = _finish(job, _diagnosed(job, result))
+        statuses[status] = statuses.get(status, 0) + 1
+
+
+def _finish_batch(result, job_ids):
+    """The continuation of a batch whose stages waited on Sentinels: what ``execute_batch`` does with the run's result."""
+    jobs = list(HostAssessment.objects.select_related('domain', 'project').filter(pk__in=job_ids, status='running').order_by('pk'))
+    if jobs:
+        _settle_batch(jobs, dict(result or {}), {})
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.continuation('host_assessment.one')(_finish_one)
+    stage_runs.continuation('host_assessment.batch')(_finish_batch)
 
 
 def execute_batch(job_ids, celery_id=None):
@@ -414,15 +450,13 @@ def execute_batch(job_ids, celery_id=None):
             if not eligible:
                 continue
             outcome = run_host_pipeline(domain_id, [job.host for job in eligible], celery_id=celery_id, retest=True, force=True, hygiene=True,
-                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None)
-            own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
-            for job in eligible:
-                if job.host in own:
-                    result = own[job.host]
-                else:  # the host went through the stages: the run's result, with this host's own count of what resolved
-                    result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
-                status = _finish(job, _diagnosed(job, result))
-                statuses[status] = statuses.get(status, 0) + 1
+                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None,
+                                        then=('host_assessment.batch', {'job_ids': [job.pk for job in eligible]}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # the stages wait on Sentinels without this worker: the callback settles these hosts
+                statuses['waiting'] = statuses.get('waiting', 0) + len(eligible)
+                continue
+            _settle_batch(eligible, outcome, statuses)
         except Exception as exc:
             logger.exception('host assessment batch %s failed', [job.pk for job in group])
             for job in group:
@@ -430,3 +464,6 @@ def execute_batch(job_ids, celery_id=None):
                     status = _finish(job, _failed(job, exc))
                     statuses[status] = statuses.get(status, 0) + 1
     return {'hosts': len(jobs), 'statuses': statuses}
+
+
+_register()

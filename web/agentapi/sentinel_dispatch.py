@@ -102,13 +102,24 @@ def outcome_text(kind):
     return 'the stage fell back to local execution' if fallback_allowed(kind) else STAY_DUE
 
 
-def _no_local(kind, why, reason='no_scanner', project=None):
+def _no_local(kind, why, reason='no_scanner', project=None, recorded=None):
     """Where a stage would run ``kind`` here because no Sentinel took it: ``ScannerUnavailable`` when it may not; when it may, nothing happens to the
     work except one row of fallback telemetry (``scanner_fallback.record``: kind, project, ``reason``; it cannot raise) and the caller runs it here.
-    This is the one place the decision "no Sentinel took it, the local run is allowed" is made."""
+    This is the one place the decision "no Sentinel took it, the local run is allowed" is made.
+
+    Inside a ``StageRun`` the stage code runs again on every pass (``agentapi.stage_runs``), so a decision is recorded once: ``recorded`` is True for
+    one an earlier pass already recorded (a task's own, ``_Dispatch.no_local``), and a decision with no task is matched to the earlier passes by its
+    place in the pass (``Pass.fallback_seen``)."""
     if not fallback_allowed(kind):
         from reNgine.resources import ScannerUnavailable
         raise ScannerUnavailable(kind, why)
+    if recorded:
+        return
+    if recorded is None:
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        if run is not None and run.fallback_seen((kind, reason)):
+            return
     from agentapi import scanner_fallback
     scanner_fallback.record(kind, project, reason)
 
@@ -217,6 +228,38 @@ REFILL_EVERY = 5  # seconds between looks for a Sentinel slot that freed up whil
 STOP_CHECK_EVERY = 2  # seconds between checks, while a fanned-out stage waits, for a stop or a global pause
 
 
+_REAL_SLEEP = time.sleep
+
+
+def _woken_by_redis():
+    """Whether a wait here blocks on the Redis wake-up (``sentinel_notify``) rather than sleeping. Only with the real clock: a test, or the fake
+    scanner (``tests.fake_scanner``), that drives the loop through its own ``time`` keeps its sleeps."""
+    if time.sleep is not _REAL_SLEEP:
+        return False
+    from agentapi import sentinel_notify
+    return sentinel_notify.client() is not None
+
+
+def _poll_interval():
+    """How long a wait sleeps before it looks again by itself: half a second when it polls, the safety interval
+    (``CVENGINE_SENTINEL_WAKE_POLL_SECONDS``) when a Redis wake-up ends it as soon as a task changes."""
+    if _woken_by_redis():
+        from agentapi import sentinel_notify
+        return float(sentinel_notify.safety_seconds())
+    return DISPATCH_POLL_INTERVAL
+
+
+def _wait(task_ids, seconds):
+    """Wait up to ``seconds`` for one of ``task_ids`` to be claimed or to end: a ``BLPOP`` on their wake keys (``sentinel_notify``) with the real
+    clock and Redis, else a plain sleep, as before."""
+    if _woken_by_redis():
+        if seconds > 0:
+            from agentapi import sentinel_notify
+            sentinel_notify.wait_tasks(task_ids, seconds, sleep=time.sleep)
+        return
+    time.sleep(max(0.0, seconds))
+
+
 def stage_parallel():
     """CVENGINE_STAGE_PARALLEL: the hard ceiling on how many chunk tasks one scan stage keeps in flight across Sentinel slots (default 4).
     ``1`` is the serial behaviour of before this existed: one chunk task at a time, each waited for before the next is created. What an App Admin
@@ -250,10 +293,53 @@ class _Dispatch:
         self.run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
         self.never_claimed = False
         self.vanished = False  # the last live Sentinel went away while the task waited
+        self.stop_check = False  # a fanned-out chunk: a stop of its scan (or a pause) cancels it while it waits
 
     @property
     def finished(self):
         return self.task.status in TERMINAL
+
+    # --- a wait written down (agentapi.stage_runs): the budgets as wall-clock times, so another worker can keep them --------------------
+
+    def state(self, key=None):
+        """This wait as JSON, for a ``StageRun`` (``stage_runs``): what ``restore`` needs to go on keeping its budgets in another worker."""
+        mono, wall = time.monotonic(), time.time()
+
+        def at(value):
+            return None if value is None else round(wall + (value - mono), 3)
+        return {'key': key, 'id': self.task.pk, 'kind': self.kind, 'project_id': getattr(self.project, 'pk', self.project),
+                'scan_id': getattr(self.scan, 'pk', None), 'internal': bool(self.internal), 'busy': self.busy, 'timeout': self.timeout,
+                'label': self.label, 'entry': getattr(self.entry, 'pk', None), 'started': at(self.started), 'queue_budget': self.queue_budget,
+                'claim_deadline': at(self.claim_deadline), 'run_deadline': at(self.run_deadline), 'never_claimed': self.never_claimed,
+                'vanished': self.vanished, 'stop_check': bool(getattr(self, 'stop_check', False))}
+
+    @classmethod
+    def restore(cls, state, siblings=None):
+        """The wait ``state`` describes, with its task read afresh (``None`` when the row is gone). A task a Sentinel claimed whose completion
+        clock had not started yet gets it from the time of the claim."""
+        from agentapi.models import SentinelTask
+        from cveFeed.models import AgentActivity
+        task = SentinelTask._base_manager.filter(pk=state.get('id')).select_related('project', 'agent', 'scan').first()
+        if task is None:
+            return None
+        mono, wall = time.monotonic(), time.time()
+
+        def back(value):
+            return None if value is None else mono + (float(value) - wall)
+        self = cls.__new__(cls)
+        self.task, self.kind, self.project, self.scan = task, state.get('kind') or task.kind, task.project, task.scan
+        self.internal, self.busy, self.timeout = bool(state.get('internal')), bool(state.get('busy')), state.get('timeout') or _dispatch_timeout(task.kind)
+        self.label = state.get('label') or _label(task.host, task.ips)
+        self.entry = AgentActivity.objects.filter(pk=state['entry']).first() if state.get('entry') else None
+        self.started = back(state.get('started')) or mono
+        self.queue_budget = state.get('queue_budget') or _queue_timeout(task.kind)
+        self.claim_deadline = back(state.get('claim_deadline')) or mono
+        self.run_deadline = back(state.get('run_deadline'))
+        if self.run_deadline is None and task.status in ('claimed', 'running') and task.claimed_at is not None:
+            self.run_deadline = back(task.claimed_at.timestamp()) + self.timeout
+        self.never_claimed, self.vanished = bool(state.get('never_claimed')), bool(state.get('vanished'))
+        self.siblings, self.stop_check = siblings, bool(state.get('stop_check'))
+        return self
 
     def _fell_back(self):
         """Count one task that falls back to local execution (``cveFeed.local_egress.note_fallback``: the warning when it keeps happening). Nothing
@@ -314,10 +400,10 @@ class _Dispatch:
         age = (timezone.now() - self.task.created_at).total_seconds()
         return max(0, min(self.queue_budget, sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY - age))
 
-    def pause(self, now):
-        """Seconds to sleep before the next look."""
+    def pause(self, now, interval=None):
+        """Seconds to wait before the next look: the poll interval (``_poll_interval``), or less when a budget ends sooner."""
         horizon = self.run_deadline if self.run_deadline is not None else self.claim_deadline
-        return min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now))
+        return min(_poll_interval() if interval is None else interval, max(0.0, horizon - now))
 
     def settle(self):
         """Close the activity line of the task that is over, saying what became of it."""
@@ -357,8 +443,14 @@ class _Dispatch:
         task = self.task
         if task.status == 'done' or self.internal:
             return
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        recorded = run.counted(self) if run is not None else None
         _no_local(self.kind, f'the {"queue" if self.never_claimed else "Sentinel"} did not return a result in time' if task.status != 'failed'
-                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}', self.fallback_reason(), self.project)
+                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}', self.fallback_reason(), self.project,
+                  recorded=recorded)
+        if run is not None:
+            run.mark_counted(self)
 
     def cancel(self, reason):
         """Hand the task back unfinished (the stage was stopped, or its consumer went away): expired, so it is neither claimed nor left queued."""
@@ -393,6 +485,10 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     by it)."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
+        return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome)
     capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if outcome is not None:
@@ -414,7 +510,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none'
         if work.step(now, none_left):
             break
-        time.sleep(work.pause(now))
+        _wait([work.task.pk], min(work.pause(now), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
     work.settle()
     if outcome is not None:
         outcome['no_scanner'] = work.vanished
@@ -474,6 +570,11 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     if not chunks:
         return
     prepare = prepare or (lambda chunk: ({'addresses': chunk}, chunk))
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    if run is not None:  # inside a StageRun: no wait loop here, the chunks are sent and the worker given back until they are over
+        yield from _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none, labeler)
+        return
     ceiling = stage_parallel()  # read once per stage: a stage already in flight keeps the ceiling it started with
     if ceiling <= 1 or len(chunks) == 1:
         yield from _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none)
@@ -556,7 +657,8 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
             for index, result in sorted(over, key=lambda pair: pair[0]):
                 yield index, result
             if flying:
-                time.sleep(min([d.pause(now) for d in flying.values()] + [DISPATCH_POLL_INTERVAL]))
+                bound = min(REFILL_EVERY if pending and not halted else REAP_EVERY, STOP_CHECK_EVERY if scan is not None else REAP_EVERY)
+                _wait([d.task.pk for d in flying.values()], min([d.pause(now) for d in flying.values()] + [_poll_interval(), bound]))
     finally:
         for d in flying.values():
             d.cancel('the stage stopped before the task finished')
@@ -566,6 +668,180 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
         if index in pending and not internal:
             _unsent(project, kind, none_halt)
         yield index, None
+
+
+# --- inside a StageRun (agentapi.stage_runs): the same decisions, with the worker given back while the Sentinels work -----------------
+
+def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome):
+    """``dispatch_or_none`` inside a StageRun. The first pass that asks creates the task and stops the pass (``Suspend``); the worker is free while
+    the Sentinel works and ``stage_runs.drive`` keeps the claim, queue and completion budgets. The pass that runs once the task is over gets here
+    again and ends it exactly as the blocking wait did: the activity line closed, the target redacted, ``no_local`` (``ScannerUnavailable`` or one
+    fallback row) and the result."""
+    from agentapi import sentinel_broker, stage_runs
+    from agentapi.models import SentinelTask
+    key = stage_runs.task_key(kind, target, host, ips, internal)
+    work = run.work(key)
+    if work is None:
+        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)
+        if capacity['state'] == 'none':
+            if outcome is not None:
+                outcome['no_scanner'] = True
+            if not internal:
+                _no_scanner(kind, project, capacity=capacity)
+            return None
+        work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity)
+        run.add(key, work)
+        run.suspend()
+    if not work.finished:
+        run.suspend()  # a pass that started before this task was over (a stage with another wait that ended first)
+    run.settled(work)
+    if outcome is not None:
+        outcome['no_scanner'] = work.vanished
+    if redact_target is not None:
+        stored = work.task.target if isinstance(work.task.target, dict) else {}
+        if stored.get('token') not in (None, '', '***'):
+            SentinelTask.objects.filter(pk=work.task.pk).update(target=redact_target(stored))
+    work.no_local()
+    return work.result
+
+
+def _group_id(kind, chunks):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps([kind, chunks], sort_keys=True, default=str).encode()).hexdigest()[:24]
+
+
+def _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none, labeler):
+    """``dispatch_many`` inside a StageRun: the same window (the free slots, the stage's share, ``CVENGINE_STAGE_PARALLEL``), the same stop when a
+    chunk goes unclaimed or the last Sentinel leaves, and the same fallback decisions, but nothing is yielded until every chunk is over: each pass
+    sends what the window has room for and stops, and the pass after the last chunk ended yields them all, in order. So a stage never handles a
+    chunk's result twice, however many passes its chunks took. ``CVENGINE_STAGE_PARALLEL=1`` keeps one chunk in flight and, with ``stop_on_none``,
+    stops at the first chunk nobody did, as the serial loop does."""
+    from agentapi import sentinel_broker
+    from reNgine import resources
+    gid = _group_id(kind, chunks)
+    group = run.group(gid)
+    group.setdefault('ceiling', stage_parallel())
+    group.setdefault('prepared', {})
+    group.setdefault('unserved', [])
+    serial = group['ceiling'] <= 1 or len(chunks) == 1
+    works = {}
+    for i in range(len(chunks)):
+        prepared = group['prepared'].get(str(i))
+        if prepared:
+            found = run.work(prepared['key'])
+            if found is not None:
+                found.stop_check = True
+                works[i] = found
+    if scan is not None and (group.get('aborted') or _stopped(scan)):
+        for d in works.values():
+            d.cancel('the stage stopped before the task finished')
+        group['aborted'] = True
+        raise resources.ScanAborted(f'{kind} dispatch was stopped with its scan')
+    halted, none_halt = bool(group.get('halted')), bool(group.get('none_halt'))
+    for i, d in works.items():
+        if not d.finished:
+            continue
+        if run.tasks.get(str(d.task.pk), {}).get('settled') is not True:
+            run.settled(d)
+        if d.never_claimed:
+            halted, none_halt = True, none_halt or d.vanished
+        if d.task.status != 'done' and not internal and not fallback_allowed(kind):
+            halted = True  # its no_local raises: nothing more is sent
+        if serial and stop_on_none and d.task.status != 'done':
+            halted, none_halt = True, none_halt or d.vanished
+    sent = {int(i) for i in group['prepared']}
+    pending = [i for i in range(len(chunks)) if i not in sent and i not in group['unserved']]
+    flying = [i for i, d in works.items() if not d.finished]
+    if pending and not halted:
+        queued_mine = [d.task.pk for d in works.values() if d.task.status == 'queued']
+        capacity = sentinel_broker.capacity_state(project, kind, internal, exclude=queued_mine)
+        if capacity['state'] == 'none':
+            halted = none_halt = True
+        else:
+            holding = sum(d.task.status in ('claimed', 'running') for d in works.values())
+            width = 1 if serial else min(group['ceiling'], _stage_share(scan, kind, sentinel_broker.total_slots()), max(1, holding + capacity['free']))
+            free_left = max(0, capacity['free'])
+            while pending and len(flying) < width:
+                index = pending.pop(0)
+                prepared = prepare(chunks[index])
+                if prepared is None:
+                    group['unserved'].append(index)
+                    continue
+                target, ips = prepared
+                label = labeler(chunks[index]) if labeler else _label('', ips)
+                state = {**capacity, 'state': 'free' if free_left else 'busy'}
+                d = _Dispatch(project, kind, target, '', ips, scan, timeout, created_by, priority, internal, state,
+                              label=f'{label} (part {index + 1} of {len(chunks)})')
+                d.stop_check = True
+                key = stage_runs_key(kind, target, ips, internal)
+                run.add(key, d, group=gid, index=index)
+                group['prepared'][str(index)] = {'key': key}
+                works[index] = d
+                flying.append(index)
+                free_left = max(0, free_left - 1)
+    group['halted'], group['none_halt'] = halted, none_halt
+    if flying:
+        run.suspend(refill=bool(pending and not halted))
+    blocked = None
+    out = []
+    for index in sorted(works):
+        d = works[index]
+        try:
+            d.no_local()
+        except resources.ScannerUnavailable as exc:
+            blocked = blocked or exc
+            continue
+        out.append((index, d.result))
+    for pair in out:
+        yield pair
+    if blocked is not None:
+        raise blocked
+    for index in sorted(group['unserved'] + pending):
+        if index in pending and not internal:
+            _unsent(project, kind, none_halt)
+        yield index, None
+
+
+def stage_runs_key(kind, target, ips, internal):
+    from agentapi import stage_runs
+    return stage_runs.task_key(kind, target, '', ips, internal)
+
+
+def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
+    """Inside a StageRun, send the tasks a loop of ``dispatch_or_none`` calls is about to make (``items``: ``(target, host, ips)`` of each, the same
+    arguments) side by side, before the loop runs, and wait (the worker given back) until every one is over; the loop then finds each result at
+    once and handles all of them in one pass, so its own summary covers every item. The window is the free slots, as for ``dispatch_many``; with no
+    live Sentinel left nothing more is sent and the loop's own calls decide, as they would have. Outside a StageRun it does nothing."""
+    from agentapi import sentinel_broker, stage_runs
+    run = stage_runs.current()
+    if run is None or not items:
+        return
+    keys = [stage_runs.task_key(kind, target, host, ips, internal) for target, host, ips in items]
+    gid = 'prefetch:' + _group_id(kind, keys)
+    group = run.group(gid)
+    works = {i: run.work(k) for i, k in enumerate(keys)}
+    works = {i: d for i, d in works.items() if d is not None}
+    flying = [i for i, d in works.items() if not d.finished]
+    pending = [i for i in range(len(items)) if i not in works]
+    if pending and not group.get('halted'):
+        capacity = sentinel_broker.capacity_state(project, kind, internal,
+                                                  exclude=[d.task.pk for d in works.values() if d.task.status == 'queued'])
+        if capacity['state'] == 'none':
+            group['halted'] = True
+        else:
+            holding = sum(d.task.status in ('claimed', 'running') for d in works.values())
+            width = max(1, holding + capacity['free'])
+            free_left = max(0, capacity['free'])
+            while pending and len(flying) < width:
+                index = pending.pop(0)
+                target, host, ips = items[index]
+                d = _Dispatch(project, kind, target, host, ips, scan, timeout, None, 1, internal, {**capacity, 'state': 'free' if free_left else 'busy'})
+                run.add(keys[index], d, group=gid, index=index)
+                flying.append(index)
+                free_left = max(0, free_left - 1)
+    if flying:
+        run.suspend(refill=bool(pending and not group.get('halted')))
 
 
 def _unsent(project, kind, none_left):
@@ -964,6 +1240,20 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
 
 # --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
+
+def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
+    """Inside a StageRun, send the WPScan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
+    the runner of ``wrap_wpscan_runner`` gives each, so the loop finds every report in one pass. Outside a StageRun it does nothing."""
+    from urllib.parse import urlsplit
+    items = []
+    for url in urls:
+        if internal:
+            host = urlsplit(url).hostname or ''
+            items.append(({'url': url, 'token': token}, host, [host]))
+        else:
+            items.append(({'url': url, 'token': token}, '', None))
+    prefetch(project, 'wpscan', items, scan=scan, timeout=timeout, internal=internal)
+
 
 def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
     """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,

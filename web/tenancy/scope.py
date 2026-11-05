@@ -59,6 +59,7 @@ SCOPES = {
     'cveFeed.BountyReportEvent': 'report__project_id',
     'agentapi.AgentTask': 'project_id',
     'agentapi.SentinelTask': 'project_id',
+    'agentapi.StageRun': 'project_id',  # a sweep over every project waits with no project (NULLABLE)
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
     'cveFeed.FindingAuditEvent': 'project_id',
@@ -77,7 +78,7 @@ SCOPES = {
     'cveFeed.RunZeroSync': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.

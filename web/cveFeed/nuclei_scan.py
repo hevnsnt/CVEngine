@@ -530,6 +530,11 @@ def _chunk_size(stream, total):
     after each call, so a failure part way marks only the targets of the calls that did not finish. ``CVENGINE_STAGE_PARALLEL=1`` keeps the serial,
     100 at a time, behaviour exactly."""
     if getattr(stream, 'chunks_itself', False):
+        from agentapi import stage_runs
+        if stage_runs.current() is not None:
+            # the stage waits on Sentinels without its worker (agentapi.stage_runs): one call takes every target, the wrapper sends them in
+            # windows across its passes and the findings are saved once, when every chunk is in
+            return max(1, total)
         from agentapi.sentinel_dispatch import MAX_ADDRESSES, stage_parallel
         if stage_parallel() > 1:
             return max(NUCLEI_CHUNK, MAX_ADDRESSES * stage_parallel())
@@ -928,14 +933,16 @@ def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_tec
     by_host = {sub.name: sub for sub in subs}
     light = light_techs or {}
     profiles = {sub.name: host_profile(sub, light.get(sub.name, ())) for sub in subs}
-    groups, skipped = plan_targeting(profiles, provider)
+    from agentapi import stage_runs
+    # asked once: when the pass waits on Sentinels and a later pass continues it (agentapi.stage_runs), the plan is the one the AI gave first
+    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider))
     result = {'targets': 0, 'findings': 0, 'groups': len(groups), 'hosts': len(profiles) - len(skipped), 'skipped': len(skipped),
               'reused': 0}
     errors = []
     if skipped:
         activity.log('run_check', f'Targeted nuclei on {domain.name}: {len(skipped)} host(s) with nothing identified to aim at, '
                      f'left to the CVE checks', project=project, scan_id=scan.id)
-    for group in groups:
+    for number, group in enumerate(groups):
         for host in group['hosts'][:5]:
             sources = ', '.join(profile_sources(profiles[host]))
             activity.log('run_check', f'nuclei targeted scan of {host}: {", ".join(group["tags"][:8])}' +
@@ -945,8 +952,9 @@ def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_tec
                          project=project, scan_id=scan.id)
         targets = [t for host in group['hosts'] for t in _target_strings(by_host[host])]
         try:
-            out = run_nuclei(scan_id, stream=stream, tags=group['tags'], targets=targets,
-                             severities=list(group['severities']) or None, **({'force': True} if force else {}))
+            out = stage_runs.once(f'targeted_group:{number}', lambda: run_nuclei(  # a group a later pass finds done keeps its own counts
+                scan_id, stream=stream, tags=group['tags'], targets=targets, severities=list(group['severities']) or None,
+                **({'force': True} if force else {})))
         except Exception as exc:  # noqa: BLE001 - one group failing must not stop the others
             logger.exception('targeted nuclei group failed for scan %s', scan_id)
             errors.append(str(exc))
