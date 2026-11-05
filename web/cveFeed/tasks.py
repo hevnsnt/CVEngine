@@ -1307,6 +1307,7 @@ def automatic_validate_finding(job_id):
         row.refresh_from_db()
         ai_state = ('failed' if ai.get('errors') or row.status == 'error' else
                     'unavailable' if ai.get('not_triaged') or row.status == 'not_triaged' else
+                    'queued' if ai.get('asked') else  # the AI reviewer container answers it; the triage applies it when it lands
                     'deferred' if ai.get('queued') or row.status == 'pending' else 'completed')
         result = {'checks': checks, 'check_state': check_state, 'ai': ai, 'ai_state': ai_state,
                   'classification': row.classification, 'validation_status': row.validation_status,
@@ -1895,6 +1896,21 @@ def reviewer_ops_checks():
     involved; the reviewer container adds its diagnosis a few times a day."""
     from cveFeed import reviewer
     return reviewer.run_ops_checks()
+
+
+@app.task(name="apply_ai_job", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def apply_ai_job(job_id):
+    """The AI reviewer container answered one of the pipeline's AI jobs: continue its stage (``cveFeed.ai_jobs.apply``)."""
+    from cveFeed import ai_jobs
+    return ai_jobs.apply(job_id)
+
+
+@app.task(name="ai_jobs_housekeeping", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def ai_jobs_housekeeping():
+    """Every five minutes: leases that ran out go back to the queue, answers whose task was lost are applied, jobs never answered within
+    a week expire and their stage asks again (``cveFeed.ai_jobs.housekeeping``)."""
+    from cveFeed import ai_jobs
+    return ai_jobs.housekeeping()
 
 
 @app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")

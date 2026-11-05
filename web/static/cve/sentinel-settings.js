@@ -28,6 +28,7 @@ export const SENTINEL_KINDS = [
   "wpscan",
   "openvas",
   "discover",
+  "bbot_discovery",
   "http_probe",
   "dns_resolve",
 ];
@@ -42,6 +43,7 @@ const KIND_WORDS = {
   wpscan: "WPScan",
   openvas: "OpenVAS",
   discover: "internal discovery",
+  bbot_discovery: "bbot discovery",
   http_probe: "version probes",
   dns_resolve: "name resolution",
 };
