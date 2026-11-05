@@ -20,6 +20,7 @@ from dashboard.models import Org, Project
 from startScan.models import IpAddress, Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.test_client_library_detection import JQUERY_11023
+from tests import ai_queue
 
 RANGES = [e['ranges'] for e in JQUERY_11023 if e.get('product') == 'jQuery' or e.get('package') in ('jquery', 'jQuery', 'components/jquery',
 																									'org.webjars.npm:jquery')]
@@ -309,7 +310,7 @@ class Base(TestCase):
 
 	def rows(self):
 		pairs = triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
-		triage.run_triage(pairs, provider=None)
+		ai_queue.run_triage(pairs, provider=None)
 		return list(Triage.objects.order_by('pk'))
 
 	def validate(self, site, rows=None):
@@ -349,7 +350,7 @@ class Base(TestCase):
 		self.assertFalse(MatchVerdict.objects.exists())  # what this host showed is never shared with another host
 		self.assertFalse(TriageVerdict.objects.filter(classification='not_applicable').exists())
 		# the next triage keeps it closed: the closure is the guarded deterministic one
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=None)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=None)
 		m.refresh_from_db()
 		self.assertEqual(m.ai_verdict, 'not_affected')
 
@@ -645,7 +646,7 @@ class HotLaneTests(Base):
 		self.assertEqual(self.step(row)['result'], 'reaffirmed')
 		self.assertNotEqual(result.get('assessment_status'), 'closed_not_applicable')
 		# the next triage does not close it again
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=None)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=None)
 		m.refresh_from_db()
 		self.assertNotEqual(m.ai_verdict, 'not_affected')
 
