@@ -37,6 +37,18 @@ def installed():
     return shutil.which('wafw00f') is not None
 
 
+def runnable(project_id):
+    """Whether the stage has anything to run with: wafw00f here, or the work goes to a scanner (one is live for the kind, or the kind may not run
+    here, so the stage waits for one instead of being skipped)."""
+    if installed():
+        return True
+    from agentapi import sentinel_dispatch
+    if not sentinel_dispatch.fallback_allowed('waf'):
+        return True
+    project = sentinel_dispatch._project_of(project_id)
+    return project is not None and sentinel_dispatch.any_scanner_for(project, 'waf')
+
+
 def _int_env(name, default, floor):
     try:
         return max(floor, int(os.environ.get(name, default)))
@@ -131,7 +143,7 @@ def store_products(project, sub, products, scan=None):
 def persist_waf_result(project, host, result, scan=None):
     """Store a Sentinel's ``waf`` result (``agentapi.sentinel_broker.clean_result``, contract kind ``waf``) for ``host`` (the ``Subdomain`` the task was
     about) exactly as a local run would: the same product rules (``_named``) and the same storing function (``store_products``), so a product
-    is the same technology row whoever found it. Nothing calls this yet: the kind is dormant (docs/SCANNER-ARCHITECTURE.md). A result that is not
+    is the same technology row whoever found it. ``run_for_scan`` reaches the same rules through ``sentinel_dispatch.waf_outcome``. A result that is not
     ``done`` stores nothing and records nothing. Returns ``{'named': n, 'generic': bool, 'recorded': bool}``."""
     if not isinstance(result, dict) or result.get('outcome') != 'done':
         return {'named': 0, 'generic': False, 'recorded': False}
@@ -142,7 +154,7 @@ def persist_waf_result(project, host, result, scan=None):
     return {'named': named, 'generic': result.get('generic') is True and not products, 'recorded': True}
 
 
-def run_for_scan(scan_id, runner=run_wafw00f, force=False):
+def run_for_scan(scan_id, runner=None, force=False):
     """Fingerprint the WAF in front of every web host this scan found, bounded and TTL-gated. Each product is stored as a technology of the host.
     Returns a summary dict; never raises."""
     from cveFeed import activity, ledger
@@ -158,19 +170,61 @@ def run_for_scan(scan_id, runner=run_wafw00f, force=False):
     todo = [(s, u) for s, u in sites if s.name not in covered][:max_hosts()]
     if not todo:
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}
+    from agentapi import sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
+    try:
+        sentinel = runner is None and sentinel_dispatch.scanner_or_local(project, 'waf')  # an injected runner (a test) is never second-guessed
+        runner = runner or run_wafw00f
+    except ScannerUnavailable as exc:  # no scanner can take it and wafw00f may not run here: the hosts stay due
+        return {'checked': len(sites), 'tested': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log('run_check', f'Fingerprinting the web application firewall of {len(todo)} host(s) of {domain.name} with wafw00f',
                            project=project, status='running', scan_id=scan.id)
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        results = list(pool.map(lambda site: runner(site[1]), todo))
+    waiting = None
+    if sentinel:
+        results, left = [None] * len(todo), []
+        try:
+            for index, result in sentinel_dispatch.dispatch_each(
+                    project, 'waf', todo, lambda site: sentinel_dispatch.waf_target(site[1], _address_of(site[0], project.id)), scan=scan,
+                    label_of=lambda site: site[0].name, ips_of=lambda site: [a for a in [_address_of(site[0], project.id)] if a]):
+                if result is None:
+                    left.append(index)  # no Sentinel did it (or the host has no address to hand one): wafw00f runs here, as before
+                else:
+                    results[index] = sentinel_dispatch.waf_outcome(result)
+        except ScannerUnavailable as exc:  # what the scanner finished is stored below; the rest stays due
+            waiting, left = exc, []
+        if left and not sentinel_dispatch.fallback_allowed('waf'):
+            waiting = waiting or ScannerUnavailable('waf', 'the host has no address a scanner may be sent to')
+            left = []  # never run here: those hosts stay due
+        for index in left:
+            results[index] = run_wafw00f(todo[index][1])
+    else:
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            results = list(pool.map(lambda site: runner(site[1]), todo))
     named = generic = errors = 0
     for (sub, _url), result in zip(todo, results):
+        if result is None:
+            continue  # waiting for a scanner: not asked, not recorded
         if result.get('error'):
             errors += 1
             continue  # not recorded: the host is asked again on the next scan
         if result.get('generic'):
             generic += 1
         named += store_products(project, sub, result.get('products') or [], scan)
+    tested = sum(r is not None for r in results)
     activity.settle(running, 'done', message=(
-        f'wafw00f for {domain.name}: {named} firewall(s) named on {len(todo)} host(s)'
-        + (f', {generic} blocked without a known product' if generic else '') + (f', {errors} failed' if errors else '')))
-    return {'checked': len(sites), 'tested': len(todo), 'named': named, 'generic': generic, 'errors': errors, 'reused': len(covered)}
+        f'wafw00f for {domain.name}: {named} firewall(s) named on {tested} host(s)'
+        + (f', {generic} blocked without a known product' if generic else '') + (f', {errors} failed' if errors else '')
+        + (f'; {len(todo) - tested} waiting: no scanner could take this work ({waiting.kind})' if waiting else '')))
+    out = {'checked': len(sites), 'tested': tested, 'named': named, 'generic': generic, 'errors': errors, 'reused': len(covered)}
+    if waiting:
+        out['skipped'] = f'no scanner could take this work ({waiting.kind})'
+    return out
+
+
+def _address_of(sub, project_id):
+    """The first address of ``sub`` the scanners may reach: the one a dispatched wafw00f is told to expect, or ``None``."""
+    from targetApp.target_types import is_scannable_ip
+    for address in sub.ip_addresses.values_list('address', flat=True).order_by('id'):
+        if address and is_scannable_ip(address, project=project_id):
+            return address
+    return None

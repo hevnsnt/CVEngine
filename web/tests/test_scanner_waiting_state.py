@@ -12,7 +12,7 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import scanner_state, sentinel_contract, sentinel_dispatch
+from agentapi import scanner_state, sentinel_broker, sentinel_contract, sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import conductor, testssl_scan, udp_scan, wpscan_scan
@@ -58,7 +58,9 @@ class SentinelWorld(FallbackEnv):
         self.project = Project.objects.create(name='W', slug='waiting-p', insert_date=timezone.now(), org=self.org)
         self.count = 0
 
-    def sentinel(self, capabilities, status='active', seen='now', token_revoked=False):
+    def sentinel(self, capabilities, status='active', seen='now', token_revoked=False, builtin=False):
+        """A Sentinel of this project that speaks the current contract. ``builtin``: it is the install's own scanner, the only one offered the kinds
+        ``sentinel_broker.BUILTIN_KINDS`` names."""
         self.count += 1
         user = User.objects.create_user(f'waiting-owner-{self.count}', password='x')
         token, _raw = create_token(user, f'waiting-token-{self.count}')
@@ -66,9 +68,14 @@ class SentinelWorld(FallbackEnv):
             token.revoked = True
             token.save(update_fields=['revoked'])
         last_seen = {'now': timezone.now(), 'old': timezone.now() - timedelta(hours=2), None: None}[seen]
-        return Agent.objects.create(token=token, name=f'sentinel-{self.count}', kind='scanner', status=status, capabilities=capabilities,
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen,
-                                    info={'contract_version': sentinel_contract.version()})  # it speaks the current contract: every kind is its to run
+        agent = Agent.objects.create(token=token, name=f'sentinel-{self.count}', kind='scanner', status=status, capabilities=capabilities,
+                                     scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, last_seen=last_seen,
+                                     info={'contract_version': sentinel_contract.version()})
+        if builtin:
+            patcher = mock.patch('agentapi.sentinel_broker.builtin_pk', return_value=agent.pk)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return agent
 
 
 class HelperTests(SentinelWorld, TestCase):
@@ -133,15 +140,17 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertFalse(scanner_state.is_waiting('nmap'))
         self.assertTrue(scanner_state.is_waiting('testssl'))
 
-    def test_a_kind_no_stage_dispatches_never_waits(self):
+    def test_a_kind_only_the_built_in_scanner_takes_waits_while_only_an_external_sentinel_declares_it(self):
         self.policy('none')
-        self.sentinel(['nmap'])
-        self.assertNotIn('waf', scanner_state.state()['kinds'])
+        self.sentinel(ALL_KINDS)
+        self.assertEqual(scanner_state.state()['kinds'], [k for k in ALL_KINDS if k in sentinel_broker.BUILTIN_KINDS])
+        self.assertTrue(scanner_state.is_waiting('path_probe'))
         self.assertFalse(scanner_state.is_waiting('waf'))
 
     def test_a_live_sentinel_for_every_kind_is_not_offline(self):
         self.policy('none')
         self.sentinel(ALL_KINDS)
+        self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)  # the kinds only the install's own scanner takes
         self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
     def test_a_registered_sentinel_that_is_not_live_waits_but_was_seen(self):
@@ -391,6 +400,7 @@ class SystemStatusTests(SentinelWorld, TestCase):
     def test_a_live_scanner_for_everything_is_quiet(self):
         self.policy('none')
         self.sentinel(ALL_KINDS)
+        self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)  # the kinds only the install's own scanner takes
         scanner = self.status(self.t_root)['scanning']['scanner']
         self.assertFalse(scanner['offline'])
 

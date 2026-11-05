@@ -13,6 +13,20 @@ It needs nothing from you. A new install starts it (`sudo ./install.sh`), an upd
 - **Its memory** is limited to 2 GB (`SCANNER_MEM_LIMIT`; the installer writes 1 GB on a host with less than about 7 GB). See [DEPLOYMENT.md](DEPLOYMENT.md#memory).
 - **It never updates itself.** The server's updater replaces its image ([UPDATES.md](UPDATES.md#the-built-in-scanner)).
 
+## What moves, and what does not
+
+What moves to the scanner is the work that already is a Sentinel task kind: the nmap fast scan, the naabu sweep, the nuclei light, targeted and deep passes, testssl, the UDP sweep and the WPScan quick pass, and since 1.4 (contract version 3) the all-ports nmap sweep and the version pass after it, the nmap script probe of a single port, wafw00f, the node2shell check, the database exposure probes, the RDP login-screen screenshot (the AI reading of it stays on the server), the scan path check and the AI template check. The last two go only to the built-in scanner. With `CVENGINE_LOCAL_FALLBACK=none` those are never run on the server again; a stage that needs one waits for a scanner instead.
+
+What does **not** move yet, and so still runs on the server (the celery container) whatever the scanner does:
+
+- bbot discovery (the work conductor goes on starting it);
+- the HTTP and version probes and the other in-process probes: route and signed-out checks, other sites on an address (vhost), applications under a path, cloud storage buckets, suppliers, retired-name checks, DNS and mail hygiene;
+- the thorough WPScan pass;
+- signed-in nuclei passes and signed-in template tests, which use a stored credential;
+- the maintainer's approval of a reviewed AI template (a loopback fixture) and `nuclei -update-templates`.
+
+So "scanner offline" does not mean no traffic leaves the server: those checks keep going while the scanner is down, and only the kinds taken off the list wait. The full inventory is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#what-exists-today).
+
 ## How it enrols, and re-enrols
 
 The server (`agentapi/builtin_scanner.py`, at celery's start and then every five minutes) keeps one instance-wide enrollment ready, owned by the oldest App Admin, and writes it as a provisioning blob to `/var/lib/cvengine-scanner/blob` on the `scanner_bootstrap` volume, which only celery (writes) and the scanner (reads) mount. The scanner reads it from that file (`CVENGINE_SENTINEL_BLOB_FILE`), redeems it once and keeps its token in the `scanner_state` volume. The installer writes the first blob right after it creates the admin account, so a new install has its scanner enrolled within a minute or two.

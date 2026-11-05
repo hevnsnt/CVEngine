@@ -330,6 +330,7 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'wafw00f': [
+        'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
         'agentapi/sentinel_broker.py',
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',
