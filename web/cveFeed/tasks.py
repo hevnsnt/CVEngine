@@ -1740,6 +1740,8 @@ def weekly_deep_nuclei():
     from overlapping another. The cursor and successful-only seven-day ledger make
     progress durable without queuing thousands of deep jobs at once.
     """
+    from cvengine_scanner import flags as scan_flags
+
     from cveFeed import activity, ledger, nuclei_scan
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
@@ -1787,7 +1789,7 @@ def weekly_deep_nuclei():
             if sub.name not in hostnames:
                 continue
             targets = [sub.name] + [f'{sub.name}:{port}' for host, port in sorted(ports)
-                                    if host == sub.name and port not in nuclei_scan.DEFAULT_PORTS][:20]
+                                    if host == sub.name and port not in scan_flags.NUCLEI_DEFAULT_PORTS][:20]
             BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=sub.pk, updated_at=timezone.now())
             run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
                                project=project_id, status='running', scan_id=sub.scan_history_id)

@@ -210,8 +210,6 @@ class ToolFragmentTests(ProxyOn, TestCase):
 
 class IntegrationTests(ProxyOn, TestCase):
     def test_argv_builders_add_the_proxy_only_when_given(self):
-        self.assertNotIn('-proxy', nuclei_scan.build_flags())
-        self.assertEqual(nuclei_scan.build_flags(proxy_args=['-proxy', HTTP_PROXY])[-2:], ['-proxy', HTTP_PROXY])
         self.assertNotIn('--proxy', wpscan_scan.wpscan_args(600))
         self.assertEqual(wpscan_scan.wpscan_args(600, proxy_args=['--proxy', HTTP_PROXY])[-2:], ['--proxy', HTTP_PROXY])
         self.assertNotIn('--proxy', testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x'))

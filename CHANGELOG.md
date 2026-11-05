@@ -29,8 +29,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Changed
 
 - **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in
-  `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection) and the nmap
-  parser. The server's own copies are gone, so a Sentinel and the server read a host the same way. Nothing changes in what is found or stored.
+  `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection), the nmap
+  parser, and the scan flags and policy constants (nuclei's `-etags dos`, the reviewed NSE scripts, the UDP port list, the probe ports). The
+  server's own copies are gone, so a Sentinel and the server scan and read a host the same way. Nothing changes in what is run, found or stored.
 
 ## v1.3.5 (2026-11-04)
 

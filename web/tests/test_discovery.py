@@ -5,6 +5,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import activity, discovery
 from cveFeed.models import AgentActivity, CVEEntry, DiscoveryEvent
 from dashboard.models import Org, Project, UserProfile
@@ -598,7 +600,7 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(ns.host_of({'host': 'https://Www.Example.test:8443/x'}), 'www.example.test')
 		self.assertEqual(ns.host_of({'host': 'www.example.test:8443'}), 'www.example.test')
 		self.assertEqual(ns.host_of({'host': 'www.example.test'}), 'www.example.test')
-		self.assertIn('info', ns.SEVERITIES.split(','))  # info severity is scanned
+		self.assertIn('info', scan_flags.NUCLEI_SEVERITIES.split(','))  # info severity is scanned
 
 	def _pipeline(self, events=EVENTS, **overrides):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):

@@ -50,6 +50,8 @@ import os
 import re
 import time
 
+from cvengine_scanner.flags import NSE_FLAGS, port_argument
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WATCH = '25,465,587,23,3389'
@@ -182,11 +184,6 @@ def fallback_cap(kind):
 
 
 # --- port lists on command lines --------------------------------------------------------------------------------------
-
-def port_argument(ports):
-    from cveFeed.naabu_scan import port_argument as arg
-    return arg(ports)
-
 
 def _expand(argument):
     """The ports of an nmap ``-p`` argument with no protocol prefixes (``"22,80,8000-8010"``), or None when it has prefixes or is ``-``."""
@@ -940,8 +937,7 @@ def settle_owed(port, entries):
 
 def catch_up_flags(port):
     """The paced pass over one port: the fingerprinting pass's own service detection and scripts, on that port alone."""
-    from cveFeed import nmap_scan
-    return ['-sV', '--version-intensity', '7', '-Pn', '-T4', '--max-retries', '2', *nmap_scan.NSE_FLAGS, '-p', str(int(port))]
+    return ['-sV', '--version-intensity', '7', '-Pn', '-T4', '--max-retries', '2', *NSE_FLAGS, '-p', str(int(port))]
 
 
 CATCH_UP_LOCK = f'{PREFIX}:catch-up-lock'

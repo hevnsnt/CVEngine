@@ -840,20 +840,21 @@ def _nuclei_target(kind, targets, kwargs):
     """The target of a dispatched nuclei task: the targets, the tags and severities this pass would run with locally, and the template policy the
     local run applies. The light pass is nuclei's technology fingerprint (``-tags tech -severity info``): ``run_light_nuclei`` asks for it with a
     ``tech`` flag only the unwrapped local stream takes, so the Sentinel is told the same here, or it would run the whole template library at
-    every severity and the stage would time out. ``etags`` are the tags the local run always leaves out (``nuclei_scan.BASE_FLAGS``, ``dos``) and
+    every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
     ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
     nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
     ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
     cached, else on the first policy request)."""
+    from cvengine_scanner import flags as scan_flags
+
     from agentapi import template_bundle
     from cveFeed import nuclei_scan
-    # no severities given: the local run's own default (``nuclei_scan.SEVERITIES``, info to critical), sent as a list, since a client given none
+    # no severities given: the local run's own default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included, and the two runs of one pass would not agree
-    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or nuclei_scan.SEVERITIES.split(','))
+    tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
     if kind == 'nuclei_light' or kwargs.get('tech'):
         tags, severities = ['tech'], ['info']
-    flags = nuclei_scan.BASE_FLAGS
-    etags = flags[flags.index('-etags') + 1].split(',') if '-etags' in flags else []
+    etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
     rev = nuclei_scan.policy_rev()
     return {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
             'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()}}

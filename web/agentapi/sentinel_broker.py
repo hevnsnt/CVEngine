@@ -694,7 +694,7 @@ def _address(value):
 
 def _bare(host):
     """The hostname or address inside a nuclei target or result host (a bare host, ``host:port`` or a URL), lowercased."""
-    from cveFeed.nuclei_scan import host_of
+    from cvengine_scanner.flags import host_of
     return host_of({'host': host if isinstance(host, str) else ''})
 
 
@@ -1822,7 +1822,7 @@ def _clean_naabu_result(body):
     ports = body.get('ports')
     if not isinstance(ports, dict) or len(ports) > MAX_ADDRESSES:
         raise ApiError(400, f'ports must be an object of at most {MAX_ADDRESSES} addresses')
-    from cveFeed.naabu_scan import MAX_OPEN_PER_IP
+    from cvengine_scanner.flags import MAX_OPEN_PER_IP
     out = {}
     for ip, values in ports.items():
         ip = _address(ip) if isinstance(ip, str) else None
