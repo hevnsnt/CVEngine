@@ -229,7 +229,7 @@ class SentinelDefaults(models.Model):
     # Sentinel with no policy of its own for a kind. ``builtin_kinds`` is for the install's own scanner (``None``: nothing was ever chosen, so the shipped
     # default applies: OpenVAS denied; ``{}``: an administrator chose no defaults), ``external_kinds`` for every other Sentinel (empty: all declared kinds allowed).
     builtin_kinds = models.JSONField(null=True, blank=True, default=None)
-    external_kinds = models.JSONField(blank=True, default=dict)
+    external_kinds = models.JSONField(blank=True, default=dict, db_default={})  # db_default: the code still running during an update inserts without it
     changed_by = models.CharField(max_length=150, blank=True, default='')
     changed_at = models.DateTimeField(null=True, blank=True)
 
