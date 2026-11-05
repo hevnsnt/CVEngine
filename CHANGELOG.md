@@ -19,6 +19,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
   The defences follow the attacks SpikeStrip and wraith describe. Settings, AI model has the switches (`GET/PUT /cve/api/settings/reviewer`); `CVENGINE_REVIEWER=0` turns it off. Migrations `cveFeed.0144` and `cveFeed.0145` add the review, alert and settings tables and the two schedules.
 
+### Changed
+
+- **One copy of the scanner code.** The server now imports the scanner library (`cvengine_scanner`, from the Sentinel repository, pinned in
+  `web/requirements.txt`) for the web fingerprint readers (technologies, CMS versions, version headers, soft-404 detection) and the nmap
+  parser. The server's own copies are gone, so a Sentinel and the server read a host the same way. Nothing changes in what is found or stored.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes
