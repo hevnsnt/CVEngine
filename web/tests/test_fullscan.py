@@ -5,6 +5,8 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from cveFeed import discovery, fullscan, nmap_scan
 from cveFeed.models import AgentActivity, AssetChange, HostState, ServiceRun
 from dashboard.models import Org, Project
@@ -138,7 +140,7 @@ class SweepTests(FullScanBase):
 		calls = []
 		out = fullscan.run(runner=self.runner(xml('192.0.2.1', [(22, 'ssh'), (9999, 'x')]), calls), fingerprint_runner=self.runner(''),
 			pipeline=lambda d, n: None)
-		self.assertEqual(calls, [(['192.0.2.1'], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL)])
+		self.assertEqual(calls, [(['192.0.2.1'], scan_flags.NMAP_FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL)])
 		ip.refresh_from_db()
 		self.assertIsNotNone(ip.full_scanned_at)
 		self.assertEqual(ip.full_scan_ports, 2)
@@ -286,7 +288,7 @@ class SweepTests(FullScanBase):
 
 	def test_the_default_runner_uses_the_background_heavy_job(self):
 		with mock.patch('cveFeed.nmap_scan.run_nmap_xml', return_value='') as run:
-			fullscan._sweep_runner(['192.0.2.1'], nmap_scan.FULL_PORT_FLAGS, '10m')
+			fullscan._sweep_runner(['192.0.2.1'], scan_flags.NMAP_FULL_PORT_FLAGS, '10m')
 		self.assertEqual(run.call_args.kwargs['kind'], 'nmap-full-bg')
 
 	def test_the_schedule_migration_created_the_periodic_task(self):

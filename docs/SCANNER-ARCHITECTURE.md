@@ -90,7 +90,14 @@ re-exported under its old name. Two parts stay on the server because they are no
 - the CMS version evidence a probe stored (`cveFeed/cms_evidence.py`: `attested`, `superseded`). It reads `ProbeObservation` rows and
   applies the library's `cms.disproven` to them.
 
-The server's copies of the flag builders and policy constants are deleted in a follow-up PR.
+The flag builders and policy constants are the library's too (`cvengine_scanner.flags`), and the server has no copies of them:
+- the nuclei run (`nuclei_flags`, with `-etags dos` always, `NUCLEI_SEVERITIES`, `NUCLEI_DEFAULT_PORTS`, `host_of`);
+- the nmap fingerprint and full-port flags, the reviewed NSE scripts and `reviewed_scripts`, `EXTRA_PORTS` and `TOP_PORTS`;
+- the UDP sweep (`udp_nmap_flags`, `UDP_PORTS`), `port_argument`, `CLOSED_PROBE_PORTS`, `MAX_OPEN_PER_IP`;
+- the version probe's per-service scripts (`probe_nmap_flags`) and `KERNEL_MARKERS`.
+
+A server module still names a constant where its own callers read it (`nmap_scan.FAST_FLAGS`, `udp_scan.DEFAULT_PORTS`, `naabu_scan.port_argument`).
+Each of those names is an import of the library's value, never a copy.
 
 ### E. Stays on the server
 
@@ -157,7 +164,8 @@ which send nothing to the target and need no vantage point.
 5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (the switch exists: unset or `all` is today's behavior, `none` or a list of kinds takes kinds off the list; see the note below), delete each local path after the telemetry shows no fallbacks
    for a set number of days. Add the missing kinds from section B as they move.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
-   and the server imports it for the fingerprint readers and the nmap parser; see section D for the status of the flags.
+   and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
+   source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
 8. Drop the scan tools, Go and bbot from the server image.
 

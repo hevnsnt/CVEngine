@@ -15,10 +15,11 @@ import threading
 import time
 from urllib.parse import urlparse
 
+from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of, nuclei_flags
+
 logger = logging.getLogger(__name__)
 
 NUCLEI_BIN = 'nuclei'
-SEVERITIES = 'info,low,medium,high,critical'
 DEFAULT_NUCLEI_TIMEOUT = 4 * 3600
 
 
@@ -29,17 +30,9 @@ def nuclei_timeout():
         return SystemTimings.current().nuclei_timeout_hours * 3600
     except Exception:  # noqa: BLE001
         return DEFAULT_NUCLEI_TIMEOUT
-DEFAULT_PORTS = (80, 443)
 NUCLEI_CHUNK = 100  # targets per nuclei process: a memory kill then only repeats one chunk
-BASE_FLAGS = ['-severity', SEVERITIES, '-jsonl', '-silent', '-duc', '-ni', '-nc', '-rl', '150', '-c', '40',
-              '-timeout', '10', '-retries', '1', '-etags', 'dos']
-
-
-# A lighter run for when the normal one was stopped for lack of memory: fewer hosts in parallel, a gentler rate.
-LIGHT_FLAGS = {'-rl': '50', '-c': '10'}
-
-
-TECH_FLAGS = ['-tags', 'tech']
+# A run's flags (``-etags dos`` on every run, the light profile for a memory-constrained retry, the tech pass, a signed-in run) and the ports a
+# bare host is probed on are the scanner library's (cvengine_scanner.flags.nuclei_flags, NUCLEI_DEFAULT_PORTS), shared with every Sentinel.
 TEMPLATE_POLICY_REV = 'readonly-2'
 ALL_TEMPLATES_REV = 'all-1'
 _APPROVED = {'root': None, 'at': 0, 'value': None}
@@ -205,32 +198,6 @@ def cve_service(cve_id):
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
-def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None, secret_file=None, proxy_args=()):
-    """Pure: the nuclei CLI flags for a run, optionally narrowed to ``tags`` (an iterable of tag names
-    already validated against a known-safe allowlist by the caller - see cveFeed.nuclei_templates).
-    ``profile='light'`` lowers concurrency and rate for a memory-constrained retry. ``severities`` narrows the severity
-    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity). ``secret_file`` (the
-    path of a nuclei secrets file, see cveFeed.auth_checks) makes it an authenticated run: nuclei reads the headers from that file, so no
-    value is ever on the command line, and ``-dr`` stops it following redirects, which could carry a header to another host. ``proxy_args`` is the
-    egress proxy's argument list (``cveFeed.egress_proxy.for_tool('nuclei')``, empty for a direct run)."""
-    flags = list(BASE_FLAGS)
-    if templates_dir:
-        flags += ['-t', templates_dir]
-    if severities or tech:
-        flags[flags.index('-severity') + 1] = ','.join(severities) if severities else 'info'
-    if profile == 'light':
-        for flag, value in LIGHT_FLAGS.items():
-            flags[flags.index(flag) + 1] = value
-        flags += ['-bs', '10']
-    if tech:
-        flags += TECH_FLAGS
-    elif tags:
-        flags += ['-tags', ','.join(sorted(tags))]
-    if secret_file:
-        flags += ['-sf', secret_file, '-dr']
-    return flags + list(proxy_args)
-
-
 def build_targets(hostnames, ips, ports):
     """Pure: the target list for nuclei. ``ports`` is an iterable of (host, port)."""
     targets = []
@@ -245,17 +212,9 @@ def build_targets(hostnames, ips, ports):
     for ip in sorted(ips):
         add(ip)
     for host, port in sorted(ports):
-        if port not in DEFAULT_PORTS:
+        if port not in NUCLEI_DEFAULT_PORTS:
             add(f'{host}:{port}')
     return targets
-
-
-def host_of(line):
-    """Hostname or IP of a nuclei result line (``host`` may be a URL or host:port)."""
-    raw = (line.get('host') or line.get('ip') or '').strip()
-    if '://' in raw:
-        return (urlparse(raw).hostname or '').lower()
-    return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
 
 
 def _target_host(target):
@@ -293,7 +252,7 @@ def _target_ports(target):
         tail = raw.rsplit(':', 1)[1] if not raw.endswith(']') else ''
         if tail.isdigit():
             return [int(tail)]
-    return list(DEFAULT_PORTS)
+    return list(NUCLEI_DEFAULT_PORTS)
 
 
 def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
@@ -386,7 +345,7 @@ def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', seve
             targets_file = on_start()  # the egress governor's say at the start (cveFeed.local_egress): the targets to run, or None
             if targets_file is None:
                 return
-        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
+        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *nuclei_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
                                 stderr=stderr, text=True, bufsize=1, start_new_session=True)
         job.attach(proc)
         timed_out = threading.Event()
@@ -841,7 +800,7 @@ def _target_strings(sub):
     from startScan.models import open_ports
     out = [sub.name]
     for ip in sub.ip_addresses.all():
-        out += [f'{sub.name}:{p.number}' for p in open_ports(ip) if p.number not in DEFAULT_PORTS]
+        out += [f'{sub.name}:{p.number}' for p in open_ports(ip) if p.number not in NUCLEI_DEFAULT_PORTS]
     return list(dict.fromkeys(out))
 
 
