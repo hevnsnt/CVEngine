@@ -57,8 +57,10 @@ except ValueError:
 ALLOWED_HOSTS = list(dict.fromkeys(host for host in (
     _site_host, 'localhost', '127.0.0.1', '[::1]',
     *(item.strip() for item in env('CVENGINE_ALLOWED_HOSTS', default='').split(',')),
-    # the built-in scanner container reaches this server by its compose service name; only when that scanner is switched on (agentapi.builtin_scanner)
-    *(['web'] if env('CVENGINE_BUILTIN_SCANNER', default='').strip().lower() in ('1', 'true', 'yes', 'on') else []),
+    # the built-in scanner and the AI reviewer containers reach this server by its compose service name: only while one of them is switched on
+    # (agentapi.builtin_scanner: CVENGINE_BUILTIN_SCANNER, off unless set; cveFeed.reviewer.env_enabled: CVENGINE_REVIEWER, on unless set to 0)
+    *(['web'] if (env('CVENGINE_BUILTIN_SCANNER', default='').strip().lower() in ('1', 'true', 'yes', 'on')
+                  or env('CVENGINE_REVIEWER', default='1').strip().lower() not in ('0', 'false', 'no', 'off')) else []),
 ) if host))
 # Behind a TLS-terminating proxy Django sees plain http, while browsers send "Origin: https://<site>"; since Django 4
 # that mismatch fails every POST with "CSRF verification failed". The shipped nginx overwrites X-Forwarded-Proto itself, so
