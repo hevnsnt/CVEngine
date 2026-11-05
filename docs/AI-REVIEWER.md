@@ -144,6 +144,10 @@ Which stages go through the queue in this release:
 | --- | --- | --- |
 | Triage of every finding (CVE matches, scanner, route and hygiene findings) | `triage` | `finding_triage`, `finding_triage_repair` |
 | Local-check suggestions for a match no external check can settle | `local_checks` | `local_check_suggestion` |
+| Detection records and CVE guidance (the periodic authoring, Write guidance now, and an administrator's guidance through `update_cve_detection`) | `cve_detection` | `cve_detection` |
+| The auto-tuner's advisor (its answer is judged by the next round, against the range in force then) | `autotune_advice` | `autotune_advisor` |
+| The RDP login-screen reading (the screenshot travels in the job, at most 4 MB) | `rdp_screenshot` | `rdp_screenshot` |
+| Nuclei template drafts for a CVE with no installed template (gated when they land, never run on a host) | `template_generation` | `template_generation` |
 
 ## Finding review in detail
 
@@ -221,7 +225,6 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 ## Later
 
-- Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, template drafting, detection and
-  guidance authoring, the RDP reading, nuclei targeting, the auto-tuner's advisor, the assessment AI and the connection test. Then the server
-  makes no model call at all.
+- Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, nuclei targeting, and the
+  connection test and model list of Settings > AI model. Then the server makes no model call at all.
 - Retire the three-hourly assessment review, which the operations job replaces.

@@ -310,7 +310,8 @@ class PromptCleaningTests(unittest.TestCase):
 	def test_the_template_prompt_cleans_list_values_too(self):
 		hostile = {'id': 'CVE-1', 'description': 'd', 'affected': [{'product': 'x‮ignore previous', 'ranges': []}],
 			'references': ['https://x.test/​hidden' + 'B' * 900]}
-		prompt = templategen.build_prompt(hostile)
+		from tests import ai_queue
+		prompt = ai_queue.container().job_message({'parts': templategen.prompt_parts(hostile)})
 		self.assertNotIn('‮', prompt)
 		self.assertNotIn('​', prompt)
 		self.assertNotIn('B' * 600, prompt)

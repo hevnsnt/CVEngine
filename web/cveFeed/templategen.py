@@ -22,7 +22,7 @@ import tempfile
 import yaml
 
 from cveFeed.safeyaml import load_template
-from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text, untrusted_block
+from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,10 @@ def _clean_value(value, limit, depth=0):
     return value
 
 
-def build_prompt(cve_info):
+def prompt_parts(cve_info):
+    """The user message of a template draft (cveFeed.ai_jobs): the request, and the CVE feed's data fenced by the AI reviewer container."""
     safe = {k: _clean_value(v, 4000 if isinstance(v, str) else 500) for k, v in cve_info.items()}
-    return "Write a nuclei detection template for this CVE:\n" + untrusted_block("CVE", safe)
+    return [{'text': 'Write a nuclei detection template for this CVE:'}, {'fence': 'CVE', 'data': safe}]
 
 
 def extract_yaml(text):
@@ -1003,56 +1004,65 @@ def _generation_lease(cve):
     last = recent.order_by('-created_at').first()
     if last is not None:
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} was already attempted on {last.created_at:%Y-%m-%d} ({last.status})')
-    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+    from cveFeed.models import AIJob
+    asked = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), status__in=AIJob.OPEN).count()
+    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
         raise TemplateBudgetExceeded('the daily AI template budget is spent')
+    if AIJob.objects.filter(kind='template_generation', dedupe=f'template:{cve.pk}', status__in=AIJob.OPEN).exists():
+        raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
     key = f'cvengine:templategen:{cve.pk}'
     if not cache.add(key, 1, timeout=15 * 60):
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
     return key
 
 
-def generate_template(cve, provider, project=None, candidate_only=True):
-    """Ask the AI for a template and gate it. On-demand candidates stay drafts after a benign fixture test. Raises
-    TemplateBudgetExceeded instead of calling the AI when the generation budget does not allow an attempt."""
+def generate_template(cve, project=None, candidate_only=True):
+    """Ask the AI for a template: one job queued for the AI reviewer container (cveFeed.ai_jobs). When it lands, ``job_answer`` gates it
+    (static check, nuclei -validate, the benign fixture) and keeps it as a draft: an AI template is never installed or run on a host
+    without independently reviewed positive fixture evidence. Raises TemplateBudgetExceeded instead of asking when the generation budget
+    does not allow an attempt. Returns the job."""
     if not candidate_only:
         raise ValueError('an AI template requires independently reviewed positive fixture evidence before installation')
     from django.core.cache import cache
+    from cveFeed import activity, ai_jobs
     key = _generation_lease(cve)
     try:
-        return _generate_template(cve, provider, project)
+        # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the
+        # prompt is masked
+        job = ai_jobs.enqueue('template_generation', 'template_generation', system=SYSTEM_PROMPT, parts=prompt_parts(cve_info_for(cve)),
+                              options={'redact_reply': False}, context={'cve': cve.pk, 'project': project}, project=project,
+                              dedupe=f'template:{cve.pk}', priority=7)
+        activity.log('write_check', f'Asked the AI reviewer container to write a nuclei check for {cve.cve_id}', project=project,
+                     cve_id=cve.cve_id)
+        return job
     finally:
         cache.delete(key)
 
 
-def _generate_template(cve, provider, project):
-    from cveFeed.models import GeneratedTemplate
+def _job_model(job):
+    return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
 
+
+def job_answer(job, text):
+    """The model's template arrived: gated as before (static check, then nuclei -validate and the benign fixture in a private scratch
+    directory: nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid."""
+    from cveFeed.models import CVEEntry, GeneratedTemplate
     from cveFeed import activity
-    with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
-                       project=project, cve_id=cve.cve_id) as handle:
-        from reNgine.ai_providers import request_options, usage_stage
-        try:
-            # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the prompt is masked
-            with usage_stage('template_generation'), request_options(redact_reply=False):
-                text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
-        except Exception as exc:
-            # a failed provider call is still a billable attempt: leave the ledger row, so the next run does not retry this CVE at once
-            GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID,
-                                             ai_model=f"{provider.name}:{provider.model}"[:128],
-                                             validation_output=f'the AI provider call failed ({type(exc).__name__}); no template was written')
-            raise
-        handle.done_message = f'Wrote a nuclei check for {cve.cve_id}'
+    cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
+    if cve is None:
+        return None
+    project = job.context.get('project')
+    text = extract_yaml(text)
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
-    tmpl = GeneratedTemplate(
-        cve_entry=cve, yaml=text, ai_model=f"{provider.name}:{provider.model}",
-        template_id=(load_template(text) or {}).get("id", "") if ok else "")
+    tmpl = GeneratedTemplate(cve_entry=cve, yaml=text, ai_model=_job_model(job)[:128],
+                             template_id=(load_template(text) or {}).get("id", "") if ok else "")
     if not ok:
         tmpl.status, tmpl.validation_output = GeneratedTemplate.STATUS_INVALID, f"static check: {reason}"
         tmpl.save()
-        return tmpl
+        activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
+        return None
     with activity.step('validate', f'Validating the check for {cve.cve_id} (safety gate and nuclei -validate)',
                        project=project, cve_id=cve.cve_id) as handle:
-        # validated in a private scratch directory: nothing unvalidated ever exists under GENERATED_DIR
         with tempfile.TemporaryDirectory(prefix="cvengine-validate-") as scratch:
             candidate = os.path.join(scratch, f"{tmpl.template_id}.yaml")
             with open(candidate, "w") as f:
@@ -1068,7 +1078,16 @@ def _generate_template(cve, provider, project):
     tmpl.validation_output = (output + '\nRequires a reviewed positive fixture before execution on a customer host.'
                               if valid else output)
     tmpl.save()
-    return tmpl
+    return None
+
+
+def job_failure(job, category, detail):
+    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once."""
+    from cveFeed.models import CVEEntry, GeneratedTemplate
+    cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
+    if cve is not None:
+        GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID, ai_model=_job_model(job)[:128],
+                                         validation_output=f'the AI provider call failed ({category}); no template was written')
 
 
 def _severity_of(cvss, fallback):
@@ -1151,8 +1170,8 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     return saved
 
 
-def run_cve_tests(cve, hosts, provider=None, project=None):
-    """Stage 7: test with a policy-approved installed template, or save an unrun draft.
+def run_cve_tests(cve, hosts, ai=False, project=None):
+    """Stage 7: test with a policy-approved installed template, or (``ai``) ask for an unrun draft.
 
     Returns {'source': 'existing'|'candidate'|'none', 'template': path/id, 'results': [...]}.
     """
@@ -1165,15 +1184,15 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
     if safe_path:
         path, source, tmpl = safe_path, "existing", None
     else:
-        if provider is None:
+        if not ai:
             return {"source": "none", "template": "", "results": [], "reason": reason or "no AI provider configured"}
         try:
-            tmpl = generate_template(cve, provider, project=project, candidate_only=True)
+            job = generate_template(cve, project=project, candidate_only=True)
         except TemplateBudgetExceeded as exc:
             activity.log('write_check', f'Not writing a nuclei check for {cve.cve_id}: {exc}', project=project, cve_id=cve.cve_id)
             return {"source": "none", "template": "", "results": [], "reason": str(exc)}
-        return {"source": "candidate" if tmpl.status == tmpl.STATUS_DRAFT else "none",
-                "template": tmpl.template_id, "results": [], "reason": tmpl.validation_output}
+        return {"source": "candidate", "template": "", "results": [], "job": job.pk,
+                "reason": "an AI draft is being written; it is validated when it lands and is never run on a host before a person reviews it"}
     results = []
     evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
     from targetApp.target_types import scannable_hosts

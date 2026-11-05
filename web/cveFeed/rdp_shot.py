@@ -153,26 +153,50 @@ def _parse_vision_reply(text):
             'summary': str(obj.get('description') or '')[:500]}
 
 
-def read_logged_in_user(png_bytes):
-    """Ask the configured AI model what the login screen shows. Returns ``{'summary', 'logged_in_user'}`` or
-    ``{'error'}``. Never raises: a model that is unconfigured, lacks vision, or answers oddly is reported, not fatal."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
-    from reNgine.ai_settings import get_configured_provider
-    try:
-        provider = get_configured_provider()
-    except AIProviderError as e:
-        return {'error': str(e)}
-    if provider is None:
-        return {'error': 'No AI model is configured'}
-    try:
-        with usage_stage('rdp_screenshot'):
-            reply = provider.complete_vision(VISION_SYSTEM, VISION_PROMPT, png_bytes)
-    except AIProviderError as e:
-        return {'error': str(e)}
-    parsed = _parse_vision_reply(reply)
+def queue_reading(shot, scan, sub, address, port, png_bytes):
+    """Ask the AI model what the login screen shows: one AI job (cveFeed.ai_jobs) carrying the image, answered by the AI reviewer
+    container; ``job_answer`` stores the reading on ``shot`` when it lands. Returns True when queued (False with no AI configured, which
+    is recorded on the shot as before)."""
+    import base64
+    from cveFeed import ai_jobs
+    if not ai_jobs.ai_on():
+        _set(shot.pk, ai_error='No AI model is configured')
+        return False
+    ai_jobs.enqueue('rdp_screenshot', 'rdp_screenshot', system=VISION_SYSTEM, parts=[{'text': VISION_PROMPT}],
+                    image={'media_type': 'image/png', 'data': base64.b64encode(png_bytes).decode()}, project=shot.project_id,
+                    context={'shot': shot.pk, 'scan': scan.pk, 'sub': sub.pk, 'address': address, 'port': port, 'image_hash': shot.image_hash},
+                    dedupe=f'rdp_screenshot:{shot.pk}', priority=6)
+    return True
+
+
+def _set(pk, **fields):
+    from cveFeed.models import RdpScreenshot
+    RdpScreenshot.objects.filter(pk=pk).update(**fields)
+
+
+def job_answer(job, text):
+    """The model read the screen: stored on the screenshot when it is still the image that was read, and a signed-in account becomes
+    the informational finding, as when the server read it itself."""
+    from cveFeed.models import RdpScreenshot
+    from startScan.models import ScanHistory, Subdomain
+    ctx = job.context
+    shot = RdpScreenshot.objects.filter(pk=ctx.get('shot'), image_hash=ctx.get('image_hash')).first()
+    if shot is None:
+        return None  # a newer capture replaced it: its own reading is on its way
+    parsed = _parse_vision_reply(text)
     if parsed is None:
-        return {'error': 'the AI model did not answer in the expected format'}
-    return parsed
+        _set(shot.pk, ai_error='the AI model did not answer in the expected format')
+        return None
+    _set(shot.pk, logged_in_user=parsed['logged_in_user'], ai_summary=parsed['summary'], ai_error='')
+    scan = ScanHistory.objects.select_related('domain').filter(pk=ctx.get('scan')).first()
+    sub = Subdomain.objects.filter(pk=ctx.get('sub')).first()
+    if parsed['logged_in_user'] and scan is not None and sub is not None:
+        _record_logged_in_finding(scan, sub, ctx.get('address'), ctx.get('port'), parsed)
+    return None
+
+
+def job_failure(job, category, detail):
+    _set(job.context.get('shot'), ai_error=f'the AI model could not read it ({category})')
 
 
 def _allowed(project, name, address):
@@ -204,10 +228,11 @@ def rdp_candidates(scan):
     return out
 
 
-def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=False):
+def run_for_scan(scan_id, capturer=capture, reader=None, force=False):
     """Screenshot every confirmed, NLA-free RDP server this scan found, store the image, and have the AI read who it
-    shows signed in. A capture or read failure is recorded and never raised; it leaves any previous screenshot in
-    place. Returns a summary dict."""
+    shows signed in: the reading is queued for the AI reviewer container (``queue_reading``), or done by ``reader(png)`` when one is
+    given. A capture or read failure is recorded and never raised; it leaves any previous screenshot in place. Returns a summary dict
+    (``read`` counts the readings done or queued)."""
     from cveFeed import ledger
     from cveFeed.models import RdpScreenshot
     from startScan.models import ScanHistory
@@ -246,13 +271,15 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
             continue
         rel_path, image_hash = save_image(scan, addr, port, png)
         captured += 1
-        ai = reader(png)
-        RdpScreenshot.objects.update_or_create(
+        ai = reader(png) if reader is not None else {}
+        shot, _ = RdpScreenshot.objects.update_or_create(
             project_id=project, host=sub.name, port=port,
             defaults={'domain_id': scan.domain_id, 'address': addr, 'image_path': rel_path, 'image_hash': image_hash,
                       'logged_in_user': ai.get('logged_in_user', ''), 'ai_summary': ai.get('summary', ''),
                       'ai_error': ai.get('error', ''), 'captured_at': timezone.now()})
-        if 'error' not in ai:
+        if reader is None:
+            read_ok += queue_reading(shot, scan, sub, addr, port, png)
+        elif 'error' not in ai:
             read_ok += 1
         if ai.get('logged_in_user'):
             _record_logged_in_finding(scan, sub, addr, port, ai)

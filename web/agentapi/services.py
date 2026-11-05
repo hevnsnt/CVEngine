@@ -3115,8 +3115,9 @@ def get_cve_detection(ctx, cve_id):
 
 def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
     """Change the shared detection record of one CVE (App Admin only: the record is the same for every organization). Give ``guidance``
-    (plain text with new facts: the onboard AI revises the record with it, validated like any model answer) or ``strategy`` (a whole record
-    written by a person, validated, never overwritten by the model afterwards). Returns the stored record."""
+    (plain text with new facts: the AI reviewer container revises the record with it, validated like any model answer, and the record changes
+    when that answer lands) or ``strategy`` (a whole record written by a person, validated, never overwritten by the model afterwards).
+    Returns the stored record, and for guidance ``revision: {state: queued, job_id}``."""
     from cveFeed import detection, detection_author
     from cveFeed.models import CVEDetection, CVEEntry
     if not ctx.user.is_superuser:
@@ -3140,23 +3141,24 @@ def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
     else:
         if not isinstance(guidance, str) or not 10 <= len(guidance.strip()) <= 3000:
             raise ApiError(400, 'guidance must be text of 10 to 3000 characters')
-        from reNgine.ai_settings import get_configured_provider
-        provider = get_configured_provider()
-        if provider is None:
+        from cveFeed import ai_jobs
+        if not ai_jobs.ai_on():
             raise ApiError(409, 'no AI provider is configured: add one in Settings > AI model, or send a strategy yourself')
         if row.pk is None:
             row.strategy, row.source, row.rules_at = detection.finalize(detection.rules_strategy(cve), cve.cvss_vector) or {}, 'rules', timezone.now()
             row.save()
         if row.source == 'manual':
             raise ApiError(409, 'a person wrote this record: send a strategy to change it')
-        stored, problems = detection_author.revise_with_guidance(row, provider, guidance.strip())
-        if stored is None:
-            raise ApiError(422, 'the model did not return a usable record: ' + '; '.join(problems[:5]))
+        # the AI reviewer container revises it (cveFeed.ai_jobs): the record changes when its answer lands and passes validation
+        queued = detection_author.revise_with_guidance(row, guidance.strip())
     from cveFeed.admin_api import audit
     audit(ctx.user, 'cve.detection.update', cve.cve_id, None, cve=cve.cve_id, via='strategy' if strategy is not None else 'guidance')
     cve.refresh_from_db()
     out = _detection(CVEEntry.objects.select_related('detection').get(pk=cve.pk))
     out['problems'] = problems[:10]
+    if guidance is not None:
+        out['revision'] = {'state': 'queued', 'job_id': queued.pk,
+                           'note': 'the AI reviewer container revises the record with this guidance; read it again in a minute'}
     return out
 
 

@@ -43,6 +43,8 @@ LAST_RUN_KEY = 'cvengine:autotune:last'
 SAMPLES_KEY = 'cvengine:autotune:samples'
 BOOT_KEY = 'cvengine:autotune:boot'
 ADVISOR_KEY = 'cvengine:autotune:advisor'
+ADVICE_KEY = 'cvengine:autotune:advice'  # the advisor's answer, waiting for the next round to judge it against the range then in force
+ADVICE_FRESH = 1800             # seconds an answer stays usable: the numbers it was given are older after that
 SAMPLES_KEPT = 300              # fifty hours of ten-minute measurements
 RETENTION_DAYS = 90
 REVERT_HOLD_HOURS = 24          # after a person reverts a change, the tuner does not raise that setting for this long
@@ -688,38 +690,68 @@ def _advisor_due(state, now):
     return not last or now - float(last) >= state['interval_hours'] * 3600
 
 
+def _set_record(record):
+    try:
+        client = _redis()
+        if client is not None:
+            client.set(ADVISOR_KEY, json.dumps(record), ex=7 * 86400)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def ask_advisor(offered, summary, now):
-    """One question to the AI advisor: the window's numbers and the settings it may advise on, no host, no finding, no free text from a scanned
-    host. Returns (accepted, refused, error) from ``autotune_policy.validate_advice``."""
+    """Queue one question for the AI advisor (cveFeed.ai_jobs; the AI reviewer container asks it): the window's numbers and the settings it
+    may advise on, no host, no finding, no free text from a scanned host. Its answer is kept for the next round (``job_answer``), which judges
+    it against the range in force then. Returns an error, or ''."""
+    from cveFeed import ai_jobs
     from cveFeed import autotune_policy as policy
-    from reNgine.ai_providers import clean_text, request_options, usage_stage
-    from reNgine.ai_settings import get_configured_provider
-    client = _redis()
     record = {'at': now, 'error': None}
     try:
-        provider = get_configured_provider()
-        if provider is None:
+        if not ai_jobs.ai_on():
             record['error'] = 'no AI provider'
-            return {}, [], record['error']
+            return record['error']
         public = {key: {'value': o['value'], 'starting_value': o['baseline'], 'target_for_this_machine': o['target'],
                         'you_may_choose_from': o['range'][0], 'you_may_choose_to': o['range'][1], 'step': o['setting'].step,
                         'higher_number_means': 'more work at once' if o['setting'].sense == 'more' else 'a longer wait between runs',
                         'controller': o['controller']} for key, o in offered.items()}
-        payload = json.dumps({'settings': public, 'measurements': summary}, sort_keys=True, separators=(',', ':'), default=str)
-        with usage_stage(ADVISOR_STAGE), request_options(temperature=0, seed=ADVISOR_SEED, schema=policy.ADVICE_SCHEMA, max_tokens=2000):
-            reply = provider.complete(ADVISOR_SYSTEM, payload)
-        accepted, refused, error = policy.validate_advice(reply, offered, clean=clean_text)
-        record['error'] = error or None
-        return accepted, refused, error
-    except Exception as exc:  # noqa: BLE001 - the controller tunes alone when the advisor cannot answer
-        record['error'] = str(getattr(exc, 'category', '') or type(exc).__name__)[:60]
-        return {}, [], record['error']
+        ai_jobs.enqueue('autotune_advice', ADVISOR_STAGE, system=ADVISOR_SYSTEM,
+                        parts=[{'text': 'The settings you may change now and the measurements of the last hours:'},
+                               {'fence': 'NUMBERS', 'data': {'settings': public, 'measurements': summary}}],
+                        schema=policy.ADVICE_SCHEMA, options={'temperature': 0, 'seed': ADVISOR_SEED, 'max_tokens': 2000},
+                        dedupe='autotune_advice', priority=6)
+        return ''
+    except Exception as exc:  # noqa: BLE001 - the controller tunes alone when the advisor cannot be asked
+        record['error'] = str(type(exc).__name__)[:60]
+        return record['error']
     finally:
-        try:
-            if client is not None:
-                client.set(ADVISOR_KEY, json.dumps(record), ex=7 * 86400)
-        except Exception:  # noqa: BLE001
-            pass
+        _set_record(record)
+
+
+def job_answer(job, text):
+    """The advisor answered: kept for the next round, which validates it (``autotune_policy.validate_advice``) against what it offers then."""
+    from reNgine.ai_providers import clean_text
+    client = _redis()
+    if client is not None:
+        client.set(ADVICE_KEY, json.dumps({'reply': clean_text(text, 20000), 'at': _now().timestamp()}), ex=ADVICE_FRESH)
+    return None
+
+
+def job_failure(job, category, detail):
+    _set_record({'at': _now().timestamp(), 'error': str(category)[:60]})
+
+
+def take_advice(now):
+    """The advisor's answer waiting for this round (and no longer after it), or None."""
+    try:
+        client = _redis()
+        raw = client.get(ADVICE_KEY) if client is not None else None
+        if not raw:
+            return None
+        client.delete(ADVICE_KEY)
+        data = json.loads(raw)
+        return data['reply'] if now - float(data.get('at', 0)) <= ADVICE_FRESH else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def run(now_dt=None):
@@ -796,10 +828,17 @@ def run(now_dt=None):
                               'controller': plan['reason'] or 'hold'}
     advice = {}
     state = advisor_state(row)
-    if offered and _advisor_due(state, now):
-        accepted, refused, error = ask_advisor(offered, signals.summarise(in_window), now)
+    reply = take_advice(now) if offered else None
+    if reply is not None:  # the answer to the question an earlier round queued
+        from reNgine.ai_providers import clean_text
+        accepted, refused, error = policy.validate_advice(reply, offered, clean=clean_text)
         advice = accepted
-        summary['advisor'] = {'asked': True, 'accepted': len(accepted), 'refused': [f'{k}: {why}' for k, why in refused][:20], 'error': error or None}
+        _set_record({'at': state.get('last_at') or now, 'error': error or None})
+        summary['advisor'] = {'answered': True, 'accepted': len(accepted), 'refused': [f'{k}: {why}' for k, why in refused][:20],
+                              'error': error or None}
+    elif offered and _advisor_due(state, now):
+        error = ask_advisor(offered, signals.summarise(in_window), now)
+        summary['advisor'] = {'asked': True, 'queued': not error, 'error': error or None}
     compact = signals.summarise(in_window[-6:])
     for key, (m, value, baseline, plan) in plans.items():
         source, new, reason, pressured, phase = 'controller', plan['new'], plan['reason'], plan['pressure'], plan['phase']

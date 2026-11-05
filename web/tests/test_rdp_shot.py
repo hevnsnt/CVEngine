@@ -172,6 +172,34 @@ class RunForScanTests(RouteFixture, TestCase):
 		self.assertEqual(vuln.severity, 0)
 		self.assertTrue(ServiceRun.objects.filter(service='rdp-shot', asset=f'{self.ip.address}:3389').exists())
 
+	def test_the_reading_is_asked_of_the_reviewer_container_with_the_image(self):
+		import base64
+		import json
+		from tests import ai_queue
+		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
+		seen = {}
+
+		class Vision:
+			name, model = 'anthropic', 'vision-model'
+
+			def complete(self, system, user):
+				seen['system'], seen['user'] = system, user
+				return json.dumps({'signed_in': True, 'username': 'ACME\\jsmith', 'description': 'Locked screen for jsmith'})
+		ai_queue.configure()
+		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True), mock.patch('cveFeed.rdp_shot.available', return_value=True):
+			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer)
+		self.assertEqual((out['captured'], out['read']), (1, 1))  # queued
+		shot = RdpScreenshot.objects.get(project=self.project, host='win.rt.test', port=3389)
+		self.assertEqual(shot.logged_in_user, '')  # not read yet
+		from cveFeed import ai_jobs
+		taken = ai_jobs.next_jobs(1)[0]
+		self.assertEqual((taken['kind'], taken['image']['media_type'], base64.b64decode(taken['image']['data'])), ('rdp_screenshot', 'image/png', self.png))
+		ai_jobs.submit(taken['id'], ai_queue.answer(taken, Vision()))
+		ai_jobs.apply(taken['id'])
+		shot.refresh_from_db()
+		self.assertEqual((shot.logged_in_user, shot.ai_summary, shot.ai_error), ('ACME\\jsmith', 'Locked screen for jsmith', ''))
+		self.assertTrue(Vulnerability.objects.filter(name='RDP login screen shows a signed-in account').exists())
+
 	def test_a_blank_capture_is_not_stored(self):
 		self.png = b'blank'
 		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=False):

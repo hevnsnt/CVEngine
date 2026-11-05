@@ -306,7 +306,7 @@ TOOLS = [
      'as read-only data (version ranges, HTTP markers, package and config checks, nuclei template). The same for every organization.',
      _schema({'cve_id': {'type': 'string'}}, ['cve_id']), lambda c, a: svc.get_cve_detection(c, a.get('cve_id', '')), False),
     ('update_cve_detection', 'App Admin only. Change the shared detection record of one CVE (identify, confirm steps, true and false positive '
-     'signs, checks, scope). Give guidance (plain text with new facts; the onboard AI revises the record with it) OR strategy (a whole '
+     'signs, checks, scope). Give guidance (plain text with new facts; the AI reviewer container revises the record with it, which changes when its answer lands) OR strategy (a whole '
      'record you wrote; it is validated and never overwritten by the model afterwards). Commands are rendered by the app, never taken from input.',
      _schema({'cve_id': {'type': 'string'}, 'guidance': {'type': 'string'}, 'strategy': {'type': 'object'}}, ['cve_id']),
      lambda c, a: svc.update_cve_detection(c, a.get('cve_id', ''), guidance=a.get('guidance'), strategy=a.get('strategy')), True),
