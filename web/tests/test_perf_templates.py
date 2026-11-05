@@ -72,7 +72,7 @@ class BatchedRunTests(unittest.TestCase):
 		real = templategen.run_template
 		sizes = []
 
-		def flaky(path, hosts):
+		def flaky(path, hosts, project=None):  # the project the hosts belong to (None here): the built-in scanner is asked only with one
 			sizes.append(len(hosts))
 			if len(hosts) > 25:
 				raise MemoryKill('low')

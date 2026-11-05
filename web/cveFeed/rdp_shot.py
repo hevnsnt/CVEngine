@@ -204,16 +204,18 @@ def rdp_candidates(scan):
     return out
 
 
-def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=False):
+def run_for_scan(scan_id, capturer=None, reader=read_logged_in_user, force=False):
     """Screenshot every confirmed, NLA-free RDP server this scan found, store the image, and have the AI read who it
     shows signed in. A capture or read failure is recorded and never raised; it leaves any previous screenshot in
     place. Returns a summary dict."""
     from cveFeed import ledger
     from cveFeed.models import RdpScreenshot
     from startScan.models import ScanHistory
+    from agentapi import sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
     if not enabled():
         return {'attempted': 0, 'skipped': 'disabled'}
-    if capturer is capture and not available():
+    if capturer is None and not available() and sentinel_dispatch.fallback_allowed('rdp_shot') and not _scanner_for(scan_id):
         return {'attempted': 0, 'skipped': 'aardwolf is not installed'}
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project = scan.domain.project_id
@@ -223,24 +225,47 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
     assets = [f'{addr}:{port}' for _sub, addr, port in candidates]
     covered = set() if force else ledger.fresh(SERVICE, assets, project)
     todo = [(sub, addr, port) for (sub, addr, port), asset in zip(candidates, assets) if asset not in covered][:max_hosts()]
-    attempted = captured = read_ok = 0
-    for sub, addr, port in todo:
-        attempted += 1
-        asset = f'{addr}:{port}'
-        if not _allowed(project, sub.name, addr):  # excluded since the candidates were listed
-            continue
-        from cveFeed import local_egress
-        held = local_egress.admit_one(port, 'rdp-shot', addr)  # the opt-in skip list and the egress governor: a held port stays due
-        if held:
-            logger.info('rdp screenshot of %s not taken from this server: %s', asset, local_egress.held_text(port, held))
-            continue
-        local_egress.record_one(port, 'rdp-shot', project=project, address=addr)
+    if not todo:
+        return {'attempted': 0, 'captured': 0, 'read': 0, 'reused': len(covered)}
+    try:
+        sentinel = capturer is None and sentinel_dispatch.scanner_or_local(scan.domain.project, 'rdp_shot')  # an injected capturer (a test) is never second-guessed
+        capturer = capturer or capture
+    except ScannerUnavailable as exc:  # no scanner can take it and no session may be opened from here: the servers stay due
+        return {'attempted': 0, 'captured': 0, 'read': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
+    shots, waiting = {}, None  # index -> PNG bytes or None (a scanner took it); an index not in here is captured here
+    if sentinel:
+        todo = [(sub, addr, port) for sub, addr, port in todo if _allowed(project, sub.name, addr)]  # excluded since the candidates were listed
         try:
-            png = capturer(addr, port)
-        except Exception as exc:  # noqa: BLE001 - one bad target must never interrupt the scan
-            logger.info('rdp screenshot failed for %s: %s', asset, exc)
-            ledger.record(SERVICE, [asset], project, scan, 'failed')
-            continue
+            for index, result in sentinel_dispatch.dispatch_each(scan.domain.project, 'rdp_shot', todo, lambda item: {'address': item[1], 'port': item[2]},
+                                                                 scan=scan, label_of=lambda item: f'{item[1]}:{item[2]}', ips_of=lambda item: [item[1]]):
+                if result is not None:
+                    shots[index] = sentinel_dispatch.rdp_image(result)
+        except ScannerUnavailable as exc:  # what the scanner captured is stored below; the rest stays due
+            waiting = exc
+    attempted = captured = read_ok = 0
+    for index, (sub, addr, port) in enumerate(todo):
+        asset = f'{addr}:{port}'
+        if index in shots:
+            attempted += 1
+            png = shots[index]
+        elif waiting is not None:
+            continue  # no scanner could take it and it may not run here: stays due, nothing recorded
+        else:
+            attempted += 1
+            if not _allowed(project, sub.name, addr):  # excluded since the candidates were listed
+                continue
+            from cveFeed import local_egress
+            held = local_egress.admit_one(port, 'rdp-shot', addr)  # the opt-in skip list and the egress governor: a held port stays due
+            if held:
+                logger.info('rdp screenshot of %s not taken from this server: %s', asset, local_egress.held_text(port, held))
+                continue
+            local_egress.record_one(port, 'rdp-shot', project=project, address=addr)
+            try:
+                png = capturer(addr, port)
+            except Exception as exc:  # noqa: BLE001 - one bad target must never interrupt the scan
+                logger.info('rdp screenshot failed for %s: %s', asset, exc)
+                ledger.record(SERVICE, [asset], project, scan, 'failed')
+                continue
         if not png or len(png) > MAX_IMAGE_BYTES or not is_meaningful(png):
             ledger.record(SERVICE, [asset], project, scan, 'failed')
             continue
@@ -257,7 +282,30 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
         if ai.get('logged_in_user'):
             _record_logged_in_finding(scan, sub, addr, port, ai)
         ledger.record(SERVICE, [asset], project, scan)
-    return {'attempted': attempted, 'captured': captured, 'read': read_ok, 'reused': len(covered)}
+    out = {'attempted': attempted, 'captured': captured, 'read': read_ok, 'reused': len(covered)}
+    if waiting is not None:
+        out['skipped'] = f'no scanner could take this work ({waiting.kind})'
+    return out
+
+
+def _scanner_for(scan_id):
+    """Whether a live scanner can take this scan's RDP screenshots (so a server without aardwolf still has the stage)."""
+    from agentapi import sentinel_dispatch
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain__project').filter(pk=scan_id).first()
+    return scan is not None and scan.domain.project is not None and sentinel_dispatch.any_scanner_for(scan.domain.project, 'rdp_shot')
+
+
+def runnable(project_id):
+    """Whether the stage has anything to run with: aardwolf here, or the work goes to a scanner (one is live for the kind, or the kind may not run
+    here, so the stage waits for one instead of being skipped)."""
+    if available():
+        return True
+    from agentapi import sentinel_dispatch
+    if not sentinel_dispatch.fallback_allowed('rdp_shot'):
+        return True
+    project = sentinel_dispatch._project_of(project_id)
+    return project is not None and sentinel_dispatch.any_scanner_for(project, 'rdp_shot')
 
 
 def _record_logged_in_finding(scan, sub, address, port, ai):

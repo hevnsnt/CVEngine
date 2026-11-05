@@ -114,6 +114,11 @@ def request_abort(scan_id):
             client.set(f'{ABORT_KEY}{int(scan_id)}', '1', ex=ABORT_TTL)
         except Exception:  # noqa: BLE001 - the database status is the source of truth; the flag only speeds things up
             logger.warning('could not publish the abort of scan %s', scan_id, exc_info=True)
+    try:  # a stage of it that waits on Sentinels without a worker (agentapi.stage_runs) hears of the stop now, not at its next budget
+        from agentapi import stage_runs
+        stage_runs.wake_scan(int(scan_id))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def abort_requested(scan_id):
@@ -714,10 +719,15 @@ def claim_release(client, key, owner):
 
 
 @contextmanager
-def redis_claim(key, owner, ttl):
+def redis_claim(key, owner, ttl, adopt=False, hold=False, keep=None):
     """Hold ``key`` in Redis for ``owner`` (SET NX EX), refreshing it while the block runs. Yields True when this
     caller holds it, or when no Redis is available to ask, else the owner that does. The key is released on exit, and
-    expires on its own ``ttl`` seconds after a crashed worker stops refreshing it."""
+    expires on its own ``ttl`` seconds after a crashed worker stops refreshing it.
+
+    For a stage that waits on Sentinels without its worker (``agentapi.stage_runs``): ``adopt`` treats a key ``owner`` already holds as won (the
+    pass that continues a run takes back the claim its first pass held); ``hold`` keeps the claim, instead of releasing it, when the block ends
+    because the run waits (``Suspend``); ``keep`` is a dict the block may set ``keep['seconds']`` in to keep the claim that long after a normal end
+    (a pipeline whose stages went on waiting). A kept claim is the run's to release or let expire."""
     client = getattr(get_store(), 'r', None)
     if client is None:
         yield True
@@ -726,6 +736,8 @@ def redis_claim(key, owner, ttl):
     try:
         got = client.set(key, owner, nx=True, ex=ttl)
         holder = None if got else client.get(key)
+        if not got and adopt and holder == owner:
+            got = bool(client.expire(key, ttl))
     except Exception:  # noqa: BLE001 - never block scanning because the claim is unavailable
         yield True
         return
@@ -743,12 +755,24 @@ def redis_claim(key, owner, ttl):
             except Exception:  # noqa: BLE001
                 pass
     threading.Thread(target=keep_alive, name='redis-claim', daemon=True).start()
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    suspending = False
     try:
         yield True
+    except stage_runs.Suspend:
+        suspending = hold
+        raise
     finally:
         stop.set()
         try:
-            claim_release(client, key, owner)
+            if suspending and run is not None:
+                claim_refresh(client, key, owner, stage_runs.HOLD_SECONDS)
+                run.hold_claim(key, owner)
+            elif keep and keep.get('seconds'):
+                claim_refresh(client, key, owner, int(keep['seconds']))
+            else:
+                claim_release(client, key, owner)
         except Exception:  # noqa: BLE001
             pass
 

@@ -43,12 +43,14 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'http_probe': 1500, 'dns_resolve': 300, 'alive_check': 900, 'secrets_scan': 1800,
+                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
+                      'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
+                      'nuclei_validate': 600, 'alive_check': 900,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
-PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60}
+PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15}
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
@@ -104,13 +106,24 @@ def outcome_text(kind):
     return 'the stage fell back to local execution' if fallback_allowed(kind) else STAY_DUE
 
 
-def _no_local(kind, why, reason='no_scanner', project=None):
+def _no_local(kind, why, reason='no_scanner', project=None, recorded=None):
     """Where a stage would run ``kind`` here because no Sentinel took it: ``ScannerUnavailable`` when it may not; when it may, nothing happens to the
     work except one row of fallback telemetry (``scanner_fallback.record``: kind, project, ``reason``; it cannot raise) and the caller runs it here.
-    This is the one place the decision "no Sentinel took it, the local run is allowed" is made."""
+    This is the one place the decision "no Sentinel took it, the local run is allowed" is made.
+
+    Inside a ``StageRun`` the stage code runs again on every pass (``agentapi.stage_runs``), so a decision is recorded once: ``recorded`` is True for
+    one an earlier pass already recorded (a task's own, ``_Dispatch.no_local``), and a decision with no task is matched to the earlier passes by its
+    place in the pass (``Pass.fallback_seen``)."""
     if not fallback_allowed(kind):
         from reNgine.resources import ScannerUnavailable
         raise ScannerUnavailable(kind, why)
+    if recorded:
+        return
+    if recorded is None:
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        if run is not None and run.fallback_seen((kind, reason)):
+            return
     from agentapi import scanner_fallback
     scanner_fallback.record(kind, project, reason)
 
@@ -219,6 +232,38 @@ REFILL_EVERY = 5  # seconds between looks for a Sentinel slot that freed up whil
 STOP_CHECK_EVERY = 2  # seconds between checks, while a fanned-out stage waits, for a stop or a global pause
 
 
+_REAL_SLEEP = time.sleep
+
+
+def _woken_by_redis():
+    """Whether a wait here blocks on the Redis wake-up (``sentinel_notify``) rather than sleeping. Only with the real clock: a test, or the fake
+    scanner (``tests.fake_scanner``), that drives the loop through its own ``time`` keeps its sleeps."""
+    if time.sleep is not _REAL_SLEEP:
+        return False
+    from agentapi import sentinel_notify
+    return sentinel_notify.client() is not None
+
+
+def _poll_interval():
+    """How long a wait sleeps before it looks again by itself: half a second when it polls, the safety interval
+    (``CVENGINE_SENTINEL_WAKE_POLL_SECONDS``) when a Redis wake-up ends it as soon as a task changes."""
+    if _woken_by_redis():
+        from agentapi import sentinel_notify
+        return float(sentinel_notify.safety_seconds())
+    return DISPATCH_POLL_INTERVAL
+
+
+def _wait(task_ids, seconds):
+    """Wait up to ``seconds`` for one of ``task_ids`` to be claimed or to end: a ``BLPOP`` on their wake keys (``sentinel_notify``) with the real
+    clock and Redis, else a plain sleep, as before."""
+    if _woken_by_redis():
+        if seconds > 0:
+            from agentapi import sentinel_notify
+            sentinel_notify.wait_tasks(task_ids, seconds, sleep=time.sleep)
+        return
+    time.sleep(max(0.0, seconds))
+
+
 def stage_parallel():
     """CVENGINE_STAGE_PARALLEL: the hard ceiling on how many chunk tasks one scan stage keeps in flight across Sentinel slots (default 4).
     ``1`` is the serial behaviour of before this existed: one chunk task at a time, each waited for before the next is created. What an App Admin
@@ -254,10 +299,53 @@ class _Dispatch:
         self.run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
         self.never_claimed = False
         self.vanished = False  # the last live Sentinel went away while the task waited
+        self.stop_check = False  # a fanned-out chunk: a stop of its scan (or a pause) cancels it while it waits
 
     @property
     def finished(self):
         return self.task.status in TERMINAL
+
+    # --- a wait written down (agentapi.stage_runs): the budgets as wall-clock times, so another worker can keep them --------------------
+
+    def state(self, key=None):
+        """This wait as JSON, for a ``StageRun`` (``stage_runs``): what ``restore`` needs to go on keeping its budgets in another worker."""
+        mono, wall = time.monotonic(), time.time()
+
+        def at(value):
+            return None if value is None else round(wall + (value - mono), 3)
+        return {'key': key, 'id': self.task.pk, 'kind': self.kind, 'project_id': getattr(self.project, 'pk', self.project),
+                'scan_id': getattr(self.scan, 'pk', None), 'internal': bool(self.internal), 'busy': self.busy, 'timeout': self.timeout,
+                'label': self.label, 'entry': getattr(self.entry, 'pk', None), 'started': at(self.started), 'queue_budget': self.queue_budget,
+                'claim_deadline': at(self.claim_deadline), 'run_deadline': at(self.run_deadline), 'never_claimed': self.never_claimed,
+                'vanished': self.vanished, 'stop_check': bool(getattr(self, 'stop_check', False))}
+
+    @classmethod
+    def restore(cls, state, siblings=None):
+        """The wait ``state`` describes, with its task read afresh (``None`` when the row is gone). A task a Sentinel claimed whose completion
+        clock had not started yet gets it from the time of the claim."""
+        from agentapi.models import SentinelTask
+        from cveFeed.models import AgentActivity
+        task = SentinelTask._base_manager.filter(pk=state.get('id')).select_related('project', 'agent', 'scan').first()
+        if task is None:
+            return None
+        mono, wall = time.monotonic(), time.time()
+
+        def back(value):
+            return None if value is None else mono + (float(value) - wall)
+        self = cls.__new__(cls)
+        self.task, self.kind, self.project, self.scan = task, state.get('kind') or task.kind, task.project, task.scan
+        self.internal, self.busy, self.timeout = bool(state.get('internal')), bool(state.get('busy')), state.get('timeout') or _dispatch_timeout(task.kind)
+        self.label = state.get('label') or _label(task.host, task.ips)
+        self.entry = AgentActivity.objects.filter(pk=state['entry']).first() if state.get('entry') else None
+        self.started = back(state.get('started')) or mono
+        self.queue_budget = state.get('queue_budget') or _queue_timeout(task.kind)
+        self.claim_deadline = back(state.get('claim_deadline')) or mono
+        self.run_deadline = back(state.get('run_deadline'))
+        if self.run_deadline is None and task.status in ('claimed', 'running') and task.claimed_at is not None:
+            self.run_deadline = back(task.claimed_at.timestamp()) + self.timeout
+        self.never_claimed, self.vanished = bool(state.get('never_claimed')), bool(state.get('vanished'))
+        self.siblings, self.stop_check = siblings, bool(state.get('stop_check'))
+        return self
 
     def _fell_back(self):
         """Count one task that falls back to local execution (``cveFeed.local_egress.note_fallback``: the warning when it keeps happening). Nothing
@@ -318,10 +406,11 @@ class _Dispatch:
         age = (timezone.now() - self.task.created_at).total_seconds()
         return max(0, min(self.queue_budget, sentinel_broker.queued_ttl(self.kind).total_seconds() - 2 * REAP_EVERY - age))
 
-    def pause(self, now):
-        """Seconds to sleep before the next look."""
+    def pause(self, now, interval=DISPATCH_POLL_INTERVAL):
+        """Seconds to wait before the next look: ``interval`` (a plain sleep polls every half second; a wait woken through Redis passes
+        ``_poll_interval()``), or less when a budget ends sooner."""
         horizon = self.run_deadline if self.run_deadline is not None else self.claim_deadline
-        return min(DISPATCH_POLL_INTERVAL, max(0.0, horizon - now))
+        return min(interval, max(0.0, horizon - now))
 
     def settle(self):
         """Close the activity line of the task that is over, saying what became of it."""
@@ -361,8 +450,14 @@ class _Dispatch:
         task = self.task
         if task.status == 'done' or self.internal:
             return
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        recorded = run.counted(self) if run is not None else None
         _no_local(self.kind, f'the {"queue" if self.never_claimed else "Sentinel"} did not return a result in time' if task.status != 'failed'
-                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}', self.fallback_reason(), self.project)
+                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}', self.fallback_reason(), self.project,
+                  recorded=recorded)
+        if run is not None:
+            run.mark_counted(self)
 
     def cancel(self, reason):
         """Hand the task back unfinished (the stage was stopped, or its consumer went away): expired, so it is neither claimed nor left queued."""
@@ -397,6 +492,10 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     by it)."""
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
+        return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome)
     capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if outcome is not None:
@@ -418,7 +517,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
             none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal)['state'] == 'none'
         if work.step(now, none_left):
             break
-        time.sleep(work.pause(now))
+        _wait([work.task.pk], min(work.pause(now, _poll_interval()), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
     work.settle()
     if outcome is not None:
         outcome['no_scanner'] = work.vanished
@@ -478,6 +577,11 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     if not chunks:
         return
     prepare = prepare or (lambda chunk: ({'addresses': chunk}, chunk))
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    if run is not None:  # inside a StageRun: no wait loop here, the chunks are sent and the worker given back until they are over
+        yield from _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none, labeler)
+        return
     ceiling = stage_parallel()  # read once per stage: a stage already in flight keeps the ceiling it started with
     if ceiling <= 1 or len(chunks) == 1:
         yield from _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none)
@@ -560,7 +664,8 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
             for index, result in sorted(over, key=lambda pair: pair[0]):
                 yield index, result
             if flying:
-                time.sleep(min([d.pause(now) for d in flying.values()] + [DISPATCH_POLL_INTERVAL]))
+                bound = min(REFILL_EVERY if pending and not halted else REAP_EVERY, STOP_CHECK_EVERY if scan is not None else REAP_EVERY)
+                _wait([d.task.pk for d in flying.values()], min([d.pause(now, _poll_interval()) for d in flying.values()] + [bound]))
     finally:
         for d in flying.values():
             d.cancel('the stage stopped before the task finished')
@@ -570,6 +675,180 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
         if index in pending and not internal:
             _unsent(project, kind, none_halt)
         yield index, None
+
+
+# --- inside a StageRun (agentapi.stage_runs): the same decisions, with the worker given back while the Sentinels work -----------------
+
+def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome):
+    """``dispatch_or_none`` inside a StageRun. The first pass that asks creates the task and stops the pass (``Suspend``); the worker is free while
+    the Sentinel works and ``stage_runs.drive`` keeps the claim, queue and completion budgets. The pass that runs once the task is over gets here
+    again and ends it exactly as the blocking wait did: the activity line closed, the target redacted, ``no_local`` (``ScannerUnavailable`` or one
+    fallback row) and the result."""
+    from agentapi import sentinel_broker, stage_runs
+    from agentapi.models import SentinelTask
+    key = stage_runs.task_key(kind, target, host, ips, internal)
+    work = run.work(key)
+    if work is None:
+        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True)
+        if capacity['state'] == 'none':
+            if outcome is not None:
+                outcome['no_scanner'] = True
+            if not internal:
+                _no_scanner(kind, project, capacity=capacity)
+            return None
+        work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity)
+        run.add(key, work)
+        run.suspend()
+    if not work.finished:
+        run.suspend()  # a pass that started before this task was over (a stage with another wait that ended first)
+    run.settled(work)
+    if outcome is not None:
+        outcome['no_scanner'] = work.vanished
+    if redact_target is not None:
+        stored = work.task.target if isinstance(work.task.target, dict) else {}
+        if stored.get('token') not in (None, '', '***'):
+            SentinelTask.objects.filter(pk=work.task.pk).update(target=redact_target(stored))
+    work.no_local()
+    return work.result
+
+
+def _group_id(kind, chunks):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps([kind, chunks], sort_keys=True, default=str).encode()).hexdigest()[:24]
+
+
+def _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none, labeler):
+    """``dispatch_many`` inside a StageRun: the same window (the free slots, the stage's share, ``CVENGINE_STAGE_PARALLEL``), the same stop when a
+    chunk goes unclaimed or the last Sentinel leaves, and the same fallback decisions, but nothing is yielded until every chunk is over: each pass
+    sends what the window has room for and stops, and the pass after the last chunk ended yields them all, in order. So a stage never handles a
+    chunk's result twice, however many passes its chunks took. ``CVENGINE_STAGE_PARALLEL=1`` keeps one chunk in flight and, with ``stop_on_none``,
+    stops at the first chunk nobody did, as the serial loop does."""
+    from agentapi import sentinel_broker
+    from reNgine import resources
+    gid = _group_id(kind, chunks)
+    group = run.group(gid)
+    group.setdefault('ceiling', stage_parallel())
+    group.setdefault('prepared', {})
+    group.setdefault('unserved', [])
+    serial = group['ceiling'] <= 1 or len(chunks) == 1
+    works = {}
+    for i in range(len(chunks)):
+        prepared = group['prepared'].get(str(i))
+        if prepared:
+            found = run.work(prepared['key'])
+            if found is not None:
+                found.stop_check = True
+                works[i] = found
+    if scan is not None and (group.get('aborted') or _stopped(scan)):
+        for d in works.values():
+            d.cancel('the stage stopped before the task finished')
+        group['aborted'] = True
+        raise resources.ScanAborted(f'{kind} dispatch was stopped with its scan')
+    halted, none_halt = bool(group.get('halted')), bool(group.get('none_halt'))
+    for i, d in works.items():
+        if not d.finished:
+            continue
+        if run.tasks.get(str(d.task.pk), {}).get('settled') is not True:
+            run.settled(d)
+        if d.never_claimed:
+            halted, none_halt = True, none_halt or d.vanished
+        if d.task.status != 'done' and not internal and not fallback_allowed(kind):
+            halted = True  # its no_local raises: nothing more is sent
+        if serial and stop_on_none and d.task.status != 'done':
+            halted, none_halt = True, none_halt or d.vanished
+    sent = {int(i) for i in group['prepared']}
+    pending = [i for i in range(len(chunks)) if i not in sent and i not in group['unserved']]
+    flying = [i for i, d in works.items() if not d.finished]
+    if pending and not halted:
+        queued_mine = [d.task.pk for d in works.values() if d.task.status == 'queued']
+        capacity = sentinel_broker.capacity_state(project, kind, internal, exclude=queued_mine)
+        if capacity['state'] == 'none':
+            halted = none_halt = True
+        else:
+            holding = sum(d.task.status in ('claimed', 'running') for d in works.values())
+            width = 1 if serial else min(group['ceiling'], _stage_share(scan, kind, sentinel_broker.total_slots()), max(1, holding + capacity['free']))
+            free_left = max(0, capacity['free'])
+            while pending and len(flying) < width:
+                index = pending.pop(0)
+                prepared = prepare(chunks[index])
+                if prepared is None:
+                    group['unserved'].append(index)
+                    continue
+                target, ips = prepared
+                label = labeler(chunks[index]) if labeler else _label('', ips)
+                state = {**capacity, 'state': 'free' if free_left else 'busy'}
+                d = _Dispatch(project, kind, target, '', ips, scan, timeout, created_by, priority, internal, state,
+                              label=f'{label} (part {index + 1} of {len(chunks)})')
+                d.stop_check = True
+                key = stage_runs_key(kind, target, ips, internal)
+                run.add(key, d, group=gid, index=index)
+                group['prepared'][str(index)] = {'key': key}
+                works[index] = d
+                flying.append(index)
+                free_left = max(0, free_left - 1)
+    group['halted'], group['none_halt'] = halted, none_halt
+    if flying:
+        run.suspend(refill=bool(pending and not halted))
+    blocked = None
+    out = []
+    for index in sorted(works):
+        d = works[index]
+        try:
+            d.no_local()
+        except resources.ScannerUnavailable as exc:
+            blocked = blocked or exc
+            continue
+        out.append((index, d.result))
+    for pair in out:
+        yield pair
+    if blocked is not None:
+        raise blocked
+    for index in sorted(group['unserved'] + pending):
+        if index in pending and not internal:
+            _unsent(project, kind, none_halt)
+        yield index, None
+
+
+def stage_runs_key(kind, target, ips, internal):
+    from agentapi import stage_runs
+    return stage_runs.task_key(kind, target, '', ips, internal)
+
+
+def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
+    """Inside a StageRun, send the tasks a loop of ``dispatch_or_none`` calls is about to make (``items``: ``(target, host, ips)`` of each, the same
+    arguments) side by side, before the loop runs, and wait (the worker given back) until every one is over; the loop then finds each result at
+    once and handles all of them in one pass, so its own summary covers every item. The window is the free slots, as for ``dispatch_many``; with no
+    live Sentinel left nothing more is sent and the loop's own calls decide, as they would have. Outside a StageRun it does nothing."""
+    from agentapi import sentinel_broker, stage_runs
+    run = stage_runs.current()
+    if run is None or not items:
+        return
+    keys = [stage_runs.task_key(kind, target, host, ips, internal) for target, host, ips in items]
+    gid = 'prefetch:' + _group_id(kind, keys)
+    group = run.group(gid)
+    works = {i: run.work(k) for i, k in enumerate(keys)}
+    works = {i: d for i, d in works.items() if d is not None}
+    flying = [i for i, d in works.items() if not d.finished]
+    pending = [i for i in range(len(items)) if i not in works]
+    if pending and not group.get('halted'):
+        capacity = sentinel_broker.capacity_state(project, kind, internal,
+                                                  exclude=[d.task.pk for d in works.values() if d.task.status == 'queued'])
+        if capacity['state'] == 'none':
+            group['halted'] = True
+        else:
+            holding = sum(d.task.status in ('claimed', 'running') for d in works.values())
+            width = max(1, holding + capacity['free'])
+            free_left = max(0, capacity['free'])
+            while pending and len(flying) < width:
+                index = pending.pop(0)
+                target, host, ips = items[index]
+                d = _Dispatch(project, kind, target, host, ips, scan, timeout, None, 1, internal, {**capacity, 'state': 'free' if free_left else 'busy'})
+                run.add(keys[index], d, group=gid, index=index)
+                flying.append(index)
+                free_left = max(0, free_left - 1)
+    if flying:
+        run.suspend(refill=bool(pending and not group.get('halted')))
 
 
 def _unsent(project, kind, none_left):
@@ -970,6 +1249,20 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
 # --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
 
+def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
+    """Inside a StageRun, send the WPScan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
+    the runner of ``wrap_wpscan_runner`` gives each, so the loop finds every report in one pass. Outside a StageRun it does nothing."""
+    from urllib.parse import urlsplit
+    items = []
+    for url in urls:
+        if internal:
+            host = urlsplit(url).hostname or ''
+            items.append(({'url': url, 'token': token}, host, [host]))
+        else:
+            items.append(({'url': url, 'token': token}, '', None))
+    prefetch(project, 'wpscan', items, scan=scan, timeout=timeout, internal=internal)
+
+
 def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
     """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,
     unwrapped ``run_wpscan_process`` when no Sentinel is eligible (so ``runner is run_wpscan_process`` identity checks,
@@ -1005,3 +1298,238 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             return run_wpscan_process(url, token)
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
     return runner
+
+
+# --- the kinds of contract version 3: one task per item, several at once, through dispatch_many -----------------------------------------------
+#
+# waf, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe and nuclei_validate (docs/SCANNER-ARCHITECTURE.md, section B). Each stage
+# asks ``scanner_or_local`` first: True sends its items with ``dispatch_each``; False is the local run of before (no Sentinel was ever set up for the
+# kind, or every one is offline and the kind may run here, counted as a fallback); ``ScannerUnavailable`` when the kind may not run here, which the
+# stage turns into "waiting" with its targets left due. An item a Sentinel did not finish comes back as ``None``: the stage runs it here when the kind
+# may, and ``dispatch_each`` raises ``ScannerUnavailable`` once the others are in when it may not.
+
+def scanner_or_local(project, kind):
+    """Whether ``kind`` work of ``project`` goes to a Sentinel (True) or runs here (False). Raises ``ScannerUnavailable`` when no live Sentinel can take
+    it and the kind may not run here (``CVENGINE_LOCAL_FALLBACK``)."""
+    if any_scanner_for(project, kind):
+        return True
+    _no_scanner(kind, project)
+    offline_fallback(project, kind)
+    return False
+
+
+def dispatch_each(project, kind, items, target_of, scan=None, label_of=None, ips_of=None):
+    """Send one ``kind`` task per entry of ``items`` (``target_of(item)`` is its target, ``None`` to keep it here) and yield ``(index, result)`` as each
+    finishes: the task's typed result, or ``None`` when no Sentinel did it (the caller runs it here: it has been through ``_no_local`` once, as for any
+    chunk). Raises ``ScannerUnavailable`` after the finished ones are yielded when one may not run here."""
+    items = list(items)
+    if not items:
+        return
+
+    def prepare(chunk):
+        item = items[chunk[0]]
+        target = target_of(item)
+        if target is None:
+            return None
+        return target, list(ips_of(item)) if ips_of else []
+    labeler = (lambda chunk: label_of(items[chunk[0]])) if label_of else None
+    with contextlib.closing(dispatch_many(project, kind, [[i] for i in range(len(items))], prepare=prepare, scan=scan, labeler=labeler)) as results:
+        yield from results
+
+
+def _project_of(project_id):
+    from dashboard.models import Project
+    return Project.objects.select_related('org').filter(pk=project_id).first() if project_id else None
+
+
+def _netloc(host, port):
+    return f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
+
+
+# waf: one site, at the address the server vetted -------------------------------------------------------------------------------------------
+
+def waf_target(url, ip):
+    """The ``waf`` target for a site root ``url`` reached at ``ip``, or ``None`` when the URL has no host."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    if not parts.hostname or not ip:
+        return None
+    scheme = parts.scheme if parts.scheme in ('http', 'https') else 'https'
+    return {'host': parts.hostname, 'ip': ip, 'port': parts.port or (443 if scheme == 'https' else 80), 'scheme': scheme}
+
+
+def waf_outcome(result):
+    """A Sentinel's ``waf`` result in the shape ``cveFeed.waf_scan.run_wafw00f`` returns, through the same product rule (``waf_scan._named``)."""
+    from cveFeed import waf_scan
+    products = waf_scan._named((p.get('name'), p.get('manufacturer')) for p in (result.get('products') or [])[:waf_scan.MAX_PRODUCTS])
+    return {'products': products, 'generic': result.get('generic') is True and not products, 'error': ''}
+
+
+# nmap_full and nmap_verify: one address, the raw report read by cveFeed.nmap_scan.parse_xml --------------------------------------------------
+
+def nmap_hosts(xml, address):
+    """The host records of a Sentinel's raw nmap report, read by ``cveFeed.nmap_scan.parse_xml`` (strict, hardened against a custom ENTITY
+    declaration) and cut to ``address``: a report that names any other host never puts it in the inventory."""
+    from cveFeed.nmap_scan import parse_xml
+    return [h for h in parse_xml(xml or '', strict=True) if h.get('ip') == address]
+
+
+def _scanner_first(project, kind):
+    """``scanner_or_local`` for work that has a project only when its address is attached to one: no project means here when the kind may run here,
+    else ``ScannerUnavailable``."""
+    if project is not None:
+        return scanner_or_local(project, kind)
+    if not fallback_allowed(kind):
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable(kind, 'the address is attached to no project a scanner could take it for')
+    return False
+
+
+def try_nmap_full(project, address, scan=None):
+    """The host records (``nmap_hosts``) of a full TCP sweep of ``address`` on a Sentinel, or ``None`` to sweep it here (no Sentinel took it and
+    nmap_full may run here). Raises ``ScannerUnavailable`` when it may not."""
+    if not _scanner_first(project, 'nmap_full'):
+        return None
+    result = dispatch_or_none(project, 'nmap_full', {'address': address}, ips=[address], scan=scan)
+    return None if result is None else nmap_hosts(result.get('xml'), address)
+
+
+def nmap_verify_target(address, ports, version_all=False, intensity=None, scripts=(), host_timeout=None):
+    """The ``nmap_verify`` target: service detection on ``ports`` of ``address``, at full intensity (``version_all``) or ``intensity``, with the named safe
+    NSE scripts (a Sentinel runs only the ones on its own reviewed list) and a per-host timeout in seconds."""
+    target = {'address': str(address), 'ports': sorted({int(p) for p in ports})[:MAX_ADDRESSES]}
+    if version_all:
+        target['version_all'] = True
+    elif intensity is not None:
+        target['version_intensity'] = int(intensity)
+    names = [n for n in (scripts or []) if n]
+    if names:
+        target['scripts'] = names[:12]
+    if host_timeout:
+        target['host_timeout'] = max(10, min(600, int(host_timeout)))
+    return target
+
+
+def try_nmap_verify(project, target, scan=None):
+    """The host records (``nmap_hosts``) of an ``nmap_verify`` task on a Sentinel, or ``None`` to run it here. Raises ``ScannerUnavailable`` when it
+    may not run here."""
+    if not _scanner_first(project, 'nmap_verify'):
+        return None
+    result = dispatch_or_none(project, 'nmap_verify', target, ips=[target['address']], scan=scan)
+    return None if result is None else nmap_hosts(result.get('xml'), target['address'])
+
+
+# node2shell: the vendored detector on the scanner, the verdict in run_check's shape ---------------------------------------------------------
+
+def node2shell_outcome(result):
+    """A Sentinel's ``node2shell`` result in the shape ``cveFeed.node2shell_scan.run_check`` returns (the detector's own dict)."""
+    return {'vulnerable': result.get('vulnerable'), 'verdict': result.get('verdict') or '', 'reason': result.get('reason') or '',
+            'status_code': result.get('status_code'), 'response': result.get('evidence') or ''}
+
+
+# rdp_shot: the PNG comes back, the reading of it stays here -----------------------------------------------------------------------------------
+
+def rdp_image(result):
+    """The PNG bytes of a Sentinel's ``rdp_shot`` result (``clean_result`` checked them), or ``None`` when nothing was painted."""
+    import base64
+    if not result.get('painted') or not result.get('image'):
+        return None
+    return base64.b64decode(result['image'])
+
+
+# path_probe: the built-in scanner's own path -------------------------------------------------------------------------------------------------
+
+def try_path_probe(groups):
+    """The path survey rows (``cveFeed.path_probe.survey``'s shape) from the built-in scanner, one task per project of ``groups`` (``{project_id: [(ip,
+    port)]}``, so no task names another tenant's address), or ``None`` to survey from here. Raises ``ScannerUnavailable`` when the built-in scanner
+    cannot take it and the survey may not run here."""
+    from reNgine.resources import ScannerUnavailable
+    projects = [(p, targets) for p, targets in ((_project_of(pid), t) for pid, t in groups.items()) if p is not None]
+    if not projects:
+        return None
+    if not any(any_scanner_for(p, 'path_probe') for p, _t in projects):
+        _no_scanner('path_probe', projects[0][0])
+        return None
+    rows = []
+    for project, targets in projects:
+        if not any_scanner_for(project, 'path_probe'):
+            continue
+        result = dispatch_or_none(project, 'path_probe', {'targets': [{'ip': ip, 'port': port} for ip, port in targets]},
+                                  ips=[ip for ip, _port in targets])
+        if result is not None:
+            rows.extend(result.get('results') or [])
+    if not rows and not fallback_allowed('path_probe'):
+        raise ScannerUnavailable('path_probe', 'the built-in scanner returned no path survey')
+    return rows
+
+
+# nuclei_validate: an AI-written or approved template, on the built-in scanner --------------------------------------------------------------
+
+def _carrier_project(project):
+    """The project a ``nuclei_validate`` task in mode ``validate`` is filed under: the one the work is for, else the oldest. The task carries only a
+    template written from public CVE data, never a host, and only the built-in scanner, whose scope is the whole instance, takes the kind."""
+    if project is not None and not isinstance(project, int):
+        return project
+    from dashboard.models import Project
+    return _project_of(project) if project else Project.objects.select_related('org').order_by('id').first()
+
+
+def nuclei_validate_ready(project=None):
+    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live built-in scanner, and nuclei may not run here), so the
+    AI is not asked for one first. Records nothing."""
+    if fallback_allowed('nuclei_validate'):
+        return
+    carrier = _carrier_project(project)
+    if carrier is None or not any_scanner_for(carrier, 'nuclei_validate'):
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable('nuclei_validate', 'no live built-in scanner can check a new template')
+
+
+def try_nuclei_validate(text, project=None):
+    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on the built-in scanner, or ``None`` to run
+    them here. Raises ``ScannerUnavailable`` when the scanner cannot take it and nuclei may not run here."""
+    carrier = _carrier_project(project)
+    if not _scanner_first(carrier, 'nuclei_validate'):
+        return None
+    result = dispatch_or_none(carrier, 'nuclei_validate', {'mode': 'validate', 'template': text})
+    if result is None:
+        return None
+    return result.get('valid') is True, result.get('output') or '', result.get('fixture_ok'), result.get('fixture_note') or ''
+
+
+NOT_REPORTED = 'not tested: the scanner reported no result for this host'
+
+
+def try_template_test(text, hosts, project):
+    """The outcomes (``cveFeed.templategen._run_template``'s shape, one per host in order) of the approved template ``text`` run on the built-in
+    scanner against ``hosts`` of ``project`` (the project the hosts belong to), in tasks of at most ``MAX_ADDRESSES``; ``None`` to run them all
+    here. An entry is ``None`` for a host whose chunk no Sentinel finished and that may run here. A host a finished chunk left out, or one that
+    may not run here while no scanner can take it, is reported as not tested (an error outcome), so it stays due."""
+    from reNgine.resources import ScannerUnavailable
+    project = _project_of(project) if isinstance(project, int) else project
+    if not _scanner_first(project, 'nuclei_validate'):
+        return None
+    hosts = list(hosts)
+    chunks = _chunks(hosts)
+    by_host, local, waiting = {}, set(), None
+    try:
+        with contextlib.closing(dispatch_many(project, 'nuclei_validate', chunks, labeler=_targets_label,
+                                              prepare=lambda chunk: ({'mode': 'test', 'template': text, 'targets': list(chunk)}, []))) as results:
+            for index, result in results:
+                if result is None:
+                    local.update(chunks[index])  # through _no_local already: it may run here
+                    continue
+                for outcome in result.get('outcomes') or []:
+                    by_host.setdefault(outcome['host'], outcome)
+    except ScannerUnavailable as exc:
+        waiting = exc
+    out = []
+    for host in hosts:
+        if host in by_host:
+            out.append(by_host[host])
+        elif host in local and waiting is None:
+            out.append(None)
+        else:
+            error = f'not tested: no scanner could take this work ({waiting.kind})' if waiting else NOT_REPORTED
+            out.append({'host': host, 'vulnerable': False, 'output': '', 'error': error})
+    return out

@@ -509,13 +509,29 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
 LOCK_TTL = 180  # seconds; refreshed while the pipeline runs, so a crashed worker frees its target within minutes
 
 
+def stage_runs_adapter(name):
+    from agentapi import stage_runs
+    return stage_runs.adapter(name, queue='discovery_queue')
+
+
+def _once(name, fn):
+    """A step between the stages that must not be repeated when a StageRun continues the pipeline (``agentapi.stage_runs.once``); its result is not kept."""
+    from agentapi import stage_runs
+    return stage_runs.once(name, lambda: (fn(), None)[1])
+
+
+def _lock_key(domain_id):
+    return f'cvengine:discovery:domain:{domain_id}'
+
+
 @contextmanager
-def domain_lock(domain_id, scan_id):
+def domain_lock(domain_id, scan_id, keep=None, resumed=False):
     """One pipeline per target at a time. Yields True when this scan holds the lock (or no Redis is available to ask), else
     the id of the scan that does. A task the queue delivers twice, or the same domain queued twice, then cannot run in
-    parallel and compete for memory."""
+    parallel and compete for memory. A pipeline whose stages wait on Sentinels without a worker (``agentapi.stage_runs``) keeps the lock
+    while it waits (``keep``), and the pass that continues it takes it back (``resumed``)."""
     from reNgine import resources
-    with resources.redis_claim(f'cvengine:discovery:domain:{domain_id}', scan_id, LOCK_TTL) as holder:
+    with resources.redis_claim(_lock_key(domain_id), scan_id, LOCK_TTL, adopt=resumed, hold=resumed, keep=keep) as holder:
         yield holder
 
 
@@ -536,11 +552,17 @@ def run_pipeline(scan_id, *args, **kwargs):
         ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(status=FAILED, time=timezone.now(), error_message=message[:290])
         activity.log('discovery', f'Refused discovery of {scan.domain.name}: Sentinel-only target', project=scan.domain.project_id, scan_id=scan_id)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
-    with domain_lock(scan.domain_id, scan_id) as holder:
+    keep = {}
+    with domain_lock(scan.domain_id, scan_id, keep=keep) as holder:
         if holder is True:
             from reNgine import resources
+            from agentapi import stage_runs
             with resources.scan_context(scan_id):  # a stop of this scan reaches the heavy jobs it starts
-                return _run_pipeline(scan_id, *args, **kwargs)
+                out = _run_pipeline(scan_id, *args, **kwargs)
+            if stage_runs.is_waiting(out):  # its stages wait on Sentinels without this worker: the target stays locked for them
+                keep['seconds'] = stage_runs.HOLD_SECONDS
+                stage_runs.add_claim(out['stage_run'], _lock_key(scan.domain_id), str(scan_id))
+            return out
     if str(holder) == str(scan_id):
         return {'scan_id': scan_id, 'status': 'duplicate'}  # the queue delivered this very task twice; the first one is running
     message = f'another discovery of {scan.domain.name} is already running (scan #{holder})'
@@ -689,9 +711,20 @@ def stopped(scan_id):
 
 def _stage(scan, title, name, run, failed=lambda result: bool(result.get('error')), fallback=None):
     """Run one pipeline stage with its own ScanActivity row. A stage that raises or reports an error is marked failed and
-    never takes the pipeline down; ``fallback`` is the result then (a ``dict`` with an ``error`` is built when omitted)."""
+    never takes the pipeline down; ``fallback`` is the result then (a ``dict`` with an ``error`` is built when omitted).
+
+    Inside a StageRun (``agentapi.stage_runs``: the pipeline gave its worker back while a stage waits on Sentinels) the pipeline is run again by
+    the pass that continues it: a stage that already finished returns the result it had, and the stage that was waiting goes on with the row it
+    already has."""
+    from agentapi import stage_runs
     from startScan.models import ScanActivity
-    ScanActivity.objects.create(scan_of=scan, title=title, name=name, time=timezone.now(), status=RUNNING)
+    current = stage_runs.current()
+    memo = f'stage:{name}'
+    if current is not None and memo in current.memo:
+        return current.memo[memo]
+    stage_runs.stage(name)
+    if current is None or not ScanActivity.objects.filter(scan_of=scan, name=name, status=RUNNING).exists():
+        ScanActivity.objects.create(scan_of=scan, title=title, name=name, time=timezone.now(), status=RUNNING)
     try:
         result = run()
     except Exception as exc:  # noqa: BLE001 - every stage after discovery records its own trouble
@@ -700,6 +733,8 @@ def _stage(scan, title, name, run, failed=lambda result: bool(result.get('error'
     error = result.get('error') or result.get('full_error')
     ScanActivity.objects.filter(scan_of=scan, name=name).update(
         status=FAILED if (failed(result) or error) else SUCCESS, time=timezone.now(), error_message=error)
+    if current is not None:
+        current.memo[memo] = stage_runs._jsonable(result)
     return result
 
 
@@ -757,8 +792,31 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
             found = run_discovery(scan_id, mode, stream=stream, finalize=False)
             if found['status'] != SUCCESS:
                 return found
-    return _run_stages(scan_id, found, light_stream=light_stream, targeted_stream=targeted_stream, nmap_runner=nmap_runner,
-                       db_exposure_checks=db_exposure_checks, provider=provider, cve_runner=cve_runner, route_probe=route_probe)
+    stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, nmap_runner=nmap_runner, db_exposure_checks=db_exposure_checks,
+                        provider=provider, cve_runner=cve_runner, route_probe=route_probe)
+    from agentapi import stage_runs
+    # the stages wait on Sentinels without this worker when they can (agentapi.stage_runs): the callback continues them (``_resume_pipeline``)
+    return stage_runs.run('pipeline', {'scan_id': scan_id, 'found': found, 'kwargs': stage_kwargs, 'domain_id': scan.domain_id},
+                          first=lambda: _run_stages(scan_id, found, **stage_kwargs), project=scan.domain.project_id, scan=scan_id)
+
+
+@stage_runs_adapter('pipeline')
+def _resume_pipeline(context):
+    """The completion callback of a discovery's stages: take the target's lock back and run the stages again from where they stopped."""
+    from reNgine import resources
+    scan_id = context['scan_id']
+    with domain_lock(context['domain_id'], scan_id, resumed=True) as holder:
+        if holder is not True:
+            logger.warning('scan %s continues its stages without the lock of its target (held by %s)', scan_id, holder)
+        with resources.scan_context(scan_id):
+            try:
+                return _run_stages(scan_id, context['found'], **context.get('kwargs') or {})
+            except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state, as the worker that started it would have
+                from startScan.models import ScanHistory
+                logger.exception('the stages of scan %s failed in their callback', scan_id)
+                ScanHistory.objects.filter(pk=scan_id, scan_status=RUNNING).update(scan_status=FAILED, stop_scan_date=timezone.now(),
+                                                                                    error_message=str(exc)[:290])
+                return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
 
 
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
@@ -792,7 +850,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if retest or force:
         rdp_kwargs['force'] = True
     rdp_result = None
-    if (rdp_capturer or rdp_shot.available()) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
+    if (rdp_capturer or rdp_shot.runnable(scan.domain.project_id)) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
         if stopped(scan_id):
@@ -832,7 +890,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if retest or force:
         waf_kwargs['force'] = True
     waf_result = None
-    if waf_scan.enabled() and (waf_runner or waf_scan.installed()) and waf_scan.web_sites(scan):  # the product behind a host's firewall
+    if waf_scan.enabled() and (waf_runner or waf_scan.runnable(scan.domain.project_id)) and waf_scan.web_sites(scan):  # the product behind a host's firewall
         waf_result = _stage(scan, 'WAF fingerprint (wafw00f)', 'wafw00f', lambda: waf_scan.run_for_scan(scan_id, **waf_kwargs),
                             fallback={'checked': 0})
         if stopped(scan_id):
@@ -864,7 +922,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if stopped(scan_id):
         return gone
     from cveFeed import subdir_apps
-    subdir_apps.carry_forward(scan)  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
+    _once('subdir_apps', lambda: subdir_apps.carry_forward(scan))  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
     if probe_get:
         wp_kwargs['probe_get'] = probe_get
@@ -895,7 +953,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if stopped(scan_id):
         return gone
     from cveFeed import openvas_scan
-    openvas_scan.carry_forward(scan)  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
+    _once('openvas_carry', lambda: openvas_scan.carry_forward(scan))  # the optional OpenVAS add-on's findings are evidence on this scan's host rows too (a no-op while it is off)
 
     def run_targeted():
         try:
@@ -913,7 +971,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     from cveFeed import finding_lifecycle
     from startScan.models import Subdomain
     # a host that only redirects to another host of the project (www to the apex): what it shares with that host is that host's finding
-    finding_lifecycle.fold_aliases_quietly(scan.domain.project_id, set(Subdomain.objects.filter(scan_history=scan).values_list('name', flat=True)))
+    _once('fold_aliases', lambda: finding_lifecycle.fold_aliases_quietly(scan.domain.project_id, set(Subdomain.objects.filter(scan_history=scan).values_list('name', flat=True))))
     from cveFeed import triage
     triage_result = _stage(scan, 'AI triage and validation', 'triage', lambda: triage.run_for_scan(scan_id, provider=provider),
                            fallback={'rows': 0})  # after the targeted pass, so its findings exist; before the change log, which can cite the verdicts
@@ -1012,7 +1070,7 @@ def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
 
 
 def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=False, source_scan_id=None,
-                      force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, **stage_kwargs):
+                      force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, then=None, **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
     correlation and the targeted nuclei pass. The ledger still dedupes each scanner per asset, so a host or IP covered
@@ -1025,7 +1083,11 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
     ``assessment_ids`` (a batch of host assessments, see ``host_assessment.execute_batch``) carries many hosts of the target through one run, so
     each stage hands a Sentinel multi-target tasks instead of one tiny task per host. Every host keeps its own outcome: a host the gates drop,
     whose lookup is not answered or that has no scannable address is named in the result's ``per_host`` (its own status, error and ``resolved``
-    count) and the rest go on; the run as a whole fails only when no host is left. The stages are the scan's, so a failed stage is every host's."""
+    count) and the rest go on; the run as a whole fails only when no host is left. The stages are the scan's, so a failed stage is every host's.
+
+    When a stage hands its work to Sentinels and gives the worker back (``agentapi.stage_runs``) this returns the ``waiting`` marker; the callback
+    finishes the stages and hands the result to the continuation ``then`` (``(name, {args})``), which is where a caller does with it what it
+    would have done with the return value."""
     from cveFeed import activity
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity, ScanHistory
@@ -1131,8 +1193,14 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
                 ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
                 return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             scanned = [n for n in wanted if n in resolved_names] if force else wanted  # the hosts the stages have something to do for
-            result = _run_stages(scan.id, found, hygiene=hygiene, hygiene_host=scanned if assessment_ids else None,
-                                 retest=retest, force=force, by_person=by_person, **stage_kwargs)
+            kwargs = dict(hygiene=hygiene, hygiene_host=scanned if assessment_ids else None, retest=retest, force=force, by_person=by_person,
+                          **stage_kwargs)
+            from agentapi import stage_runs
+            # the stages wait on Sentinels without this worker when they can; ``then`` is what the caller does with the result then
+            result = stage_runs.run('pipeline.host', {'scan_id': scan.id, 'found': found, 'kwargs': kwargs, 'per_host': per_host, 'step_id': step.pk},
+                                    first=lambda: _run_stages(scan.id, found, **kwargs), project=domain.project_id, scan=scan.id, then=then)
+            if stage_runs.is_waiting(result):
+                return result
             if per_host:
                 result['per_host'] = per_host
             return result
@@ -1143,3 +1211,24 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
         ScanActivity.objects.filter(pk=step.pk).update(status=FAILED, time=timezone.now(), error_message=str(exc)[:290])
         ScanHistory.objects.filter(pk=scan.id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
         return {'scan_id': scan.id, 'status': FAILED, 'error': str(exc)[:290], **({'per_host': per_host} if per_host else {})}
+
+
+@stage_runs_adapter('pipeline.host')
+def _resume_host_pipeline(context):
+    """The completion callback of a host pipeline's stages: run them again from where they stopped, ending the scan as ``run_host_pipeline`` does."""
+    from reNgine import resources
+    from startScan.models import ScanActivity, ScanHistory
+    scan_id, per_host = context['scan_id'], context.get('per_host') or {}
+    try:
+        with resources.scan_context(scan_id):
+            result = _run_stages(scan_id, context['found'], **context.get('kwargs') or {})
+            if per_host:
+                result['per_host'] = per_host
+            return result
+    except resources.ScanAborted:
+        return {'scan_id': scan_id, 'status': 'aborted', **({'per_host': per_host} if per_host else {})}
+    except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
+        logger.exception('host pipeline failed for scan %s', scan_id)
+        ScanActivity.objects.filter(pk=context.get('step_id')).update(status=FAILED, time=timezone.now(), error_message=str(exc)[:290])
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290], **({'per_host': per_host} if per_host else {})}
