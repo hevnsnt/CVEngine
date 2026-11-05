@@ -296,17 +296,19 @@ class PatchedConsequencesTests(Fixture):
 			('patched', 'patched by distro (fixed in 1:8.9p1-3ubuntu0.10)', 'ice'))
 
 	def test_the_ai_may_clear_a_patched_match_but_not_a_vulnerable_one(self):
-		from cveFeed.correlation import ai_confirm_match
+		from cveFeed import triage
+		from tests import ai_queue
 		provider = mock.Mock(model='m')
-		provider.name = 'test'
-		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "backported fix"}'
+		provider.name = 'anthropic'
+		provider.complete.return_value = json.dumps({'classification': 'likely_false_positive', 'reason': 'backported fix'})
 		self._patched_match()
+		matches = lambda: triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))  # noqa: E731
 		with mock.patch('cveFeed.activity.log', return_value=None):
-			patched = ai_confirm_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(), provider=provider)
-			self.assertEqual(patched.ai_verdict, 'not_affected')
+			ai_queue.run_triage(triage.track(matches()), provider=provider)
+			self.assertEqual(CVEMatch.objects.get().ai_verdict, 'not_affected')
 			CVEMatch.objects.update(distro_status='vulnerable')
-			vulnerable = ai_confirm_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(), provider=provider)
-		self.assertEqual(vulnerable.ai_verdict, 'affected')  # the distribution's own tracker lists it: hard evidence, confirmed
+			ai_queue.run_triage(triage.track(matches()), provider=provider)
+		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'affected')  # the distribution's own tracker lists it: hard evidence, confirmed
 
 
 # --- the sync ---------------------------------------------------------------------------------------------------------

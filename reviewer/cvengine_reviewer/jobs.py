@@ -1,5 +1,11 @@
-"""The two jobs. Each builds one prompt from the server's data (untrusted parts fenced), makes one model call, checks the answer and sends
-it back. The server decides what happens next; nothing here changes anything by itself."""
+"""The reviewer's work. Each builds one prompt from the server's data (untrusted parts fenced), makes one model call, checks or bounds the
+answer and sends it back. The server decides what happens next; nothing here changes anything by itself.
+
+* ``review_one`` and ``run_ops``: the reviewer's own two jobs, with their fixed prompts (``prompts``).
+* ``run_job``: one of the pipeline's AI jobs (triage, validation planning, template drafting, ...). The server sends the job's fixed system
+  prompt, its parts in order (text cvENGINE wrote itself, and data that came from a scanned host, a scanner or a feed, which is fenced here
+  with ``guard.fence``), the schema and request options, and for the RDP reading one bounded image. The answer goes back as text: the server
+  validates it with the same validators it used when it called the model itself."""
 import json
 import logging
 
@@ -60,3 +66,67 @@ def run_ops(server, provider, release=None):
         answer = {'alerts': [], 'actions': []}
     alerts = [{'code': a['code'], 'severity': a['severity'], 'diagnosis': guard.scrub(a['diagnosis'], NOTE_LIMIT)} for a in answer['alerts']]
     return server.ops_report({'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release})
+
+
+JOB_REPLY_LIMIT = 200_000  # characters of one pipeline answer sent back (the server refuses more)
+IMAGE_LIMIT = 6_000_000    # base64 characters of the one image a job may carry
+MEDIA_TYPES = ('image/png', 'image/jpeg', 'image/webp', 'image/gif')
+
+
+class JobError(ValueError):
+    """A job the server sent that this container will not run (malformed)."""
+
+
+def job_message(job):
+    """The user message of a pipeline job: its parts in order, text as the server wrote it and data fenced with a fresh nonce each."""
+    parts = job.get('parts')
+    if not isinstance(parts, list) or not parts or len(parts) > 20:
+        raise JobError('a job has from 1 to 20 parts')
+    out = []
+    for part in parts:
+        if not isinstance(part, dict):
+            raise JobError('a part is an object')
+        if 'fence' in part:
+            out.append(guard.fence(str(part['fence']), part.get('data'))[0])
+        elif isinstance(part.get('text'), str):
+            out.append(part['text'])
+        else:
+            raise JobError('a part is text or fenced data')
+    return '\n'.join(out)
+
+
+def job_image(job):
+    image = job.get('image')
+    if image is None:
+        return None
+    if not isinstance(image, dict) or image.get('media_type') not in MEDIA_TYPES or not isinstance(image.get('data'), str) \
+            or not 0 < len(image['data']) <= IMAGE_LIMIT:
+        raise JobError('the image is not one this container takes')
+    return {'media_type': image['media_type'], 'data': image['data']}
+
+
+def run_job(server, provider, job):
+    """Run one pipeline job and send the answer (or the failure, by category) back. Returns ``(server's answer, failure category)``: the
+    category is '' when the model answered, for the caller's back-off."""
+    ref, lease = job.get('id'), job.get('lease')
+    try:
+        system = job.get('system')
+        if not isinstance(system, str) or not system.strip():
+            raise JobError('a job carries its system prompt')
+        schema = job.get('schema') if isinstance(job.get('schema'), dict) else None
+        options = job.get('options') if isinstance(job.get('options'), dict) else {}
+        text, calls, model = llm.complete(provider, system, job_message(job), schema, options, job_image(job))
+    except JobError as exc:
+        logger.warning('job %s: not run (%s)', ref, exc)
+        return server.job_result(ref, {'lease': lease, 'error': 'malformed_job', 'calls': []}), ''
+    except llm.ModelError as exc:
+        logger.warning('job %s (%s): model call failed (%s)', ref, job.get('kind'), exc.category)
+        body = {'lease': lease, 'error': exc.category, 'calls': getattr(exc, 'calls', [])[:8], 'provider': provider.get('provider'),
+                'model': str(provider.get('model') or '')[:200]}
+        for key in ('http_status', 'stop_reason'):
+            if getattr(exc, key, None) is not None:
+                body[key] = getattr(exc, key)
+        return server.job_result(ref, body), exc.category
+    body = {'lease': lease, 'text': text[:JOB_REPLY_LIMIT], 'calls': calls[:8], 'provider': provider.get('provider'),
+            'model': str(model)[:200]}
+    return server.job_result(ref, body), ''
