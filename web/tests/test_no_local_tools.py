@@ -307,7 +307,6 @@ ALLOWED = {
         'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
-        'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
         'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing

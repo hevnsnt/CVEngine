@@ -10,7 +10,6 @@ from django.contrib.auth.models import User
 from django.test import Client, TestCase
 from django.utils import timezone
 
-from cveFeed import assessment_review as ar
 from cveFeed import conductor, coverage_topup, ctmonitor, fullscan, host_assessment, reaper, tasks
 from cveFeed.models import HostAssessment
 from scanEngine.models import EngineType
@@ -211,8 +210,8 @@ class ManualOnlyHostsTests(DiscoveryModeBase):
 		self.addCleanup(patcher.stop)
 
 	def test_a_manual_only_targets_hosts_are_no_first_pass_backlog(self):
-		self.assertEqual(ar.host_coverage_due(self.p1, NOW), (0, []))
-		count, due = ar.host_coverage_due(self.p2, NOW)
+		self.assertEqual(coverage_topup.host_coverage_due(self.p1, NOW), (0, []))
+		count, due = coverage_topup.host_coverage_due(self.p2, NOW)
 		self.assertEqual((count, due), (1, [self.auto_host.pk]))
 
 	def test_the_top_up_assesses_the_other_projects_hosts_and_not_the_manual_ones(self):
