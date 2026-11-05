@@ -1,10 +1,11 @@
 """The install's own scanner ("CVEngine Scanner"): the server's half of enrolling it with nobody typing a secret.
 
-When ``CVENGINE_BUILTIN_SCANNER`` is on, ``ensure()`` keeps one instance-wide enrollment ready for the scanner container and hands it over as a
+The scanner is on by default (``CVENGINE_BUILTIN_SCANNER`` unset); ``0`` turns it off. While it is on, ``ensure()`` keeps one instance-wide enrollment ready for the scanner container and hands it over as a
 provisioning blob (the same base64 JSON a person pastes into ``CVENGINE_SENTINEL_BLOB``) in a file on a volume only the server and the scanner
 share. The scanner redeems it with the ordinary bootstrap call, the file is removed the moment it was redeemed, and a scanner that is later lost
 (its token revoked or expired, its Agent deleted) gets a fresh blob on the next run. Nothing here widens a Sentinel's rights: it is the same
-instance-scope enrollment an App Admin can generate by hand, owned by the oldest App Admin, written to the audit log, single use.
+instance-scope enrollment an App Admin can generate by hand, owned by the oldest App Admin, written to the audit log, single use. Turned off, the
+next run revokes the scanner's token and removes any blob, so the container idles (``CVENGINE_REVIEWER=0`` does the same for the AI reviewer).
 """
 import logging
 import os
@@ -19,8 +20,12 @@ BLOB_TTL = timedelta(hours=24)  # a person's enrollment lives 30 minutes; this o
 RENEW_BELOW = timedelta(hours=2)  # an unredeemed blob this close to expiry is replaced, so a slow start never meets an expired one
 
 
+OFF = ('0', 'false', 'no', 'off')
+
+
 def enabled():
-    return os.environ.get('CVENGINE_BUILTIN_SCANNER', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    """On unless ``CVENGINE_BUILTIN_SCANNER`` is ``0`` (or ``false``, ``no``, ``off``): every install runs the built-in scanner by default."""
+    return os.environ.get('CVENGINE_BUILTIN_SCANNER', '1').strip().lower() not in OFF
 
 
 def bootstrap_dir():
@@ -103,7 +108,7 @@ def ensure(now=None):
     from agentapi.models import SentinelEnrollment
     from tenancy import audit
     if not enabled():
-        return {'state': 'disabled'}
+        return _turn_off()
     now = now or timezone.now()
     agent = builtin_agent()
     if agent is not None and _alive(agent, now):
@@ -125,6 +130,30 @@ def ensure(now=None):
     audit.record(admin, 'sentinel.enroll.generate', 'instance enrollment for the built-in scanner', enrollment_id=row.pk)
     logger.info('built-in scanner: enrollment %s ready until %s', row.prefix, expires_at.isoformat())
     return {'state': 'blob_written', 'expires_at': expires_at.isoformat()}
+
+
+def _turn_off():
+    """Switched off: no enrollment stays valid, no blob stays on the volume, and the built-in scanner's token is revoked (its tasks are released),
+    so a container that keeps running takes no work. ``revoked`` is how many tokens this run revoked."""
+    from agentapi.agent_broker import release_agent_tasks
+    from agentapi.models import Agent, SentinelEnrollment
+    from dashboard.models import ApiToken
+    from tenancy import audit
+    SentinelEnrollment.objects.filter(builtin=True, used_at__isnull=True).delete()
+    _remove_blob()
+    revoked = 0
+    for row in SentinelEnrollment.objects.filter(builtin=True, used_by_agent__isnull=False).select_related('used_by_agent__token__user'):
+        agent = row.used_by_agent
+        if agent.token.revoked:
+            continue
+        release_agent_tasks(agent, 'the built-in scanner was turned off (CVENGINE_BUILTIN_SCANNER=0)')
+        revoked += ApiToken.objects.filter(pk=agent.token_id, revoked=False).update(revoked=True)
+        Agent.objects.filter(pk=agent.pk).exclude(status='revoked').update(status='revoked', status_changed_at=timezone.now(),
+                                                                          status_note='the built-in scanner was turned off (CVENGINE_BUILTIN_SCANNER=0)')
+        audit.record_for_user(None, 'agent.revoke', agent.token.user, target=agent.name, agent_id=agent.pk, kind=agent.kind,
+                              reason='CVENGINE_BUILTIN_SCANNER=0')
+        logger.info('built-in scanner turned off: revoked the token of %s (agent %s)', agent.name, agent.pk)
+    return {'state': 'disabled', 'revoked': revoked}
 
 
 def status(now=None):

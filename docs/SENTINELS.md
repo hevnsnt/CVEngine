@@ -122,7 +122,7 @@ Not built yet (planned for 1.4's capability-aware placement): a Sentinel would d
 A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md)).
 
 - **Results are typed and clipped.** Each kind has one fixed shape. Strings are clipped, lists capped, and anything unexpected is a `400`. Nothing it reports is run or used to build a command.
-- **It sees little.** A task carries only its own target. A Sentinel never receives stored sign-ins, another project's data or database access. WPScan's API token travels in its task and is scrubbed once the task ends.
+- **It sees little.** A task carries only its own target. An external Sentinel never receives stored sign-ins (only the built-in scanner reads one, through the secure read below), another project's data or database access. WPScan's API token travels in its task and is scrubbed once the task ends.
 - **Its own token.** A Sentinel's token has the scope `sentinel`: it reaches the Sentinel routes and nothing else (not the rest of the API, not MCP), so it is not its administrator's token. It lasts 90 days, and a heartbeat renews the same token in place when under 60 days are left. A Sentinel that was off for longer must be enrolled again.
 - **Scope and leases.** It can only claim work in its enrolled scope and capabilities. A claimed task must be accepted within two minutes. A running task is kept by the heartbeat (which can also list the task ids it is running, so a task it dropped ends early) and lost after five minutes without one.
 - **Results are bound to the task.** Ports and findings for an address that was not dispatched are dropped. A result body can be up to 24 MB; every other route takes 4 MB.
@@ -136,9 +136,9 @@ A task that needs a stored sign-in carries only a reference to it (`secret_ref`,
 - Only the built-in scanner may call it, with its own token, for a task assigned to it that is `claimed` or `running` and names a credential. An external Sentinel, a person's token (full or read only) or a Sentinel's token for another agent's task is refused: `403` for a caller that is not the built-in scanner, `404` for a task that is not its own or not signed in.
 - It works once per task. The server wins an atomic update of `secret_read_at` before it decrypts anything, so a second or concurrent read is a `409` and returns nothing.
 - Every call, granted or refused, is written to the audit log as `sentinel.secret.read` with the task, the Sentinel, the credential reference and the outcome. The value is never in the audit log, a task row, an activity line or a log. It is limited to 6 calls a minute per token.
-- A task with a `secret_ref` is never offered to any Sentinel but the built-in one (next task, queue counts and capacity all leave it out for the others).
+- A task with a `secret_ref` is never offered to any Sentinel but the built-in one, and only to a built-in scanner image that reads stored sign-ins (its heartbeat's `info.features` has `secret_read`): next task, queue counts and capacity all leave it out for the others. The task a Sentinel receives says `signed_in: true` and nothing more.
 
-Not built yet: the scanner client that calls this endpoint, and the dispatch of signed-in work. Nothing sets `secret_ref` today, so signed-in Nuclei passes still run on the server as before.
+The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei_*` task per credential and chunk of up to 64 origins (`agentapi.sentinel_dispatch.signed_in_stream`). The built-in scanner reads the credential once for the task, runs Nuclei with it from a 0600 file on a memory file system, and wipes it afterwards. Without a built-in scanner that can, the pass runs on the server with a private secrets file as before when `CVENGINE_LOCAL_FALLBACK` lets nuclei run there, and waits for one otherwise.
 
 ## The result contract
 

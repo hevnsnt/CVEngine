@@ -254,69 +254,52 @@ services:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
 
-  # Optional, 1.4 work in progress: the built-in scanner ("CVEngine Scanner"), the cvENGINE Sentinel image running next to the server and enrolled by it with
-  # nobody typing a secret (docs/SCANNER-ARCHITECTURE.md). Off unless COMPOSE_PROFILES=builtin-scanner and CVENGINE_BUILTIN_SCANNER=1 are in .env. The server
-  # (celery) writes a one-time provisioning blob into the scanner_bootstrap volume (agentapi/builtin_scanner.py); this container reads it once, and
-  # the token it gets lives in its own state volume afterwards. CVENGINE_SCANNER_IMAGE names the Sentinel image (a registry reference pinned by digest
-  # once the image is published, or the locally built cvengine-sentinel-local:latest). It never updates itself: the server updater swaps the image.
-  # Until the image is published, `build:` makes it from a pinned COMMIT of the Sentinel repository (make scanner-build; the first up builds it when the image
-  # is missing); CVENGINE_SCANNER_SOURCE points at another checkout or commit. BUILDKIT_CONTEXT_KEEP_GIT_DIR keeps the .git directory of that context, so the
-  # Sentinel's VERSION stamp is the commit. The published image, by digest, replaces `build:` later.
+  # The built-in scanner ("CVEngine Scanner", docs/BUILTIN-SCANNER.md): the cvENGINE Sentinel image running next to the server, enrolled by it with nobody
+  # typing a secret, and where every scan tool runs (docs/SCANNER-ARCHITECTURE.md). On by default; CVENGINE_BUILTIN_SCANNER=0 in .env turns it off (the
+  # server then writes no enrollment and revokes the scanner's token, and the container idles).
+  # The image is the one scanner.lock.json pins BY DIGEST (scripts/scanner_lock.py keeps this default equal to it). The update scripts pull it, start it
+  # and keep it only once it reaches the server, else they put the previous image back (CVENGINE_SCANNER_ROLLBACK_IMAGE, which they write and clear).
+  # CVENGINE_SCANNER_IMAGE in .env runs another image (a `make scanner-build` from source). It never updates itself.
+  # It shares the celery container's network namespace, so its scans leave from exactly where the server's own did: the same address, the Tailscale
+  # sidecar's tailnet route (which lives in that namespace too) and the host network or macvlan overlays. Nothing connects to it; it reaches
+  # the server as http://web:8000. Every update and `make up` recreate it after celery, as they do the Tailscale sidecar.
   scanner:
-    profiles: ["builtin-scanner"]
-    build:
-      context: "${CVENGINE_SCANNER_SOURCE:-https://github.com/hevnsnt/cvENGINE-sentinel.git#f94a942f3c7bd7428c7c04a8d6fcc037453eb4ac}"
-      args:
-        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
-    image: "${CVENGINE_SCANNER_IMAGE:-cvengine-sentinel-local:latest}"
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:3809470ea0b4fff693f2a939416e7fc24c9ed67ba5a12c3afcf6b3f3d499e75a}}"
     pull_policy: missing
     container_name: cvengine-scanner
     restart: unless-stopped
     init: true
+    network_mode: "service:celery"
     stop_grace_period: 75s
     pids_limit: 512
+    # About 2 GB: nuclei and nmap over a chunk of 64 addresses at the scanner's concurrency. Lower it on a small host (docs/DEPLOYMENT.md, Memory).
     mem_limit: "${SCANNER_MEM_LIMIT:-2g}"
+    # nmap's SYN scan and OS detection, naabu's SYN scan and the UDP sweep send raw packets. Only nmap and naabu hold these (file capabilities in the
+    # image); the daemon runs as an unprivileged user with none, and the kernel refuses to start a binary whose file capabilities it cannot grant.
     cap_add:
-      - NET_RAW  # nmap's OS detection, naabu's SYN scan and the UDP sweep need raw sockets
+      - NET_RAW
+      - NET_ADMIN
+    # (no `no-new-privileges`: it would stop the kernel granting those file capabilities)
     healthcheck:
+      # Healthy while its heartbeats reach the server (python3 -m client.control health); it also restarts itself after three minutes without one.
       test: ["CMD", "python3", "-m", "client.control", "health"]
-      interval: 60s
+      interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10m  # covers the wait for the server's enrollment (entrypoint below)
+      start_period: 10m  # covers the wait for the server's enrollment on a first start
     environment:
-      CVENGINE_SENTINEL_NAME: "CVEngine Scanner"
-      CVENGINE_SENTINEL_UPDATE: "off"  # the server's updater swaps the image
+      CVENGINE_SENTINEL_BUILTIN: "1"
+      CVENGINE_SENTINEL_BLOB_FILE: /bootstrap/blob  # the enrollment the server writes (agentapi/builtin_scanner.py); read again whenever it re-enrols
       CVENGINE_SENTINEL_ALLOW_INSECURE: "1"  # it talks to the server over the compose network, in plain http
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       HTTP_PROXY: "${HTTP_PROXY:-}"
-      NO_PROXY: "${NO_PROXY:-}"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        # No token from an earlier start: the server writes the enrollment when celery starts and then every five minutes, and only with
-        # CVENGINE_BUILTIN_SCANNER=1 and an App Admin. Wait for it (up to ~10 minutes, one log line) instead of exiting and restarting in a loop.
-        if [ ! -s /var/lib/cvengine-sentinel/token.json ] && [ ! -s /bootstrap/blob ]; then
-          echo "waiting for the server to write the enrollment; needs CVENGINE_BUILTIN_SCANNER=1 and an App Admin"
-          n=0
-          while [ ! -s /bootstrap/blob ] && [ "$$n" -lt 300 ]; do
-            sleep 2
-            n=$$((n + 1))
-          done
-        fi
-        if [ -s /bootstrap/blob ]; then
-          CVENGINE_SENTINEL_BLOB="$$(cat /bootstrap/blob)"
-          export CVENGINE_SENTINEL_BLOB
-        fi
-        exec /opt/sentinel/docker-entrypoint.sh python3 -m client
+      NO_PROXY: "${NO_PROXY:-},web,localhost,127.0.0.1"  # the server is never reached through a host proxy
     volumes:
       - scanner_bootstrap:/bootstrap:ro
       - scanner_state:/var/lib/cvengine-sentinel
     depends_on:
+      - celery
       - web
-    networks:
-      - rengine_network
 
   # The AI reviewer (docs/AI-REVIEWER.md): reviews every open finding once and checks the server's operations a few times a day, with the
   # provider and models chosen in Settings > AI model. It is boxed in on purpose: its own small image (./reviewer) with no cvENGINE source,

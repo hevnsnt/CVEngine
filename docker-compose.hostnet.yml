@@ -12,6 +12,9 @@
 # celery container's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead). If something
 # on the host already uses port 6379, set CVENGINE_REDIS_HOST_PORT in .env to another one.
 #
+# The built-in scanner joins celery's namespace, so it scans from the host network too. It reaches the server on the host's loopback, where this
+# file publishes the web service (127.0.0.1:8000; CVENGINE_WEB_HOST_PORT moves it).
+#
 # The published broker must have a password (on the host's loopback any local user or process could otherwise queue work the workers run
 # as root): `make up` and every update generate REDIS_PASSWORD when it is empty (scripts/redis-password.sh) and recreate Redis with it.
 services:
@@ -22,6 +25,12 @@ services:
       - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
       - POSTGRES_HOST=127.0.0.1
+      # the built-in scanner shares celery's network namespace, here the host's, where the name "web" does not resolve: its enrollment points it at
+      # the web service published below instead
+      - CVENGINE_SCANNER_SERVER_URL=http://127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}
+  web:
+    ports:
+      - "127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000"
   redis:
     ports:
       - "127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}:6379"

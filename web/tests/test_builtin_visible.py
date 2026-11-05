@@ -51,7 +51,7 @@ class BuiltinVisibleBase(BuiltinBase):
 
 class StatusBlockTests(BuiltinVisibleBase):
     def test_with_the_switch_off_the_block_is_just_disabled_and_costs_no_query(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': ''}):
+        with mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '0'}):
             for token in (self.t_root, self.t_member):
                 data = self.status(token)
                 self.assertEqual(data['scanning']['builtin_scanner'], {'enabled': False})

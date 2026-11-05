@@ -88,6 +88,11 @@ deploy_steps() {
   if grep -qx reviewer <<<"$listed"; then
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
+  # The built-in scanner's pinned image (scanner.lock.json): pulled now, before anything is stopped. It never fails the update (scripts/scanner.sh).
+  if [ -f scripts/scanner.sh ]; then
+    . scripts/scanner.sh
+    cvengine_scanner_fetch "${compose[@]}"
+  fi
   maintenance_on
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
@@ -133,6 +138,12 @@ deploy_steps() {
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
   phase applying verifying
   verify_serving || return 1
+  # The built-in scanner, once the server answers: recreated after celery (it shares celery's network namespace), kept on the new image only once a
+  # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
+  if declare -F cvengine_scanner_start >/dev/null; then
+    phase applying scanner
+    cvengine_scanner_start "${compose[@]}"
+  fi
   prune_old_images
 }
 

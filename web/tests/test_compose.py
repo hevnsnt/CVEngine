@@ -1,7 +1,5 @@
 """The compose files forward .env to the containers (parsed, so no Docker is needed). Skipped inside the web
 container, where only ./web is mounted."""
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -77,67 +75,52 @@ class ComposeEnvTests(unittest.TestCase):
 
 @unittest.skipUnless(yaml and (ROOT / 'docker-compose.yml').is_file(), 'needs PyYAML and the compose file')
 class BuiltinScannerComposeTests(unittest.TestCase):
-    """The optional built-in scanner service (docs/SCANNER-ARCHITECTURE.md): built from a pinned Sentinel commit, and it waits for the server's enrollment."""
+    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the image scanner.lock.json pins, celery's network namespace, a health check
+    on its heartbeats, and the enrollment read from the shared volume by the client itself."""
 
     @classmethod
     def setUpClass(cls):
-        cls.scanner = load('docker-compose.yml')['scanner']
+        cls.compose = load('docker-compose.yml')
+        cls.scanner = cls.compose['scanner']
 
-    def script(self):
-        return self.scanner['entrypoint'][2].replace('$$', '$')
+    def test_it_is_a_default_service_not_behind_a_profile(self):
+        self.assertNotIn('profiles', self.scanner)
 
-    def test_it_stays_behind_its_profile_and_keeps_the_image_name(self):
-        self.assertEqual(self.scanner['profiles'], ['builtin-scanner'])
-        self.assertIn('${CVENGINE_SCANNER_IMAGE:-', self.scanner['image'])
+    def test_it_runs_the_pinned_image_and_never_builds_one(self):
+        self.assertTrue(self.scanner['image'].startswith('${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-'))
+        self.assertNotIn('build', self.scanner)
+        self.assertEqual(self.scanner['pull_policy'], 'missing')
 
-    def test_the_default_build_context_is_a_pinned_commit_never_a_branch(self):
-        context = self.scanner['build']['context']
-        self.assertRegex(context, r'^\$\{CVENGINE_SCANNER_SOURCE:-https://[^#}]+\.git#[0-9a-f]{40}\}$')
+    def test_it_shares_celerys_network_namespace(self):
+        self.assertEqual(self.scanner['network_mode'], 'service:celery')
+        self.assertNotIn('networks', self.scanner)
+        self.assertIn('celery', self.scanner['depends_on'])
 
-    def test_the_build_keeps_the_git_directory_so_the_version_stamp_is_the_commit(self):
-        self.assertEqual(self.scanner['build']['args'], {'BUILDKIT_CONTEXT_KEEP_GIT_DIR': '1'})
+    def test_it_has_its_raw_socket_capabilities_and_nothing_that_would_block_them(self):
+        self.assertEqual(sorted(self.scanner['cap_add']), ['NET_ADMIN', 'NET_RAW'])
+        self.assertFalse([o for o in self.scanner.get('security_opt', []) if 'no-new-privileges' in o])
 
-    def test_the_start_period_covers_the_wait_for_the_enrollment(self):
+    def test_it_is_built_in_mode_reading_its_enrollment_from_the_shared_volume(self):
+        env = self.scanner['environment']
+        self.assertEqual(env['CVENGINE_SENTINEL_BUILTIN'], '1')
+        self.assertEqual(env['CVENGINE_SENTINEL_BLOB_FILE'], '/bootstrap/blob')
+        self.assertNotIn('CVENGINE_SENTINEL_UPDATE', env)  # built-in mode forces it off
+        self.assertIn('web', env['NO_PROXY'])
+        self.assertIn('scanner_bootstrap:/bootstrap:ro', self.scanner['volumes'])
+        self.assertNotIn('entrypoint', self.scanner)
+
+    def test_the_health_check_and_restart_policy_restart_a_wedged_scanner(self):
+        self.assertEqual(self.scanner['healthcheck']['test'], ['CMD', 'python3', '-m', 'client.control', 'health'])
         self.assertEqual(self.scanner['healthcheck']['start_period'], '10m')
+        self.assertEqual(self.scanner['restart'], 'unless-stopped')
 
-    def test_the_entrypoint_waits_for_the_blob_only_without_a_persisted_token(self):
-        script = self.script()
-        self.assertIn('[ ! -s /var/lib/cvengine-sentinel/token.json ]', script)
-        self.assertIn('waiting for the server to write the enrollment; needs CVENGINE_BUILTIN_SCANNER=1 and an App Admin', script)
-        self.assertEqual(script.count('waiting for the server'), 1)  # one line, not one per poll
-        self.assertLess(script.index('waiting for the server'), script.index('while '))
-        self.assertLess(script.index('while '), script.index('CVENGINE_SENTINEL_BLOB='))
-        self.assertTrue(script.rstrip().endswith('exec /opt/sentinel/docker-entrypoint.sh python3 -m client'))
+    def test_it_has_a_memory_limit(self):
+        self.assertEqual(self.scanner['mem_limit'], '${SCANNER_MEM_LIMIT:-2g}')
 
-    def test_the_entrypoint_is_valid_shell(self):
-        subprocess.run(['sh', '-n'], input=self.script(), text=True, check=True)
-
-    def run_entrypoint(self, token=False, blob=None, patience=0):
-        """Run the extracted script over stand-in paths, with the final `exec` replaced by an echo of what the scanner would have started with."""
-        with tempfile.TemporaryDirectory() as tmp:
-            state, boot = Path(tmp, 'state'), Path(tmp, 'bootstrap')
-            state.mkdir()
-            boot.mkdir()
-            if token:
-                (state / 'token.json').write_text('{}')
-            if blob is not None:
-                (boot / 'blob').write_text(blob)
-            script = (self.script().replace('/var/lib/cvengine-sentinel', str(state)).replace('/bootstrap', str(boot))
-                      .replace('-lt 300', f'-lt {patience}').replace('sleep 2', 'sleep 0'))
-            script = script.replace('exec /opt/sentinel/docker-entrypoint.sh python3 -m client', 'echo "started blob=${CVENGINE_SENTINEL_BLOB:-none}"')
-            return subprocess.run(['sh', '-c', script], capture_output=True, text=True, timeout=30, check=True).stdout.splitlines()
-
-    def test_without_a_token_or_blob_it_logs_once_waits_then_proceeds(self):
-        out = self.run_entrypoint(patience=5)
-        self.assertEqual(len([line for line in out if line.startswith('waiting for the server')]), 1)
-        self.assertEqual(out[-1], 'started blob=none')
-
-    def test_with_a_persisted_token_it_does_not_wait(self):
-        self.assertEqual(self.run_entrypoint(token=True, patience=5), ['started blob=none'])
-
-    def test_with_a_blob_it_does_not_wait_and_passes_it_on(self):
-        self.assertEqual(self.run_entrypoint(blob='abc123', patience=5), ['started blob=abc123'])
-
+    def test_the_host_network_overlay_points_it_at_a_published_web(self):
+        overlay = (ROOT / 'docker-compose.hostnet.yml').read_text()  # read as text: it uses Compose's own !reset tag
+        self.assertIn('      - CVENGINE_SCANNER_SERVER_URL=http://127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}\n', overlay)
+        self.assertIn('  web:\n    ports:\n      - "127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000"\n', overlay)
 
 if __name__ == '__main__':
     unittest.main()
