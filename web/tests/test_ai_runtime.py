@@ -171,31 +171,6 @@ class ReplyLimitSettingTests(unittest.TestCase):
 		self.assertIsNone(limit(send('openai', AIRuntime(max_tokens=99999))[1]))
 
 
-class RetryCeilingTests(unittest.TestCase):
-	CUT = {'choices': [{'message': {'content': '{'}, 'finish_reason': 'length'}]}
-
-	def ask(self, max_tokens):
-		with mock.patch.dict('os.environ', {k: '' for k in ENV_NAMES}), mock.patch('requests.post', return_value=Reply(self.CUT)) as post:
-			p = ai.get_provider('vllm', model='m', base_url='http://h:8000/v1', runtime=AIRuntime(max_tokens=max_tokens))
-			with self.assertRaises(ai.AIProviderError) as raised:
-				ai._ask_triage(p, 'finding_triage', 's', 'u')
-		return post, raised.exception
-
-	def test_a_cut_off_triage_is_asked_again_with_twice_the_limit(self):
-		post, error = self.ask(16000)
-		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [16000, 32000])
-		self.assertEqual(error.category, 'output_truncated')
-
-	def test_a_limit_already_at_the_ceiling_is_not_asked_twice(self):
-		post, error = self.ask(32768)  # the second request would be identical, and paid
-		self.assertEqual(post.call_count, 1)
-		self.assertEqual(error.category, 'output_truncated')
-
-	def test_a_limit_that_doubling_would_only_cap_is_still_retried_once(self):
-		post, _ = self.ask(20000)  # 20000 -> 32768 is a longer reply
-		self.assertEqual([c[1]['json']['max_tokens'] for c in post.call_args_list], [20000, 32768])
-
-
 class ConnectTimeoutTests(unittest.TestCase):
 	def category(self, exc):
 		import requests
@@ -257,42 +232,6 @@ class KeepAliveSettingTests(unittest.TestCase):
 			self.assertEqual(send(name, AIRuntime(keep_alive='30m')), send(name), name)
 
 
-class StructuredSettingTests(unittest.TestCase):
-	def setUp(self):
-		ai._STRUCTURED.clear()
-		self.addCleanup(ai._STRUCTURED.clear)
-
-	def asked(self, name, runtime=None, env=None):
-		reply = Reply(REPLIES[name] if name != 'ollama' else {'message': {'content': TRIAGE_OK}})
-		if name in ('openai', 'openrouter', 'vllm', 'lmstudio'):
-			reply = Reply({'choices': [{'message': {'content': TRIAGE_OK}, 'finish_reason': 'stop'}]})
-		elif name == 'anthropic':
-			reply = Reply({'content': [{'type': 'text', 'text': TRIAGE_OK}], 'stop_reason': 'end_turn'})
-		with mock.patch.dict('os.environ', {**{k: '' for k in ENV_NAMES}, **(env or {})}), mock.patch('requests.post', return_value=reply) as post:
-			p = ai.get_provider(name, model='m', api_key='k' if name in ('anthropic', 'openai', 'openrouter') else None, base_url=BASES.get(name), runtime=runtime)
-			ai.triage_finding(p, 'cve_match', {'product': 'nginx'})
-		return post.call_args[1]['json']
-
-	def test_a_self_hosted_server_is_sent_a_schema_unless_the_page_turns_it_off(self):
-		self.assertEqual(self.asked('vllm')['response_format']['type'], 'json_schema')
-		self.assertNotIn('response_format', self.asked('vllm', AIRuntime(structured_mode='off')))
-		self.assertNotIn('response_format', self.asked('vllm', AIRuntime(structured_mode='off'), env={'CVENGINE_AI_STRUCTURED': 'all'}))
-		self.assertIn('format', self.asked('ollama'))
-		self.assertNotIn('format', self.asked('ollama', AIRuntime(structured_mode='off')))
-
-	def test_a_hosted_provider_is_sent_one_only_when_the_page_says_all(self):
-		for name in ('openai', 'openrouter'):
-			self.assertNotIn('response_format', self.asked(name), name)
-			self.assertEqual(self.asked(name, AIRuntime(structured_mode='all'))['response_format']['type'], 'json_schema', name)
-			self.assertNotIn('response_format', self.asked(name, AIRuntime(structured_mode='auto'), env={'CVENGINE_AI_STRUCTURED': 'all'}), name)  # the page wins
-			self.assertEqual(self.asked(name, env={'CVENGINE_AI_STRUCTURED': 'all'})['response_format']['type'], 'json_schema', name)
-
-	def test_anthropic_is_never_sent_a_schema(self):
-		body = self.asked('anthropic', AIRuntime(structured_mode='all'))
-		self.assertEqual(set(body), set(self.asked('anthropic')))  # the prompt carries a random nonce: compare the fields
-		self.assertEqual(set(body), {'model', 'max_tokens', 'system', 'messages'})
-
-
 class ReasoningSettingTests(unittest.TestCase):
 	def setUp(self):
 		ai._REASONING_NOTED.clear()
@@ -321,10 +260,6 @@ class ReasoningSettingTests(unittest.TestCase):
 		body = send('anthropic', AIRuntime(reasoning='low', max_tokens=4096), model='claude-sonnet-4-5')[1]
 		self.assertEqual(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024})
 		self.assertEqual(body['max_tokens'], 4096)
-
-
-TRIAGE_OK = ('{"classification": "needs_validation", "reason": "r", "impact": "i", "severity_adjust": 0, "severity_reason": "", '
-	'"remediation": "p", "validation_steps": []}')
 
 
 class EffectiveSettingsTests(unittest.TestCase):

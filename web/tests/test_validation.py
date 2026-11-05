@@ -17,6 +17,7 @@ from dashboard.models import Org, Project
 from reNgine import resources
 from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests import ai_queue
 
 GET_TEMPLATE = """
 id: cve-2099-1
@@ -478,7 +479,7 @@ class ValidationBase(TestCase):
 	def rows(self, **kw):
 		findings = triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))
 		pairs = triage.track(findings)
-		triage.run_triage(pairs, provider=None)  # no AI: validation does not need one
+		ai_queue.run_triage(pairs, provider=None)  # no AI: validation does not need one
 		return list(Triage.objects.all())
 
 	def runners(self, status='no_match', **extra):
@@ -561,13 +562,13 @@ class ApplyValidationTests(ValidationBase):
 		provider = mock.Mock(model='m')
 		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "no"}'
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual(row.classification, 'needs_validation')
 		validation.apply_validation(row, self.check(), validation._result_from_outcome({'host': 'www.v.test', 'vulnerable': True, 'hit': hit()}))
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.status, row.verdict_id), ('confirmed', 'pending', None))
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.status), ('confirmed', 'triaged'))
 
@@ -576,7 +577,7 @@ class ApplyValidationTests(ValidationBase):
 		provider = mock.Mock(model='m')
 		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "no"}'
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual(row.classification, 'needs_validation')  # in range: the floor
 		validation.apply_validation(row, self.check(), {'status': 'no_match', 'summary': 'the template did not match'})
@@ -895,15 +896,17 @@ class OnDemandKeepsTriageTests(ValidationBase):
 		with mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)), \
 				mock.patch('cveFeed.validation_authority.require_authority'), \
 				mock.patch.dict(validation.RUNNERS, {'nmap_sv': lambda check: observed}), \
-				mock.patch('cveFeed.triage._resolve_provider', return_value=provider), \
+				mock.patch('cveFeed.triage._resolve_provider', return_value=provider and ai_queue.ensure_configured(provider) or provider), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')):
 			tasks.validate_match_on_demand(job.pk)
+		if provider:
+			ai_queue.serve(provider)  # the AI reviewer container answers the question the validation queued
 		return job
 
 	def triaged_match(self):
 		from tests.test_triage import reply
 		m = self.match()
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))),
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))),
 						  provider=self.provider(reply('likely')))
 		row = Triage.objects.get(match=m)
 		self.assertEqual((row.status, row.classification), ('triaged', 'needs_validation'))  # version string alone: capped

@@ -136,6 +136,13 @@ which send nothing to the target and need no vantage point.
   floor). The scanner enforces it on every hop and reports the hosts it touched. Today each hop asks the database.
 - **bbot**: a streamed job type. Partial results are posted as the run goes, screenshots travel as blobs, and the server
   can stop it. It does not fit "one result per task".
+  - *Built (server side):* the `bbot_discovery` kind, contract version 3, with `$defs/partials` (the batches) and `$defs/scope_policy` (what the
+    scanner may touch). `POST /api/v1/sentinel/tasks/<id>/partial` (`agentapi.sentinel_stream.report_partial`) takes numbered batches once and in
+    order, holds them to the task's scope and stores them as `SentinelPartial` rows; `sentinel_stream.dispatch_stream` (the discovery stage) reads
+    them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
+    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind and runs bbot here otherwise, through the same
+    `_no_local` decision as every other kind. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
+    scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
@@ -166,7 +173,8 @@ which send nothing to the target and need no vantage point.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
    and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
    source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
-7. Probes and bbot: the scope-policy task and the streamed job type, then move them.
+7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
+   **bbot** above); the local run stays as the fallback until its telemetry shows none.
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).

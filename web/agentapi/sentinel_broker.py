@@ -38,6 +38,7 @@ from agentapi import builtin_scanner
 from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
+from agentapi import sentinel_stream
 from agentapi import sentinel_version
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
@@ -59,7 +60,8 @@ INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed insi
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
-         'secret': (6, 60)}  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
+         'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
+         'partial': (240, 60)}  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
@@ -1314,6 +1316,8 @@ def max_runtime(task):
     target = task.target if isinstance(task.target, dict) else {}
     if task.kind == 'openvas' and isinstance(target.get('max_hours'), int) and not isinstance(target['max_hours'], bool) and target['max_hours'] > 0:
         seconds = target['max_hours'] * 3600 + 600
+    elif task.kind == 'bbot_discovery' and isinstance(target.get('timeout_seconds'), int) and not isinstance(target['timeout_seconds'], bool):
+        seconds = max(60, target['timeout_seconds']) + sentinel_stream.REPORT_GRACE  # the run's own limit (up to six hours), as the stage waits
     else:
         seconds = sentinel_dispatch._dispatch_timeout(task.kind, len(task.ips or []) or len(target.get('targets') or target.get('addresses') or []))
     return timedelta(seconds=seconds) + RUN_GRACE
@@ -1683,6 +1687,8 @@ def _credential_payload(credential_id, project_id, now):
 
 def read_secret(ctx, task_id):
     """``POST sentinel/tasks/<id>/secret``: the decrypted stored credential of one signed-in task, to the built-in scanner that holds it, exactly once.
+    For a ``bbot_discovery`` task whose ``secret_ref`` is ``bbotkeys:<project id>`` it is the project's API keys for bbot's modules instead, as
+    ``{bbot_config: {modules: {<module>: {<option>: <key>}}}}`` (``sentinel_stream.keys_payload``), under the same rules.
 
     Only the built-in scanner (``builtin_scanner.builtin_agent``) with its own sentinel-scope token may call it, for a task assigned to it, claimed
     or running, that names a stored credential (``secret_ref``). Any other caller (an external Sentinel, a person's token, a read-only token) is a 403,
@@ -1731,8 +1737,13 @@ def read_secret(ctx, task_id):
         refuse(409, f'the task is {task.status}', 'the task is not in progress on this Sentinel')
     if eff.refusal(task):
         refuse(403, "the task is outside the built-in scanner's rights", 'this Sentinel does not cover that task')
-    credential_id = _credential_id(task.secret_ref)
-    problem = _stored_credential(credential_id, task, now) if credential_id is not None else (410, 'the task names no readable credential')
+    keys_project = sentinel_stream.keys_ref_project(task.secret_ref)  # a bbot discovery's module keys (bbotkeys:<project id>), not an AuthCredential
+    if keys_project is not None:
+        credential_id = None
+        problem = None if keys_project == task.project_id else (403, "the keys named belong to another project than the task's")
+    else:
+        credential_id = _credential_id(task.secret_ref)
+        problem = _stored_credential(credential_id, task, now) if credential_id is not None else (410, 'the task names no readable credential')
     if problem:
         refuse(problem[0], problem[1], 'the stored credential is not available for this task')
     # The single use: whoever moves secret_read_at from null wins, whatever else is happening. Nothing has been decrypted yet.
@@ -1741,14 +1752,19 @@ def read_secret(ctx, task_id):
     if not won:
         refuse(409, 'already read, or no longer held by this Sentinel', 'the stored credential was already read for this task')
     try:
-        credential = _credential_payload(credential_id, task.project_id, now)
+        if keys_project is not None:
+            config = sentinel_stream.keys_payload(task)
+            body = {'bbot_config': config} if config else None
+        else:
+            credential = _credential_payload(credential_id, task.project_id, now)
+            body = {'credential': credential} if credential is not None else None
     except Exception as exc:  # noqa: BLE001 - nothing of the credential may reach a log or a message: the type is all that is kept
-        credential = None
+        body = None
         logger.error('could not read the stored credential for sentinel task %s (%s)', task.pk, type(exc).__name__)
-    if credential is None:
+    if body is None:
         refuse(410, 'the stored credential could not be read', 'the stored credential is not available for this task')
     _secret_audit(ctx, 'granted', task.pk, agent_id=agent.pk, ref=task.secret_ref, org=seen['org'])
-    response = JsonResponse({'credential': credential, 'task_id': task.pk})
+    response = JsonResponse({**body, 'task_id': task.pk})
     response['Cache-Control'] = 'no-store'
     response['Pragma'] = 'no-cache'
     return response
@@ -2049,7 +2065,8 @@ def _clean_waf_result(body):
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
              'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
-             'discover': _clean_discover_result, 'waf': _clean_waf_result}
+             'discover': _clean_discover_result, 'waf': _clean_waf_result,
+             'bbot_discovery': sentinel_stream.clean_bbot_result}
 
 
 def _bind_to_task(kind, result, task):
@@ -2160,6 +2177,8 @@ def report_result(ctx, task_id, body):
             raise ApiError(409, 'the task is no longer assigned to this Sentinel (its lease expired or it was cancelled)')
         try:
             result = clean_result(task.kind, body, task)
+            if task.kind in sentinel_contract.STREAMED:
+                sentinel_stream.check_final(task, result)  # every batch first, then the result that closes the run
         except ApiError as exc:
             if exc.status != 400:
                 raise

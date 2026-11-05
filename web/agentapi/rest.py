@@ -13,6 +13,7 @@ from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
 from agentapi import sentinel_dispatch
+from agentapi import sentinel_stream
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -473,6 +474,10 @@ ROUTES = [
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
     ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
      lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
+    ('GET', r'reviewer/jobs/next', 'AI reviewer token only (docs/AI-REVIEWER.md): up to ?limit= (at most 20) of the pipeline\'s queued AI jobs (triage and the other stages), each leased to the container with a fresh lease token: {jobs: [{id, kind, stage, attempt, lease, system, parts: [{text} | {fence, data}], schema, options, image?}]}; none while no provider is configured, CVENGINE_REVIEWER=0 or scanning is paused',
+     lambda r, c, **k: reviewer_api.next_jobs(r, c)),
+    ('POST', r'reviewer/jobs/(?P<job_id>\d{1,12})/result', 'AI reviewer token only: the answer to one leased job {lease, text | error (a failure category), provider, model, calls: [{status, category, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms, model, actual_model}]}; answers {accepted: true} (the server checks and applies it in the background), 409 when the lease is not the job\'s current one',
+     lambda r, c, job_id, **k: reviewer_api.job_result(r, c, job_id, _body(r))),
     ('POST', r'sentinels/bootstrap', 'A Sentinel\'s first call: trade a one-time enrollment secret (from the project\'s sentinels/enroll) for its own API token and Agent row (kind=scanner), pre-scoped to what the secret was generated for; body {enrollment_token, name, capabilities, os, tools, max_concurrent}. No bearer token needed; the token is returned once',
      _sentinel_bootstrap),
     ('GET', r'sentinel', 'The Sentinel registered on this token: scope, capabilities, open assignments', lambda r, c, **k: sentinels.identity(c)),
@@ -485,13 +490,15 @@ ROUTES = [
      lambda r, c, **k: sentinels.template_policy(c)),
     ('GET', r'sentinel/template-policy/bundle', 'Sentinel token only: the approved Nuclei templates as a .tar.gz (application/gzip, ETag = the sha256 in quotes, If-None-Match answers 304)',
      lambda r, c, **k: sentinels.template_bundle_response(c, r.headers.get('If-None-Match'))),
-    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover]}',
+    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover, waf, bbot_discovery]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
-    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/partial', 'One numbered batch of partial results of a streamed SentinelTask it is running (bbot_discovery, contract version 3): {seq, ...the lists of $defs/partials/<kind>}. Answers {accepted, duplicate, seq}: a batch at or below the last one taken is a duplicate and stored once, any other seq than the next is a 409. A 409 also means stop the run (cancelled, expired or its scan stopped); a 429 means send it again shortly',
+     lambda r, c, task_id, **k: sentinel_stream.report_partial(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
      lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),

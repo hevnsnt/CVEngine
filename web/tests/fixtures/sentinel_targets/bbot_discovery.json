@@ -1,0 +1,41 @@
+{
+  "domain": "example.com",
+  "mode": "standard",
+  "presets": [
+    "subdomain-enum",
+    "web",
+    "web-screenshots"
+  ],
+  "require_flags": [
+    "safe"
+  ],
+  "exclude_modules": [
+    "trufflehog"
+  ],
+  "force": true,
+  "strict_scope": false,
+  "timeout_seconds": 21600,
+  "api_keys": false,
+  "trufflehog": false,
+  "scope": {
+    "in_scope_domains": [
+      "example.com"
+    ],
+    "exact_host": false,
+    "exclusions": [
+      {
+        "host": "intranet.example.com",
+        "subtree": true
+      },
+      {
+        "host": "old.example.com",
+        "subtree": false
+      }
+    ],
+    "deny_ranges": [
+      "10.20.0.0/16",
+      "198.51.100.7/32"
+    ],
+    "bounty": false
+  }
+}
