@@ -278,6 +278,9 @@ ALLOWED = {
         'Dockerfile',
         'agentapi/mcp.py',
         'agentapi/rest.py',
+        'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
+        'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
+        'agentapi/sentinel_stream.py',  # 1.4 bbot on a Sentinel: hands the run to a Sentinel and takes its batches, runs nothing
         'agentapi/services.py',
         'celery-entrypoint.sh',
         'cveFeed/admin_api.py',

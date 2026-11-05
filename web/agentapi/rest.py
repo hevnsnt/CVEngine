@@ -13,6 +13,7 @@ from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
 from agentapi import sentinel_dispatch
+from agentapi import sentinel_stream
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -485,13 +486,15 @@ ROUTES = [
      lambda r, c, **k: sentinels.template_policy(c)),
     ('GET', r'sentinel/template-policy/bundle', 'Sentinel token only: the approved Nuclei templates as a .tar.gz (application/gzip, ETag = the sha256 in quotes, If-None-Match answers 304)',
      lambda r, c, **k: sentinels.template_bundle_response(c, r.headers.get('If-None-Match'))),
-    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover]}',
+    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover, waf, bbot_discovery]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
-    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/partial', 'One numbered batch of partial results of a streamed SentinelTask it is running (bbot_discovery, contract version 3): {seq, ...the lists of $defs/partials/<kind>}. Answers {accepted, duplicate, seq}: a batch at or below the last one taken is a duplicate and stored once, any other seq than the next is a 409. A 409 also means stop the run (cancelled, expired or its scan stopped); a 429 means send it again shortly',
+     lambda r, c, task_id, **k: sentinel_stream.report_partial(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
      lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
