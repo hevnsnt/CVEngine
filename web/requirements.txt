@@ -59,4 +59,4 @@ cryptography==50.0.2
 packaging==26.3
 # The scanner library (hevnsnt/cvENGINE-sentinel, cvengine_scanner/): the scan policy, the tool output parsers and the pure web fingerprint
 # readers this server shares with every Sentinel. Pinned to a release tag; bumping it is a pull request of its own (its README, "The scanner library").
-cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@e73b0f80331178e593658cab0c4173698fe05f3c
+cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@v1.4.0
