@@ -62,6 +62,14 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   - **Opt-in validation, off by default.** An Org Admin or App Admin may switch on read-only identity checks of found credentials for a project, by accepting an attestation (audited). Only the built-in scanner validates, never for a project with a bug bounty engagement, and only with the reviewed validators of `web/cveFeed/data/secrets_validation_allowlist.json` (AWS, GitHub, GitLab, Slack, Google API key, SendGrid), each pinned by the hash of its text in the attested rule bundle.
   - **Custom rules and placeholders.** App Admins can add Kingfisher rules (detection only, never a validator) and skip words through `GET/PUT /api/v1/secrets/rules`; the Sentinel fetches them from `GET /api/v1/sentinel/secret-rules/bundle`.
   - **Result contract version 3** adds `secrets_scan` (`kind_since: 3`); a Sentinel on contract 1 or 2 keeps every kind it had. Migration `cveFeed.0147` adds the inventory tables and the project's validation switch.
+- **Name and certificate reads on the scanner** (`identity_check`, contract version 3). The reads the server used to make of a name or an address now
+  go to a Sentinel in one task: the alias a hostname ends at when no CNAME was stored (the shared-platform check of the port stages), the name
+  server and mail server records of a domain (the bucket sweep's ownership check), the reverse name and certificate names of an IP target, and the
+  addresses of an archived or unresolved host. The kind has no local path (`NEVER_LOCAL`): with no scanner able to take it nothing is read here, and
+  an answer that did not come is unknown, never "no alias", "no name servers" or "gone".
+- **The server resolves no target name and connects to no retired address**: `dns_resolve` and `alive_check` are `NEVER_LOCAL`, the server's own
+  lookups and connects are deleted (`discovery.resolve_names`, `zombie.http_alive`, `zombie.tcp_alive`), and the archived-host, inactive-host and
+  unresolved-host reviews ask a Sentinel (`identity_check` for names, `alive_check` for the stored addresses' ports). With no scanner the reviews wait.
 
 ### Changed
 
