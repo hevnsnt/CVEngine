@@ -71,6 +71,19 @@ class ClassifyTests(SimpleTestCase):
 		self.assertEqual(self.state(status=410)[0], 'not_found')
 		self.assertEqual(self.state(status=503)[0], 'error')
 
+	def test_every_case_of_the_table_the_scanner_is_held_to(self):
+		"""``tests/fixtures/route_probe/classify.json`` is the same file as the Sentinel's ``cvengine_scanner/tests/fixtures/route_classify.json``: its
+		``route_probe`` kind classifies a route with its own copy of ``classify``, and both copies must give these answers."""
+		from pathlib import Path
+		table = json.loads((Path(__file__).parent / 'fixtures' / 'route_probe' / 'classify.json').read_text(encoding='utf-8'))
+		self.assertGreater(len(table['cases']), 20)
+		for case in table['cases']:
+			with self.subTest(case['name']):
+				state, evidence = ra.classify(case['probe'])
+				expect = case['expect']
+				self.assertEqual((state, evidence['provider'], evidence['redirect_to'], evidence['markers']),
+					(expect['state'], expect['provider'], expect['redirect_to'], expect['markers']))
+
 	def test_evidence_carries_markers_bytes_and_cookie_names_never_the_body(self):
 		_, evidence = self.state(body='<input type="password">' + 'x' * 100, cookies=['sid', 'csrf'], bytes=123)
 		self.assertEqual((evidence['markers'], evidence['bytes'], evidence['cookies']), (['password_input'], 123, ['csrf', 'sid']))

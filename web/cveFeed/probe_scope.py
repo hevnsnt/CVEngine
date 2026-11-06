@@ -123,6 +123,38 @@ def for_probes(project_id, planned, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_routes(project_id, scan, hosts, unattended=False):
+    """The policy of a route_probe task: the hosts the route plan chose (``route_auth._plan`` already applied the exclusions and the bug bounty gate;
+    an exclusion made since is applied again here), then, for the scripts of their front pages, the other hosts of the same site this project holds
+    under a target that is neither manual only, passive nor host scoped (the library reader's own rule, ``_same_site_hosts``) and the public library
+    CDNs. A same-site host that is excluded, archived or outside the bounty program's scope is never listed. Sorted, so the same task is the same
+    task on every pass of an asynchronous stage."""
+    from cveFeed import js_libraries
+    from cveFeed.exclusions import is_excluded
+    from startScan.models import Subdomain
+    names = sorted({(h or '').strip().lower().rstrip('.') for h in hosts} - {''})
+    listed, excluded = [], set()
+    for name in names:
+        if is_excluded(project_id, name):
+            excluded.add(name)
+        else:
+            listed.append(name)
+    gate = _Gate(project_id, unattended=unattended)
+    subs = Subdomain.objects.filter(scan_history=scan, name__in=listed).select_related('target_domain').order_by('name')
+    for sub in subs:
+        for name in sorted(_same_site_hosts(project_id, sub, gate)):
+            if name in listed or name in excluded:
+                continue
+            if gate.refusal(name):
+                excluded.add(name)
+            elif len(listed) < MAX_HOSTS:
+                listed.append(name)
+    for name in sorted(js_libraries.CDN_HOSTS):  # a public library CDN touches no target
+        if name not in listed and len(listed) < MAX_HOSTS:
+            listed.append(name)
+    return {'hosts': listed, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_addresses(project_id, addresses):
     """The policy of an alive_check task: the last known addresses it asks, each as itself (``zombie.endpoints`` already kept only the ones a
     scanner may touch, by this server's address rules, which travel along for the scanner to apply again)."""

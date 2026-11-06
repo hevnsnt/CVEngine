@@ -19,6 +19,14 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **The web route check on the scanner** (`route_probe`, contract version 3). The anonymous half of the route and sign-in state check sends the
+  routes it planned to a Sentinel, up to 25 hosts and 20 routes each per task. The Sentinel asks each route (one GET, no credential, no cookie, no
+  redirect followed), classifies the answer, compares it with the answer for a path that cannot exist (`catch_all`), reads the front page's own
+  scripts for the libraries they state and counts the sensitive data a body serves; the task carries a scope policy the Sentinel holds every hop and
+  address to. The server validates and clips every route (a state its status cannot have is refused, the sensitive score is its own) and stores it
+  as it stores its own readings: states, auth changes, retired and zombie routes, the secrets inventory. A route the scanner could not ask is
+  unanswered and asked again, never a state. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the routes stay due.
+  The signed-in half (`auth_routes`) is unchanged and still runs on the server.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
