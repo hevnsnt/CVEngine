@@ -62,6 +62,7 @@ NEVER_LOCAL = (  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALL
     'secrets_scan',
     'bbot_discovery',
     'rdp_shot',
+    'db_probe',  # the credential-less database attempts: a Sentinel's, this server carries no database client
     'bucket_check',  # the storage requests: a Sentinel's, the server carries only the readers of what comes back
     'node2shell',  # the Brotli decoder check: the detector is vendored on the scanner only, this server carries no copy of it
     'dns_resolve',  # the discovery and retire-check name lookups (agentapi.probe_dispatch.try_dns_resolve): a Sentinel's resolver, never this server's

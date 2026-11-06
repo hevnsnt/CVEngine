@@ -512,15 +512,20 @@ def run_fact_probe(check):
 
 
 def run_db_probe(check):
+    """The one credential-less attempt, made by a Sentinel (``db_probe``): this server opens no connection. ``failed`` (never ``no_match``) when no
+    scanner answered or the scanner has no client for this database."""
+    from agentapi import sentinel_dispatch
     from cveFeed import db_exposure
+    from dashboard.models import Project
     params = check['params']
-    _label, fn = db_exposure.CHECKS[params['db']]
-    db_exposure.EVIDENCE.pop((params['ip'], params['port']), None)
-    opened = fn(params['ip'], params['port'])
-    reply = db_exposure.EVIDENCE.pop((params['ip'], params['port']), '')
-    if opened is None:
-        return {'status': 'failed', 'error': 'the client library for this check is not installed', 'summary': 'not run'}
-    if opened:
+    label, _fn = db_exposure.CHECKS[params['db']]
+    project = Project.objects.get(pk=params['project_id'])
+    result = sentinel_dispatch.dispatch_or_none(project, 'db_probe', {'address': params['ip'], 'port': params['port'], 'db': db_exposure.DB_KEYS[label]},
+                                                host=f'{label} on {params["ip"]}:{params["port"]}', ips=[params['ip']])  # ScannerUnavailable: no scanner can take it
+    if result is None or result.get('open') is None:
+        return {'status': 'failed', 'error': 'no scanner could run this check', 'summary': 'not run'}
+    reply = str(result.get('evidence') or '')
+    if result.get('open') is True:
         return {'status': 'hit', 'summary': 'the service answered with no credentials' + (f': {reply}' if reply else ''),
                 'output_excerpt': _trim(reply, OUTPUT_CAP), 'evidence': {'reply': _trim(reply, 300)}}
     return {'status': 'no_match', 'summary': 'the service did not answer without credentials at the time of the check'}
@@ -1573,6 +1578,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                         row.save(update_fields=['validation_status', 'updated_at'])
                     continue
                 try:
+                    check['params'].setdefault('project_id', project_id)  # the runners that need a scanner say which project asks
                     result = interpret(subject, check, runners[check['kind']](check))
                 except resources.ScanAborted:
                     stats['stopped'] = True
