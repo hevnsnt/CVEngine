@@ -17,7 +17,7 @@ from unittest import mock
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
+from cveFeed import egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
 from reNgine import crypto_fields
 from scanEngine.models import Proxy
 
@@ -566,19 +566,6 @@ class LiveProxyTests(ProxyOn, TestCase):
             self.assertIs(transport.open_socket(addresses, 3), sock)
         sock.connect.assert_called_once_with(('203.0.113.10', 443))
         self.assertEqual(fixture.records, [])
-
-    def test_db_exposure_http_checks_use_the_proxy_through_requests(self):
-        fixture = self.proxy()
-        self.turn_on(fixture.url_without_login)
-        body = b'{"cluster_name": "c1", "version": {"number": "8.1"}}'
-        fixture_response = (b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(body)) + body
-        with mock.patch(__name__ + '.origin_response', return_value=fixture_response):
-            self.assertTrue(db_exposure.check_elasticsearch('203.0.113.20', 9200))
-        self.assertEqual(fixture.records[0]['line'], 'GET http://203.0.113.20:9200/ HTTP/1.1')
-        self.turn_on(fixture.url_without_login, use=False)
-        with mock.patch('requests.sessions.Session.get', side_effect=OSError('direct')) as get:
-            self.assertFalse(db_exposure.check_elasticsearch('203.0.113.20', 9200))
-        self.assertEqual(get.call_args.kwargs['proxies'], {})
 
     @unittest.skipUnless(shutil.which('wafw00f'), 'wafw00f is not installed')
     def test_the_real_wafw00f_sends_its_requests_to_the_proxy(self):

@@ -2,7 +2,6 @@
 keeping its own row, outcome, bookkeeping and gates, with the caps counted in pipeline runs and the reaper and time limits sized for a batch."""
 import contextlib
 import os
-import socket
 import uuid
 from datetime import timedelta
 from unittest import mock
@@ -393,19 +392,16 @@ class ExecuteBatchTests(Base):
     def test_a_lookup_that_is_not_answered_for_one_host_does_not_fail_the_others(self):
         jobs = self.queue(self.a1, ['ok1.a1.example', 'slow.a1.example', 'ok2.a1.example'])
 
-        real_lookup = socket.getaddrinfo
-
-        def lookup(name, *args, **kwargs):
-            if not str(name).endswith('.a1.example'):
-                return real_lookup(name, *args, **kwargs)  # the database and Redis are not the test's to break
-            if name.startswith('slow'):
-                raise socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (f'8.8.4.{len(name) % 200 + 1}', 0))]
+        def lookup(_domain, wanted, errors=None, scan=None):  # a Sentinel's answer: the names it resolved, and the lookups it could not answer
+            names = set(wanted)
+            if errors is not None:
+                errors.update({n: 'Temporary failure in name resolution' for n in names if n.startswith('slow')})
+            return {(n, f'8.8.4.{len(n) % 200 + 1}') for n in names if n.endswith('.a1.example') and not n.startswith('slow')}
         nmap, kwargs = _stages()
-        del kwargs['resolver']  # the real resolver, so a lookup that is not answered is told from a name with no address
+        del kwargs['resolver']  # a Sentinel's resolver (below): it reports a lookup it could not answer, told from a name with no address
         real = discovery.run_host_pipeline
         with mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=lambda *a, **k: real(*a, **{**k, **kwargs})), \
-                mock.patch('socket.getaddrinfo', side_effect=lookup), \
+                mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lookup), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
                 mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
                 mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}):

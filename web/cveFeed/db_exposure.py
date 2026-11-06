@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 EVIDENCE = {}
 
 
+def _note(host, port, text):
+    EVIDENCE[(host, port)] = str(text)[:300]
+
+
 def _remote_only(host, port):
     """The table's entry for a check that a Sentinel runs: this server carries no database client and opens no connection."""
     raise RuntimeError('a database exposure check runs on a Sentinel only')
