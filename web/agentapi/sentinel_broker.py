@@ -2285,7 +2285,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'rdp_shot': _clean_rdp_shot_result, 'db_probe': _clean_db_probe_result, 'path_probe': _clean_path_probe_result,
              'nuclei_validate': _clean_nuclei_validate_result,
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
-             'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe}
+             'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
+             'route_probe': probe_results.clean_route_probe}
 
 
 def _bind_to_task(kind, result, task):
@@ -2295,7 +2296,7 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
-    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'vhost_probe', 'subdir_probe'):
+    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'vhost_probe', 'subdir_probe', 'route_probe'):
         return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result

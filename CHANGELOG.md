@@ -25,6 +25,14 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   asks them at the sweep's own pace and request caps. The server compares what comes back with its own rules (it does not read the Sentinel's
   verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
   clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
+- **The web route check on the scanner** (`route_probe`, contract version 3). The anonymous half of the route and sign-in state check sends the
+  routes it planned to a Sentinel, up to 25 hosts and 20 routes each per task. The Sentinel asks each route (one GET, no credential, no cookie, no
+  redirect followed), classifies the answer, compares it with the answer for a path that cannot exist (`catch_all`), reads the front page's own
+  scripts for the libraries they state and counts the sensitive data a body serves; the task carries a scope policy the Sentinel holds every hop and
+  address to. The server validates and clips every route (a state its status cannot have is refused, the sensitive score is its own) and stores it
+  as it stores its own readings: states, auth changes, retired and zombie routes, the secrets inventory. A route the scanner could not ask is
+  unanswered and asked again, never a state. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the routes stay due.
+  The signed-in half (`auth_routes`) is unchanged and still runs on the server.
 
 - **The WordPress scan no longer runs on the server** (T8, kind `wpscan`). The local runner, its argument builder, its environment and resource-gate wiring, the
   installed-binary check and the hours-long thorough pass (`wpscan_thorough`, which could not be handed to a Sentinel) are deleted from
