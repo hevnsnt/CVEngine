@@ -147,11 +147,8 @@ class ScreenshotNoteTests(TestCase):
 	reasons the browser attempts record is in tests/test_web_shot.py.)"""
 
 	def _note(self, rows=(), has_web_evidence=True, **kwargs):
-		from unittest import mock
-
 		from cveFeed import web_shot
-		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
-			return web_shot.note_for(list(rows), has_web_evidence=has_web_evidence, **kwargs)
+		return web_shot.note_for(list(rows), has_web_evidence=has_web_evidence, **kwargs)
 
 	def test_no_web_page_answered(self):
 		self.assertIn('no web page has answered', self._note(has_web_evidence=False))
@@ -160,8 +157,10 @@ class ScreenshotNoteTests(TestCase):
 		self.assertIn('no web port', self._note(has_web_evidence=False, ports_known=True))
 		self.assertNotIn('no web port', self._note(has_web_evidence=True, ports_known=True))
 
-	def test_internal_hosts_say_that_only_a_sentinel_scans_them(self):
-		self.assertIn('internal network 10.20.0.0/24', self._note(network='10.20.0.0/24'))
+	def test_internal_hosts_say_that_only_a_sentinel_scans_them_and_no_screenshot_is_taken_yet(self):
+		note = self._note(network='10.20.0.0/24')
+		self.assertIn('internal network 10.20.0.0/24', note)
+		self.assertIn('not taken yet', note)
 
 	def test_a_host_that_answers_on_the_web_says_when_a_picture_will_be_taken(self):
 		note = self._note()
@@ -185,8 +184,7 @@ class ScreenshotNoteTests(TestCase):
 		Subdomain.objects.create(scan_history=scan, name='shot.n.example', target_domain=domain, http_status=200, http_url='https://shot.n.example/',
 		                         screenshot_path='n.example_1/screenshots/s.jpeg')
 		user = User.objects.create_user('n-admin', password='x', is_superuser=True)
-		with mock.patch.object(web_shot, 'browser_installed', return_value=True):
-			hosts = {h['host']: h for h in list_hosts(Ctx(user=user), 'n-shot-p', {})['results']}
+		hosts = {h['host']: h for h in list_hosts(Ctx(user=user), 'n-shot-p', {})['results']}
 		self.assertIn('waiting for the next screenshot pass', hosts['www.n.example']['screenshot_note'])
 		self.assertFalse(hosts['www.n.example']['screenshot'])
 		self.assertEqual((hosts['shot.n.example']['screenshot'], hosts['shot.n.example']['screenshot_note']), (True, ''))

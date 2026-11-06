@@ -110,7 +110,7 @@ class VantageWarningTests(VantageBase):
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
         proxied = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'wpscan', 'waf', 'bbot_discovery', 'http_probe',
-                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe']
+                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'web_screenshot']
         moved = ', '.join(k for k in proxied if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertEqual(out[0], f"CVENGINE_LOCAL_FALLBACK moves {moved} to the built-in scanner, whose image "
                                  "does not use this server's egress proxy; update it (the server's updater pulls the image this release pins).")
@@ -120,7 +120,7 @@ class VantageWarningTests(VantageBase):
         # checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check), the supplier
         # checks (supplier_check), the route checks (route_probe), the TLS reads and
         # MTA-STS fetches of the hygiene sweep (hygiene_check) and the takeover control request (dangling_dns_check) do
-        os.environ[ENV] = 'wpscan,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,supplier_check,hygiene_check,dangling_dns_check,route_probe'
+        os.environ[ENV] = 'wpscan,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,supplier_check,hygiene_check,dangling_dns_check,route_probe,web_screenshot'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -140,7 +140,7 @@ class VantageWarningTests(VantageBase):
         self.assertEqual(len(out), 1)
         taken_off = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'waf', 'bbot_discovery', 'http_probe', 'dns_resolve',
                      'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nmap_full', 'nmap_verify', 'node2shell', 'rdp_shot', 'db_probe',
-                     'path_probe', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe']
+                     'path_probe', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'web_screenshot']
         moved = ', '.join(k for k in taken_off if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertIn(f'moves {moved} to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])

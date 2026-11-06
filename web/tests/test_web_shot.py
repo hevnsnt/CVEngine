@@ -1,10 +1,8 @@
+import base64
 import io
 import os
 import shutil
-import socket
-import sys
 import tempfile
-import textwrap
 import time
 from datetime import timedelta
 from unittest import mock
@@ -15,11 +13,13 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import egress_proxy, web_shot
+from agentapi.models import SentinelTask
+from cveFeed import web_shot
 from cveFeed.models import HostExclusion, HostScreenshot, HostState, InternalRange
 from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
+from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_agentapi import call
 from tests.test_route_auth import RouteFixture
 from tests.test_service_intel import RDP_ENC, RDP_NLA_ONLY
@@ -47,8 +47,55 @@ def png(width=60, height=40, flat=False, noise=0):
 	return buf.getvalue()
 
 
+def shot_result(task, plan=None, sandbox=None, **extra):
+	"""What a Sentinel answers for a ``web_screenshot`` task: one page per page of the task, as ``plan`` says by host (``{host: {outcome, reason, final_url,
+	status, title, image}}``; a page not in the plan is photographed with a picture of its own)."""
+	from urllib.parse import urlsplit
+	plan = plan or {}
+	pages = []
+	for page in task['target']['pages']:
+		spec = dict(plan.get(urlsplit(page['url']).hostname, {}))
+		outcome = spec.pop('outcome', 'ok')
+		item = {'id': page['id'], 'outcome': outcome, 'reason': spec.pop('reason', ''), 'final_url': spec.pop('final_url', page['url'] if outcome == 'ok' else ''),
+				'status': spec.pop('status', 200 if outcome == 'ok' else None), 'title': spec.pop('title', '')}
+		if outcome == 'ok':
+			item['image'] = base64.b64encode(spec.pop('image', None) or png(noise=int(page['id']) % 900 + 1)).decode()
+		pages.append(item)
+	return {'outcome': 'done', 'sandbox': sandbox or {'engaged': True, 'reason': '', 'version': '156.0.8078.4'}, 'pages': pages,
+			'touched': [], 'refused': [], 'dropped_requests': 0, **extra}
+
+
+class Scanner:
+	"""A fake Sentinel that takes ``web_screenshot`` (and nothing else), answering through ``shot_result``; ``tasks`` are the targets it was handed."""
+
+	def __init__(self, plan=None, wait='60', **kw):
+		self.tasks, self.plan, self.wait, self.kw = [], plan, wait, kw
+
+	def respond(self, task):
+		self.tasks.append(task['target'])
+		return shot_result(task, self.plan, **self.kw)
+
+	def mode(self, mode):
+		self.fake.set_mode(mode)
+
+	def __enter__(self):
+		# the fake serves one task per poll of the virtual clock, so the claim budget (one second by default) is widened for a drain of several tasks
+		self.env = mock.patch.dict(os.environ, {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': self.wait, 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT': self.wait})
+		self.env.start()
+		self.fake = FakeScanner(kinds=['web_screenshot'], responders={'web_screenshot': self.respond})
+		self.local = LocalFallback('none')
+		self.local.__enter__()
+		self.fake.__enter__()
+		return self
+
+	def __exit__(self, *exc):
+		self.fake.__exit__(*exc)
+		self.local.__exit__(*exc)
+		self.env.stop()
+
+
 class ShotFixture(RouteFixture):
-	"""A project with a target, a media directory of its own, and the browser reported as installed (no browser is ever launched here)."""
+	"""A project with a target and a media directory of its own. No browser is ever launched here: the pictures come from a fake Sentinel."""
 
 	def setUp(self):
 		super().setUp()
@@ -57,17 +104,7 @@ class ShotFixture(RouteFixture):
 		override = override_settings(MEDIA_ROOT=self.media)
 		override.enable()
 		self.addCleanup(override.disable)
-		mock.patch.object(web_shot, 'browser_installed', return_value=True).start()
 		self.kicked = mock.patch('cveFeed.tasks.drain_screenshots.apply_async').start()
-		# the stack's own service names (web_shot.stack_blocklist) do not resolve outside the compose network, and no test may look them up
-		real_lookup = socket.getaddrinfo
-
-		def lookup(host, *args, **kwargs):
-			if host in egress_proxy.STACK_HOSTS and host != 'localhost':
-				raise socket.gaierror(f'{host}: not resolved in tests')
-			return real_lookup(host, *args, **kwargs)
-		mock.patch('socket.getaddrinfo', side_effect=lookup).start()
-		web_shot.stack_blocklist(refresh=True)
 		cache.clear()
 
 	def host(self, name='www.rt.test', ports=((443, 'https'), (80, 'http')), address='203.0.113.5', **fields):
@@ -87,6 +124,20 @@ class ShotFixture(RouteFixture):
 		fields.setdefault('outcome', 'queued')
 		fields.setdefault('domain', self.domain)
 		return HostScreenshot.objects.create(project=self.project, host=host, scheme=scheme, port=port, **fields)
+
+	def project_with_hosts(self, slug, count, ports=((443, 'https'),), start=10):
+		org = Org.objects.create(name=slug, slug=slug)
+		project = Project.objects.create(name=slug, slug=slug, insert_date=timezone.now(), org=org)
+		domain = Domain.objects.create(name=f'{slug}.test', project=project, insert_date=timezone.now())
+		from startScan.models import ScanHistory
+		scan = ScanHistory.objects.create(domain=domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='x')
+		for i in range(count):
+			sub = Subdomain.objects.create(name=f'h{i}.{slug}.test', target_domain=domain, scan_history=scan)
+			ip, _ = IpAddress.objects.get_or_create(address=f'198.51.{start}.{i + 1}')
+			sub.ip_addresses.add(ip)
+			for number, service in ports:
+				ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
+		return project
 
 	def plant(self, rel, data=None):
 		full = os.path.join(self.media, rel)
@@ -291,10 +342,10 @@ class QueueTests(ShotFixture, TestCase):
 			self.assertFalse(web_shot.has_work_for_scan(scan))
 		self.assertEqual(HostScreenshot.objects.count(), 0)
 
-	def test_a_scan_with_no_web_service_has_no_work_and_no_browser_means_no_stage(self):
+	def test_a_scan_with_no_web_service_has_no_work_and_switched_off_means_no_stage(self):
 		self.assertTrue(web_shot.has_work_for_scan(self.scan()))
 		self.assertFalse(web_shot.has_work_for_scan(self.scan(names=('db.rt.test',), ports=((5432, 'postgresql'),), ip='203.0.113.9')))
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
 			self.assertFalse(web_shot.has_work_for_scan(self.scan(names=('x.rt.test',), ip='203.0.113.7')))
 
 	def test_the_button_queues_every_page_whatever_the_window_says(self):
@@ -351,9 +402,9 @@ class DiscoveryStageTests(ShotFixture, TestCase):
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='web_screenshot').status, 0)
 		self.assertIn('triage', list(ScanActivity.objects.filter(scan_of=scan).values_list('name', flat=True)))  # the later stages still ran
 
-	def test_no_browser_or_no_web_page_means_no_stage_row(self):
+	def test_switched_off_or_no_web_page_means_no_stage_row(self):
 		from startScan.models import ScanActivity
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
 			self.run_stages(self.scan())
 		self.run_stages(self.scan(names=('db.rt.test',), ports=((5432, 'postgresql'),), ip='203.0.113.9'))
 		self.assertFalse(ScanActivity.objects.filter(name='web_screenshot').exists())
@@ -361,635 +412,11 @@ class DiscoveryStageTests(ShotFixture, TestCase):
 
 # ------------------------------------------------------------------------------------------------ the guards, per connection
 
-class GuardTests(ShotFixture, TestCase):
-	def guard(self, resolver=None, primary='www.rt.test', unattended=True, excluded=None):
-		calls = []
-
-		def resolve(host, port):
-			calls.append((host, port))
-			return resolver(host, port) if resolver else ((2, ('203.0.113.5', port)),)
-		guard = web_shot.Guard(self.project.pk, primary, unattended, excluded=excluded, resolver=resolve)
-		return guard, calls
-
-	def test_the_pages_own_host_is_let_through_with_the_vetted_address(self):
-		guard, _ = self.guard()
-		target, reason = guard.admit('www.rt.test', 443)
-		self.assertEqual((target, reason), ((((2, ('203.0.113.5', 443)),), self.project.pk), ''))  # the project is the authority for its own tailnet address only
-		other, _ = guard.admit('cdn.thirdparty.test', 443)
-		self.assertIsNone(other[1])
-
-	def test_a_host_that_resolves_to_an_internal_address_is_refused_on_every_hop_and_for_a_sub_resource(self):
-		def internal(host, port):
-			if host == 'evil.example.test':
-				raise ValueError('probe destination is prohibited')
-			return ((2, ('203.0.113.5', port)),)
-		guard, _ = self.guard(internal)
-		target, reason = guard.admit('evil.example.test', 80)
-		self.assertIsNone(target)
-		self.assertIn('internal or reserved address', reason)
-		self.assertEqual(guard.denied, [('evil.example.test', reason)])
-
-	def test_a_redirect_to_a_literal_internal_address_is_refused_by_the_real_address_rules(self):
-		guard = web_shot.Guard(self.project.pk, 'www.rt.test', True, excluded=frozenset())  # the real resolver: a literal address is judged as itself
-		for address in ('127.0.0.1', '169.254.169.254', '10.0.0.5', '192.168.1.1', '[::1]'):
-			target, reason = guard.admit(address.strip('[]'), 80)
-			self.assertIsNone(target, address)
-			self.assertTrue('internal or reserved' in reason or 'own services' in reason, (address, reason))  # 127.0.0.1 is also the test broker
-
-	def test_a_name_that_does_not_resolve_is_refused_with_a_reason(self):
-		def gone(host, port):
-			raise OSError('Name or service not known')
-		guard, _ = self.guard(gone)
-		target, reason = guard.admit('nothing.example.test', 443)
-		self.assertIsNone(target)
-		self.assertIn('could not be resolved', reason)
-
-	def test_an_excluded_host_is_refused_wherever_the_browser_meets_it(self):
-		HostExclusion.objects.create(org=self.project.org, host='excluded.rt.test')
-		guard, calls = self.guard()
-		target, reason = guard.admit('excluded.rt.test', 443)
-		self.assertIsNone(target)
-		self.assertIn('excluded for this organization', reason)
-		self.assertEqual(calls, [])  # refused before any name lookup
-
-	def test_an_unreadable_exclusion_list_stops_the_request(self):
-		guard, _ = self.guard()
-		with mock.patch('cveFeed.exclusions.excluded_names', side_effect=RuntimeError('db')):
-			target, reason = guard.admit('www.rt.test', 443)
-		self.assertIsNone(target)
-		self.assertIn('exclusion list could not be read', reason)
-
-	def test_the_bug_bounty_scope_holds_back_every_host_but_the_pages_own(self):
-		seen = []
-
-		def refusal(gate, project_id, host=None, *, unattended=True, derived=False):
-			seen.append((host, unattended))
-			return 'the program\'s scope does not name it'
-		guard, _ = self.guard(unattended=True)
-		with mock.patch('cveFeed.bounty_gate.Gate.refusal', refusal):
-			self.assertIsNotNone(guard.admit('www.rt.test', 443)[0])  # the page itself was admitted when it was queued
-			target, reason = guard.admit('sso.thirdparty.test', 443)
-		self.assertIsNone(target)
-		self.assertIn('cannot be visited: the program\'s scope does not name it', reason)
-		self.assertEqual(seen, [('sso.thirdparty.test', True)])
-
-	def test_a_person_asking_does_not_need_the_project_confirmation(self):
-		seen = []
-
-		def refusal(gate, project_id, host=None, *, unattended=True, derived=False):
-			seen.append(unattended)
-			return ''
-		guard, _ = self.guard(unattended=False)
-		with mock.patch('cveFeed.bounty_gate.Gate.refusal', refusal):
-			guard.admit('cdn.thirdparty.test', 443)
-		self.assertEqual(seen, [False])
-
-	def test_a_verdict_is_remembered_for_the_page(self):
-		guard, calls = self.guard()
-		guard.admit('cdn.thirdparty.test', 443)
-		guard.admit('CDN.thirdparty.test.', 443)
-		self.assertEqual(len(calls), 1)
-
-	def test_a_page_that_never_loaded_says_which_host_stopped_it(self):
-		guard, _ = self.guard(lambda host, port: (_ for _ in ()).throw(ValueError('x')) if host != 'www.rt.test' else ((2, ('203.0.113.5', port)),))
-		self.assertEqual(guard.blocked_reason(), '')
-		guard.admit('hop.thirdparty.test', 80)
-		self.assertTrue(guard.blocked_reason().startswith('Redirects to hop.thirdparty.test, which is not visited:'))
-		other, _ = self.guard(lambda host, port: (_ for _ in ()).throw(ValueError('x')))
-		other.admit('www.rt.test', 443)
-		self.assertTrue(other.blocked_reason().startswith('www.rt.test resolves to an internal or reserved address'))
-
-	def test_the_connection_is_made_to_the_vetted_address_through_the_pinned_transport(self):
-		with mock.patch('cveFeed.pinned_transport.open_socket', return_value='socket') as opened:
-			self.assertEqual(web_shot.connect((((2, ('203.0.113.5', 443)),), 7), 'www.rt.test', 443, 9), 'socket')
-		opened.assert_called_once_with(((2, ('203.0.113.5', 443)),), 9, project=7, host='www.rt.test')
-
-
 # ------------------------------------------------------------------------------------------------ capturing
-
-class FakeProxy:
-	"""Stands in for the vetting proxy: records the guard hook the batch gave it, binds nothing."""
-	instances = []
-
-	def __init__(self, admit, connect, secret):
-		self.admit, self.connect, self.secret = admit, connect, secret
-		self.server = 'http://127.0.0.1:1'
-		FakeProxy.instances.append(self)
-
-	def __enter__(self):
-		return self
-
-	def __exit__(self, *exc):
-		return False
-
-
-def runner_for(plan, seen=None):
-	"""A browser child that plays ``plan`` (``{host: result fields}``, picture bytes in ``'png'``) instead of launching Chromium."""
-	def run(job, on_result, wall, label='', workdir=None):
-		if seen is not None:
-			seen.append((job, wall, label, workdir))
-		for target in job['targets']:
-			host = target['url'].split('://', 1)[1].split('/', 1)[0].split(':')[0]
-			step = dict(plan.get(host, {'outcome': 'ok'}))
-			if callable(step.get('before')):
-				step.pop('before')(FakeProxy.instances[-1], target['key'])
-			data = step.pop('png', None)
-			outcome = step.setdefault('outcome', 'ok')
-			if outcome == 'ok':
-				with open(target['out'], 'wb') as handle:
-					handle.write(data if data is not None else png())
-				step.setdefault('final_url', target['url'])
-				step.setdefault('status', 200)
-				step.setdefault('title', 'Title')
-			on_result({'key': target['key'], 'reason': '', **step})
-		return plan.get('__failure__', {}).get('reason', '')
-	return run
-
-
-class CaptureTests(ShotFixture, TestCase):
-	def setUp(self):
-		super().setUp()
-		self.sub = self.host(ports=((443, 'https'),))
-		FakeProxy.instances = []
-
-	def queue(self, **kw):
-		web_shot.queue_for_subs([self.sub], self.project.pk, **kw)
-		return HostScreenshot.objects.get(host='www.rt.test', scheme='https', port=443)
-
-	def drain(self, plan=None, **kw):
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			return web_shot.drain(runner=runner_for(plan or {}, kw.pop('seen', None)), proxy_factory=FakeProxy, **kw)
-
-	def test_a_good_page_is_stored_with_everything_the_host_page_needs(self):
-		row = self.queue()
-		seen = []
-		out = self.drain({'www.rt.test': {'title': 'Welcome', 'final_url': 'https://www.rt.test/home', 'status': 200}}, seen=seen)
-		self.assertEqual((out['captured'], out['failed'], out['blocked']), (1, 0, 0))
-		row.refresh_from_db()
-		self.assertEqual((row.outcome, row.reason, row.http_status, row.title, row.final_url), ('ok', '', 200, 'Welcome', 'https://www.rt.test/home'))
-		self.assertTrue(row.captured_at and row.attempted_at and not row.queued_at)
-		self.assertRegex(row.image_path, rf'^screenshots/{self.project.pk}/www\.rt\.test-[0-9a-f]{{8}}/https-443-\d+\.png$')
-		self.assertTrue(os.path.isfile(os.path.join(self.media, row.image_path)))
-		self.assertTrue(os.path.isfile(os.path.join(self.media, row.thumb_path)))
-		self.assertRegex(row.image_hash, r'^[0-9a-f]{16}$')
-		self.assertEqual(row.image_bytes, os.path.getsize(os.path.join(self.media, row.image_path)))
-		job, wall, label, workdir = seen[0]
-		self.assertEqual(job['targets'][0]['url'], 'https://www.rt.test/')
-		self.assertEqual(job['proxy']['server'], FakeProxy.instances[0].server)
-		self.assertEqual(job['proxy']['password'], FakeProxy.instances[0].secret)
-		self.assertFalse(os.path.exists(workdir), 'the private working directory is removed')
-
-	def test_the_browser_is_given_nothing_of_the_workers_secrets(self):
-		with mock.patch.dict(os.environ, {'POSTGRES_PASSWORD': 'hunter2', 'CELERY_BROKER': 'redis://secret', 'PATH': '/usr/bin'}):
-			env = web_shot._child_env('/tmp/w')
-		self.assertNotIn('POSTGRES_PASSWORD', env)
-		self.assertNotIn('CELERY_BROKER', env)
-		self.assertEqual((env['HOME'], env['TMPDIR']), ('/tmp/w', '/tmp/w'))
-
-	def test_a_page_that_redirects_to_another_host_says_so(self):
-		row = self.queue()
-		self.drain({'www.rt.test': {'final_url': 'https://acme-site.example/'}})
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'ok')
-		self.assertEqual(row.reason, 'Redirects to https://acme-site.example/ (another host).')
-
-	def test_an_error_page_is_still_a_picture_with_its_status_as_the_reason(self):
-		row = self.queue()
-		self.drain({'www.rt.test': {'status': 403}})
-		row.refresh_from_db()
-		self.assertEqual((row.outcome, row.http_status, row.reason), ('ok', 403, 'The server answered HTTP 403.'))
-
-	def test_a_page_that_rendered_blank_is_recorded_as_blank_and_stores_no_picture(self):
-		row = self.queue()
-		self.drain({'www.rt.test': {'png': png(flat=True)}})
-		row.refresh_from_db()
-		self.assertEqual((row.outcome, row.image_path), ('blank', ''))
-		self.assertEqual(os.listdir(self.media), [])
-
-	def test_a_failure_says_why_and_keeps_the_earlier_picture(self):
-		row = self.queue()
-		self.drain()
-		first = HostScreenshot.objects.get().image_path
-		captured = HostScreenshot.objects.get().captured_at
-		HostScreenshot.objects.update(outcome='queued')
-		self.drain({'www.rt.test': {'outcome': 'timeout', 'reason': 'The page did not load within the time allowed.'}})
-		row.refresh_from_db()
-		self.assertEqual((row.outcome, row.reason, row.image_path, row.captured_at), ('timeout', 'The page did not load within the time allowed.', first, captured))
-		self.assertGreater(row.attempted_at, captured)
-
-	def test_only_the_current_and_the_previous_picture_are_kept(self):
-		row = self.queue()
-		paths = []
-		for i in range(3):
-			self.drain({'www.rt.test': {'png': png(noise=50 * (i + 1))}})
-			row.refresh_from_db()
-			paths.append(row.image_path)
-			HostScreenshot.objects.update(outcome='queued')
-			time.sleep(0.003)  # file names carry the millisecond
-		self.assertEqual(len(set(paths)), 3)
-		row.refresh_from_db()
-		self.assertEqual(row.previous_image_path, paths[1])
-		self.assertTrue(os.path.isfile(os.path.join(self.media, paths[2])) or os.path.isfile(os.path.join(self.media, row.image_path)))
-		self.assertTrue(os.path.isfile(os.path.join(self.media, paths[1])))
-		self.assertFalse(os.path.exists(os.path.join(self.media, paths[0])), 'older than the previous capture: deleted')
-
-	def test_a_picture_over_the_size_cap_is_stored_as_a_smaller_jpeg(self):
-		row = self.queue()
-		big = png(width=400, height=300, noise=120000)
-		with mock.patch.object(web_shot, 'max_bytes', return_value=60 * 1024):
-			self.drain({'www.rt.test': {'png': big}})
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'ok')
-		self.assertTrue(row.image_path.endswith('.jpg'))
-		self.assertLessEqual(row.image_bytes, 60 * 1024)
-		self.assertLess(row.image_bytes, len(big))
-
-	def test_a_picture_that_cannot_be_shrunk_under_the_cap_is_refused(self):
-		row = self.queue()
-		with mock.patch.object(web_shot, 'max_bytes', return_value=64 * 1024):
-			self.drain({'www.rt.test': {'png': png(width=500, height=400, noise=200000)}})
-		row.refresh_from_db()
-		self.assertEqual((row.outcome, row.image_path), ('error', ''))
-		self.assertIn('larger than the size allowed', row.reason)
-
-	def test_a_project_over_its_storage_cap_stops_storing_and_says_so(self):
-		other = self.make_row(host='other.rt.test', outcome='ok', image_path='screenshots/x.png', image_bytes=600, previous_image_path='screenshots/p.png')
-		self.plant('screenshots/p.png')
-		row = self.queue()
-		with mock.patch.object(web_shot, 'project_cap_bytes', return_value=500):
-			self.drain()
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'error')
-		self.assertIn('storage', row.reason)
-		other.refresh_from_db()
-		self.assertEqual(other.previous_image_path, '')  # the comparison copies are given up first
-		self.assertFalse(os.path.exists(os.path.join(self.media, 'screenshots/p.png')))
-
-	def test_a_page_a_guard_stopped_is_blocked_with_the_reason_not_unreachable(self):
-		row = self.queue()
-
-		def meets_an_internal_host(proxy, key):
-			proxy.admit(key, 'www.rt.test', 443)
-			proxy.admit(key, 'hop.internal.test', 80)
-		with mock.patch('cveFeed.pinned_transport.resolve', side_effect=lambda host, port, project=None: (_ for _ in ()).throw(ValueError('prohibited')) if host == 'hop.internal.test' else ((2, ('203.0.113.5', port)),)):
-			self.drain({'www.rt.test': {'outcome': 'unreachable', 'reason': 'The connection was closed without an answer.', 'before': meets_an_internal_host}})
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'blocked')
-		self.assertTrue(row.reason.startswith('Redirects to hop.internal.test, which is not visited:'), row.reason)
-
-	def test_a_sub_resource_a_guard_dropped_does_not_stop_the_page(self):
-		self.queue()
-
-		def drops_an_asset(proxy, key):
-			proxy.admit(key, 'cdn.internal.test', 443)
-		with mock.patch('cveFeed.pinned_transport.resolve', side_effect=lambda host, port, project=None: (_ for _ in ()).throw(ValueError('x')) if host.startswith('cdn') else ((2, ('203.0.113.5', port)),)):
-			out = self.drain({'www.rt.test': {'before': drops_an_asset}})
-		self.assertEqual(out['captured'], 1)
-		self.assertEqual(out['dropped_requests'], 1)
-
-	def test_the_proxy_asks_the_guard_of_the_page_it_belongs_to(self):
-		self.queue()
-		answers = {}
-
-		def asks(proxy, key):
-			answers['own'] = proxy.admit(key, 'www.rt.test', 443)[1]
-			answers['unknown'] = proxy.admit('999', 'www.rt.test', 443)
-		with mock.patch('cveFeed.pinned_transport.resolve', return_value=((2, ('203.0.113.5', 443)),)):
-			self.drain({'www.rt.test': {'before': asks}})
-		self.assertEqual(answers['own'], '')
-		self.assertEqual(answers['unknown'], (None, 'unknown page'))
-
-	def test_a_browser_that_could_not_run_marks_the_rows_and_is_remembered_until_it_works(self):
-		row = self.queue()
-		out = self.drain({'__failure__': {'reason': 'The browser stopped.'}, 'www.rt.test': {'outcome': 'ok'}})
-		self.assertEqual(out['error'], 'The browser stopped.')
-		self.assertEqual(cache.get('screenshots:last_browser_error')['error'], 'The browser stopped.')
-		runner = lambda job, on_result, wall, label='', workdir=None: 'Playwright is not installed.'  # noqa: E731
-		row.refresh_from_db()
-		HostScreenshot.objects.update(outcome='queued')
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=runner, proxy_factory=FakeProxy)
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'unavailable')
-		self.assertIn('Playwright is not installed.', row.reason)
-		HostScreenshot.objects.update(outcome='queued')
-		self.drain()
-		self.assertIsNone(cache.get('screenshots:last_browser_error'))
-
-	def test_a_stopped_or_memory_starved_run_leaves_the_pages_queued(self):
-		from reNgine import resources
-		row = self.queue()
-
-		def stopped(job, on_result, wall, label='', workdir=None):
-			raise resources.ScanAborted('paused')
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			out = web_shot.drain(runner=stopped, proxy_factory=FakeProxy)
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'queued')
-		self.assertEqual(out['stopped'], 'ScanAborted')
-
-	def test_a_page_that_gives_nothing_back_is_not_retried_in_a_tight_loop(self):
-		self.queue()
-		calls = []
-
-		def silent(job, on_result, wall, label='', workdir=None):
-			calls.append(1)
-			return ''
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=silent, proxy_factory=FakeProxy)
-		self.assertEqual(len(calls), 1)
-
-
-class PrecheckTests(ShotFixture, TestCase):
-	"""Every queued page is judged again where it is used: what was true when it was queued may not be now."""
-
-	def setUp(self):
-		super().setUp()
-		self.sub = self.host(ports=((443, 'https'),))
-		FakeProxy.instances = []
-
-	def drain(self, resolve='203.0.113.5', by_person=False):
-		self.row = self.make_row(by_person=by_person)
-		resolver = resolve if callable(resolve) else mock.Mock(return_value=resolve)
-		with mock.patch('cveFeed.web_shot._resolve', resolver):
-			return web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-
-	def test_a_host_that_left_the_inventory_is_forgotten_not_photographed(self):
-		Subdomain.objects.all().delete()
-		out = self.drain()
-		self.assertEqual((out['captured'], out['dropped']), (0, 1))
-		self.assertEqual(HostScreenshot.objects.count(), 0)
-
-	def test_a_host_excluded_since_it_was_queued_is_forgotten(self):
-		HostExclusion.objects.create(org=self.project.org, host='www.rt.test')
-		self.drain()
-		self.assertEqual(HostScreenshot.objects.count(), 0)
-
-	def test_an_archived_host_is_blocked(self):
-		HostState.objects.create(project=self.project, domain=self.domain, host='www.rt.test', archived_at=timezone.now())
-		self.drain()
-		self.assertEqual((self.row.__class__.objects.get().outcome, self.row.__class__.objects.get().reason), ('blocked', 'Not captured: the host is archived.'))
-
-	def test_the_bug_bounty_confirmation_holds_back_an_unattended_page_but_not_a_persons(self):
-		def refusal(gate, project_id, host=None, *, unattended=True, derived=False):
-			return 'the bug bounty engagement has not confirmed automated testing' if unattended else ''
-		with mock.patch('cveFeed.bounty_gate.Gate.refusal', refusal):
-			self.drain(by_person=False)
-			self.assertEqual(HostScreenshot.objects.get().outcome, 'blocked')
-			HostScreenshot.objects.all().delete()
-			self.drain(by_person=True)
-		self.assertEqual(HostScreenshot.objects.get().outcome, 'ok')
-
-	def test_a_name_that_now_resolves_to_an_internal_address_is_blocked(self):
-		def internal(host, port, project_id):
-			raise ValueError('probe destination is prohibited')
-		self.drain(internal)
-		row = HostScreenshot.objects.get()
-		self.assertEqual(row.outcome, 'blocked')
-		self.assertIn('internal or reserved address', row.reason)
-
-	def test_a_name_that_does_not_resolve_is_unreachable_with_the_reason(self):
-		def gone(host, port, project_id):
-			raise OSError('Name or service not known')
-		self.drain(gone)
-		row = HostScreenshot.objects.get()
-		self.assertEqual(row.outcome, 'unreachable')
-		self.assertIn('could not be resolved', row.reason)
-
-
-class DrainTests(ShotFixture, TestCase):
-	def setUp(self):
-		super().setUp()
-		FakeProxy.instances = []
-		self.sub = self.host(ports=((443, 'https'),))
-
-	def test_nothing_runs_while_scanning_is_paused_and_the_pages_stay_queued(self):
-		self.make_row()
-		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
-			out = web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-		self.assertEqual(out['skipped'], 'scanning is paused')
-		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
-
-	def test_a_second_drain_while_one_runs_returns_at_once(self):
-		self.make_row()
-		from contextlib import contextmanager
-
-		@contextmanager
-		def taken(key, owner, ttl):
-			yield 'drain-other'
-		with mock.patch('reNgine.resources.redis_claim', taken):
-			out = web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-		self.assertEqual(out['skipped'], 'another drain is running')
-		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
-
-	def test_without_the_browser_the_pages_wait_and_the_reason_is_given(self):
-		self.make_row()
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
-			out = web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-		self.assertIn('Chromium is not installed', out['skipped'])
-		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
-
-	def test_a_persons_request_goes_first_and_the_oldest_next(self):
-		old = self.make_row(host='old.rt.test', queued_at=timezone.now() - timedelta(hours=3))
-		new = self.make_row(host='new.rt.test', queued_at=timezone.now())
-		person = self.make_row(host='person.rt.test', queued_at=timezone.now(), by_person=True)
-		for host in ('old.rt.test', 'new.rt.test', 'person.rt.test'):
-			Subdomain.objects.create(name=host, target_domain=self.domain, scan_history=self.sub.scan_history)
-		self.assertEqual([r.host for r in web_shot.queued_rows(10)], ['person.rt.test', 'old.rt.test', 'new.rt.test'])
-		self.assertEqual(len(web_shot.queued_rows(2)), 2)
-		self.assertTrue(old and new and person)
-
-	def test_a_long_queue_is_taken_a_batch_at_a_time_until_it_is_empty(self):
-		for i in range(5):
-			name = f'h{i}.rt.test'
-			Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=self.sub.scan_history)
-			self.make_row(host=name)
-		batches = []
-
-		def run(job, on_result, wall, label='', workdir=None):
-			batches.append(len(job['targets']))
-			return runner_for({})(job, on_result, wall, label, workdir)
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			out = web_shot.drain(runner=run, proxy_factory=FakeProxy, batch=2)
-		self.assertEqual(batches, [2, 2, 1])
-		self.assertEqual(out['captured'], 5)
-		self.assertFalse(HostScreenshot.objects.filter(outcome='queued').exists())
-
-	def test_a_drain_that_runs_out_of_time_asks_for_another_instead_of_holding_the_worker(self):
-		self.make_row()
-		ticks = iter([0, 10_000])
-		out = web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy, budget_seconds=5, now_fn=lambda: next(ticks))
-		self.assertTrue(out['continued'])
-		self.kicked.assert_called_once()
-		self.assertEqual(self.kicked.call_args.kwargs['countdown'], 5)
-
-	def test_a_page_queued_while_a_drain_was_finishing_gets_another_drain(self):
-		row = self.make_row()
-		looks = iter([[row], [], [row]])  # the loop's two looks, then the last look after the drain has done its work
-
-		def process(rows, runner=None, resolve=None, summary=None, proxy_factory=None):
-			summary['captured'] += 1
-			return summary
-		with mock.patch.object(web_shot, 'queued_rows', side_effect=lambda limit: next(looks)), mock.patch.object(web_shot, 'process', process):
-			out = web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-		self.assertEqual(out['captured'], 1)
-		self.kicked.assert_called_once()
-		self.assertEqual(self.kicked.call_args.kwargs['countdown'], 5)
-
-	def test_the_activity_feed_gets_one_line(self):
-		from cveFeed.models import AgentActivity
-		self.make_row()
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
-		self.assertTrue(AgentActivity.objects.filter(message='Screenshots: 1 captured, 0 not captured, 0 blocked').exists())
-
-
-class RunChildTests(SimpleTestCase):
-	"""The real child-process plumbing, over a stand-in script (no browser)."""
-
-	def run_script(self, script, wall=20, on_result=None):
-		results = []
-		workdir = tempfile.mkdtemp()
-		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-		with mock.patch.object(web_shot, '_unprivileged', return_value=None):
-			failure = web_shot.run_child({'targets': [{'key': '1'}], 'proxy': {'server': 's', 'password': 'p'}}, on_result or results.append, wall,
-										 argv=[sys.executable, '-c', textwrap.dedent(script)], heavy=False, workdir=workdir)
-		return failure, results
-
-	def test_results_are_handed_over_as_they_arrive_and_done_ends_it(self):
-		failure, results = self.run_script("""
-			import json, sys
-			job = json.loads(sys.stdin.readline())
-			print(json.dumps({'op': 'result', 'key': '1', 'outcome': 'ok', 'seen_proxy': job['proxy']['server']}), flush=True)
-			print('not json at all', flush=True)
-			print(json.dumps({'op': 'done'}), flush=True)""")
-		self.assertEqual(failure, '')
-		self.assertEqual(results[0]['seen_proxy'], 's')
-
-	def test_a_fatal_message_is_returned_as_the_reason(self):
-		failure, _ = self.run_script("""
-			import json
-			print(json.dumps({'op': 'fatal', 'reason': 'Executable does not exist'}), flush=True)""")
-		self.assertEqual(failure, 'Executable does not exist')
-
-	def test_a_child_that_dies_before_finishing_is_reported_with_its_status(self):
-		failure, _ = self.run_script("import sys; sys.exit(3)")
-		self.assertIn('status 3', failure)
-
-	def test_a_child_that_hangs_is_killed_at_the_wall_clock_limit(self):
-		import time
-		started = time.monotonic()
-		failure, _ = self.run_script("import time; time.sleep(60)", wall=1)
-		self.assertLess(time.monotonic() - started, 15)
-		self.assertTrue(failure)
-
-	def test_the_child_runs_in_its_own_session_with_the_workdir_as_home(self):
-		failure, results = self.run_script("""
-			import json, os
-			print(json.dumps({'op': 'result', 'key': '1', 'home': os.environ.get('HOME'), 'tmp': os.environ.get('TMPDIR'), 'db': os.environ.get('POSTGRES_PASSWORD'),
-			                  'sid_is_leader': os.getsid(0) == os.getpid()}), flush=True)
-			print(json.dumps({'op': 'done'}), flush=True)""")
-		self.assertEqual(failure, '')
-		self.assertTrue(results[0]['home'].startswith(tempfile.gettempdir()))
-		self.assertEqual(results[0]['home'], results[0]['tmp'])
-		self.assertIsNone(results[0]['db'])
-		self.assertTrue(results[0]['sid_is_leader'])
-
-	def test_the_browser_runs_as_an_unprivileged_account_when_the_worker_is_root(self):
-		with mock.patch('os.geteuid', return_value=0), mock.patch('pwd.getpwnam', return_value=mock.Mock(pw_uid=65534, pw_gid=65534)):
-			self.assertEqual(web_shot._unprivileged(), (65534, 65534))
-			with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOT_USER': '-'}):
-				self.assertIsNone(web_shot._unprivileged())
-		with mock.patch('os.geteuid', return_value=1000):
-			self.assertIsNone(web_shot._unprivileged())
-		with mock.patch('os.geteuid', return_value=0), mock.patch('pwd.getpwnam', side_effect=KeyError('nobody')):
-			with self.assertLogs('cveFeed.web_shot', 'WARNING'):
-				self.assertIsNone(web_shot._unprivileged())
-
-
-class SandboxTests(ShotFixture, TestCase):
-	"""Chromium's sandbox: asked for on every batch, and while it cannot start no page is opened and every place that shows screenshots says why."""
-
-	def drain(self, runner):
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			return web_shot.drain(runner=runner, proxy_factory=FakeProxy)
-
-	def test_every_batch_asks_for_the_sandbox_unless_it_is_switched_off(self):
-		self.host(ports=((443, 'https'),))
-		self.make_row()
-		seen = []
-		self.drain(runner_for({}, seen))
-		self.assertIs(seen[0][0]['settings']['sandbox'], True)
-		self.assertTrue(web_shot.sandbox_state()['engaged'])  # the child checks it before the first page
-		HostScreenshot.objects.update(outcome='queued')
-		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOT_SANDBOX': '0'}):
-			self.drain(runner_for({}, seen))
-			self.assertIs(seen[1][0]['settings']['sandbox'], False)
-			self.assertEqual(web_shot.sandbox_status()['state'], 'off')
-			self.assertEqual(web_shot.unavailable_reason(), '')
-
-	def test_a_sandbox_that_cannot_start_turns_screenshots_off_with_the_reason_everywhere(self):
-		from agentapi import system_status
-		from cveFeed import shot_worker
-		from cveFeed.models import AgentActivity
-		sub = self.host(ports=((443, 'https'),))
-		row = self.make_row()
-		with self.assertLogs('cveFeed.web_shot', 'ERROR'):
-			self.drain(lambda job, on_result, wall, label='', workdir=None: shot_worker.SANDBOX_PREFIX + shot_worker.NO_USERNS)
-		row.refresh_from_db()
-		self.assertEqual(row.outcome, 'unavailable')
-		self.assertIn('seccomp profile', row.reason)
-		why = web_shot.unavailable_reason()
-		self.assertIn("Chromium's sandbox could not start", why)
-		self.assertEqual(web_shot.status_counts([self.project.pk])['sandbox']['state'], 'failed')
-		problems, notes = [], []
-		system_status._screenshots(problems, notes)
-		self.assertTrue(any('sandbox could not start' in p for p in problems))
-		self.assertEqual(AgentActivity.objects.filter(message__startswith='Screenshots are off').count(), 1)
-		# from now on nothing is planned or opened, and a page that waits says why instead of "waiting"
-		self.assertEqual(web_shot.backfill()['skipped'], why)
-		self.assertFalse(web_shot.has_work_for_scan(sub.scan_history))
-		HostScreenshot.objects.update(outcome='queued')
-		self.assertIn('sandbox could not start', web_shot.note_for(list(HostScreenshot.objects.all()), has_web_evidence=True))
-		self.assertEqual(self.drain(mock.Mock(side_effect=AssertionError('no browser may start')))['skipped'], why)
-
-	def test_the_start_check_records_what_the_probe_found(self):
-		from cveFeed import shot_worker
-
-		def probe(found):
-			def run(job, on_result, wall, argv=None, heavy=True, label='', workdir=None):
-				self.assertEqual((argv[-1], heavy), ('--probe', False))
-				if found:
-					on_result({'op': 'result', 'key': 'sandbox', **found})
-				return '' if found else 'the browser process ended before it finished (status 2)'
-			return run
-		self.assertTrue(web_shot.check_sandbox(runner=probe({'engaged': True, 'reason': '', 'version': '156.0.8078.4'}))['engaged'])
-		self.assertEqual(web_shot.sandbox_status()['state'], 'engaged')
-		with self.assertLogs('cveFeed.web_shot', 'ERROR'):
-			web_shot.check_sandbox(runner=probe({'engaged': False, 'reason': shot_worker.AS_ROOT}))
-		self.assertIn('as root', web_shot.unavailable_reason())
-		with self.assertLogs('cveFeed.web_shot', 'WARNING'):
-			self.assertIsNone(web_shot.check_sandbox(runner=probe({})))  # a check that did not finish changes nothing
-		self.assertIn('as root', web_shot.unavailable_reason())
-
 
 # ------------------------------------------------------------------------------------------------ the hourly backfill
 
 class BackfillTests(ShotFixture, TestCase):
-	def project_with_hosts(self, slug, count, ports=((443, 'https'),), start=10):
-		org = Org.objects.create(name=slug, slug=slug)
-		project = Project.objects.create(name=slug, slug=slug, insert_date=timezone.now(), org=org)
-		domain = Domain.objects.create(name=f'{slug}.test', project=project, insert_date=timezone.now())
-		from startScan.models import ScanHistory
-		scan = ScanHistory.objects.create(domain=domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2, tasks=[], results_dir='x')
-		for i in range(count):
-			sub = Subdomain.objects.create(name=f'h{i}.{slug}.test', target_domain=domain, scan_history=scan)
-			ip, _ = IpAddress.objects.get_or_create(address=f'198.51.{start}.{i + 1}')
-			sub.ip_addresses.add(ip)
-			for number, service in ports:
-				ip.ports.add(Port.objects.create(number=number, service_name=service, state='open'))
-		return project
-
 	def hosts_queued(self, project):
 		return sorted(HostScreenshot.objects.filter(project=project).values_list('host', flat=True))
 
@@ -1034,12 +461,12 @@ class BackfillTests(ShotFixture, TestCase):
 		self.assertEqual(stale.outcome, 'queued')
 		self.assertEqual(out['queued'], 2)
 
-	def test_a_paused_instance_a_missing_browser_and_a_blocked_project_queue_nothing(self):
+	def test_a_paused_instance_screenshots_switched_off_and_a_blocked_project_queue_nothing(self):
 		project = self.project_with_hosts('bf-a', 2)
 		with mock.patch('cveFeed.scan_control.pause_requested', return_value=True):
 			self.assertEqual(web_shot.backfill()['skipped'], 'scanning is paused')
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
-			self.assertIn('Chromium is not installed', web_shot.backfill()['skipped'])
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
+			self.assertIn('switched off', web_shot.backfill()['skipped'])
 		with mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value={project.pk}):
 			out = web_shot.backfill()
 		self.assertEqual((out['queued'], HostScreenshot.objects.filter(project=project).count()), (0, 0))
@@ -1052,8 +479,8 @@ class BackfillTests(ShotFixture, TestCase):
 
 	def test_the_sweep_queues_then_drains_and_only_one_runs_at_a_time(self):
 		self.project_with_hosts('bf-a', 1)
-		with mock.patch('cveFeed.web_shot._resolve', return_value='198.51.10.1'), mock.patch('cveFeed.ledger.sweep_claim', return_value=True):
-			out = web_shot.sweep(runner=runner_for({}))
+		with Scanner(), mock.patch('cveFeed.ledger.sweep_claim', return_value=True):
+			out = web_shot.sweep()
 		self.assertEqual((out['backfill']['queued'], out['drain']['captured']), (1, 1))
 		with mock.patch('cveFeed.ledger.sweep_claim', return_value=False):
 			self.assertEqual(web_shot.sweep(), {'skipped': 'another sweep is running'})
@@ -1211,7 +638,7 @@ class HostRecordTests(ReadFixture, TestCase):
 
 	def test_a_page_waiting_for_the_worker_says_so(self):
 		self.make_row()
-		self.assertIn('Waiting for the screenshot worker: https://www.rt.test:443', self.record()['screenshot_note'])
+		self.assertIn('Waiting for a scanner to take the screenshot (the pages stay queued until one can): https://www.rt.test:443', self.record()['screenshot_note'])
 
 	def test_a_host_that_answers_on_the_web_but_was_never_photographed_says_when_it_will_be(self):
 		note = self.record()['screenshot_note']
@@ -1223,9 +650,9 @@ class HostRecordTests(ReadFixture, TestCase):
 		note = [r for r in call(self.token, 'GET', '/api/v1/projects/pr/hosts')[1]['results'] if r['host'] == 'db.rt.test'][0]['screenshot_note']
 		self.assertEqual(note, 'No screenshot: no web port (such as 80 or 443) is recorded open on this host, so there is no page to capture.')
 
-	def test_a_server_without_the_browser_says_that(self):
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
-			self.assertIn('Chromium is not installed on this server', self.record()['screenshot_note'])
+	def test_a_server_with_screenshots_switched_off_says_that(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
+			self.assertIn('switched off on this server', self.record()['screenshot_note'])
 
 	def test_a_discovery_screenshot_is_shown_and_a_later_failed_attempt_is_noted(self):
 		Subdomain.objects.filter(pk=self.sub.pk).update(screenshot_path='rt.test_1/screenshots/old.png')
@@ -1328,11 +755,11 @@ class ApiTests(ReadFixture, TestCase):
 		self.assertEqual(status, 409)
 		self.assertIn('scope does not name it', data['error'])
 
-	def test_a_server_without_the_browser_answers_503_with_why(self):
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
+	def test_a_server_with_screenshots_switched_off_answers_503_with_why(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
 			status, data = call(self.token, 'POST', self.path, {})
 		self.assertEqual(status, 503)
-		self.assertIn('Chromium is not installed', data['error'])
+		self.assertIn('switched off', data['error'])
 
 	def test_a_host_with_no_known_web_port_is_tried_on_443_and_80_when_a_person_asks(self):
 		sub = self.host(name='quiet.rt.test', ports=((22, 'ssh'),), address='203.0.113.50')
@@ -1377,75 +804,32 @@ class StatusTests(ReadFixture, TestCase):
 		self.assertTrue(counts['available'])
 		self.assertIsNone(counts['unavailable_reason'])
 
-	def test_the_system_status_carries_them_per_project_and_the_browser_for_admins(self):
+	def test_the_system_status_carries_them_per_project_and_the_last_sandbox_proof_for_admins(self):
 		from agentapi import system_status
 		self.make_row(outcome='ok', image_path='x.png')
 		row = system_status._project_row(self.project)
 		self.assertEqual(row['screenshots']['hosts_with_screenshot'], 1)
 		problems, notes = [], []
-		cache.set('screenshots:last_browser_error', {'at': '2026-11-01T00:00:00+00:00', 'error': 'The browser stopped.'}, 60)
 		out = system_status._screenshots(problems, notes)
-		self.assertEqual((out['enabled'], out['chromium_installed'], out['queued']), (True, True, 0))
-		self.assertTrue(any('screenshots: the browser last failed to run' in p and 'The browser stopped.' in p for p in problems))
+		self.assertEqual((out['enabled'], out['queued'], out['sandbox']['state']), (True, 0, 'unchecked'))
+		self.assertNotIn('chromium_installed', out)  # no browser runs on this server
+		self.assertEqual((problems, notes), ([], []))
+		with self.assertLogs('cveFeed.web_shot', 'ERROR'):
+			web_shot.record_sandbox(False, 'the renderer shares the user namespace of the browser')
 		problems, notes = [], []
-		cache.delete('screenshots:last_browser_error')
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
+		system_status._screenshots(problems, notes)
+		self.assertTrue(any('screenshots: the renderer shares the user namespace' in p for p in problems))
+		web_shot.record_sandbox(True, version='156.0.8078.4')
+		self.assertEqual(web_shot.sandbox_status()['state'], 'engaged')
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
+			problems, notes = [], []
 			system_status._screenshots(problems, notes)
-		self.assertEqual(problems, [])
-		self.assertTrue(any('Chromium is not installed' in n for n in notes))  # a note, not a problem: the rest of the image runs fine
+		self.assertTrue(any('switched off' in n for n in notes))  # a note, not a problem
 
-	def test_the_queue_and_the_browser_are_in_the_status_listings(self):
+	def test_the_queue_is_in_the_status_listings_and_no_browser_version_is(self):
 		from agentapi import system_status
 		self.assertIn('screenshot_queue', system_status.QUEUES)
-		self.assertEqual(system_status._chromium_version(), web_shot.pinned_browser()['version'])
-		with mock.patch.object(web_shot, 'browser_installed', return_value=False):
-			self.assertIsNone(system_status._chromium_version())
-
-
-class HousekeepingTests(ReadFixture, TestCase):
-	def test_deleting_a_host_removes_its_rows_and_its_picture_files(self):
-		sub = self.host()
-		row = self.make_row(outcome='ok', image_path=f'screenshots/{self.project.pk}/www.rt.test/https-443-1.png',
-							thumb_path=f'screenshots/{self.project.pk}/www.rt.test/https-443-1.png.thumb-320.jpg',
-							previous_image_path=f'screenshots/{self.project.pk}/www.rt.test/https-443-0.png')
-		for rel in (row.image_path, row.thumb_path, row.previous_image_path):
-			self.plant(rel)
-		self.make_row(host='other.rt.test', outcome='ok', image_path=f'screenshots/{self.project.pk}/other.rt.test/https-443-1.png')
-		self.plant(f'screenshots/{self.project.pk}/other.rt.test/https-443-1.png')
-		admin = User.objects.create_superuser('shot-admin', 'a@x.test', 'x')
-		_, token = create_token(admin, 'admin')
-		with mock.patch('reNgine.common_func.SCAN_RESULTS_ROOT', self.media):  # the media root of this test is where the files were planted
-			status, data = call(token, 'POST', '/api/v1/projects/pr/hosts/www.rt.test/delete', {})
-		self.assertEqual(status, 200, data)
-		self.assertEqual(data['web_screenshots'], 1)
-		self.assertEqual(list(HostScreenshot.objects.values_list('host', flat=True)), ['other.rt.test'])
-		self.assertFalse(os.path.exists(os.path.join(self.media, f'screenshots/{self.project.pk}/www.rt.test')))
-		self.assertTrue(os.path.isfile(os.path.join(self.media, f'screenshots/{self.project.pk}/other.rt.test/https-443-1.png')))
-		self.assertTrue(sub)
-
-	def test_moving_a_target_to_another_project_takes_its_captures_along(self):
-		from agentapi import target_move
-		self.make_row(outcome='ok', image_path='x.png')
-		destination = Project.objects.create(name='Dest', slug='dest-shot', insert_date=timezone.now(), org=self.project.org)
-		with mock.patch('cveFeed.exclusions.is_excluded', return_value=False):
-			target_move.repoint(self.project, destination, [self.domain], {'www.rt.test'})
-		self.assertEqual(HostScreenshot.objects.get().project_id, destination.pk)
-
-	def test_the_model_is_one_row_per_page_and_is_tenancy_scoped(self):
-		from django.db import IntegrityError, transaction
-		from tenancy.scope import SCOPES
-		self.make_row()
-		with self.assertRaises(IntegrityError), transaction.atomic():
-			self.make_row()
-		self.make_row(scheme='http', port=80)
-		self.assertEqual(SCOPES['cveFeed.HostScreenshot'], 'project_id')
-
-	def test_the_files_are_only_ever_removed_from_the_screenshots_directory(self):
-		keep = self.plant('other_dir/keep.png')
-		inside = self.plant('screenshots/1/h/a.png')
-		web_shot.remove_files('other_dir/keep.png', 'screenshots/1/h/a.png', '../etc/hosts', '')
-		self.assertTrue(os.path.isfile(keep))
-		self.assertFalse(os.path.exists(inside))
+		self.assertFalse(hasattr(system_status, '_chromium_version'))
 
 
 class WiringTests(TestCase):
@@ -1467,31 +851,26 @@ class WiringTests(TestCase):
 		task = PeriodicTask.objects.get(name='cvengine-screenshot-backfill')
 		self.assertEqual((task.task, task.queue, task.enabled, task.crontab.minute, task.crontab.hour), ('screenshot_backfill', 'screenshot_queue', True, '41', '*'))
 
-	def test_the_browser_is_a_memory_gated_heavy_job_that_runs_one_at_a_time(self):
-		from reNgine import resources
-		self.assertIn('screenshot', resources.BASE_COSTS_MB)
-		self.assertEqual(resources.MAX_CONCURRENT['screenshot'], 1)
-		self.assertEqual(web_shot.HEAVY_KIND, 'screenshot')
-
 	def test_paused_scanning_defers_the_screenshot_tasks(self):
 		from cveFeed import scan_control, tasks
 		self.assertNotIn('drain_screenshots', scan_control.PAUSE_EXEMPT_TASKS)
 		self.assertNotIn('screenshot_backfill', scan_control.PAUSE_EXEMPT_TASKS)
 		self.assertTrue(tasks.drain_screenshots.name and tasks.screenshot_backfill.name)
 
-	def test_the_chromium_pin_in_the_dockerfile_is_the_build_the_pinned_playwright_drives(self):
-		"""A Playwright bump that moves the browser fails here until the Dockerfile's pin (which the image build also checks against a real launch) is read and updated."""
-		import re
+	def test_the_server_image_carries_no_browser_and_no_capture_code(self):
 		from pathlib import Path
 		root = Path(__file__).resolve().parents[2]
+		self.assertNotRegex((root / 'web' / 'requirements.txt').read_text().lower(), r'(?m)^playwright')
 		dockerfile = (root / 'web' / 'Dockerfile').read_text()
-		pin = re.search(r'(?m)^ARG PLAYWRIGHT_CHROMIUM_VERSION=(\S+)$', dockerfile).group(1)
-		self.assertEqual(pin, web_shot.pinned_browser()['version'])
-		self.assertIn('playwright install --with-deps --only-shell chromium', dockerfile)
-		self.assertIn('runuser -u nobody', dockerfile)  # the build launches it as the account the worker runs it as
-		self.assertRegex((root / 'web' / 'requirements.txt').read_text(), r'(?m)^playwright==\d+\.\d+\.\d+$')
+		self.assertNotIn('playwright', dockerfile.lower())
+		self.assertNotIn('PLAYWRIGHT_CHROMIUM_VERSION', dockerfile)
+		for name in ('shot_worker.py', 'shot_proxy.py', 'management/commands/check_screenshot_sandbox.py'):
+			self.assertFalse((root / 'web' / 'cveFeed' / name).exists(), name)
+		self.assertNotIn('check_screenshot_sandbox', (root / 'web' / 'celery-entrypoint.sh').read_text())
+		for name in ('run_child', 'Guard', 'launch', 'check_sandbox', 'pinned_browser', 'browser_installed', 'stack_blocklist', 'read_picture'):
+			self.assertFalse(hasattr(web_shot, name), name)
 
-	def test_the_browser_is_in_the_bill_of_materials_and_the_tool_version_check(self):
+	def test_the_browser_is_not_in_the_bill_of_materials_or_the_tool_version_check(self):
 		import importlib.util
 		from pathlib import Path
 		root = Path(__file__).resolve().parents[2]
@@ -1500,108 +879,22 @@ class WiringTests(TestCase):
 			module = importlib.util.module_from_spec(spec)
 			spec.loader.exec_module(module)
 			if name == 'generate_sbom':
-				components = {c['name']: c for c in module.build()['components']}
-				chromium = components['chromium (Playwright headless shell)']
-				self.assertEqual(chromium['version'], web_shot.pinned_browser()['version'])
-				self.assertRegex(components['playwright']['version'], r'^\d+\.\d+\.\d+$')
+				names = {c['name'] for c in module.build()['components']}
+				self.assertFalse([n for n in names if 'chromium' in n.lower() or n == 'playwright'])
 			else:
-				rows = {r['tool']: r for r in module.collect(lambda url, as_json=True: {})}
-				self.assertRegex(rows['playwright (screenshot browser; its Chromium build is pinned by it)']['pinned'], r'^\d+\.\d+\.\d+$')
+				self.assertFalse([r for r in module.collect(lambda url, as_json=True: {}) if 'playwright' in r['tool'] or 'chromium' in r['tool']])
 
-	def test_the_browser_install_is_looked_up_from_the_pinned_playwright(self):
-		pinned = web_shot.pinned_browser()
-		self.assertRegex(pinned['revision'], r'^\d+$')
-		self.assertRegex(pinned['version'], r'^\d+\.\d+\.\d+\.\d+$')
-		with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {'PLAYWRIGHT_BROWSERS_PATH': root}):
-			self.assertFalse(web_shot.browser_installed())
-			os.makedirs(os.path.join(root, f'chromium_headless_shell-{pinned["revision"]}'))
-			self.assertFalse(web_shot.browser_installed())  # the installer's completion marker is what counts
-			open(os.path.join(root, f'chromium_headless_shell-{pinned["revision"]}', 'INSTALLATION_COMPLETE'), 'w').close()
-			self.assertTrue(web_shot.browser_installed())
-		self.assertIn('Chromium is not installed', web_shot.unavailable_reason() if not web_shot.browser_installed() else 'Chromium is not installed')
+	def test_web_screenshot_never_runs_on_this_server(self):
+		from agentapi import sentinel_dispatch
+		self.assertIn('web_screenshot', sentinel_dispatch.NEVER_LOCAL)
+		self.assertIn('web_screenshot', SentinelTask.KINDS)
+		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'all'}):
+			self.assertFalse(sentinel_dispatch.fallback_allowed('web_screenshot'))
 
 
 # ------------------------------------------------------------------------------------------------ review round: hardening
 
-class StackGuardTests(ShotFixture, TestCase):
-	def guard(self, resolver):
-		return web_shot.Guard(self.project.pk, 'www.rt.test', True, excluded=frozenset(), resolver=resolver, stack=(frozenset({'web', 'redis', 'db'}), frozenset({'172.18.0.5'})))
-
-	def test_the_installations_own_service_names_are_never_visited(self):
-		guard = self.guard(lambda host, port: ((2, ('203.0.113.5', port)),))
-		for name in ('web', 'redis', 'db'):
-			target, reason = guard.admit(name, 8000)
-			self.assertIsNone(target, name)
-			self.assertIn('own services', reason)
-
-	def test_a_name_that_resolves_to_an_address_of_the_stack_is_refused_even_with_private_targets_allowed(self):
-		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
-			guard = self.guard(lambda host, port: ((2, ('172.18.0.5', port)),))
-			target, reason = guard.admit('innocent.example.test', 80)
-		self.assertIsNone(target)
-		self.assertIn('own services', reason)
-		self.assertIsNotNone(self.guard(lambda host, port: ((2, ('172.18.0.9', port)),)).admit('other.example.test', 80)[0])  # another private address is the opt-in's business
-
-	def test_the_blocklist_is_built_from_the_service_names_and_the_settings(self):
-		with mock.patch.dict(os.environ, {'CELERY_BROKER': 'redis://broker.internal:6379/0', 'CACHE_URL': 'redis://cache.internal:6379/1', 'POSTGRES_HOST': '/var/run/postgresql'}), \
-				mock.patch('socket.getaddrinfo', side_effect=lambda name, *a, **k: [(2, 1, 6, '', ('10.9.8.7', 0))] if name == 'broker.internal' else (_ for _ in ()).throw(OSError('x'))):
-			names, addresses = web_shot.stack_blocklist(refresh=True)
-		self.assertTrue({'web', 'redis', 'db', 'celery', 'broker.internal', 'cache.internal'} <= names)
-		self.assertNotIn('/var/run/postgresql', names)
-		self.assertEqual(addresses, frozenset({'10.9.8.7'}))
-		web_shot.stack_blocklist(refresh=True)  # leave a clean cache for the other tests
-
-
-class NoDatabaseInTheProxyTests(ShotFixture, TestCase):
-	def test_the_guard_is_loaded_in_the_calling_thread_and_judges_with_no_query(self):
-		guard = web_shot.Guard(self.project.pk, 'www.rt.test', True, resolver=lambda host, port: ((2, ('203.0.113.5', port)),), stack=(frozenset(), frozenset()))
-		guard.warm()
-		with self.assertNumQueries(0):
-			self.assertIsNotNone(guard.admit('www.rt.test', 443)[0])
-			self.assertIsNotNone(guard.admit('cdn.thirdparty.test', 443)[0])
-
-	def test_connections_are_closed_after_each_judgement_unless_inside_a_transaction(self):
-		with mock.patch('django.db.backends.base.base.BaseDatabaseWrapper.close') as closed:
-			web_shot._close_thread_connections()  # a test runs in a transaction: left alone
-		closed.assert_not_called()
-
-
-class RelabelTests(ShotFixture, TestCase):
-	def guard(self):
-		return web_shot.Guard(self.project.pk, 'www.rt.test', True, excluded=frozenset(), resolver=lambda h, p: ((2, ('203.0.113.5', p)),), stack=(frozenset({'web'}), frozenset()))
-
-	def test_a_refused_sub_resource_does_not_turn_a_timeout_into_blocked(self):
-		guard = self.guard()
-		guard.admit('web', 80)  # a font host refused
-		self.assertFalse(guard.relabel('timeout'))
-		self.assertFalse(guard.relabel('tls_error'))
-		self.assertFalse(guard.relabel('error'))
-
-	def test_a_connection_that_failed_outright_after_a_refusal_is_blocked_and_a_refused_primary_always_is(self):
-		guard = self.guard()
-		self.assertFalse(guard.relabel('unreachable'))  # nothing was refused
-		guard.admit('web', 80)
-		self.assertTrue(guard.relabel('unreachable'))
-		primary = web_shot.Guard(self.project.pk, 'web', True, excluded=frozenset(), stack=(frozenset({'web'}), frozenset()))
-		primary.admit('web', 80)
-		self.assertTrue(primary.relabel('timeout'))
-
-
 class PictureFileTests(ShotFixture, TestCase):
-	def test_a_link_in_place_of_the_picture_is_never_followed(self):
-		workdir = tempfile.mkdtemp()
-		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-		secret = os.path.join(tempfile.mkdtemp(), 'secret.png')
-		with open(secret, 'wb') as handle:
-			handle.write(png())
-		os.symlink(secret, os.path.join(workdir, '0.png'))
-		self.assertIsNone(web_shot.read_picture(workdir, '0.png', 1 << 20))
-		with open(os.path.join(workdir, '1.png'), 'wb') as handle:
-			handle.write(png())
-		self.assertEqual(web_shot.read_picture(workdir, '1.png', 1 << 20), png())
-		self.assertEqual(web_shot.read_picture(workdir, '1.png', 10), b'')  # over the limit: refused, not read
-		self.assertIsNone(web_shot.read_picture(workdir, 'missing.png', 1 << 20))
-
 	def test_the_stored_picture_is_a_new_file_of_our_own_and_never_overwrites(self):
 		target = os.path.join(self.media, 'screenshots', '1', 'h', 'a.png')
 		web_shot.write_new(target, b'x')
@@ -1612,14 +905,6 @@ class PictureFileTests(ShotFixture, TestCase):
 		os.symlink('/etc/hostname', target)
 		with self.assertRaises(OSError):
 			web_shot.write_new(target, b'z')
-
-	def test_a_capture_the_browser_replaced_with_a_link_is_an_error_not_a_picture(self):
-		row = self.make_row()
-		workdir = tempfile.mkdtemp()
-		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-		os.symlink('/etc/hostname', os.path.join(workdir, '0.png'))
-		fields, outcome, reason = web_shot.finish_image(row, {'path': os.path.join(workdir, '0.png')}, workdir)
-		self.assertEqual((fields, outcome), ({}, 'error'))
 
 	def test_two_hosts_that_differ_only_in_replaced_characters_have_their_own_directories(self):
 		self.assertNotEqual(web_shot.safe_name('a*b.example.test'), web_shot.safe_name('a_b.example.test'))
@@ -1646,8 +931,7 @@ class OrphanFileTests(ShotFixture, TestCase):
 		self.plant(rel)
 		self.make_row(outcome='queued', image_path=rel)
 		Subdomain.objects.filter(pk=sub.pk).delete()
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
+		web_shot.drain()  # the page is judged first: no scanner is needed to forget it
 		self.assertFalse(os.path.exists(os.path.join(self.media, rel)))
 
 	def test_the_sweep_removes_old_files_no_row_names_and_keeps_the_rest(self):
@@ -1676,72 +960,13 @@ class OrphanFileTests(ShotFixture, TestCase):
 		self.assertIn('sweep_orphans', inspect.getsource(tasks.weekly_maintenance))
 
 
-class BrowserProcessTests(SimpleTestCase):
-	def test_the_launch_flags_keep_udp_and_quic_off_the_network_and_limit_the_renderer(self):
-		from cveFeed import shot_worker
-		flags = set(shot_worker.LAUNCH_ARGS)
-		self.assertIn('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', flags)  # WebRTC would send UDP around the vetting proxy
-		self.assertIn('--disable-quic', flags)
-		self.assertIn('--renderer-process-limit=1', flags)
-		self.assertTrue(any(f.startswith('--js-flags=--max-old-space-size=') for f in flags))
-		self.assertIn('--disable-dev-shm-usage', flags)
-
-	def test_the_memory_of_a_browser_that_left_its_process_group_is_counted_and_stopped(self):
-		"""A browser starts its own session: the launcher's group holds ~30 MB, the browser behind it hundreds."""
-		import subprocess
-
-		from reNgine import resources
-		proc = subprocess.Popen([sys.executable, '-c', textwrap.dedent("""
-			import os, subprocess, sys, time
-			child = subprocess.Popen([sys.executable, '-c', 'import time; x = bytearray(60 * 1024 * 1024); time.sleep(60)'], start_new_session=True)
-			print(child.pid, flush=True)
-			time.sleep(60)""")], stdout=subprocess.PIPE, text=True, start_new_session=True)
-		self.addCleanup(lambda: resources.terminate_group(proc, grace=1))
-		child_pid = int(proc.stdout.readline())
-		time.sleep(0.5)
-		self.assertNotEqual(os.getpgid(child_pid), os.getpgid(proc.pid))  # it really is another group
-		self.assertIn(child_pid, resources.tree_pids(proc.pid))
-		self.assertGreaterEqual(resources.tree_rss_mb(proc.pid), 50)
-		self.assertLess(resources.group_rss_mb(proc.pid), 50)  # the old measure saw only the launcher
-		resources.terminate_group(proc, grace=2)
-		time.sleep(0.3)
-		self.assertFalse(os.path.exists(f'/proc/{child_pid}') and 'Z' not in open(f'/proc/{child_pid}/stat').read().rsplit(')', 1)[1][:3])
-
-	def test_a_browser_over_its_memory_ceiling_is_killed_and_reported_as_too_big(self):
-		workdir = tempfile.mkdtemp()
-		self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-		script = "import time; x = bytearray(80 * 1024 * 1024); time.sleep(60)"
-		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOT_MAX_RSS_MB': '300'}), mock.patch.object(web_shot, '_unprivileged', return_value=None), \
-				mock.patch('reNgine.resources.tree_rss_mb', return_value=2000):
-			failure = web_shot.run_child({'targets': []}, lambda m: None, 60, argv=[sys.executable, '-c', script], heavy=False, workdir=workdir)
-		self.assertEqual(failure, 'too_big:2000')
-
-
-class TooBigPageTests(ShotFixture, TestCase):
-	def test_the_page_in_flight_is_recorded_too_big_and_the_others_stay_queued(self):
-		self.host(name='a.rt.test', ports=((443, 'https'),), address='203.0.113.31')
-		self.host(name='b.rt.test', ports=((443, 'https'),), address='203.0.113.32')
-		first, second = self.make_row(host='a.rt.test'), self.make_row(host='b.rt.test')
-
-		def run(job, on_result, wall, label='', workdir=None):
-			on_result({'key': '0', 'outcome': 'timeout', 'reason': 'slow'})
-			return 'too_big:2100'
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=run, proxy_factory=FakeProxy, batch=5)
-		first.refresh_from_db()
-		second.refresh_from_db()
-		self.assertEqual(first.outcome, 'timeout')
-		self.assertEqual(second.outcome, 'too_big')
-		self.assertIn('MB of memory', second.reason)
-
-
 class ByPersonTests(ShotFixture, TestCase):
 	def test_a_persons_request_is_used_up_by_the_capture_and_not_carried_into_a_later_unattended_one(self):
 		sub = self.host(ports=((443, 'https'),))
 		web_shot.queue_for_subs([sub], self.project.pk, by_person=True)
 		self.assertTrue(HostScreenshot.objects.get().by_person)
-		with mock.patch('cveFeed.web_shot._resolve', return_value='203.0.113.5'):
-			web_shot.drain(runner=runner_for({}), proxy_factory=FakeProxy)
+		with Scanner():
+			web_shot.drain()
 		self.assertFalse(HostScreenshot.objects.get().by_person)
 		HostScreenshot.objects.update(outcome='timeout', by_person=True, attempted_at=timezone.now() - timedelta(days=3))  # e.g. left over from an interrupted run
 		web_shot.queue_for_subs([sub], self.project.pk)  # the backfill or a scan asks again
@@ -1773,3 +998,494 @@ class BackfillStarvationTests(ShotFixture, TestCase):
 		row = HostScreenshot.objects.get()
 		self.assertEqual((row.outcome, row.port), ('blocked', 8443))
 		self.assertIn('behind a CDN', row.reason)
+
+
+# ------------------------------------------------------------------------------------------------ the drain: pages go to a Sentinel and the pictures come back
+
+class SentinelCaptureTests(ShotFixture, TestCase):
+	def setUp(self):
+		super().setUp()
+		self.sub = self.host(ports=((443, 'https'),))
+
+	def queue(self, **kw):
+		web_shot.queue_for_subs([self.sub], self.project.pk, **kw)
+		return HostScreenshot.objects.get(host='www.rt.test', scheme='https', port=443)
+
+	def test_a_good_page_is_stored_with_everything_the_host_page_needs(self):
+		row = self.queue()
+		with Scanner({'www.rt.test': {'title': 'Welcome', 'final_url': 'https://www.rt.test/home', 'status': 200}}) as scanner:
+			out = web_shot.drain()
+		self.assertEqual((out['captured'], out['failed'], out['blocked']), (1, 0, 0))
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, row.reason, row.http_status, row.title, row.final_url), ('ok', '', 200, 'Welcome', 'https://www.rt.test/home'))
+		self.assertTrue(row.captured_at and row.attempted_at and not row.queued_at)
+		self.assertRegex(row.image_path, rf'^screenshots/{self.project.pk}/www\.rt\.test-[0-9a-f]{{8}}/https-443-\d+\.png$')
+		self.assertTrue(os.path.isfile(os.path.join(self.media, row.image_path)))
+		self.assertTrue(os.path.isfile(os.path.join(self.media, row.thumb_path)))
+		self.assertRegex(row.image_hash, r'^[0-9a-f]{16}$')
+		self.assertEqual(row.image_bytes, os.path.getsize(os.path.join(self.media, row.image_path)))
+		self.assertEqual(len(scanner.tasks), 1)
+
+	def test_the_task_names_the_page_by_the_rows_own_id_and_carries_the_policy_and_the_limits(self):
+		row = self.queue()
+		HostExclusion.objects.create(org=self.project.org, host='skip.rt.test', include_subdomains=True)
+		HostExclusion.objects.create(org=self.project.org, host='one.rt.test')
+		with Scanner() as scanner:
+			web_shot.drain()
+		target = scanner.tasks[0]
+		self.assertEqual(target['pages'], [{'id': str(row.pk), 'url': 'https://www.rt.test/'}])
+		self.assertEqual(target['scope']['hosts'], ['www.rt.test'])
+		self.assertTrue(set(target['scope']['excluded']) >= {'skip.rt.test', 'one.rt.test'})
+		self.assertEqual(target['scope']['excluded_trees'], ['skip.rt.test'])
+		self.assertEqual((target['scope']['private'], target['scope']['domains']), (False, []))
+		self.assertTrue(target['open_web'])  # no bug bounty program: a page's own fonts and scripts may load
+		self.assertEqual((target['timeout_seconds'], target['max_bytes']), (20, web_shot.DEFAULT_MAX_BYTES))
+		from agentapi import sentinel_contract
+		from jsonschema import Draft202012Validator
+		doc = sentinel_contract.load()
+		Draft202012Validator({'$ref': '#/$defs/targets/web_screenshot', '$defs': doc['$defs']}).validate(target)
+
+	def test_a_bug_bounty_project_may_only_load_the_listed_hosts(self):
+		from cveFeed.models import BountyEngagement, BountyProgram
+		program = BountyProgram.objects.create(platform='hackerone', handle='acme', name='Acme')
+		BountyEngagement.objects.create(project=self.project, program=program, status='active')
+		with Scanner() as scanner, mock.patch('cveFeed.bounty_gate.Gate.refusal', return_value=''):
+			self.queue(by_person=True)
+			web_shot.drain()
+		self.assertFalse(scanner.tasks[0]['open_web'])
+
+	def test_an_exclusion_list_too_long_for_the_policy_closes_the_open_web(self):
+		from cveFeed import probe_scope
+		HostExclusion.objects.bulk_create([HostExclusion(org=self.project.org, host=f'x{i}.rt.test') for i in range(probe_scope.MAX_EXCLUDED + 1)])
+		policy, open_web = probe_scope.for_screenshots(self.project.pk, ['www.rt.test'])
+		self.assertFalse(open_web)
+		self.assertEqual(len(policy['excluded']), probe_scope.MAX_EXCLUDED)
+
+	def test_no_pages_of_two_projects_ever_share_a_task(self):
+		other = self.project_with_hosts('two', 1)
+		self.queue()
+		web_shot.queue_for_subs(list(Subdomain.objects.filter(target_domain__project=other)), other.pk)
+		with Scanner() as scanner:
+			web_shot.drain()
+		self.assertEqual(sorted(len(t['pages']) for t in scanner.tasks), [1, 1])
+		self.assertEqual({p['url'].split('/')[2] for t in scanner.tasks for p in t['pages']}, {'www.rt.test', 'h0.two.test'})
+
+	def test_a_long_queue_goes_in_tasks_of_at_most_six_pages(self):
+		for i in range(14):
+			name = f'h{i}.rt.test'
+			Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=self.sub.scan_history)
+			self.make_row(host=name)
+		with Scanner() as scanner:
+			out = web_shot.drain()
+		self.assertEqual(sorted(len(t['pages']) for t in scanner.tasks), [2, 6, 6])
+		self.assertEqual(out['captured'], 14)
+		self.assertFalse(HostScreenshot.objects.filter(outcome='queued').exists())
+
+	def test_a_page_that_redirects_to_another_host_says_so(self):
+		row = self.queue()
+		with Scanner({'www.rt.test': {'final_url': 'https://acme-site.example/'}}):
+			web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual(row.outcome, 'ok')
+		self.assertEqual(row.reason, 'Redirects to https://acme-site.example/ (another host).')
+
+	def test_an_error_page_is_still_a_picture_with_its_status_as_the_reason(self):
+		row = self.queue()
+		with Scanner({'www.rt.test': {'status': 403}}):
+			web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, row.http_status, row.reason), ('ok', 403, 'The server answered HTTP 403.'))
+
+	def test_what_the_scanner_could_not_photograph_keeps_its_reason_and_the_old_picture(self):
+		row = self.queue()
+		with Scanner() as scanner:
+			web_shot.drain()
+			row.refresh_from_db()
+			old = row.image_path
+			for outcome, counted in (('timeout', 'failed'), ('blocked', 'blocked'), ('too_big', 'failed')):
+				HostScreenshot.objects.filter(pk=row.pk).update(outcome='queued')
+				scanner.plan = {'www.rt.test': {'outcome': outcome, 'reason': f'it was {outcome}'}}
+				out = web_shot.drain()
+				row.refresh_from_db()
+				self.assertEqual((row.outcome, row.reason, row.image_path, out[counted]), (outcome, f'it was {outcome}', old, 1), outcome)
+
+	def test_a_flat_color_picture_is_a_blank_page_whatever_the_scanner_says(self):
+		row = self.queue()
+		with Scanner({'www.rt.test': {'image': png(flat=True)}}):
+			out = web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, row.image_path, out['failed']), ('blank', '', 1))
+
+	def test_a_picture_that_is_not_a_png_is_never_stored(self):
+		row = self.queue()
+		with Scanner({'www.rt.test': {'image': b'<html>not an image</html>' + b'x' * 60}}):
+			web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, row.image_path), ('error', ''))
+		self.assertIn('not a usable PNG', row.reason)
+		self.assertEqual(os.listdir(self.media), [])
+
+	def test_a_page_the_scanner_did_not_report_is_unavailable_never_a_state_and_the_rest_are_kept(self):
+		other = self.make_row(host='b.rt.test')
+		Subdomain.objects.create(name='b.rt.test', target_domain=self.domain, scan_history=self.sub.scan_history)
+		row = self.queue()
+
+		def respond(task):
+			result = shot_result(task)
+			result['pages'] = [p for p in result['pages'] if p['id'] != str(other.pk)]
+			return result
+		fake = FakeScanner(kinds=['web_screenshot'], responders={'web_screenshot': respond})
+		with LocalFallback('none'), fake:
+			out = web_shot.drain()
+		other.refresh_from_db()
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, other.outcome, out['captured'], out['failed']), ('ok', 'unavailable', 1, 1))
+		self.assertIn('reported nothing', other.reason)
+
+	def test_an_id_the_task_did_not_name_is_dropped_and_names_are_never_used(self):
+		row = self.queue()
+
+		def respond(task):
+			result = shot_result(task)
+			evil = dict(result['pages'][0], id='999999', image=result['pages'][0]['image'])
+			result['pages'].append(evil)
+			result['pages'][0]['title'] = '../../etc/passwd'
+			result['pages'][0]['final_url'] = '../../x'
+			return result
+		with LocalFallback('none'), FakeScanner(kinds=['web_screenshot'], responders={'web_screenshot': respond}):
+			web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual(row.outcome, 'ok')
+		self.assertEqual(HostScreenshot.objects.count(), 1)
+		self.assertTrue(row.image_path.startswith(f'screenshots/{self.project.pk}/www.rt.test-'))
+		self.assertEqual(sum(len(files) for _d, _s, files in os.walk(self.media)) , 2)  # the picture and its thumbnail
+
+	def test_a_sandbox_that_did_not_engage_opens_nothing_and_every_page_says_why(self):
+		from agentapi import system_status
+		from cveFeed.models import AgentActivity
+		row = self.queue()
+		reason = "Chromium's sandbox could not start: this container may not create the user namespaces it needs."
+		with Scanner(sandbox={'engaged': False, 'reason': reason, 'version': ''}) as scanner, self.assertLogs('cveFeed.web_shot', 'ERROR'):
+			def respond(task):
+				return {'outcome': 'done', 'sandbox': {'engaged': False, 'reason': reason}, 'pages': [], 'touched': [], 'refused': []}
+			scanner.fake.responders['web_screenshot'] = respond
+			out = web_shot.drain()
+		row.refresh_from_db()
+		self.assertEqual((row.outcome, out['failed']), ('unavailable', 1))
+		self.assertIn('sandbox did not engage', row.reason)
+		self.assertIn('user namespaces', row.reason)
+		self.assertEqual(web_shot.sandbox_status()['state'], 'failed')
+		problems, notes = [], []
+		system_status._screenshots(problems, notes)
+		self.assertTrue(any('user namespaces' in p for p in problems))
+		self.assertEqual(AgentActivity.objects.filter(message__startswith='Screenshots are off').count(), 1)
+
+	def test_a_proof_of_the_sandbox_in_the_result_is_recorded(self):
+		self.queue()
+		with Scanner():
+			web_shot.drain()
+		self.assertEqual(web_shot.sandbox_status()['state'], 'engaged')
+		self.assertEqual(web_shot.sandbox_status()['chromium_version'], '156.0.8078.4')
+
+	def test_a_result_that_says_nothing_of_the_sandbox_is_refused_by_the_server(self):
+		from agentapi.services import ApiError
+		from agentapi import sentinel_broker
+		with self.assertRaises(ApiError):
+			sentinel_broker.clean_result('web_screenshot', {'outcome': 'done', 'pages': []})
+
+
+class NoScannerTests(ShotFixture, TestCase):
+	"""``web_screenshot`` has no local path at all: with no scanner able to take it nothing is recorded and the pages stay queued."""
+
+	def setUp(self):
+		super().setUp()
+		self.sub = self.host(ports=((443, 'https'),))
+		self.row = self.make_row()
+		assert_ran_nowhere_locally(self, 'web_screenshot')
+
+	def test_no_scanner_at_all_leaves_the_page_queued(self):
+		with LocalFallback('none'):
+			out = web_shot.drain()
+		self.assertIn('no scanner could take this work (web_screenshot)', out['skipped'])
+		self.assertEqual(out['captured'], 0)
+		self.row.refresh_from_db()
+		self.assertEqual((self.row.outcome, self.row.attempted_at, self.row.reason), ('queued', None, ''))
+		self.kicked.assert_not_called()  # a page that cannot be taken is not kicked in a loop
+
+	def test_local_fallback_all_does_not_bring_a_local_run_back(self):
+		with LocalFallback('all'):
+			out = web_shot.drain()
+		self.assertIn('no scanner could take', out['skipped'])
+		self.row.refresh_from_db()
+		self.assertEqual(self.row.outcome, 'queued')
+
+	def test_an_offline_scanner_leaves_the_page_queued_and_a_live_one_takes_it_later(self):
+		with Scanner() as scanner:
+			scanner.mode('offline')
+			out = web_shot.drain()
+			self.assertIn('no scanner could take', out['skipped'])
+			self.row.refresh_from_db()
+			self.assertEqual(self.row.outcome, 'queued')
+			scanner.mode('ok')
+			out = web_shot.drain()
+		self.row.refresh_from_db()
+		self.assertEqual((self.row.outcome, out['captured']), ('ok', 1))
+
+	def test_a_scanner_that_fails_or_never_answers_leaves_the_page_queued(self):
+		with Scanner(wait='1') as scanner:
+			for mode in ('fail', 'timeout', 'idle'):
+				scanner.mode(mode)
+				out = web_shot.drain()
+				self.row.refresh_from_db()
+				self.assertEqual(self.row.outcome, 'queued', mode)
+				self.assertIn('no scanner could take', out['skipped'], mode)
+
+	def test_the_waiting_state_is_what_a_page_that_nothing_can_take_shows(self):
+		web_shot.queue_for_subs([self.fresh(self.sub)], self.project.pk, by_person=True, force=True)
+		with LocalFallback('none'):
+			web_shot.drain()
+		rows = list(HostScreenshot.objects.all())
+		self.assertEqual({r.outcome for r in rows}, {'queued'})
+		self.assertIn('Waiting for a scanner', web_shot.note_for(rows, has_web_evidence=True))
+
+	def test_a_project_without_a_scanner_does_not_hold_up_one_that_has_one(self):
+		other = self.project_with_hosts('two', 1)
+		web_shot.queue_for_subs(list(Subdomain.objects.filter(target_domain__project=other)), other.pk)
+		from agentapi import sentinel_dispatch
+		from reNgine.resources import ScannerUnavailable
+		original = sentinel_dispatch.scanner_or_local
+
+		def gate(project, kind):
+			if project.pk == self.project.pk:
+				raise ScannerUnavailable(kind, 'no scanner for this project')
+			return original(project, kind)
+		with Scanner(), mock.patch.object(sentinel_dispatch, 'scanner_or_local', gate):
+			out = web_shot.drain()
+		self.assertEqual(out['captured'], 1)
+		self.assertEqual(out['waiting'], [self.project.pk])
+		self.assertEqual(HostScreenshot.objects.get(host='h0.two.test').outcome, 'ok')
+		self.assertEqual(HostScreenshot.objects.get(pk=self.row.pk).outcome, 'queued')
+
+
+class PrecheckTests(ShotFixture, TestCase):
+	"""Every queued page is judged again where it is used: what was true when it was queued may not be now."""
+
+	def setUp(self):
+		super().setUp()
+		self.sub = self.host(ports=((443, 'https'),))
+		self.scanner = Scanner().__enter__()
+		self.addCleanup(self.scanner.__exit__, None, None, None)
+
+	def drain(self, by_person=False):
+		self.row = self.make_row(by_person=by_person)
+		self.scanner.tasks.clear()
+		out = web_shot.drain()
+		self.tasks = list(self.scanner.tasks)
+		return out
+
+	def test_a_host_that_left_the_inventory_is_forgotten_not_photographed(self):
+		Subdomain.objects.all().delete()
+		out = self.drain()
+		self.assertEqual((out['captured'], out['dropped']), (0, 1))
+		self.assertEqual(HostScreenshot.objects.count(), 0)
+		self.assertEqual(self.tasks, [])
+
+	def test_a_host_excluded_since_it_was_queued_is_forgotten(self):
+		HostExclusion.objects.create(org=self.project.org, host='www.rt.test')
+		self.drain()
+		self.assertEqual(HostScreenshot.objects.count(), 0)
+		self.assertEqual(self.tasks, [])
+
+	def test_an_archived_host_is_blocked(self):
+		HostState.objects.create(project=self.project, domain=self.domain, host='www.rt.test', archived_at=timezone.now())
+		self.drain()
+		row = HostScreenshot.objects.get()
+		self.assertEqual((row.outcome, row.reason), ('blocked', 'Not captured: the host is archived.'))
+		self.assertEqual(self.tasks, [])
+
+	def test_the_bug_bounty_confirmation_holds_back_an_unattended_page_but_not_a_persons(self):
+		def refusal(gate, project_id, host=None, *, unattended=True, derived=False):
+			return 'the bug bounty engagement has not confirmed automated testing' if unattended else ''
+		with mock.patch('cveFeed.bounty_gate.Gate.refusal', refusal):
+			self.drain(by_person=False)
+			self.assertEqual(HostScreenshot.objects.get().outcome, 'blocked')
+			self.assertEqual(self.tasks, [])
+			HostScreenshot.objects.all().delete()
+			self.drain(by_person=True)
+		self.assertEqual(HostScreenshot.objects.get().outcome, 'ok')
+
+	def test_a_target_made_manual_only_while_the_page_waited_is_blocked_for_the_schedule(self):
+		Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=Domain.DISCOVERY_MANUAL)
+		self.drain(by_person=False)
+		row = HostScreenshot.objects.get()
+		self.assertEqual((row.outcome, row.reason), ('blocked', 'Not captured: the target is set to manual only.'))
+
+
+class DrainTests(ShotFixture, TestCase):
+	def setUp(self):
+		super().setUp()
+		self.sub = self.host(ports=((443, 'https'),))
+
+	def test_nothing_runs_while_scanning_is_paused_and_the_pages_stay_queued(self):
+		self.make_row()
+		with Scanner() as scanner, mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+			out = web_shot.drain()
+		self.assertEqual(out['skipped'], 'scanning is paused')
+		self.assertEqual(scanner.tasks, [])
+		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
+
+	def test_a_second_drain_while_one_runs_returns_at_once(self):
+		self.make_row()
+		from contextlib import contextmanager
+
+		@contextmanager
+		def taken(key, owner, ttl):
+			yield 'drain-other'
+		with Scanner() as scanner, mock.patch('reNgine.resources.redis_claim', taken):
+			out = web_shot.drain()
+		self.assertEqual(out['skipped'], 'another drain is running')
+		self.assertEqual(scanner.tasks, [])
+		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
+
+	def test_switched_off_the_pages_wait_and_the_reason_is_given(self):
+		self.make_row()
+		with mock.patch.dict(os.environ, {'CVENGINE_SCREENSHOTS': '0'}):
+			out = web_shot.drain()
+		self.assertIn('switched off', out['skipped'])
+		self.assertEqual(HostScreenshot.objects.get().outcome, 'queued')
+
+	def test_a_persons_request_goes_first_and_the_oldest_next(self):
+		self.make_row(host='old.rt.test', queued_at=timezone.now() - timedelta(hours=3))
+		self.make_row(host='new.rt.test', queued_at=timezone.now())
+		self.make_row(host='person.rt.test', queued_at=timezone.now(), by_person=True)
+		self.assertEqual([r.host for r in web_shot.queued_rows(10)], ['person.rt.test', 'old.rt.test', 'new.rt.test'])
+		self.assertEqual(len(web_shot.queued_rows(2)), 2)
+		self.assertEqual([r.host for r in web_shot.queued_rows(10, exclude_projects=[self.project.pk])], [])
+
+	def test_a_long_queue_is_taken_a_batch_at_a_time_until_it_is_empty(self):
+		for i in range(5):
+			name = f'h{i}.rt.test'
+			Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=self.sub.scan_history)
+			self.make_row(host=name)
+		with Scanner() as scanner:
+			out = web_shot.drain(batch=2)
+		self.assertEqual(sorted(len(t['pages']) for t in scanner.tasks), [1, 2, 2])
+		self.assertEqual(out['captured'], 5)
+		self.assertFalse(HostScreenshot.objects.filter(outcome='queued').exists())
+
+	def test_a_drain_that_runs_out_of_time_asks_for_another_instead_of_holding_the_worker(self):
+		self.make_row()
+		ticks = iter([0, 10_000])
+		out = web_shot.drain(budget_seconds=5, now_fn=lambda: next(ticks))
+		self.assertTrue(out['continued'])
+		self.kicked.assert_called_once()
+		self.assertEqual(self.kicked.call_args.kwargs['countdown'], 5)
+
+	def test_a_page_queued_while_a_drain_was_finishing_gets_another_drain(self):
+		row = self.make_row()
+		looks = iter([[row], [], [row]])  # the loop's two looks, then the last look after the drain has done its work
+
+		def process(rows, summary=None):
+			summary['captured'] += 1
+			return summary
+		with mock.patch.object(web_shot, 'queued_rows', side_effect=lambda limit, exclude=(): next(looks)), mock.patch.object(web_shot, 'process', process):
+			out = web_shot.drain()
+		self.assertEqual(out['captured'], 1)
+		self.kicked.assert_called_once()
+		self.assertEqual(self.kicked.call_args.kwargs['countdown'], 5)
+
+	def test_the_activity_feed_gets_one_line(self):
+		from cveFeed.models import AgentActivity
+		self.make_row()
+		with Scanner():
+			web_shot.drain()
+		self.assertTrue(AgentActivity.objects.filter(message='Screenshots: 1 captured, 0 not captured, 0 blocked').exists())
+
+
+# ------------------------------------------------------------------------------------------------ what the server keeps of a result
+
+class ResultCleaningTests(SimpleTestCase):
+	def png_b64(self, **kw):
+		return base64.b64encode(png(**kw)).decode()
+
+	def clean(self, pages, **extra):
+		from agentapi import sentinel_broker
+		return sentinel_broker.clean_result('web_screenshot', {'outcome': 'done', 'sandbox': {'engaged': True}, 'pages': pages, **extra})
+
+	def test_a_good_result_passes_through_and_matches_the_contract(self):
+		import json
+		from pathlib import Path
+		from agentapi import sentinel_contract
+		from jsonschema import Draft202012Validator
+		good = json.loads((Path(__file__).parent / 'fixtures' / 'sentinel_results' / 'web_screenshot.json').read_text())
+		Draft202012Validator(sentinel_contract.result_schema('web_screenshot')).validate(good)
+		out = self.clean(good['pages'], touched=good['touched'], refused=good['refused'], dropped_requests=1)
+		self.assertEqual([p['outcome'] for p in out['pages']], ['ok', 'unreachable'])
+		self.assertEqual(out['pages'][0]['image'], good['pages'][0]['image'])
+		self.assertEqual((out['touched'], out['refused'], out['dropped_requests']), (good['touched'], good['refused'], 1))
+
+	def test_a_picture_is_checked_before_anything_opens_it(self):
+		import struct
+		import zlib
+		good = png()
+		header = struct.pack('>II', 100_000, 100_000) + good[24:29]
+		bomb = good[:16] + header + struct.pack('>I', zlib.crc32(b'IHDR' + header) & 0xFFFFFFFF) + good[33:]  # a good checksum, and sides of ten billion pixels
+		bad_crc = good[:29] + b'\0\0\0\0' + good[33:]
+		for name, data in (('bomb', bomb), ('crc', bad_crc), ('text', b'hello' * 20), ('truncated', good[:-12]), ('empty', b''), ('signature only', good[:8])):
+			with self.subTest(name):
+				page = {'id': '1', 'outcome': 'ok', 'image': base64.b64encode(data).decode()}
+				out = self.clean([page])['pages'][0]
+				self.assertEqual(out['outcome'], 'error')
+				self.assertNotIn('image', out)
+		self.assertEqual(self.clean([{'id': '1', 'outcome': 'ok', 'image': 'not base64!!'}])['pages'][0]['outcome'], 'error')
+		self.assertEqual(self.clean([{'id': '1', 'outcome': 'ok'}])['pages'][0]['outcome'], 'error')  # ok with no picture is not ok
+
+	def test_a_picture_over_the_cap_is_refused_and_an_image_on_a_failed_page_is_dropped(self):
+		from agentapi import web_screenshot_results as results
+		huge = base64.b64encode(png(width=40, height=40) + b'\0' * (results.MAX_IMAGE_BYTES + 1)).decode()
+		self.assertEqual(self.clean([{'id': '1', 'outcome': 'ok', 'image': huge}])['pages'][0]['outcome'], 'error')
+		failed = self.clean([{'id': '1', 'outcome': 'timeout', 'image': self.png_b64()}])['pages'][0]
+		self.assertNotIn('image', failed)
+
+	def test_the_task_can_ask_for_a_smaller_picture_than_the_contract_allows(self):
+		from agentapi import web_screenshot_results as results
+		big = png(width=300, height=300, noise=5000)
+		page = {'id': '1', 'outcome': 'ok', 'image': base64.b64encode(big).decode()}
+
+		class Task:
+			target = {'pages': [{'id': '1', 'url': 'https://a.example/'}], 'max_bytes': 1000}
+		self.assertGreater(len(big), 1000)
+		out = results.bind(self.clean([page]), Task())['pages'][0]
+		self.assertEqual((out['outcome'], out['reason']), ('error', results.TOO_BIG))
+
+	def test_strings_are_clipped_and_odd_values_are_dropped(self):
+		page = {'id': '1', 'outcome': 'timeout', 'reason': 'x' * 900, 'final_url': 'y' * 5000, 'title': 't' * 900, 'status': True}
+		out = self.clean([page, {'id': '', 'outcome': 'ok'}, {'id': '2', 'outcome': 'nonsense'}, 'text', {'outcome': 'ok'}])['pages']
+		self.assertEqual(len(out), 1)
+		self.assertEqual((len(out[0]['reason']), len(out[0]['final_url']), len(out[0]['title']), out[0]['status']), (300, 2000, 300, None))
+
+	def test_too_many_pages_is_not_a_result(self):
+		from agentapi.services import ApiError
+		with self.assertRaises(ApiError):
+			self.clean([{'id': str(i), 'outcome': 'timeout'} for i in range(7)])
+
+	def test_a_browser_that_was_not_proven_sandboxed_has_no_pages(self):
+		from agentapi import sentinel_broker
+		out = sentinel_broker.clean_result('web_screenshot', {'outcome': 'done', 'sandbox': {'engaged': False, 'reason': 'no'},
+														  'pages': [{'id': '1', 'outcome': 'ok', 'image': self.png_b64()}]})
+		self.assertEqual((out['sandbox']['engaged'], out['pages']), (False, []))
+
+	def test_the_bounds_are_the_contracts(self):
+		from agentapi import sentinel_contract
+		from agentapi import web_screenshot_results as results
+		from cveFeed import probe_scope
+		doc = sentinel_contract.load()['$defs']
+		page = doc['results']['web_screenshot']['allOf'][1]['properties']['pages']
+		self.assertEqual(page['maxItems'], results.MAX_PAGES)
+		self.assertEqual(doc['targets']['web_screenshot']['properties']['pages']['maxItems'], web_shot.MAX_PAGES_PER_TASK)
+		self.assertEqual(page['items']['properties']['image']['maxLength'], (results.MAX_IMAGE_BYTES + 2) // 3 * 4)
+		self.assertEqual(doc['targets']['web_screenshot']['properties']['max_bytes']['maximum'], results.MAX_IMAGE_BYTES)
+		self.assertEqual(sorted(page['items']['properties']['outcome']['enum']), sorted(results.OUTCOMES))
+		scope = doc['probe_scope']['properties']
+		self.assertEqual((scope['excluded']['maxItems'], scope['excluded_trees']['maxItems']), (probe_scope.MAX_EXCLUDED, probe_scope.MAX_EXCLUDED_TREES))
+		self.assertEqual(web_shot.MAX_PAGES_PER_TASK * results.MAX_IMAGE_BYTES * 4 // 3 + 4096 < 24 * 1024 * 1024, True)  # six pictures fit the 24 MiB a result body may be

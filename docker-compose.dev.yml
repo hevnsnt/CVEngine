@@ -40,12 +40,6 @@ services:
     init: true  # tini as PID 1; the entrypoint turns SIGTERM into a warm worker shutdown and exits when a worker dies (see docker-compose.yml)
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
-    # Chromium's sandbox for the web screenshots (cveFeed/web_shot.py) needs user namespaces, which Docker's default seccomp profile refuses. This is
-    # Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and unshare), vendored unchanged
-    # from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). Without it the sandbox cannot start and screenshots stay off, with the reason shown
-    # (docs/PIPELINE.md, "Web screenshots"); `make up` and the update scripts recreate this container, so an upgrade applies it with no manual step.
-    security_opt:
-      - seccomp=./config/seccomp/playwright-chromium.json
     # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
     volumes:
       - ./web:/usr/src/app

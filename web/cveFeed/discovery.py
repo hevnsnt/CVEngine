@@ -741,7 +741,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
             return gone
     from cveFeed import web_shot
     shot_result = None
-    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by the screenshot worker (its own queue and memory gate)
+    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by a Sentinel (the screenshot drain hands it over; its own queue)
         shot_result = _stage(scan, 'Web screenshots', 'web_screenshot',
                              lambda: (screenshot_queuer or web_shot.queue_for_scan)(scan_id, by_person=by_person or scan.initiated_by_id is not None, force=retest or force),
                              fallback={'queued': 0})

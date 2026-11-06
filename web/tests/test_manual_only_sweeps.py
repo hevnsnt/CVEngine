@@ -216,16 +216,15 @@ class ScreenshotTests(test_web_shot.ShotFixture, TestCase):
     def test_a_page_queued_before_the_target_was_made_manual_only_is_blocked_unless_a_person_asked(self):
         self.host(ports=((443, 'https'),))
         Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)
-        for by_person, outcome in ((False, 'blocked'), (True, 'ok')):
-            HostScreenshot.objects.all().delete()
-            self.make_row(by_person=by_person)
-            test_web_shot.FakeProxy.instances = []
-            with mock.patch('cveFeed.web_shot._resolve', mock.Mock(return_value='203.0.113.5')):
-                web_shot.drain(runner=test_web_shot.runner_for({}), proxy_factory=test_web_shot.FakeProxy)
-            row = HostScreenshot.objects.get()
-            self.assertEqual(row.outcome, outcome, by_person)
-            if not by_person:
-                self.assertIn('manual only', row.reason)
+        with test_web_shot.Scanner():
+            for by_person, outcome in ((False, 'blocked'), (True, 'ok')):
+                HostScreenshot.objects.all().delete()
+                self.make_row(by_person=by_person)
+                web_shot.drain()
+                row = HostScreenshot.objects.get()
+                self.assertEqual(row.outcome, outcome, by_person)
+                if not by_person:
+                    self.assertIn('manual only', row.reason)
 
 
 class SharedHostTests(PlainWorld):
@@ -343,9 +342,8 @@ class SharedHostScreenshotTests(test_web_shot.ShotFixture, TestCase):
         self.shared()
         HostScreenshot.objects.all().delete()
         self.make_row(host='www.rt.test', by_person=False)
-        test_web_shot.FakeProxy.instances = []
-        with mock.patch('cveFeed.web_shot._resolve', mock.Mock(return_value='203.0.113.5')):
-            web_shot.drain(runner=test_web_shot.runner_for({}), proxy_factory=test_web_shot.FakeProxy)
+        with test_web_shot.Scanner():
+            web_shot.drain()
         self.assertEqual(HostScreenshot.objects.get().outcome, 'ok')
 
 

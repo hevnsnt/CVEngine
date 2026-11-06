@@ -41,6 +41,7 @@ from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_stream
 from agentapi import sentinel_version
+from agentapi import web_screenshot_results
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -2294,7 +2295,7 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
              'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
-             'identity_check': probe_results.clean_identity_check}
+             'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean}
 
 
 def _bind_to_task(kind, result, task):
@@ -2307,6 +2308,8 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
                                        'dangling_dns_check', 'route_probe', 'identity_check'):
         return probe_results.bind(kind, result, task)
+    if task is not None and kind == 'web_screenshot':
+        return web_screenshot_results.bind(result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result
     target = task.target if isinstance(task.target, dict) else {}
