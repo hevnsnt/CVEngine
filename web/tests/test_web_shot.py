@@ -25,6 +25,7 @@ from tests.test_route_auth import RouteFixture
 from tests.test_service_intel import RDP_ENC, RDP_NLA_ONLY
 
 from PIL import Image
+from tests.port_stage_stub import port_double
 
 
 def png(width=60, height=40, flat=False, noise=0):
@@ -318,7 +319,7 @@ class DiscoveryStageTests(ShotFixture, TestCase):
 		from cveFeed import discovery
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-										 nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
+										 port_stage_run=port_double(),
 										 db_exposure_checks={}, provider=None, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 										 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kwargs)
 

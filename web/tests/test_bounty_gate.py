@@ -134,7 +134,8 @@ def full_port_sweep(self, w):
 
 def weekly_deep_nuclei(self, w):
     from cveFeed.tasks import weekly_deep_nuclei as sweep
-    with mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+    with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=object()), \
+            mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
             mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({w.host}, set(), set())), \
             mock.patch('cveFeed.nuclei_scan.run_nuclei', return_value={'targets': 1, 'findings': 0}) as run:
         sweep()

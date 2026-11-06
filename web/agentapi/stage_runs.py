@@ -68,7 +68,7 @@ CONTINUATIONS = {}
 _local = threading.local()
 # The modules that register adapters and continuations when they are imported: a callback imports them all first, since the worker that runs
 # it may not have imported the one that made the run. A track that adds an adapter adds its module here.
-ADAPTER_MODULES = ('cveFeed.discovery', 'cveFeed.internal_scan', 'cveFeed.internal_discovery', 'cveFeed.testssl_scan', 'cveFeed.udp_scan',
+ADAPTER_MODULES = ('cveFeed.discovery', 'cveFeed.internal_scan', 'cveFeed.internal_discovery', 'cveFeed.tls_audit', 'cveFeed.udp_scan',
                    'cveFeed.wpscan_scan', 'cveFeed.openvas_scan', 'cveFeed.host_assessment', 'cveFeed.tasks')
 
 

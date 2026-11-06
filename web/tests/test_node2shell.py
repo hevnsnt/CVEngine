@@ -6,6 +6,7 @@ from cveFeed import discovery, node2shell_scan
 from cveFeed.models import RouteAuth, ServiceRun
 from startScan.models import Subdomain, Technology, Vulnerability
 from tests.test_route_auth import RouteFixture
+from tests.port_stage_stub import port_double
 
 VULNERABLE = {'vulnerable': True, 'verdict': 'VULNERABLE', 'reason': 'the 23068764-byte probe reached the valid route',
               'response': 'HTTP/1.1 200 OK\r\n\r\n{"ok":true}', 'status_code': 200}
@@ -160,7 +161,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 			return NOT_VULNERABLE
 		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+								  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 								  node2shell_checker=checker)
@@ -175,7 +176,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		from startScan.models import ScanActivity
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+								  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='node2shell').exists())

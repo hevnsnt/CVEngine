@@ -7,7 +7,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import heavy_process, testssl_scan, waf_scan, wpscan_scan
+from cveFeed import heavy_process, wpscan_scan
 from reNgine import resources
 from tests.test_route_auth import RouteFixture
 
@@ -57,21 +57,6 @@ class WpscanTests(SimpleTestCase):
 			wpscan_scan.run_wpscan_process('https://www.example.test/', 'tok')
 		self.assertEqual((seen['kind'], seen['env']['WPSCAN_API_TOKEN']), ('wpscan', 'tok'))
 		self.assertIn('wpscan', resources.BASE_COSTS_MB)
-		self.assertIn('testssl', resources.BASE_COSTS_MB)
-
-
-class TestsslTests(SimpleTestCase):
-	def test_the_default_runner_is_the_gated_one(self):
-		with mock.patch('cveFeed.heavy_process.run') as run:
-			testssl_scan._run(['testssl.sh', 'rt.test:443'], {'PATH': '/usr/bin'}, 120)
-		run.assert_called_once_with('testssl', ['testssl.sh', 'rt.test:443'], 120, label='rt.test:443', env={'PATH': '/usr/bin'}, on_start=None)
-
-
-class WafTests(SimpleTestCase):
-	def test_a_stopped_scan_is_an_error_result_not_a_crash(self):
-		with mock.patch('cveFeed.heavy_process.run', side_effect=resources.ScanAborted('stopped')):
-			out = waf_scan.run_wafw00f('https://www.example.test/')
-		self.assertEqual((out['products'], out['error']), ([], 'stopped'))
 
 
 class DbExposureTests(RouteFixture, TestCase):

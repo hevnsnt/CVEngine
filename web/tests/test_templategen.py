@@ -139,91 +139,44 @@ class GateEvidenceTests(unittest.TestCase):
 			self.assertIn('forbidden', reason)
 
 
-class FakeProc:
-	"""Stands in for the nuclei process: its stdout is the given JSON lines."""
-	lines = []
-	returncode = 0
+class RunOnScannerTests(unittest.TestCase):
+	"""``run_template`` hands the template to the built-in scanner and returns what it reports; nothing runs on this server."""
 
-	def __init__(self, cmd, **kwargs):
-		pass
-
-	def attach(self, proc):
-		pass
-
-	def communicate(self, timeout=None):
-		import json
-		return '\n'.join(json.dumps(line) for line in self.lines), ''
-
-
-class _Job:
-	def __enter__(self):
-		return self
-
-	def __exit__(self, *exc):
-		return False
-
-	def attach(self, proc):
-		pass
-
-	def raise_if_killed(self):
-		pass
-
-
-class RunTimeHitTests(unittest.TestCase):
 	def setUp(self):
 		# run_template resolves every name again at launch and treats one it cannot resolve in time as blocked; these tests are about what is
-		# done with nuclei's output, so they must not depend on a real DNS lookup answering (it did not, once, on a busy CI runner)
+		# done with the scanner's outcomes, so they must not depend on a real DNS lookup answering (it did not, once, on a busy CI runner)
 		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
 		patcher.start()
 		self.addCleanup(patcher.stop)
 
-	def _run(self, lines):
-		FakeProc.lines = lines
+	def _run(self, outcomes, project=1):
 		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
-			return templategen.run_template('/t.yaml', ['www.t.test'])[0]
+				mock.patch('agentapi.sentinel_dispatch.try_template_test', return_value=outcomes) as sent:
+			out = templategen.run_template('/t.yaml', ['www.t.test'], project=project)
+		return out[0], sent
 
-	def test_an_extractor_only_line_is_not_a_hit(self):
-		out = self._run([{'host': 'https://www.t.test', 'template-id': 't', 'extracted-results': ['nginx/1.18.0']}])
+	def test_the_scanners_outcome_is_returned_as_reported(self):
+		outcome = {'host': 'www.t.test', 'vulnerable': True, 'output': '{}', 'hit': {'matcher-name': 'version'}}
+		out, sent = self._run([outcome])
+		self.assertEqual(out, outcome)
+		self.assertEqual(sent.call_args.args, (GOOD, ['www.t.test'], 1))  # exactly the approved bytes, for the project the host belongs to
+
+	def test_an_error_outcome_is_an_error_not_a_negative_result(self):
+		out, _ = self._run([{'host': 'www.t.test', 'vulnerable': False, 'output': '', 'error': 'not tested: no scanner could take this work (nuclei_validate)'}])
 		self.assertFalse(out['vulnerable'])
+		self.assertIn('not tested', out['error'])
 
-	def test_a_matcher_line_is_a_hit_with_its_evidence(self):
-		out = self._run([{'host': 'https://www.t.test', 'template-id': 't', 'matcher-name': 'version', 'extracted-results': ['1']}])
-		self.assertTrue(out['vulnerable'])
-		self.assertEqual(out['hit']['matcher-name'], 'version')
+	def test_without_a_project_the_check_is_not_tested_and_asks_no_scanner(self):
+		out, sent = self._run([], project=None)
+		sent.assert_not_called()
+		self.assertIn('not tested', out['error'])
 
-	def test_an_unnamed_matcher_with_a_true_status_is_a_hit(self):
-		self.assertTrue(self._run([{'host': 'https://www.t.test', 'template-id': 't', 'matcher-status': True}])['vulnerable'])
-
-	def test_a_false_matcher_status_is_not_a_hit(self):
-		self.assertFalse(self._run([{'host': 'https://www.t.test', 'template-id': 't', 'matcher-status': False,
-			'matcher-name': 'x'}])['vulnerable'])
-
-	def test_nonzero_exit_and_malformed_output_are_errors_not_negative_results(self):
-		with mock.patch.object(FakeProc, 'returncode', 2):
-			out = self._run([])
-		self.assertFalse(out['vulnerable'])
-		self.assertIn('error', out)
-		with mock.patch.object(FakeProc, 'communicate', return_value=('{broken', '')):
-			out = self._run([])
-		self.assertEqual(out['error'], 'nuclei returned malformed JSON output')
-
-	def test_missing_nuclei_is_not_reported_as_no_match(self):
-		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
-				mock.patch.object(templategen.subprocess, 'Popen', side_effect=FileNotFoundError('nuclei')):
-			out = templategen._run_template_with_retry('/t.yaml', ['www.t.test'])
-		self.assertIn('FileNotFoundError', out[0]['error'])
-
-	def test_timeout_is_not_reported_as_no_match(self):
-		import subprocess
-		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), \
-				mock.patch('reNgine.resources.terminate_group'), \
-				mock.patch.object(templategen.subprocess, 'Popen', FakeProc), \
-				mock.patch.object(FakeProc, 'communicate', side_effect=[subprocess.TimeoutExpired('nuclei', 1), ('', '')]):
-			out = templategen._run_template_with_retry('/t.yaml', ['www.t.test'])
-		self.assertIn('TimeoutExpired', out[0]['error'])
+	def test_a_template_the_policy_refuses_is_never_sent(self):
+		with mock.patch('cveFeed.validation.approved_template', return_value=('', 'template not validated: write method')), \
+				mock.patch('agentapi.sentinel_dispatch.try_template_test') as sent:
+			out = templategen.run_template('/t.yaml', ['www.t.test'], project=1)
+		sent.assert_not_called()
+		self.assertIn('write method', out[0]['error'])
 
 
 import datetime
@@ -266,14 +219,14 @@ class RecordOutcomesTests(TestCase):
 
 	def _run(self, outcomes, project=None):
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/cve-2099-5.yaml', '')), \
-				mock.patch.object(templategen, '_run_template_with_retry', return_value=outcomes):
+				mock.patch.object(templategen, '_test_chunk', return_value=outcomes):
 			return templategen.run_cve_tests(self.cve, [o['host'] for o in outcomes], project=project or self.project.id)
 
 	def test_missing_installed_template_stays_a_draft_without_customer_execution(self):
 		from types import SimpleNamespace
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
 				mock.patch.object(templategen, 'generate_template', return_value=SimpleNamespace(pk=7)) as generate, \
-				mock.patch.object(templategen, '_run_template_with_retry') as run:
+				mock.patch.object(templategen, '_test_chunk') as run:
 			result = templategen.run_cve_tests(self.cve, ['www.t.test'], ai=True, project=self.project.id)
 		self.assertEqual((result['source'], result['results'], result['job']), ('candidate', [], 7))
 		self.assertIn('never run on a host', result['reason'])
@@ -336,6 +289,9 @@ class GenerationBudgetTests(TestCase):
 	def setUp(self):
 		from django.core.cache import cache
 		cache.clear()
+		ready = mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready')  # a live scanner could check the template: not what these tests are about
+		ready.start()
+		self.addCleanup(ready.stop)
 		self.provider = mock.Mock(model='m')
 		self.provider.name = 'test'
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-0101', cvss=9.8, title='t', published_at=timezone.now())
@@ -387,6 +343,9 @@ class ProviderFailureLedgerTests(TestCase):
 	def test_a_failed_provider_call_still_counts_as_the_attempt_for_that_cve(self):
 		from django.core.cache import cache
 		cache.clear()
+		ready = mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready')
+		ready.start()
+		self.addCleanup(ready.stop)
 		provider = mock.Mock(model='m')
 		provider.name = 'test'
 		from reNgine.ai_providers import AIProviderError
@@ -403,20 +362,20 @@ class ProviderFailureLedgerTests(TestCase):
 
 
 class LaunchTimeResolutionTests(TestCase):
-	def test_a_name_that_now_resolves_to_a_blocked_address_is_not_handed_to_nuclei(self):
+	def test_a_name_that_now_resolves_to_a_blocked_address_is_not_handed_to_a_scanner(self):
 		seen = []
 
-		def fake(path, hosts, secret_file=None, redact=()):
+		def fake(path, hosts, project):
 			seen.append(list(hosts))
 			return [{'host': h, 'vulnerable': False, 'output': ''} for h in hosts]
-		with mock.patch.object(templategen, '_run_template', side_effect=fake), \
+		with mock.patch.object(templategen, '_run_on_scanner', side_effect=fake), \
 				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
 			out = templategen.run_template('/t.yaml', ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
 		self.assertEqual(seen, [['ok.example.test', '203.0.113.7:8443']])
 		self.assertEqual([o['host'] for o in out], ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
 		self.assertIn('may not be scanned', out[1]['error'])
 		self.assertNotIn('error', out[0])
-		with mock.patch.object(templategen, '_run_template', side_effect=fake) as run, \
+		with mock.patch.object(templategen, '_run_on_scanner', side_effect=fake) as run, \
 				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
 			out = templategen.run_template('/t.yaml', ['rebind.example.test'])
 		run.assert_not_called()
@@ -430,6 +389,9 @@ class ValidateBeforeSaveTests(TestCase):
 		lease = mock.patch.object(templategen, '_generation_lease', return_value='cvengine:templategen:test')
 		lease.start()
 		self.addCleanup(lease.stop)
+		ready = mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready')
+		ready.start()
+		self.addCleanup(ready.stop)
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2024-1234', title='t', original_description='d', summary='', cvss=9.8,
 										   affected=[], references=[], published_at=timezone.now())
 
@@ -441,15 +403,14 @@ class ValidateBeforeSaveTests(TestCase):
 
 	def test_on_demand_candidate_stays_draft_after_syntax_and_benign_fixture(self):
 		from tests import ai_queue
-		with mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
-				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')) as fixture, \
+		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', return_value=(True, 'syntax ok', True, 'no benign match')) as checked, \
 				mock.patch.object(templategen, 'save_template_file') as install:
 			job = ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve, candidate_only=True)
 		self.assertEqual(job.kind, 'template_generation')
 		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
 		self.assertEqual((tmpl.status, tmpl.path, tmpl.ai_model), (tmpl.STATUS_DRAFT, '', 'anthropic:m'))
 		self.assertIn('positive fixture', tmpl.validation_output)
-		fixture.assert_called_once()
+		checked.assert_called_once()  # the syntax check and the benign fixture ran on the scanner
 		install.assert_not_called()
 
 	def test_literal_secrets_in_a_drafted_template_survive_the_round_trip(self):
@@ -460,8 +421,7 @@ class ValidateBeforeSaveTests(TestCase):
 					 '    headers:\n      Authorization: "Bearer ' + jwt + '"\n      X-Basic: "Basic YWRtaW46YWRtaW4="\n'
 					 '    matchers:\n      - type: word\n        words:\n          - "-----BEGIN RSA PRIVATE KEY-----"\n')
 		with mock.patch.object(templategen, 'GENERATED_DIR', '/nonexistent-cvengine-test'), \
-				mock.patch.object(templategen, 'validate_with_nuclei', return_value=(True, 'syntax ok')), \
-				mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')), \
+				mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', return_value=(True, 'syntax ok', True, 'no benign match')), \
 				mock.patch.object(templategen, 'save_template_file'):
 			ai_queue.asking(templategen.generate_template, self.provider('```yaml\n' + yaml_text + '```'), self.cve, candidate_only=True)
 		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
@@ -474,12 +434,11 @@ class ValidateBeforeSaveTests(TestCase):
 		from tests import ai_queue
 		seen = {}
 		with tempfile.TemporaryDirectory() as generated:
-			def validate(path):
+			def validate(text, project=None):
 				seen['generated_during_validation'] = os.listdir(generated)
-				seen['validated_path_exists'] = os.path.exists(path)
-				return valid, 'ok' if valid else 'error: bad'
-			with mock.patch.object(templategen, 'GENERATED_DIR', generated), mock.patch.object(templategen, 'validate_with_nuclei', validate), \
-					mock.patch.object(templategen, 'test_benign_fixture', return_value=(True, 'no benign match')):
+				seen['validated_text'] = text
+				return valid, 'ok' if valid else 'error: bad', True, 'no benign match'
+			with mock.patch.object(templategen, 'GENERATED_DIR', generated), mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', validate):
 				ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve)
 			seen['after'] = os.listdir(generated)
 		return GeneratedTemplate.objects.get(cve_entry=self.cve), seen
@@ -487,12 +446,29 @@ class ValidateBeforeSaveTests(TestCase):
 	def test_syntax_valid_draft_never_reaches_the_scan_path(self):
 		tmpl, seen = self._generate(True)
 		self.assertEqual(seen['generated_during_validation'], [])
-		self.assertTrue(seen['validated_path_exists'])
+		self.assertEqual(seen['validated_text'], GOOD.strip())  # the scanner checks the text, not a file on this server
 		self.assertEqual(seen['after'], [])
 		self.assertEqual(tmpl.path, '')
 		self.assertEqual(tmpl.status, 'draft')
 		with self.assertRaisesRegex(ValueError, 'positive fixture'):
 			templategen.generate_template(None, candidate_only=False)
+
+	def test_with_no_scanner_the_ai_is_not_asked_for_a_template_nothing_could_check(self):
+		from reNgine.resources import ScannerUnavailable
+		from cveFeed.models import AIJob
+		with mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready', side_effect=ScannerUnavailable('nuclei_validate', 'no live built-in scanner')):
+			with self.assertRaises(ScannerUnavailable):
+				templategen.generate_template(self.cve)
+		self.assertFalse(AIJob.objects.exists())
+
+	def test_a_scanner_that_went_away_leaves_an_invalid_draft_never_a_valid_one(self):
+		from reNgine.resources import ScannerUnavailable
+		from tests import ai_queue
+		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', side_effect=ScannerUnavailable('nuclei_validate', 'gone')):
+			ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve)
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
+		self.assertEqual(tmpl.status, 'invalid')
+		self.assertIn('not validated', tmpl.validation_output)
 
 	def test_an_invalid_template_never_reaches_the_scan_path(self):
 		tmpl, seen = self._generate(False)

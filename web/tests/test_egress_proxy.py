@@ -11,13 +11,12 @@ import struct
 import tempfile
 import threading
 import time
-import unittest
 from unittest import mock
 
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
+from cveFeed import egress_proxy, pinned_transport as transport, route_auth, wpscan_scan
 from reNgine import crypto_fields
 from scanEngine.models import Proxy
 
@@ -183,26 +182,18 @@ class ToolFragmentTests(ProxyOn, TestCase):
         for tool in egress_proxy.TOOLS:
             self.assertEqual(egress_proxy.for_tool(tool), [])
         self.turn_on(HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'http://localhost:9']), [])
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'www.example.com']), ['-proxy', HTTP_PROXY])
+        self.assertEqual(egress_proxy.for_tool('wpscan', ['127.0.0.1:8080', 'http://localhost:9']), [])
+        self.assertEqual(egress_proxy.for_tool('wpscan', ['127.0.0.1:8080', 'www.example.com']), ['--proxy', HTTP_PROXY])
 
     def test_each_tool_gets_its_own_arguments(self):
         self.turn_on(LOGIN_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['www.example.com']), ['-proxy', LOGIN_PROXY])
-        self.assertEqual(egress_proxy.for_tool('wafw00f', ['www.example.com']), ['-p', LOGIN_PROXY])
         self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
-
-    def test_testssl_takes_a_plain_http_proxy_only(self):
-        self.turn_on(LOGIN_PROXY, SOCKS_PROXY)
-        with self.assertRaises(egress_proxy.ProxyUnavailable):
-            egress_proxy.for_tool('testssl', ['www.example.com'])
-        self.turn_on(LOGIN_PROXY, HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('testssl', ['www.example.com']), ['--proxy', '203.0.113.50:3128'])
 
     def test_a_tool_that_cannot_use_any_proxy_fails_closed(self):
         self.turn_on('socks5h://203.0.113.5:1080')
-        with self.assertRaises(egress_proxy.ProxyUnavailable) as raised:
-            egress_proxy.for_tool('nuclei', ['www.example.com'])
+        with mock.patch.dict(egress_proxy.TOOLS, {'plain-http-only': (('http',), lambda s: ['-x', s.url])}), \
+                self.assertRaises(egress_proxy.ProxyUnavailable) as raised:  # a tool that takes a plain HTTP proxy only
+            egress_proxy.for_tool('plain-http-only', ['www.example.com'])
         self.assertNotIn('203.0.113.5', str(raised.exception))
         self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com'])[0], '--proxy')
 
@@ -211,45 +202,8 @@ class IntegrationTests(ProxyOn, TestCase):
     def test_argv_builders_add_the_proxy_only_when_given(self):
         self.assertNotIn('--proxy', wpscan_scan.wpscan_args(600))
         self.assertEqual(wpscan_scan.wpscan_args(600, proxy_args=['--proxy', HTTP_PROXY])[-2:], ['--proxy', HTTP_PROXY])
-        self.assertNotIn('--proxy', testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x'))
-        args = testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x', ['--proxy', '203.0.113.50:3128'])
-        self.assertEqual((args[args.index('--proxy') + 1], args[-1]), ('203.0.113.50:3128', 'a.example.com:443'))
 
-    def run_nuclei(self, hosts):
-        path = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        self.addCleanup(os.unlink, path.name)
-        path.write('\n'.join(hosts) + '\n')
-        path.close()
-        captured = {}
-
-        class Stop(Exception):
-            pass
-
-        def popen(argv, **kwargs):
-            captured['argv'] = argv
-            raise Stop
-
-        with mock.patch.object(nuclei_scan.subprocess, 'Popen', popen), \
-                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/templates', None, None)):
-            try:
-                list(nuclei_scan.stream_nuclei(path.name))
-            except Stop:
-                pass
-        return captured.get('argv')
-
-    def test_nuclei_runs_through_the_proxy_when_on_and_directly_when_off(self):
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY, use=False)
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY)
-        argv = self.run_nuclei(['www.example.com', '203.0.113.9:8443'])
-        self.assertEqual(argv[argv.index('-proxy') + 1], HTTP_PROXY)
-        self.assertNotIn('-proxy', self.run_nuclei(['127.0.0.1:8080']))  # a loopback fixture stays local
-        self.turn_on('socks5h://203.0.113.5:1080')
-        with self.assertRaises(egress_proxy.ProxyUnavailable):  # never a direct run behind the administrator's back
-            self.run_nuclei(['www.example.com'])
-
-    def test_wafw00f_wpscan_and_testssl_runs(self):
+    def test_wpscan_run_takes_the_proxy_login(self):
         from cveFeed import heavy_process
         seen = []
 
@@ -262,15 +216,6 @@ class IntegrationTests(ProxyOn, TestCase):
             return mock.Mock(returncode=0, stderr='')
 
         with mock.patch.object(heavy_process, 'run', fake_run):
-            waf_scan.run_wafw00f('https://www.example.com/')
-            self.assertNotIn('-p', seen[-1])
-            self.turn_on(HTTP_PROXY)
-            waf_scan.run_wafw00f('https://www.example.com/')
-            self.assertEqual((seen[-1][seen[-1].index('-p') + 1], seen[-1][-1]), (HTTP_PROXY, 'https://www.example.com/'))
-            waf_scan.run_wafw00f('http://127.0.0.1:8080/')
-            self.assertNotIn('-p', seen[-1])
-            self.turn_on('socks5h://203.0.113.5:1080')
-            self.assertIn('cannot use', waf_scan.run_wafw00f('https://www.example.com/')['error'])
             self.turn_on(LOGIN_PROXY)
             try:
                 wpscan_scan.run_wpscan_process('https://www.example.com/', '', timeout=120)
@@ -278,16 +223,6 @@ class IntegrationTests(ProxyOn, TestCase):
                 pass
             wp = seen[-1]
             self.assertEqual((wp[wp.index('--proxy') + 1], wp[wp.index('--proxy-auth') + 1]), ('http://203.0.113.52:3128', 'bob:hunter2'))
-            self.turn_on(SOCKS_PROXY)
-            with self.assertRaises(testssl_scan.TestsslError) as raised:
-                testssl_scan.run_testssl('www.example.com', '203.0.113.5', 443)
-            self.assertIn('testssl', str(raised.exception))
-
-        captured = []
-        self.turn_on(HTTP_PROXY)
-        with self.assertRaises(testssl_scan.TestsslError):
-            testssl_scan.run_testssl('www.example.com', '203.0.113.5', 443, runner=lambda args, env, timeout: captured.append(args))
-        self.assertEqual(captured[0][captured[0].index('--proxy') + 1], '203.0.113.50:3128')  # a runner that writes no report: only the args matter
 
 
 # ----------------------------------------------------------------------------- a tiny forward proxy that records what it is asked
@@ -567,13 +502,6 @@ class LiveProxyTests(ProxyOn, TestCase):
         sock.connect.assert_called_once_with(('203.0.113.10', 443))
         self.assertEqual(fixture.records, [])
 
-    @unittest.skipUnless(shutil.which('wafw00f'), 'wafw00f is not installed')
-    def test_the_real_wafw00f_sends_its_requests_to_the_proxy(self):
-        fixture = self.proxy()
-        self.turn_on(fixture.url_without_login)
-        result = waf_scan.run_wafw00f('http://203.0.113.9:8080/', timeout_s=60)
-        self.assertEqual(result['error'], '')
-        self.assertTrue(any(r['line'].startswith('GET http://203.0.113.9:8080/') for r in fixture.records), fixture.records[:3])
 
 
 class PinnedForwardingUnitTests(ProxyOn, TestCase):

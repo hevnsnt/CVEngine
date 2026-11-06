@@ -1741,7 +1741,7 @@ def _stored_credential(credential_id, task, now):
 
 
 def _credential_payload(credential_id, project_id, now):
-    """The decrypted credential of one task, in the shape the authenticated nuclei pass consumes (``cveFeed.auth_checks.secrets_document``): the header
+    """The decrypted credential of one task, in the shape the authenticated scanner pass consumes: the header
     pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
     from cveFeed import auth_checks
     from cveFeed.models import AuthCredential
@@ -1900,8 +1900,8 @@ def _clean_naabu_result(body):
             continue
         if values is None or len(values) > MAX_OPEN_PER_IP:
             # an address with more open ports than that is a tarpit or a firewall that accepts everything: its list is no port list. It is kept
-            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and naabu_scan.discover then
-            # leaves the address to nmap's default ports.
+            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and port_stage.discover then
+            # leaves the address to the fingerprint pass's default ports.
             out[ip] = None
             continue
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
@@ -1981,9 +1981,8 @@ _TESTSSL_SEVERITIES = ('INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'WARN', 'FAT
 
 
 def _clean_testssl_result(body):
-    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.testssl_scan.evaluate`` reads from a
-    locally-run report item (``id``, ``severity``, ``finding``, ``cve``): everything else testssl.sh's own JSON carries is
-    dropped, never stored or interpreted, so a Sentinel-reported item is no richer an attack surface than a local one."""
+    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.tls_audit.evaluate`` reads
+    (``id``, ``severity``, ``finding``, ``cve``): everything else the report's own JSON carries is dropped, never stored or interpreted."""
     items = body.get('items')
     if not isinstance(items, list) or len(items) > MAX_TESTSSL_ITEMS:
         raise ApiError(400, f'items must be a list of at most {MAX_TESTSSL_ITEMS} entries')
@@ -2004,8 +2003,8 @@ MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU repor
 def _clean_nmap_udp_result(body):
     """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
     (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
-    only by ``cveFeed.nmap_scan.parse_xml`` - the exact function a local run's own XML already goes through - so the
-    Sentinel's report is parsed by that same function (hardened against a custom ENTITY declaration) instead of
+    only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``) - so the
+    Sentinel's report is parsed by that one function (hardened against a custom ENTITY declaration) instead of
     duplicating its logic here. Only the size is bounded; parsing itself, and its safety against malicious XML, is
     parse_xml's job."""
     xml = body.get('xml')
@@ -2115,11 +2114,11 @@ def _clean_openvas_result(body):
 
 
 def _clean_waf_result(body):
-    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
-    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
-    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
-    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
-    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    """A Sentinel's WAF fingerprint of one web host, reshaped into what ``cveFeed.waf_fingerprint.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else the tool prints is kept. The
+    bounds are ``cveFeed.waf_fingerprint``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one product rule."""
+    from cveFeed.waf_fingerprint import MAX_PRODUCTS, NAME_LEN
     products = body.get('products')
     if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
         raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')
@@ -2136,8 +2135,8 @@ def _clean_waf_result(body):
 
 
 def _clean_nmap_report(body):
-    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.nmap_scan.parse_xml``, hardened
-    against a custom ENTITY declaration, is the one reader of an nmap report, local or not). Only the size is bounded here."""
+    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.port_inventory.parse_xml``, hardened
+    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here."""
     return _clean_nmap_udp_result(body)
 
 
@@ -2223,7 +2222,7 @@ MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most 
 
 
 def _clean_hit(hit):
-    """The first nuclei result line of a host, as ``cveFeed.templategen._trim_hit`` keeps it, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    """The first result line of a host, cut to the fields ``reNgine.tasks.parse_nuclei_result``
     and the validation record read. Anything else is dropped."""
     if not isinstance(hit, dict):
         return None
@@ -2246,7 +2245,7 @@ def _clean_hit(hit):
 
 def _clean_nuclei_validate_result(body):
     """An AI-written or approved template's check on the built-in scanner. Mode ``validate``: whether ``nuclei -validate`` accepted it, its output, and
-    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``cveFeed.templategen._run_template``'s shape), a
+    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``{host, vulnerable, output, hit?}``), a
     hit counted only with its result line. Which mode it was is the task's, so both halves are cleaned and the caller reads its own."""
     out = {}
     if 'valid' in body:

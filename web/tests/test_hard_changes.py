@@ -1,13 +1,13 @@
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import changes, nmap_scan, retest
+from cveFeed import changes, port_inventory, retest
 from dashboard.models import Org, Project
 from reNgine import discovery_events as bbot_lib
 from reNgine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Subdomain, Technology
 from targetApp.models import Domain
-from tests.test_nmap_scan import _report
+from tests.test_port_inventory import _report
 
 
 def state(techs=()):
@@ -61,7 +61,7 @@ class ChangeTrackingAfterPortFixesTests(TestCase):
 		persist_bbot_result(bbot_lib.BbotResult(ports={('198.51.100.11', 443)}), ctx={})
 		before = self.snapshot(self.b)
 		# nmap fingerprints host A only; with a shared row B would now claim A's nginx 1.18.0
-		nmap_scan.persist_inventory([{'ip': '198.51.100.10', 'ports': [
+		port_inventory.persist_inventory([{'ip': '198.51.100.10', 'ports': [
 			{'number': 443, 'state': 'open', 'product': 'nginx', 'version': '1.18.0', 'service_name': 'https'}]}])
 		persist_bbot_result(bbot_lib.BbotResult(ports={('198.51.100.11', 443), ('198.51.100.10', 443)}), ctx={})
 		after = self.snapshot(self.b)
@@ -71,19 +71,19 @@ class ChangeTrackingAfterPortFixesTests(TestCase):
 	def test_a_filtered_port_is_not_in_the_snapshot(self):
 		ip, _ = IpAddress.objects.get_or_create(address='198.51.100.20')
 		self.a.ip_addresses.add(ip)
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(_report([(22, 'open', 'OpenSSH', '8.9'), (3306, 'filtered', 'MySQL', '5.7')]).replace('192.0.2.77', '198.51.100.20')))
+		port_inventory.persist_inventory(port_inventory.parse_xml(_report([(22, 'open', 'OpenSSH', '8.9'), (3306, 'filtered', 'MySQL', '5.7')]).replace('192.0.2.77', '198.51.100.20')))
 		self.assertEqual(sorted(self.snapshot(self.a)['ips']['198.51.100.20']['ports']), ['22/tcp'])
 
 	def test_a_port_missing_from_a_run_is_closed_and_reported_once(self):
 		ip, _ = IpAddress.objects.get_or_create(address='198.51.100.30')
 		self.a.ip_addresses.add(ip)
 		xml = lambda ports: _report(ports).replace('192.0.2.77', '198.51.100.30')  # noqa: E731
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9'), (8080, 'open', 'nginx', '1.18.0')])))
+		port_inventory.persist_inventory(port_inventory.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9'), (8080, 'open', 'nginx', '1.18.0')])))
 		first = self.snapshot(self.a)
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9')])))
+		port_inventory.persist_inventory(port_inventory.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9')])))
 		second = self.snapshot(self.a)
 		self.assertEqual([(k, p) for k, _ip, p, _b, _a in changes.diff_states(first, second)], [('port_closed', 8080)])
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9')])))
+		port_inventory.persist_inventory(port_inventory.parse_xml(xml([(22, 'open', 'OpenSSH', '8.9')])))
 		self.assertEqual(changes.diff_states(second, self.snapshot(self.a)), [])  # the next run reports nothing more
 
 	def test_a_banner_that_flips_the_tech_version_does_not_retest(self):

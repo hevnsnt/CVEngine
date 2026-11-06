@@ -257,21 +257,31 @@ def _check(kind, label, argv, display, target, asset, signature, timeout, **para
             'service': f'validate:{kind}:{signature[:16]}:{revision}', 'timeout': timeout, 'params': params}
 
 
+def _template_check(path, host, cve_id, signature, **params):
+    """The ``nuclei_template`` check of one CVE's template against one host: it runs on the built-in scanner (``templategen.run_template``), so it has no
+    argv; ``display`` names the template file and the host, for a person reading the step."""
+    from cveFeed import templategen
+    display = f'template check {os.path.basename(path)} against {host}'
+    return _check('nuclei_template', f'template check for {cve_id}', [], display, host, host, signature, templategen.RUN_TIMEOUT,
+                  template=path, cve_id=cve_id, **params)
+
+
+def _sv_argv(ip, port):
+    """The service detection command line of an ``nmap_sv`` check, for a person to repeat (a scanner runs it, never this server)."""
+    return ['nmap', '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+
+
 def plan_checks(subject, signature, template=('', '')):
     """``(checks, notes)`` for one finding. ``subject`` is a plain dict (see ``subject_for``), ``template`` the ``(path, reason)`` of
     ``resolve_template`` for a CVE match. A check is ``{kind, label, argv, display, target, asset, service, timeout, params}``: ``argv``
     is what runs (never through a shell) and ``display`` the command a person can repeat. ``notes`` says why a check that could have
     applied was not planned (a template that is not read-only, for instance). Pure: no database, no network."""
-    from cveFeed import nmap_scan, templategen
     checks, notes = [], []
     host, kind = subject.get('host') or '', subject['kind']
     if kind == 'cve_match':
         path, why = template
         if path and _safe_host(host):
-            argv = [templategen.NUCLEI_BIN, '-t', path, '-u', host, '-ni', '-rl', templategen.RATE_LIMIT, '-timeout', '10',
-                    '-retries', '0', '-duc']
-            checks.append(_check('nuclei_template', f'nuclei template for {subject["cve_id"]}', argv, shlex.join(argv), host, host,
-                                 signature, templategen.RUN_TIMEOUT, template=path, cve_id=subject['cve_id'], project_id=subject.get('project_id')))
+            checks.append(_template_check(path, host, subject['cve_id'], signature, project_id=subject.get('project_id')))
         elif why and why != 'no template covers this CVE':
             notes.append(why)
         if subject.get('local_component_only'):
@@ -293,9 +303,9 @@ def plan_checks(subject, signature, template=('', '')):
             for ip, port in list(dict.fromkeys(candidates))[:4]:
                 if not _safe_ip(ip) or not isinstance(port, int) or not 0 < port < 65536:
                     continue
-                argv = [nmap_scan.NMAP_BIN, '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+                argv = _sv_argv(ip, port)
                 checks.append(_check('nmap_sv', f'nmap service detection on observed port {port}', argv, shlex.join(argv),
-                                     f'{ip}:{port}', f'{ip}:{port}', signature, NMAP_TIMEOUT, ip=ip, port=port))
+                                     f'{ip}:{port}', f'{ip}:{port}', signature, NMAP_TIMEOUT, ip=ip, port=port, project_id=subject.get('project_id')))
             if subject.get('source') == 'tech' and subject.get('url'):
                 checks.append(_http_check(subject['url'], signature))
             checks += _probe_checks(subject, signature)
@@ -306,9 +316,9 @@ def plan_checks(subject, signature, template=('', '')):
                 display = DB_EQUIVALENT[label].format(ip=ip, port=port)
                 checks.append(_check('db_probe', f'unauthenticated {label} check', [], display, f'{ip}:{port}', f'{ip}:{port}', signature,
                                      30, ip=ip, port=port, db=label, equivalent=True))
-            argv = [nmap_scan.NMAP_BIN, '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+            argv = _sv_argv(ip, port)
             checks.append(_check('nmap_sv', f'nmap service detection on port {port}', argv, shlex.join(argv), f'{ip}:{port}', f'{ip}:{port}',
-                                 signature, NMAP_TIMEOUT, ip=ip, port=port))
+                                 signature, NMAP_TIMEOUT, ip=ip, port=port, project_id=subject.get('project_id')))
     elif kind == 'route_auth' and subject.get('url'):
         checks.append(_http_check(subject['url'], signature))
     return checks, notes
@@ -439,22 +449,28 @@ def _trim(value, limit=EVIDENCE_CAP):
 
 
 def run_nuclei_template(check):
-    """Run the planned template against the one host (see templategen.run_template: -ni, -rl 10, -timeout 10, no retries)."""
+    """Run the planned template against the one host, on the built-in scanner (see ``templategen.run_template``)."""
     from cveFeed import templategen
-    outcome = templategen._run_template_with_retry(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
+    outcome = templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
     if outcome.get('vulnerable') and not outcome.get('error'):
         outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
     return _result_from_outcome(outcome)
 
 
 def run_nmap_sv(check):
-    from cveFeed import local_egress, nmap_scan
+    """Service detection on the one port the finding names, run by a scanner (an ``nmap_verify`` task at intensity 5). With no scanner able to take it
+    the check ``failed`` (retried later, never read as clean): it never runs here."""
+    from agentapi import sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
+    params = check['params']
+    port = params['port']
     try:
-        out = nmap_scan.run_nmap_args(check['argv'][1:], label=check['target'], timeout=check['timeout'])
-    except local_egress.PortHeld as exc:  # the opt-in skip list or the egress governor: nothing was sent, nothing is concluded
-        return {'status': 'failed', 'error': str(exc), 'summary': f'not run from this server: {exc}'}
+        target = sentinel_dispatch.nmap_verify_target(params['ip'], [port], intensity=5, host_timeout=60)
+        hosts = sentinel_dispatch.try_nmap_verify(sentinel_dispatch._project_of(params.get('project_id')), target)
+    except ScannerUnavailable as exc:
+        return {'status': 'failed', 'error': str(exc), 'summary': f'not run: no scanner could take this work ({exc.kind})'}
     port = check['params']['port']
-    record = next((p for host in nmap_scan.parse_xml(out) for p in host['ports'] if p['number'] == port), None)
+    record = next((p for host in hosts for p in host['ports'] if p['number'] == port), None)
     if record is None or record['state'] != 'open':
         return {'status': 'no_match', 'summary': f'port {port} was not open at the time of the check',
                 'output_excerpt': f'port {port} not open'}
@@ -1241,10 +1257,7 @@ def record_template_outcomes(cve, outcomes, project, template_path):
         outcome = by_host.get(row.host)
         if outcome is None:
             continue
-        argv = [templategen.NUCLEI_BIN, '-t', template_path, '-u', row.host, '-ni', '-rl', templategen.RATE_LIMIT, '-timeout', '10',
-                '-retries', '0', '-duc']
-        check = _check('nuclei_template', f'nuclei template for {cve.cve_id}', argv, shlex.join(argv), row.host, row.host, row.signature,
-                       templategen.RUN_TIMEOUT, template=template_path, cve_id=cve.cve_id)
+        check = _template_check(template_path, row.host, cve.cve_id, row.signature)
         result = _result_from_outcome(outcome)
         result['recorded'] = True
         apply_validation(row, check, result)

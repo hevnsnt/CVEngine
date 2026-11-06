@@ -6,7 +6,7 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import host_context, nmap_scan, probes, triage, validation, validation_plan
+from cveFeed import host_context, port_inventory, probes, triage, validation, validation_plan
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth, Triage, TriageVerdict
 from reNgine import ai_providers
 from startScan.models import IpAddress, Port, Subdomain, Technology, Waf
@@ -340,7 +340,7 @@ class NmapPersistTests(TestCase):
 
     def persist(self, version='1.24.0'):
         xml = self.XML.format(version=version, cpe=f':{version}' if version else '')
-        nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+        port_inventory.persist_inventory(port_inventory.parse_xml(xml))
         return IpAddress.objects.get(address='192.0.2.30').ports.get(number=8444)
 
     def test_the_tunnel_and_the_certificate_are_stored(self):
@@ -356,7 +356,7 @@ class NmapPersistTests(TestCase):
 
     def test_a_flaky_run_with_no_product_keeps_the_last_good_version(self):
         self.persist()
-        nmap_scan.persist_inventory([{'ip': '192.0.2.30', 'os_guess': '', 'os_accuracy': None, 'ports': [{'number': 8444, 'state': 'open', 'service_name': 'http'}]}])
+        port_inventory.persist_inventory([{'ip': '192.0.2.30', 'os_guess': '', 'os_accuracy': None, 'ports': [{'number': 8444, 'state': 'open', 'service_name': 'http'}]}])
         self.assertEqual(IpAddress.objects.get(address='192.0.2.30').ports.get(number=8444).version, '1.24.0')
 
     def test_a_tls_web_service_on_a_non_standard_port_is_asked_over_https(self):

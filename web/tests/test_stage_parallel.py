@@ -52,6 +52,8 @@ class FakeSentinels:
     def default_answer(self, task):
         if task.kind == 'naabu':
             return {'outcome': 'done', 'ports': {ip: [22] for ip in task.target['addresses']}}
+        if task.kind == 'openvas':
+            return {'outcome': 'done', 'findings': []}
         if task.kind == 'nmap':
             return {'outcome': 'done', 'hosts': [{'ip': ip, 'os_guess': '', 'ports': []} for ip in task.target['addresses']]}
         return {'outcome': 'done', 'findings': [{'template_id': 'tech-detect', 'name': 'nginx', 'severity': 'info', 'host': host,
@@ -117,7 +119,7 @@ class StageBase(DispatchBase):
         resources.clear_abort(self.scan.id)
         self.addCleanup(resources.clear_abort, self.scan.id)
 
-    def agent(self, name, capabilities=('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted'), slots=2):
+    def agent(self, name, capabilities=('nmap', 'naabu', 'openvas', 'nuclei_light', 'nuclei_targeted'), slots=2):
         user = User.objects.create_user(f'owner-{name}', password='x')
         token, _raw = create_token(user, f'token-{name}')
         return Agent.objects.create(token=token, name=name, kind='scanner', status='active', max_concurrent=slots,
@@ -128,7 +130,7 @@ class StageBase(DispatchBase):
     def two_agents(self, slots=2):
         return [self.agent('sentinel-a', slots=slots), self.agent('sentinel-b', slots=slots)]
 
-    def fan_out(self, fake, kind='nmap', **kw):
+    def fan_out(self, fake, kind='openvas', **kw):
         got = []
 
         def call():
@@ -149,13 +151,13 @@ class WindowTests(StageBase):
         self.assertTrue(all(result is not None for _, result in got))
         self.assertEqual(fake.peak_inflight, 4)  # four free slots (and the ceiling is four)
         self.assertEqual(fake.peak_claimed, 4)
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 8)  # every chunk a task of its own, created as the window made room
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 8)  # every chunk a task of its own, created as the window made room
         self.assertEqual(self.active_tasks(), 0)
 
     def test_each_chunks_result_belongs_to_its_chunk_and_they_arrive_as_they_finish_not_in_order(self):
         chunks = chunks_of(4)
         fake = FakeSentinels(self.two_agents(), chunks, duration=lambda i: 30 if i == 0 else 3)  # the first chunk is the slowest
-        got = self.fan_out(fake)
+        got = self.fan_out(fake, kind='nmap')
         for index, result in got:
             self.assertEqual([h['ip'] for h in result['hosts']], chunks[index])
         self.assertEqual(got[-1][0], 0)  # the slow one lands last, though it was sent first
@@ -196,8 +198,8 @@ class WindowTests(StageBase):
             other = ScanHistory.objects.create(domain=self.domain, scan_type=self.scan.scan_type, start_scan_date=timezone.now(),
                                                scan_status=1, results_dir='/tmp')
             SentinelTask.objects.create(project=self.project, scan=other, kind='nuclei_deep', target={}, status='queued')
-        self.assertEqual(dispatch._stage_share(self.scan, 'nmap', 4), 2)
-        self.assertEqual(dispatch._stage_share(self.scan, 'nmap', 0), 1)  # never below one
+        self.assertEqual(dispatch._stage_share(self.scan, 'openvas', 4), 2)
+        self.assertEqual(dispatch._stage_share(self.scan, 'openvas', 0), 1)  # never below one
         fake = FakeSentinels(agents, chunks_of(8), duration=lambda i: 5)
         got = self.fan_out(fake)
         self.assertEqual(len(got), 8)
@@ -206,12 +208,12 @@ class WindowTests(StageBase):
     @mock.patch.object(dispatch, 'DISPATCH_POLL_INTERVAL', 5)  # a coarser poll keeps the simulated half hour short
     def test_a_one_slot_sentinel_with_a_long_first_chunk_keeps_the_stage_serial_as_before(self):
         from agentapi import sentinel_broker
-        ttl = sentinel_broker.queued_ttl('nmap').total_seconds()
+        ttl = sentinel_broker.queued_ttl('openvas').total_seconds()
         fake = FakeSentinels([self.agent('solo', slots=1)], chunks_of(3), duration=lambda i: ttl * 2.5 if i == 0 else 5)  # the first runs far past what the reaper allows a queued task
         got = dict(self.fan_out(fake, timeout=ttl * 4))
         self.assertTrue(all(result is not None for result in got.values()), got)  # nothing was sent to run here
         self.assertEqual(fake.peak_inflight, 1)  # one chunk task at a time: none is queued behind its own stage's
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 3)
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 3)
         self.assertEqual(SentinelTask.objects.filter(status='expired').count(), 0)
 
     @mock.patch.object(dispatch, 'DISPATCH_POLL_INTERVAL', 5)
@@ -220,7 +222,7 @@ class WindowTests(StageBase):
         task, and it is the loop that ends it (the stage stops sending, the activity line says no slot freed up), not the reaper."""
         from agentapi import sentinel_broker
         from cveFeed.models import AgentActivity
-        ttl = sentinel_broker.queued_ttl('nmap').total_seconds()
+        ttl = sentinel_broker.queued_ttl('openvas').total_seconds()
         fake = FakeSentinels([self.agent('solo', slots=1)], chunks_of(4), duration=lambda i: ttl * 3 if i == 0 else 5)
         real = sentinel_broker.capacity_state
         calls = []
@@ -233,13 +235,13 @@ class WindowTests(StageBase):
             got = dict(self.fan_out(fake, timeout=ttl * 4))
         self.assertIsNone(got[1])  # the queued chunk was given up, to run here
         self.assertIsNotNone(got[0])
-        queued = SentinelTask.objects.get(kind='nmap', target__addresses=fake.chunks[1])
+        queued = SentinelTask.objects.get(kind='openvas', target__addresses=fake.chunks[1])
         self.assertEqual(queued.status, 'expired')
         self.assertIn('no Sentinel slot freed up in time', queued.error)  # step ended it, not reap_expired ('while it waited in the queue')
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 2)  # and the stage stopped sending: chunks 2 and 3 were never created
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 2)  # and the stage stopped sending: chunks 2 and 3 were never created
         self.assertEqual([got[2], got[3]], [None, None])
-        self.assertTrue(AgentActivity.objects.filter(message__contains='No Sentinel slot freed up for nmap work').exists())
-        self.assertFalse(AgentActivity.objects.filter(message__contains='No Sentinel checked in nmap work').exists())
+        self.assertTrue(AgentActivity.objects.filter(message__contains='No Sentinel slot freed up for openvas work').exists())
+        self.assertFalse(AgentActivity.objects.filter(message__contains='No Sentinel checked in openvas work').exists())
 
     def test_one_poll_read_per_tick_whatever_the_number_of_chunks_in_flight(self):
         agents = self.two_agents()
@@ -258,7 +260,7 @@ class FallbackTests(StageBase):
         fake = FakeSentinels(self.two_agents(), chunks_of(6), outcome=lambda i: outcomes.get(i, 'done'))
         got = dict(self.fan_out(fake, timeout=40))
         self.assertEqual([i for i, result in sorted(got.items()) if result is None], [1, 3])
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 6)  # a failure does not stop the chunks after it
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 6)  # a failure does not stop the chunks after it
         self.assertEqual(list(SentinelTask.objects.filter(status='expired').values_list('error', flat=True)),
                          ['the dispatch wait timed out; the stage fell back to local execution'])
         self.assertEqual(self.active_tasks(), 0)
@@ -275,7 +277,7 @@ class FallbackTests(StageBase):
             Agent.objects.update(last_seen=fake.wall() - timedelta(hours=1))
         fake.hooks.append((1, go_quiet))  # both go quiet after the first tick
         got = dict(self.fan_out(fake))
-        sent = SentinelTask.objects.filter(kind='nmap').count()
+        sent = SentinelTask.objects.filter(kind='openvas').count()
         self.assertLess(sent, 8)
         self.assertEqual(sorted(got), list(range(8)))  # every chunk is accounted for
         self.assertTrue(all(result is None for i, result in got.items() if i >= sent))  # the unsent ones are the caller's, in order
@@ -293,10 +295,10 @@ class FallbackTests(StageBase):
         fake.hooks.append((1, go_quiet))
         with mock.patch.dict(os.environ, {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '60'}), mock.patch.object(dispatch, 'REFILL_EVERY', 10_000):
             got = dict(self.fan_out(fake))
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 4)  # one window went out, the other four chunks were never sent
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # one window went out, the other four chunks were never sent
         self.assertEqual(sorted(got), list(range(8)))
         self.assertTrue(all(result is None for result in got.values()))
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('nmap', 'no_scanner')] * 8)
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('openvas', 'no_scanner')] * 8)
         self.assertEqual(self.active_tasks(), 0)
 
     def test_a_chunk_left_behind_one_nobody_claimed_while_a_sentinel_is_live_is_still_over_chunk(self):
@@ -311,7 +313,7 @@ class FallbackTests(StageBase):
         got = dict(self.fan_out(fake))
         self.assertTrue(all(result is None for result in got.values()))
         self.assertEqual(sorted(got), list(range(10)))
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 4)  # one window, not ten waits of the claim timeout
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # one window, not ten waits of the claim timeout
         self.assertEqual(set(SentinelTask.objects.values_list('status', flat=True)), {'expired'})
 
 
@@ -323,7 +325,7 @@ class StopTests(StageBase):
             self.fan_out(fake)
         self.assertEqual(self.active_tasks(), 0)  # none queued, none still claimed
         self.assertEqual(set(SentinelTask.objects.values_list('status', flat=True)), {'expired'})
-        self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 4)  # and no more were sent once it stopped
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # and no more were sent once it stopped
 
     def test_a_global_pause_stops_it_the_same_way(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 500)
@@ -338,7 +340,7 @@ class StopTests(StageBase):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 3 + 10 * i)
 
         def call():
-            with contextlib.closing(dispatch.dispatch_many(self.project, 'nmap', fake.chunks, scan=self.scan)) as results:
+            with contextlib.closing(dispatch.dispatch_many(self.project, 'openvas', fake.chunks, scan=self.scan)) as results:
                 next(results)  # the first result lands; the consumer fails before asking for more
         fake.run(call)
         self.assertEqual(self.active_tasks(), 0)
@@ -346,7 +348,7 @@ class StopTests(StageBase):
     def test_an_error_in_the_caller_while_it_holds_a_result_leaves_no_orphan_task(self):
         ips = [f'198.51.100.{i}' for i in range(1, 201)]  # four chunks
         fake = FakeSentinels(self.two_agents(), dispatch._chunks(ips), duration=lambda i: 3 + 100 * i)
-        with mock.patch('cveFeed.nmap_scan.persist_inventory', side_effect=RuntimeError('db down')), self.assertRaises(RuntimeError):
+        with mock.patch('cveFeed.port_inventory.persist_inventory', side_effect=RuntimeError('db down')), self.assertRaises(RuntimeError):
             fake.run(lambda: dispatch.try_nmap(self.project, self.scan, ips))
         self.assertEqual(SentinelTask.objects.filter(kind='nmap').count(), 4)  # all four were out when the first result failed to be saved
         self.assertEqual(self.active_tasks(), 0)
@@ -361,13 +363,13 @@ class SerialTests(StageBase):
             got = self.fan_out(fake)
         self.assertEqual([i for i, _ in got], list(range(5)))  # in order
         self.assertEqual(fake.peak_inflight, 1)
-        self.assertEqual([t.target['addresses'] for t in SentinelTask.objects.filter(kind='nmap').order_by('id')], chunks)  # one task per chunk, one after the other
+        self.assertEqual([t.target['addresses'] for t in SentinelTask.objects.filter(kind='openvas').order_by('id')], chunks)  # one task per chunk, one after the other
 
         SentinelTask.objects.all().delete()  # the loop that was there before, over the same chunks
         old = []
         fake_old = FakeSentinels(agents, chunks, duration=lambda i: 3)
-        fake_old.run(lambda: old.extend(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': c}, ips=c, scan=self.scan) for c in chunks))
-        self.assertEqual([t.target['addresses'] for t in SentinelTask.objects.filter(kind='nmap').order_by('id')], chunks)
+        fake_old.run(lambda: old.extend(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': c}, ips=c, scan=self.scan) for c in chunks))
+        self.assertEqual([t.target['addresses'] for t in SentinelTask.objects.filter(kind='openvas').order_by('id')], chunks)
         self.assertEqual(fake_old.peak_inflight, 1)
         self.assertEqual(old, [result for _, result in got])
 
@@ -378,7 +380,7 @@ class SerialTests(StageBase):
             calls.append(target['addresses'])
             return None
         with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '1'}), mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch):
-            got = list(dispatch.dispatch_many(self.project, 'nmap', chunks_of(4), stop_on_none=True))
+            got = list(dispatch.dispatch_many(self.project, 'openvas', chunks_of(4), stop_on_none=True))
         self.assertEqual(len(calls), 1)
         self.assertEqual(got, [(i, None) for i in range(4)])
 
@@ -392,7 +394,7 @@ class SerialTests(StageBase):
 class CallerTests(StageBase):
     """The callers, end to end through the fake Sentinels."""
 
-    def test_nmap_chunks_are_persisted_as_each_lands_and_a_chunk_nobody_did_stays_for_the_local_pass(self):
+    def test_nmap_chunks_are_persisted_as_each_lands_and_a_chunk_nobody_did_stays_due(self):
         ips = [f'198.51.100.{i}' for i in range(1, 161)]  # three chunks: 64, 64, 32
         chunks = [ips[:64], ips[64:128], ips[128:]]
         fake = FakeSentinels(self.two_agents(), chunks, outcome=lambda i: 'failed' if i == 1 else 'done')
@@ -401,23 +403,19 @@ class CallerTests(StageBase):
         def persist(inventory, org_id=None, os_reliable=True):
             saved.append([h['ip'] for h in inventory])
             return {'ports': len(inventory), 'hosts_with_os': 0}
-        with mock.patch('cveFeed.nmap_scan.persist_inventory', side_effect=persist):
-            remaining, totals, _ = fake.run(lambda: dispatch.try_nmap(self.project, self.scan, ips))
-        self.assertEqual(remaining, chunks[1])  # the failed chunk, and only it
-        self.assertEqual(totals['ports'], 96)
+        with mock.patch('cveFeed.port_inventory.persist_inventory', side_effect=persist):
+            with self.assertRaises(resources.ScannerUnavailable) as caught:
+                fake.run(lambda: dispatch.try_nmap(self.project, self.scan, ips))
+        self.assertEqual(sorted(caught.exception.done), sorted(chunks[0] + chunks[2]))  # what landed is done; the failed chunk, and only it, stays due
         self.assertEqual(sorted(sum(saved, [])), sorted(chunks[0] + chunks[2]))
         self.assertEqual(fake.peak_inflight, 3)
 
-    def test_naabu_merges_every_chunk_and_scans_only_the_failed_one_here(self):
+    def test_naabu_merges_every_chunk_and_waits_for_the_failed_one(self):
         ips = [f'198.51.100.{i}' for i in range(1, 151)]
         chunks = [ips[:64], ips[64:128], ips[128:]]
         fake = FakeSentinels(self.two_agents(), chunks, outcome=lambda i: 'failed' if i == 2 else 'done')
-        local = mock.Mock(return_value={ips[140]: [443]})
-        with mock.patch('cveFeed.naabu_scan.run_naabu', local):
-            found = fake.run(lambda: dispatch.wrap_naabu_runner(self.project, self.scan)(ips))
-        local.assert_called_once_with(chunks[2])
-        self.assertEqual(set(found), set(ips[:128]) | {ips[140]})
-        self.assertEqual(found[ips[0]], [22])
+        with self.assertRaises(resources.ScannerUnavailable):
+            fake.run(lambda: dispatch.wrap_naabu_runner(self.project, self.scan)(ips))
 
     def _targets(self, n):
         targets = [f'h{i}.example.test' for i in range(n)]
@@ -426,23 +424,23 @@ class CallerTests(StageBase):
             handle.write('\n'.join(targets))
         return targets, path
 
-    def test_the_nuclei_stream_still_yields_every_line_of_every_chunk_and_runs_an_unserved_chunk_here_last(self):
+    def test_the_nuclei_stream_still_yields_every_line_of_every_chunk_and_waits_for_an_unserved_chunk(self):
+        from reNgine.resources import ScannerUnavailable
         targets, path = self._targets(dispatch.MAX_ADDRESSES * 3 + 7)
         chunks = dispatch._chunks(targets)
         fake = FakeSentinels(self.two_agents(), chunks, outcome=lambda i: 'failed' if i == 1 else 'done')
-        local = []
+        hosts = []
 
-        def local_stream(targets_file, **kw):
-            with open(targets_file) as handle:
-                local.append(handle.read().split())
-            return iter([{'host': 'local.example.test'}])
-        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True), mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream):
+        def drain():
+            try:
+                for line in stream(path):
+                    hosts.append(line['host'])
+            except ScannerUnavailable:  # the chunk a Sentinel failed may not run here: the stage waits, after the finished chunks are in
+                return 'waiting'
+        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
-            lines = fake.run(lambda: list(stream(path)))
-        hosts = [line['host'] for line in lines]
-        self.assertEqual(sorted(h for h in hosts if h != 'local.example.test'), sorted(chunks[0] + chunks[2] + chunks[3]))
-        self.assertEqual(hosts[-1], 'local.example.test')  # the Sentinels' chunks first, the local one once they are in
-        self.assertEqual(local, [chunks[1]])
+            self.assertEqual(fake.run(drain), 'waiting')
+        self.assertEqual(sorted(hosts), sorted(chunks[0] + chunks[2] + chunks[3]))
         self.assertEqual(fake.peak_inflight, 4)
 
     def test_the_internal_nuclei_stream_fans_out_too_and_raises_for_an_unanswered_chunk(self):

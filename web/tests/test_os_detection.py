@@ -4,7 +4,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import host_context, nmap_scan, os_detection
+from cveFeed import host_context, port_inventory, os_detection
 from startScan.models import IpAddress
 
 
@@ -51,23 +51,23 @@ class StoredGuessTests(TestCase):
 
 	def test_a_local_scan_behind_docker_desktop_stores_no_guess(self):
 		with mock.patch.object(os_detection, 'unreliable', return_value=True):
-			nmap_scan.persist_inventory([_record()])
+			port_inventory.persist_inventory([_record()])
 		self.assertEqual(self.stored(), '')
 
 	def test_a_local_scan_elsewhere_stores_it(self):
 		with mock.patch.object(os_detection, 'unreliable', return_value=False):
-			nmap_scan.persist_inventory([_record()])
+			port_inventory.persist_inventory([_record()])
 		self.assertEqual(self.stored(), 'Google Fuchsia')
 
 	def test_a_sentinels_guess_is_stored_even_when_this_server_is_behind_docker_desktop(self):
 		with mock.patch.object(os_detection, 'unreliable', return_value=True):
-			nmap_scan.persist_inventory([_record()], os_reliable=True)
+			port_inventory.persist_inventory([_record()], os_reliable=True)
 		self.assertEqual(self.stored(), 'Google Fuchsia')
 
 	def test_the_ports_are_stored_either_way(self):
 		record = {**_record(), 'ports': [{'number': 22, 'state': 'open', 'protocol': 'tcp', 'service': 'ssh', 'product': 'OpenSSH', 'version': '8.9'}]}
 		with mock.patch.object(os_detection, 'unreliable', return_value=True):
-			nmap_scan.persist_inventory([record])
+			port_inventory.persist_inventory([record])
 		self.assertEqual(IpAddress.objects.get(address='203.0.113.40').ports.filter(number=22).count(), 1)
 
 
@@ -250,11 +250,11 @@ class GuessProvenanceTests(TestCase):
 		return SimpleNamespace(ip_addresses=SimpleNamespace(all=lambda: [IpAddress.objects.get(pk=ip.pk)]))
 
 	def sentinel_scanned(self, address, guess='Ubuntu 22.04 Linux 5.15'):
-		nmap_scan.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': None, 'ports': []}], os_reliable=True)  # as sentinel_dispatch calls it
+		port_inventory.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': None, 'ports': []}], os_reliable=True)  # as sentinel_dispatch calls it
 		return self.host(address)
 
 	def local_scanned(self, address, guess='Google Fuchsia'):
-		nmap_scan.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': 86, 'ports': []}])
+		port_inventory.persist_inventory([{'ip': address, 'os_guess': guess, 'os_accuracy': 86, 'ports': []}])
 		return self.host(address)
 
 	def test_a_local_scan_on_docker_desktop_is_dropped_and_the_block_says_why(self):

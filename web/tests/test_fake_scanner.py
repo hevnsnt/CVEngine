@@ -6,10 +6,10 @@ request, and its guards trip. Part two is the pattern every phase 5 delete PR co
 kind's result, and the test asserts what the stage stored; then again with the fake offline, where the stage must wait, fail nothing and leave its
 target due. The stages are the ones ``tests/test_scanner_unavailable_stages.py`` already drives, with its fixtures.
 
-Entry points: nmap ``nmap_scan.run_nmap_for_scan`` (which dispatches naabu and nmap itself), naabu ``naabu_scan.discover`` with
+Entry points: nmap ``port_stage.run_for_scan`` (which dispatches naabu and nmap itself), naabu ``port_stage.discover`` with
 ``wrap_naabu_runner`` (the runner the nmap stage builds), nuclei light and targeted ``nuclei_scan.run_light_nuclei`` / ``run_targeted_nuclei`` with
 ``wrap_nuclei_stream`` (what ``discovery._run_stages`` passes them), nuclei deep ``tasks.weekly_deep_nuclei`` (which wraps its own stream),
-testssl ``testssl_scan.sweep``, nmap -sU ``udp_scan.run`` / ``scan_ip``, wpscan ``wpscan_scan.run_wpscan`` (which wraps its own runner)."""
+testssl ``tls_audit.sweep``, UDP ``udp_scan.run`` / ``scan_ip``, wpscan ``wpscan_scan.run_wpscan`` (which wraps its own runner)."""
 import os
 import time
 from unittest import mock
@@ -19,7 +19,7 @@ from django.test import TestCase
 from agentapi import scanner_state, sentinel_broker
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
-from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import discovery, ledger, nuclei_scan, port_stage, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import ProbeObservation, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
@@ -28,7 +28,7 @@ from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, ass
 from tests.test_route_auth import RouteFixture
 from tests.test_scanner_unavailable_stages import ENV, IP, FallbackOffBase, WaitsMixin
 from tests.test_sentinel_dispatch import UDP_XML, DispatchBase
-from tests.test_testssl_scan import CLEAN
+from tests.test_tls_audit import CLEAN
 from tests.test_udp_scan import UdpBase
 
 HOST = 'www.example.test'
@@ -150,9 +150,14 @@ class HarnessModeTests(NoRealSleep, DispatchBase):
         self.assertIn('the Sentinel reported it failed', str(caught.exception))
 
     def test_fail_where_local_is_allowed_returns_none_so_the_stage_falls_back(self):
-        with LocalFallback('nmap'), FakeScanner(kinds=['nmap'], mode='fail'):
-            self.assertIsNone(self.go())
-        self.assertEqual(SentinelTask.objects.get(kind='nmap').status, 'failed')
+        with LocalFallback('wpscan'), FakeScanner(kinds=['wpscan'], mode='fail'):
+            self.assertIsNone(self.go('wpscan'))
+        self.assertEqual(SentinelTask.objects.get(kind='wpscan').status, 'failed')
+
+    def test_the_kinds_with_no_local_path_wait_whatever_the_list_says(self):
+        with LocalFallback('all'), FakeScanner(kinds=['nmap'], mode='fail'):
+            with self.assertRaises(resources.ScannerUnavailable):
+                self.go('nmap')
 
     def test_timeout_claims_and_never_reports_so_the_task_expires_and_the_stage_must_wait(self):
         started = time.monotonic()
@@ -229,18 +234,15 @@ class HarnessGuardTests(TestCase):
         case, guard = self.guarded('nmap')
         try:
             with self.assertRaises(AssertionError) as caught:
-                nmap_scan.run_nmap_xml(['192.0.2.1'], [], '5m')
+                guard.runner(['192.0.2.1'], [], '5m')
             self.assertIsInstance(caught.exception, LocalRunDetected)
             self.assertIn('nmap ran on this server', str(caught.exception))
-            self.assertIn('run_nmap_xml', str(caught.exception))
-            with self.assertRaises(LocalRunDetected):
-                guard.runner(['192.0.2.1'], [], '5m')
             with self.assertRaises(LocalRunDetected):
                 with resources.heavy_job('nmap', label='x'):
                     pass
         finally:
             failures = self.finish(case)
-        self.assertEqual(len(guard.calls), 3)
+        self.assertEqual(len(guard.calls), 2)
         self.assertEqual(len(failures), 1, 'a run that a stage swallowed must still fail the test when it ends')
 
     def test_the_resource_gate_is_closed_for_the_kinds_tools_and_open_for_everything_else(self):
@@ -258,14 +260,12 @@ class HarnessGuardTests(TestCase):
             try:
                 with self.assertRaises(LocalRunDetected):
                     heavy_process.run('testssl', ['testssl.sh', 'example.test'], 5)
-                with self.assertRaises(LocalRunDetected):
-                    testssl_scan.run_testssl('example.test', '192.0.2.1', 443, '')
                 with resources.heavy_job('route-probe', label='x'):  # another tool's job goes through the real gate
                     pass
             finally:
                 failures = self.finish(case)
         self.assertEqual(entered, ['route-probe'])
-        self.assertEqual(len(guard.calls), 2)
+        self.assertEqual(len(guard.calls), 1)
         self.assertTrue(guard.calls[0][0].startswith('heavy_process.run'), guard.calls)
         self.assertEqual(len(failures), 1)
 
@@ -281,15 +281,15 @@ class HarnessGuardTests(TestCase):
         before = os.environ.get(ENV)
         with LocalFallback('none'):
             self.assertEqual(dispatch.local_fallback_kinds(), set())
-            with LocalFallback('nmap,naabu'):
-                self.assertEqual(dispatch.local_fallback_kinds(), {'nmap', 'naabu'})
+            with LocalFallback('openvas,wpscan'):
+                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'wpscan'})
             with LocalFallback(None):
-                self.assertIn('nmap', dispatch.local_fallback_kinds())
+                self.assertIn('openvas', dispatch.local_fallback_kinds())
         self.assertEqual(os.environ.get(ENV), before)
 
         @LocalFallback('none')
         def decorated():
-            return dispatch.fallback_allowed('nmap')
+            return dispatch.fallback_allowed('testssl')
         self.assertFalse(decorated())
 
 
@@ -321,12 +321,12 @@ class StageBase(NoRealSleep, WaitsMixin):
 
 
 class NmapServedTests(StageBase, FallbackOffBase):
-    """The fast nmap stage: naabu finds the ports and nmap fingerprints them, each one a task for the scanner (``run_nmap_for_scan`` dispatches both)."""
+    """The fast nmap stage: naabu finds the ports and nmap fingerprints them, each one a task for the scanner (``port_stage.run_for_scan`` dispatches both)."""
 
     def test_the_scanner_serves_naabu_and_nmap_and_the_stage_stores_what_they_found(self):
-        guard = self.arm('nmap', 'naabu')[0]
+        self.arm('nmap', 'naabu')
         with FakeScanner(kinds=['naabu', 'nmap'], responders={'naabu': fixture('naabu', ports={IP: [22]})}) as fake:
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner)
+            result = port_stage.run_for_scan(self.scan.id)
         self.assertServed(fake, 'naabu', 'nmap')
         self.assertEqual(result, {'targets': 1, 'reused': 0, 'fast': {'ports': 1, 'hosts_with_os': 1}})
         port = IpAddress.objects.get(address=IP, org_id=self.org.id).ports.get(number=22)
@@ -335,9 +335,9 @@ class NmapServedTests(StageBase, FallbackOffBase):
         self.assertEqual(fake.served[1]['target'], {'addresses': [IP]})
 
     def test_with_the_scanner_offline_the_stage_waits_and_the_address_stays_due(self):
-        guard = self.arm('nmap', 'naabu')[0]
+        self.arm('nmap', 'naabu')
         with FakeScanner(kinds=['naabu', 'nmap'], mode='offline') as fake:
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner)
+            result = port_stage.run_for_scan(self.scan.id)
         self.assertWaited(fake)
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (naabu)', result['skipped'])
@@ -348,7 +348,7 @@ class NmapServedTests(StageBase, FallbackOffBase):
     def test_a_scanner_that_fails_the_nmap_task_leaves_the_address_due_not_failed(self):
         guard = self.arm('nmap', 'naabu')[0]
         with FakeScanner(kinds=['naabu', 'nmap'], modes={'nmap': 'fail'}, responders={'naabu': fixture('naabu', ports={IP: [22]})}) as fake:
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner)
+            result = port_stage.run_for_scan(self.scan.id)
         self.assertEqual(fake.served_kinds(), ['naabu', 'nmap'])
         self.assertEqual(guard.calls, [])
         self.assertNotIn('error', result)
@@ -358,30 +358,30 @@ class NmapServedTests(StageBase, FallbackOffBase):
 
 
 class NaabuServedTests(StageBase, FallbackOffBase):
-    """The naabu stage: ``naabu_scan.discover`` with the runner ``wrap_naabu_runner`` builds (the nmap stage passes the same one)."""
+    """The naabu stage: ``port_stage.discover`` with the runner ``wrap_naabu_runner`` builds (the nmap stage passes the same one)."""
 
     def test_the_scanner_serves_the_fixture_and_discover_stores_the_open_ports(self):
         self.arm('naabu')
         with FakeScanner(kinds=['naabu']) as fake:
             runner = dispatch.wrap_naabu_runner(self.project, self.scan)
-            found = naabu_scan.discover([IP], self.scan, runner)
+            found = port_stage.discover([IP], self.scan, runner)
         self.assertServed(fake, 'naabu')
         self.assertEqual(found, {IP: [22, 443]})  # the fixture's ports for the address asked about (its tarpit entry is another address)
         ports = IpAddress.objects.get(address=IP, org_id=self.org.id).ports
         self.assertEqual(sorted((p.number, p.source) for p in ports.all()), [(22, 'naabu'), (443, 'naabu')])
-        self.assertEqual(list(ServiceRun.objects.filter(service=naabu_scan.SERVICE).values_list('status', flat=True)), ['done'])
+        self.assertEqual(list(ServiceRun.objects.filter(service=port_stage.SERVICE).values_list('status', flat=True)), ['done'])
 
     def test_with_the_scanner_offline_the_runner_waits_and_the_address_stays_due(self):
         self.arm('naabu')
         with FakeScanner(kinds=['naabu']) as fake:
             runner = dispatch.wrap_naabu_runner(self.project, self.scan)
             fake.go_offline()
-            self.assertIsNone(naabu_scan.discover([IP], self.scan, runner))
+            self.assertIsNone(port_stage.discover([IP], self.scan, runner))
             with self.assertRaises(resources.ScannerUnavailable):  # and building the runner while it is offline says so at once, which the nmap stage handles
                 dispatch.wrap_naabu_runner(self.project, self.scan)
         self.assertWaited(fake)
         self.assertNothingRecorded('naabu')
-        self.assertFalse(ledger.fresh(naabu_scan.SERVICE, [IP], self.project.id))
+        self.assertFalse(ledger.fresh(port_stage.SERVICE, [IP], self.project.id))
         self.assertNamesTheScanner('naabu')
 
 
@@ -499,7 +499,7 @@ class NucleiDeepServedTests(StageBase, FallbackOffBase):
 
 
 class TestsslServedTests(StageBase, RouteFixture, TestCase):
-    """The TLS audit: ``testssl_scan.sweep`` for the project."""
+    """The TLS audit: ``tls_audit.sweep`` for the project."""
 
     def setUp(self):
         super().setUp()
@@ -508,11 +508,11 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
 
     def sweep(self, guard):
-        return testssl_scan.sweep(self.project.id, runner=guard.runner, resolve=lambda host, port, project: '203.0.113.5')
+        return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
 
     def test_the_scanner_serves_a_report_and_the_sweep_records_the_audit(self):
         guard = self.arm('testssl')[0]
-        # the contract fixture is one protocol line, which testssl_scan reads as "no test ran": the scenario serves a full report (the one test_testssl_scan uses)
+        # the contract fixture is one protocol line, which tls_audit reads as "no test ran": the scenario serves a full report (the one test_tls_audit uses)
         report = {'outcome': 'done', 'items': CLEAN}
         with FakeScanner(kinds=['testssl'], responders={'testssl': report}) as fake:
             out = self.sweep(guard)
@@ -520,10 +520,10 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         self.assertEqual((out['tested'], out['failed']), (1, 0))
         self.assertNotIn('skipped', out)
         self.assertEqual(fake.served[0]['target'], {'host': 'www.rt.test', 'ip': '203.0.113.5', 'port': 443, 'starttls': ''})
-        self.assertEqual(list(ServiceRun.objects.filter(service=testssl_scan.SERVICE).values_list('asset', 'status')), [('www.rt.test:443', 'done')])
-        audit = ProbeObservation.objects.get(host='www.rt.test', probe=testssl_scan.PROBE, kind=testssl_scan.OBS_AUDIT)
+        self.assertEqual(list(ServiceRun.objects.filter(service=tls_audit.SERVICE).values_list('asset', 'status')), [('www.rt.test:443', 'done')])
+        audit = ProbeObservation.objects.get(host='www.rt.test', probe=tls_audit.PROBE, kind=tls_audit.OBS_AUDIT)
         self.assertEqual((audit.outcome, audit.evidence['protocols']['TLS1_2'], audit.evidence['ip']), ('found', 'offered', '203.0.113.5'))
-        self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', probe=testssl_scan.PROBE, product='heartbleed', outcome='absent').exists())
+        self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', probe=tls_audit.PROBE, product='heartbleed', outcome='absent').exists())
 
     def test_with_the_scanner_offline_the_sweep_waits_and_the_target_stays_due(self):
         guard = self.arm('testssl')[0]
@@ -533,7 +533,7 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         self.assertEqual((out['tested'], out['failed']), (0, 0))
         self.assertIn('no scanner is online for testssl', out['skipped'])
         self.assertFalse(ServiceRun.objects.exists())
-        self.assertEqual([(host, port) for host, port, *_ in testssl_scan.due(self.project.id)], [('www.rt.test', 443)])  # still due
+        self.assertEqual([(host, port) for host, port, *_ in tls_audit.due(self.project.id)], [('www.rt.test', 443)])  # still due
 
 
 class UdpServedTests(StageBase, UdpBase):
@@ -545,9 +545,9 @@ class UdpServedTests(StageBase, UdpBase):
         self.ip_row = self.ip(IP, name='edge.udp.test')
 
     def test_the_scanner_serves_a_report_and_the_sweep_stores_the_udp_ports(self):
-        guard = self.arm('nmap_udp')[0]
+        self.arm('nmap_udp')
         with FakeScanner(kinds=['nmap_udp'], responders={'nmap_udp': {'outcome': 'done', 'xml': UDP_XML}}) as fake:
-            out = udp_scan.run(runner=guard.runner)
+            out = udp_scan.run()
         self.assertServed(fake, 'nmap_udp')
         self.assertEqual([(row['ip'], row['ok']) for row in out['scanned']], [(IP, True)])
         self.assertEqual({p.number: p.state for p in self.udp(self.ip_row)}, {123: 'open', 161: 'open|filtered'})
@@ -556,12 +556,12 @@ class UdpServedTests(StageBase, UdpBase):
         self.assertEqual(ServiceRun.objects.filter(service=udp_scan.SERVICE, status='done').count(), 1)
 
     def test_with_the_scanner_offline_the_sweep_waits_and_the_address_stays_due(self):
-        guard = self.arm('nmap_udp')[0]
+        self.arm('nmap_udp')
         with FakeScanner(kinds=['nmap_udp'], mode='offline') as fake:
-            out = udp_scan.run(runner=guard.runner)
+            out = udp_scan.run()
             self.assertIn('no scanner is online for nmap_udp', out['skipped'])
             self.reach_the_stage_handler()  # a stale read of the scanner's state: the address itself still waits
-            again = udp_scan.scan_ip(self.ip_row, runner=guard.runner)
+            again = udp_scan.scan_ip(self.ip_row)
         self.assertWaited(fake)
         self.assertEqual(again, {'ip': IP, 'ok': False, 'error': 'ScannerUnavailable', 'waiting': True})
         self.assertFalse(self.udp(self.ip_row).exists())
@@ -629,7 +629,7 @@ class PipelineServedTests(StageBase, FallbackOffBase):
         Subdomain.objects.get(scan_history=self.scan).technologies.add(Technology.objects.create(name='WordPress'))
         with FakeScanner(mode='offline') as fake, mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
-                self.scan.id, {'scan_id': self.scan.id, 'status': discovery.SUCCESS}, hygiene=False, nmap_runner=self.guards[0].runner,
+                self.scan.id, {'scan_id': self.scan.id, 'status': discovery.SUCCESS}, hygiene=False,
                 db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})

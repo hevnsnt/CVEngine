@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from agentapi import sentinel_broker
 from agentapi import sentinel_dispatch as dispatch
-from cveFeed import cleartext, hygiene, nuclei_fp, nuclei_scan, testssl_scan
+from cveFeed import cleartext, hygiene, nuclei_fp, nuclei_scan, tls_audit
 from cveFeed.models import HygieneFinding
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -245,10 +245,10 @@ class TestsslArtefactTests(SimpleTestCase):
         items = ALL_NOT_OFFERED + [{'id': 'FS', 'severity': 'MEDIUM', 'finding': 'No ciphers supporting Forward Secrecy offered'},
                                    {'id': 'cipherlist_3DES_IDEA', 'severity': 'WARN', 'finding': 'test failed'},
                                    {'id': 'heartbleed', 'severity': 'OK', 'finding': 'not vulnerable, no heartbeat extension'}]
-        result = testssl_scan.evaluate(items, 'help.example.test:443')
-        self.assertEqual([f['check'] for f in result.findings], [testssl_scan.NO_HANDSHAKE])
+        result = tls_audit.evaluate(items, 'help.example.test:443')
+        self.assertEqual([f['check'] for f in result.findings], [tls_audit.NO_HANDSHAKE])
         finding = result.findings[0]
-        self.assertEqual(finding['severity'], testssl_scan.SEVERITY['LOW'])
+        self.assertEqual(finding['severity'], tls_audit.SEVERITY['LOW'])
         self.assertEqual(finding['title'], 'help.example.test:443: TLS listener does not negotiate')
         self.assertNotIn('tlsa_cipherlist_3des_idea', result.inconclusive)  # the old cipher findings of the port resolve
         self.assertIn('heartbleed', result.cleared)
@@ -257,20 +257,20 @@ class TestsslArtefactTests(SimpleTestCase):
         items = [{'id': 'TLS1_2', 'severity': 'OK', 'finding': 'offered'},
                  {'id': 'TLS1_3', 'severity': 'INFO', 'finding': 'not offered'},
                  {'id': 'FS', 'severity': 'MEDIUM', 'finding': 'No ciphers supporting Forward Secrecy offered'}]
-        self.assertEqual([f['check'] for f in testssl_scan.evaluate(items, 'a.example.test:443').findings], ['tlsa_fs'])
+        self.assertEqual([f['check'] for f in tls_audit.evaluate(items, 'a.example.test:443').findings], ['tlsa_fs'])
 
     def test_a_downgraded_handshake_that_never_completes_is_not_a_finding(self):
         items = [{'id': 'TLS1_1', 'severity': 'INFO', 'finding': 'offered (deprecated)'},
                  {'id': 'fallback_SCSV', 'severity': 'MEDIUM',
                   'finding': "some unexpected 'handshake failure' instead of 'inappropriate fallback' (likely: warning)"}]
-        result = testssl_scan.evaluate(items, 'support.example.test:443')
+        result = tls_audit.evaluate(items, 'support.example.test:443')
         self.assertEqual(result.findings, [])
         self.assertNotIn('tlsa_fallback_scsv', result.inconclusive)
 
     def test_a_real_missing_downgrade_protection_is_still_a_finding(self):
         items = [{'id': 'TLS1_1', 'severity': 'INFO', 'finding': 'offered (deprecated)'},
                  {'id': 'fallback_SCSV', 'severity': 'HIGH', 'finding': 'Downgrade attack prevention NOT supported'}]
-        self.assertEqual([f['check'] for f in testssl_scan.evaluate(items, 'old.example.test:443').findings], ['tlsa_fallback_scsv'])
+        self.assertEqual([f['check'] for f in tls_audit.evaluate(items, 'old.example.test:443').findings], ['tlsa_fallback_scsv'])
 
 
 class TestsslStoreTests(TestCase):
@@ -282,9 +282,9 @@ class TestsslStoreTests(TestCase):
         HygieneFinding.objects.create(domain=domain, host=where, check_name='tlsa_fs', severity=2, title=f'{where} does not offer forward secrecy',
                                       status='open')
         items = ALL_NOT_OFFERED + [{'id': 'FS', 'severity': 'MEDIUM', 'finding': 'No ciphers supporting Forward Secrecy offered'}]
-        testssl_scan.store(domain, 'help.example.test', 443, testssl_scan.evaluate(items, where), where)
+        tls_audit.store(domain, 'help.example.test', 443, tls_audit.evaluate(items, where), where)
         rows = dict(HygieneFinding.objects.filter(domain=domain).values_list('check_name', 'status'))
-        self.assertEqual(rows, {'tlsa_fs': 'resolved', testssl_scan.NO_HANDSHAKE: 'open'})
+        self.assertEqual(rows, {'tlsa_fs': 'resolved', tls_audit.NO_HANDSHAKE: 'open'})
 
 
 class LegacyEvidenceTests(SimpleTestCase):
