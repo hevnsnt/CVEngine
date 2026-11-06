@@ -602,6 +602,9 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         connection.close()
 
 
+_LOCAL_PROBE = probe_url  # the probe the stage asks with when the caller gives none (``probe_url`` itself may be replaced in a test)
+
+
 # ----------------------------------------------------------------------------- the stage
 
 def _chunks(items, size=CHUNK):
@@ -703,6 +706,7 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     empty = {'routes': 0, 'hosts': 0, 'by_state': {}, 'reused': 0, 'errors': 0}
+    injected = probe is not _LOCAL_PROBE  # a test's probe replaces the network: the routes are asked here, never through a Sentinel
     if probe is probe_url:  # the project may authorise the tailnet devices of its own
         probe = functools.partial(probe_url, project=project)
     retired = _retired_endpoints(scan)
@@ -728,6 +732,21 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         for url in won_urls:
             by_host.setdefault(host_of[url], []).append(url)
         probed, errors, blocked = {}, {}, 0
+        local_hosts = by_host
+        if not injected:  # through a Sentinel when one can take route_probe; what none took is asked below, here, as before
+            try:
+                answered, local = _remote_routes(scan, by_host)
+            except resources.ScannerUnavailable as exc:  # no scanner takes it and it may not run here: nothing was asked, the routes stay due
+                message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
+                logger.warning('route check of scan %s is waiting for a scanner: %s', scan.id, exc)
+                activity.log('run_check', f'Web route check for {domain.name} is waiting: {message}', project=project, scan_id=scan.id)
+                return {**empty, 'skipped': message}
+            for url, result in answered.items():
+                if isinstance(result, Exception):
+                    errors[url] = str(result)[:200]
+                else:
+                    probed[url] = result
+            local_hosts = {host: by_host[host] for host in local}
         from cveFeed.bounty_gate import Gate
         gate = Gate(blocked=())  # a script on another host of the same site is read only when the program's scope names that host
         reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget; a forced re-test reads past the cache
@@ -753,23 +772,24 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
 
         running = activity.log('run_check', f'Checking {len(won_urls)} web routes on {len(by_host)} hosts of {domain.name}',
                                project=project, status='running', scan_id=scan.id)
-        with resources.heavy_job('route-probe', label=f'{domain.name}: {len(won_urls)} routes'):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=ROUTE_WORKERS) as pool:
-                futures = []
-                for host, urls in by_host.items():
-                    if resources.abort_requested(scan_id):
-                        break
-                    futures.append(pool.submit(probe_host, host, urls))
-                for future in futures:
-                    host, out = future.result()
-                    if out is None:
-                        blocked += 1
-                        continue
-                    for url, result in out:
-                        if isinstance(result, Exception):
-                            errors[url] = str(result)[:200]
-                        else:
-                            probed[url] = result
+        if local_hosts:
+            with resources.heavy_job('route-probe', label=f'{domain.name}: {sum(len(u) for u in local_hosts.values())} routes'):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=ROUTE_WORKERS) as pool:
+                    futures = []
+                    for host, urls in local_hosts.items():
+                        if resources.abort_requested(scan_id):
+                            break
+                        futures.append(pool.submit(probe_host, host, urls))
+                    for future in futures:
+                        host, out = future.result()
+                        if out is None:
+                            blocked += 1
+                            continue
+                        for url, result in out:
+                            if isinstance(result, Exception):
+                                errors[url] = str(result)[:200]
+                            else:
+                                probed[url] = result
         stored = _persist(scan, project, probed, now=timezone.now(), retired_endpoints=retired)
         ledger.record(SERVICE, list(probed), project, scan)
         scoring.rescore_quietly(project, list(by_host))
@@ -784,6 +804,17 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
             + (f'; {len(errors)} could not be reached' if errors else '')), routes=len(probed))
         return {'routes': len(probed), 'hosts': len(by_host), 'by_state': counts, 'reused': len(fresh), 'errors': len(errors),
                 'blocked': blocked, 'sensitive': stored['sensitive']}
+
+
+def _remote_routes(scan, by_host):
+    """``({url: result or error}, local_hosts)``: what a Sentinel's ``route_probe`` tasks answered for the planned routes (``{host: [urls]}``, see
+    ``agentapi.probe_dispatch.try_routes``) and the hosts to ask here; every host is asked here when no Sentinel can take the kind. Raises
+    ``ScannerUnavailable`` when none can and the kind may not run here."""
+    from agentapi import probe_dispatch
+    got = probe_dispatch.try_routes(scan.domain.project, scan, by_host)
+    if got is None:
+        return {}, list(by_host)
+    return got
 
 
 def _persist(scan, project, probed, now, retired_endpoints=None):

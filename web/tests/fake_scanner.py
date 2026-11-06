@@ -394,7 +394,11 @@ LOCAL_RUNNERS = {
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
+    'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
+    'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
+    'subdir_probe': ('cveFeed.slow_web.get',),
+    'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
     'hygiene_check': ('cveFeed.hygiene._fetch_cert', 'cveFeed.hygiene._resolver'),  # the certificate read and every DNS lookup of the sweep
     'dangling_dns_check': ('cveFeed.dangling_dns.Net.ns', 'cveFeed.dangling_dns.Net.ask', 'cveFeed.dangling_dns.Net.registered', 'cveFeed.dangling_dns.Net.http_control'),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
@@ -421,7 +425,11 @@ HEAVY_KINDS = {
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
     'alive_check': (),
+    'route_probe': (),
     'bucket_check': (),
+    'vhost_probe': (),
+    'subdir_probe': (),
+    'supplier_check': (),
     'hygiene_check': (),
     'dangling_dns_check': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')

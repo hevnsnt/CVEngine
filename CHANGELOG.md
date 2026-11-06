@@ -19,6 +19,26 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **Virtual host and subdirectory application checks on the scanner** (`vhost_probe` and `subdir_probe`, contract version 3). The virtual host
+  sweep sends each due address with the project's own names to a Sentinel, which asks the address its default response and then each name as the
+  Host header; the subdirectory sweep sends each due web host with the curated mount paths and the directories its own URLs show, and the Sentinel
+  asks them at the sweep's own pace and request caps. The server compares what comes back with its own rules (it does not read the Sentinel's
+  verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
+  clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
+- **Supplier posture checks on the scanner** (`supplier_check`, contract version 3). Each due supplier's names go to a Sentinel as one task that carries
+  the pacing, the request budget still left and a scope policy naming only those names (and their `mta-sts.` hosts, never a private address). The
+  Sentinel does the DNS, the certificate read, the page requests and the MTA-STS file, and reports a row per name; the server keeps the schedule, the
+  budget, the CVE match against the catalog (the scanner only reports what the page announces), the text of what to ask the supplier and what is
+  stored, and a category the scanner claims to have decided resolves nothing the card does not show it read. With no scanner able to take the work
+  and the kind off `CVENGINE_LOCAL_FALLBACK`, the suppliers stay due and nothing is recorded as checked.
+- **The web route check on the scanner** (`route_probe`, contract version 3). The anonymous half of the route and sign-in state check sends the
+  routes it planned to a Sentinel, up to 25 hosts and 20 routes each per task. The Sentinel asks each route (one GET, no credential, no cookie, no
+  redirect followed), classifies the answer, compares it with the answer for a path that cannot exist (`catch_all`), reads the front page's own
+  scripts for the libraries they state and counts the sensitive data a body serves; the task carries a scope policy the Sentinel holds every hop and
+  address to. The server validates and clips every route (a state its status cannot have is refused, the sensitive score is its own) and stores it
+  as it stores its own readings: states, auth changes, retired and zombie routes, the secrets inventory. A route the scanner could not ask is
+  unanswered and asked again, never a state. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the routes stay due.
+  The signed-in half (`auth_routes`) is unchanged and still runs on the server.
 - **DNS and mail hygiene checks on the scanner** (`hygiene_check` and `dangling_dns_check`, contract version 3). The hygiene sweep of a target sends its TLS
   endpoints and the names that may have mail to a Sentinel as one task: the scanner reads each certificate and runs the SPF, DMARC, DKIM, CAA and MailFail
   checks from its own resolver, and the server evaluates the certificates and stores what comes back as it stores its own reads. The ratings of bbot's

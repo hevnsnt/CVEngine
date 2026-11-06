@@ -54,6 +54,35 @@ class Site:
         return [path for _host, path, _ip in self.calls]
 
 
+# The same table is in the Sentinel's tests (cvengine_scanner/tests/probes/test_subdir.py): the scanner reads a response with its own copy of
+# ``identify`` and the curated data, and the two must agree. Change one, change the other (and the digest below, which is the data file's).
+DATA_SHA256 = '62fc583d66b8d00b034cb894d91f393c0b35446ddb83b4ca2e412a565c3d370c'
+PARITY = [  # (path, status, title, body, headers, location) -> (product, confidence, version, indicated) or None
+    ('/jenkins/', 403, 'Authentication required', '<html>x</html>', {'x-jenkins': '2.401.3'}, '', ('Jenkins', 0.9, '2.401.3', '/jenkins/')),
+    ('/grafana/', 302, '', '', {}, 'https://www.example.com/grafana/login', ('Grafana', 0.7, '', '/grafana/')),
+    ('/jira/', 200, 'Dashboard - Jira', '<html><meta name="ajs-version-number" content="9.4.1"><body data-name="jira" data-version="9.4.1"></body></html>', {}, '',
+     ('Jira', 0.85, '9.4.1', '/jira/')),
+    ('/phpmyadmin/', 200, 'phpMyAdmin', '<html>' + 'p' * 300 + '</html>', {}, '', ('phpMyAdmin', 0.8, '', '/phpmyadmin/')),
+    ('/portal/', 200, 'Staff portal', '<html>' + 's' * 900 + '</html>', {}, '', None),
+    ('/confluence/', 200, 'Home - Confluence', '<html>Atlassian Confluence 8.5.4</html>', {}, '', ('Confluence', 0.85, '8.5.4', '/confluence/')),
+    ('/x/', 404, 'Not found', 'nothing', {}, '', None),
+]
+
+
+class ScannerParityTests(SimpleTestCase):
+    def test_the_curated_data_is_the_file_the_scanner_carries(self):
+        import hashlib
+        with open(subdir_apps.DATA_FILE, 'rb') as handle:
+            self.assertEqual(hashlib.sha256(handle.read()).hexdigest(), DATA_SHA256)
+
+    def test_a_response_is_read_as_the_scanner_reads_it(self):
+        for path, status, title, body, headers, location, expected in PARITY:
+            with self.subTest(path=path):
+                response = page(status, title, body, headers, location=location)
+                got = subdir_apps.identify(response, path)
+                self.assertEqual(None if got is None else (got['product'], got['confidence'], got['version'], got['indicated']), expected)
+
+
 class CatalogueTests(SimpleTestCase):
     def test_the_path_list_is_the_curated_list_and_nothing_else(self):
         self.assertEqual(subdir_apps.curated_paths(), EXPECTED_PATHS)
