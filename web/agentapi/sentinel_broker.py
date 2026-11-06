@@ -1298,7 +1298,7 @@ def _scrubbed(task):
     replaced; empty when there is nothing to scrub. The dispatcher scrubs it too once its wait ends, but a worker that died in between, or a task
     cancelled, released or expired by the reaper, must not leave the token in the row until the retention sweep."""
     target = task.target if isinstance(task.target, dict) else {}
-    return {'target': {**target, 'token': '***'}} if task.kind == 'wpscan' and target.get('token') not in (None, '', '***') else {}
+    return {'target': {**target, 'token': '***'}} if task.kind in ('wpscan', 'wpscan_thorough') and target.get('token') not in (None, '', '***') else {}
 
 
 def expire(task, reason=None, actor=None):
@@ -1357,7 +1357,7 @@ def release_ineligible(agent):
 
 def max_runtime(task):
     """The longest heartbeats keep ``task`` running after it was accepted: how long its dispatcher waits for its kind (``sentinel_dispatch``'s
-    completion ceiling, an OpenVAS task's own time budget) plus ``RUN_GRACE``. A task the Sentinel dropped without reporting (a failed report, a
+    completion ceiling, an OpenVAS or thorough WordPress scan task's own time budget) plus ``RUN_GRACE``. A task the Sentinel dropped without reporting (a failed report, a
     restart that lost it) is still "running" to the server and every heartbeat would extend it, holding a slot for ever; past this it is left to expire."""
     from agentapi import sentinel_dispatch
     target = task.target if isinstance(task.target, dict) else {}
@@ -1365,6 +1365,8 @@ def max_runtime(task):
         seconds = target['max_hours'] * 3600 + 600
     elif task.kind == 'bbot_discovery' and isinstance(target.get('timeout_seconds'), int) and not isinstance(target['timeout_seconds'], bool):
         seconds = max(60, target['timeout_seconds']) + sentinel_stream.REPORT_GRACE  # the run's own limit (up to six hours), as the stage waits
+    elif task.kind == 'wpscan_thorough' and isinstance(target.get('timeout_seconds'), int) and not isinstance(target['timeout_seconds'], bool):
+        seconds = min(86400, max(600, target['timeout_seconds'])) + sentinel_stream.REPORT_GRACE  # the one site's own limit (hours), as the stage waits
     else:
         seconds = sentinel_dispatch._dispatch_timeout(task.kind, len(task.ips or []) or len(target.get('targets') or target.get('addresses') or []))
     return timedelta(seconds=seconds) + RUN_GRACE
@@ -2278,7 +2280,7 @@ def _clean_secrets_scan_result(body):
 
 _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_light': _clean_nuclei_result,
              'nuclei_targeted': _clean_nuclei_result, 'nuclei_deep': _clean_nuclei_result, 'testssl': _clean_testssl_result,
-             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'openvas': _clean_openvas_result,
+             'nmap_udp': _clean_nmap_udp_result, 'wpscan': _clean_wpscan_result, 'wpscan_thorough': _clean_wpscan_result, 'openvas': _clean_openvas_result,
              'discover': _clean_discover_result, 'waf': _clean_waf_result, 'secrets_scan': _clean_secrets_scan_result,
              'bbot_discovery': sentinel_stream.clean_bbot_result,
              'http_probe': probe_results.clean_http_probe, 'dns_resolve': probe_results.clean_dns_resolve,

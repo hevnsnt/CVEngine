@@ -431,6 +431,12 @@ class ScannerSelectionTests(EnforcementBase):
 			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, confidence=0.9, matched_product='nginx', matched_version='1.18.0', version_in_range=True)
 		self.assertEqual(openvas_scan.hot_names(self.project.id), {'www.wide.test'})
 
+	def test_the_thorough_wpscan_pass_skips_a_name_under_an_exact_host_target(self):
+		from cveFeed import wpscan_scan
+		self.assertIsNone(wpscan_scan._latest_row(self.project.id, 'old.exact.test'))
+		self.assertEqual(wpscan_scan._latest_row(self.project.id, 'exact.test').name, 'exact.test')
+		self.assertEqual(wpscan_scan._latest_row(self.project.id, 'www.wide.test').name, 'www.wide.test')
+
 	def test_the_web_archive_lookup_ignores_a_name_kept_under_an_exact_host_target(self):
 		from cveFeed import archive_urls
 		from cveFeed.models import HostArchive

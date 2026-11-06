@@ -40,11 +40,15 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   unanswered and asked again, never a state. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the routes stay due.
   The signed-in half (`auth_routes`) is unchanged and still runs on the server.
 
-- **The WordPress scan no longer runs on the server** (T8, kind `wpscan`). The local runner, its argument builder, its environment and resource-gate wiring, the
-  installed-binary check and the hours-long thorough pass (`wpscan_thorough`, which could not be handed to a Sentinel) are deleted from
-  `cveFeed/wpscan_scan.py`; `wpscan` joins `sentinel_dispatch.NEVER_LOCAL`, so whatever `CVENGINE_LOCAL_FALLBACK` says it runs on a Sentinel or the
-  sites wait and stay due. What stays is what the server does with a Sentinel's report: the candidate probe, classifying the reported outcome,
-  storing findings and versioned sightings, and the per-host state.
+- **The WordPress scan no longer runs on the server, and the thorough pass moved to a Sentinel** (T8, kinds `wpscan` and `wpscan_thorough`). The local runner,
+  its argument builder, its environment and resource-gate wiring and the installed-binary check are deleted from `cveFeed/wpscan_scan.py`; `wpscan` and the new
+  kind `wpscan_thorough` (contract version 3, kind_since 3) join `sentinel_dispatch.NEVER_LOCAL`, so whatever `CVENGINE_LOCAL_FALLBACK` says they run on a
+  Sentinel or the sites wait and stay due. The hours-long thorough pass keeps everything it had (the background task on `wpscan_queue`, one site at a time and
+  one pass per project, the host page and system status rows, the coverage check, the 30-day ledger window, the start after the quick pass): each site is now
+  one `wpscan_thorough` task whose target carries its own time limit (`CVENGINE_WPSCAN_THOROUGH_TIMEOUT`, 12 hours by default, between ten minutes and a day),
+  and the broker keeps that task's lease for that time plus a grace to report and no longer, so no new lease setting. With no scanner able to take it the host
+  stays `pending` and is asked again later; nothing is recorded as done. What stays server side is what it does with a report: the candidate probe, classifying
+  the reported outcome, storing findings and versioned sightings, and the per-host state. A Sentinel that declares `wpscan_thorough` needs the matching client release.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.

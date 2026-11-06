@@ -485,9 +485,10 @@ class WpscanTests(Base):
             return wpscan_answer
         with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', side_effect=fake_dispatch_or_none), \
-                mock.patch('cveFeed.probes.run_http_probe') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles:
+                mock.patch('cveFeed.probes.run_http_probe') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles, \
+                mock.patch('cveFeed.wpscan_scan.queue_thorough') as thorough:
             out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None, wp_runner=wp_runner, **kwargs)
-        return scan, out, calls, {'probe': probe, 'titles': titles}
+        return scan, out, calls, {'probe': probe, 'titles': titles, 'thorough': thorough}
 
     def test_a_site_tagged_wordpress_is_scanned_through_the_runner_and_stored_with_nothing_sent_from_this_server(self):
         from startScan.models import Vulnerability
@@ -503,6 +504,7 @@ class WpscanTests(Base):
         self.assertTrue(Vulnerability.objects.filter(scan_history=scan, name__startswith='WordPress').exists())
         mocks['probe'].assert_not_called()  # no WordPress probe from here
         mocks['titles'].assert_not_called()  # no plugin page lookups from here
+        mocks['thorough'].assert_not_called()  # a thorough pass would not run inside the network
 
     def test_a_host_with_no_sign_of_wordpress_is_not_scanned(self):
         scan, out, calls, _mocks = self.run_scan(tagged=False, wp_runner=mock.Mock(side_effect=AssertionError('must not run')))

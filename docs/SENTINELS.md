@@ -21,6 +21,7 @@ Eleven kinds of work, each a capability the Sentinel declares (the list is `kind
 | `testssl`                                        | The TLS audit (one `host:port` per task)                                     |
 | `nmap_udp`                                       | The UDP exposure sweep                                                       |
 | `wpscan`                                         | WPScan on WordPress sites                                                    |
+| `wpscan_thorough`                                | The thorough WPScan pass on one WordPress site: hours per site (contract version 3) |
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 | `waf`                                            | WAF fingerprinting (contract version 2; no stage dispatches it yet)          |

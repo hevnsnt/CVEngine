@@ -579,7 +579,8 @@ class WpscanServedTests(StageBase, RouteFixture, TestCase):
         wp = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
         wp.technologies.add(Technology.objects.create(name='WordPress'))
         LocalFallback('none').apply(self)
-        mock.patch('cveFeed.wpscan_scan.queue_quick', return_value=[]).start()  # the retry job would go to the real broker
+        for target in ('cveFeed.wpscan_scan.queue_quick', 'cveFeed.wpscan_scan.queue_thorough'):  # the retry and thorough jobs would go to the real broker
+            mock.patch(target, return_value=[] if target.endswith('quick') else 0).start()
 
     def go(self):
         return wpscan_scan.run_wpscan(self.scan_obj.id, probe_get=lambda url: {
@@ -614,6 +615,71 @@ class WpscanServedTests(StageBase, RouteFixture, TestCase):
         self.assertEqual(state['state'], 'waiting')
         self.assertIn('no scanner could take this work (wpscan)', state['reason'])
         self.assertNamesTheScanner('wpscan')
+
+
+class WpscanThoroughServedTests(StageBase, RouteFixture, TestCase):
+    """The thorough WordPress pass: ``wpscan_scan.run_thorough`` hands each waiting site to the scanner as one ``wpscan_thorough`` task."""
+
+    def setUp(self):
+        super().setUp()
+        self.scan_obj = self.scan(names=('www.rt.test',))
+        wp = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
+        wp.technologies.add(Technology.objects.create(name='WordPress'))
+        LocalFallback('none').apply(self)
+        wpscan_scan.record_thorough(self.project.id, self.domain.id, 'www.rt.test', 'pending', 'queued')
+        self.addCleanup(self.clear_claim)
+        self.clear_claim()
+        for target in ('cveFeed.route_auth.host_allowed', ):
+            mock.patch(target, return_value=True).start()
+        mock.patch('cveFeed.wp_correlation.run_for_host').start()
+
+    def clear_claim(self):
+        from reNgine import resources
+        client = getattr(resources.get_store(), 'r', None)
+        if client is not None:
+            try:
+                client.delete(f'cvengine:wpscan:thorough:{self.project.id}')
+            except Exception:  # noqa: BLE001 - no Redis: no claim to leave behind
+                pass
+
+    def go(self):
+        return wpscan_scan.run_thorough(self.project.id, probe_get=lambda url: {
+            'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '',
+            'final_url': url, 'url': url}, sleep=lambda seconds: None)
+
+    def row(self):
+        return wpscan_scan.thorough_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
+
+    def test_the_scanner_serves_the_task_with_its_own_budget_and_the_stage_records_the_site(self):
+        self.arm('wpscan_thorough')
+        with FakeScanner(kinds=['wpscan_thorough']) as fake:
+            out = self.go()
+        self.assertServed(fake, 'wpscan_thorough')
+        self.assertEqual(out['done'], 1)
+        self.assertEqual(self.row()['state'], 'done')
+        target = fake.served[0]['target']
+        self.assertEqual((target['url'], target['timeout_seconds']), ('https://www.rt.test', wpscan_scan.thorough_timeout()))
+        self.assertTrue(ServiceRun.objects.filter(service=wpscan_scan.THOROUGH_SERVICE, asset='www.rt.test', status='done').exists())
+        self.assertEqual(SentinelTask.objects.get(kind='wpscan_thorough').target.get('token', ''), '')  # no token configured: nothing to scrub, none stored
+
+    def test_with_the_scanner_offline_the_site_stays_pending_and_nothing_runs_here(self):
+        self.arm('wpscan_thorough')
+        with FakeScanner(kinds=['wpscan_thorough'], mode='offline') as fake:
+            out = self.go()
+        self.assertWaited(fake)
+        self.assertIn('no scanner could take this work (wpscan_thorough)', out['skipped'])
+        self.assertTrue(out['unavailable'])
+        self.assertEqual(self.row()['state'], 'pending')
+        self.assertNothingRecorded('wpscan-thorough')
+        self.assertNamesTheScanner('wpscan_thorough')
+
+    def test_a_scanner_without_the_kind_leaves_the_site_pending_too(self):
+        self.arm('wpscan_thorough')
+        with FakeScanner(kinds=['wpscan']) as fake:  # the quick kind is not the thorough one
+            out = self.go()
+        self.assertEqual(fake.served, [])
+        self.assertTrue(out['unavailable'])
+        self.assertEqual(self.row()['state'], 'pending')
 
 
 # ============================================================================== the pipeline's own stage rows

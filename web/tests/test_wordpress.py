@@ -31,14 +31,14 @@ class WordPressFixture(RouteFixture):
         self.addCleanup(self.clear_claims)
 
     def clear_claims(self):
-        """The quick pass holds a Redis claim per project id (``cvengine:wpscan:quick:<id>``, 10 minutes). A
+        """The WordPress scan passes hold a Redis claim per project id (``cvengine:wpscan:thorough:<id>``, ``cvengine:wpscan:quick:<id>``, 5 to 10 minutes). A
         test database starts its ids over, so a claim left by an earlier or interrupted run on the same Redis would make a pass answer "another one is
         running": the tests never depend on what an earlier run left behind."""
         from reNgine import resources
         client = getattr(resources.get_store(), 'r', None)
         if client is not None:
             try:
-                client.delete(*(f'cvengine:wpscan:{kind}:{self.project.id}' for kind in ('quick',)))
+                client.delete(*(f'cvengine:wpscan:{kind}:{self.project.id}' for kind in ('thorough', 'quick')))
             except Exception:  # noqa: BLE001 - no Redis: no claim to leave behind
                 pass
 
@@ -165,7 +165,7 @@ class StateTests(WordPressFixture, TestCase):
                 raise wpscan_scan.Blocked('403 forbidden')
             return PLUGIN_REPORT
         self.go(runner=runner)
-        self.assertEqual(wpscan_scan.status_counts([self.project.id]), {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}})
+        self.assertEqual(wpscan_scan.status_counts([self.project.id]), {'hosts': 2, 'scanned': 1, 'never_scanned': 1, 'reasons': {'blocked': 1}, 'thorough': {'pending': 1}})
         self.assertEqual(wpscan_scan.status_counts([self.project.id + 999])['hosts'], 0)  # another project's hosts are not counted
 
 
@@ -258,6 +258,133 @@ class PluginCorrelationTests(WordPressFixture, TestCase):
         correlation._INDEX_CACHE.update(key=None, value=None)
         self.assertEqual(wp_correlation.carry_forward(self.scan_obj), 1)
         self.assertEqual(CVEMatch.objects.filter(source='wp-plugin').count(), 1)
+
+
+class ThoroughPassTests(WordPressFixture, TestCase):
+    """The WordPress scan must really run on every WordPress host, however long it takes: the quick pass finishes in minutes and always reports, the thorough
+    pass (every plugin and theme the scanner knows, hours per site) is a separate resumable background task that never blocks the scan."""
+
+    def thorough_state(self, host='www.rt.test'):
+        return (wpscan_scan.thorough_of(list(ProbeObservation.objects.filter(project=self.project, host=host))) or {}).get('state')
+
+    def quick(self):
+        self.table['/wp-login.php'] = page(200, headers=LINK, body='<form id="loginform" action="wp-login.php">')
+        self.go()
+        self.sites = len(self.calls)  # every name of the fixture answers the login probe
+        self.assertGreaterEqual(self.sites, 1)
+
+    def thorough(self, runner=None, **kw):
+        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), mock.patch('cveFeed.wp_correlation.run_for_host'):
+            return wpscan_scan.run_thorough(self.project.id, runner=runner or self.runner, sleep=lambda s: None, probe_get=self.probe_get, **kw)
+
+    def test_the_quick_pass_queues_the_thorough_pass_and_does_not_wait_for_it(self):
+        self.quick()
+        self.assertEqual(self.thorough_state(), 'pending')
+        self.assertEqual(len(self.calls), self.sites)  # only the quick runs happened in the scan itself, none of the thorough kind
+
+    def test_the_real_runner_starts_the_background_task_on_its_own_queue(self):
+        with mock.patch('cveFeed.tasks.wpscan_thorough.apply_async') as start:
+            self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id), 1)
+        start.assert_called_once_with(args=[self.project.id], queue='wpscan_queue')
+
+    def test_the_stage_with_the_real_binary_dispatches_and_a_broker_failure_leaves_the_host_pending(self):
+        with mock.patch('cveFeed.tasks.wpscan_thorough.apply_async', side_effect=OSError('broker down')):
+            self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id), 1)
+        self.assertEqual(self.thorough_state(), 'pending')
+
+    def test_a_waiting_host_is_scanned_thoroughly_and_not_again_inside_its_window(self):
+        self.quick()
+        self.assertEqual(self.thorough()['done'], self.sites)
+        self.assertEqual(self.thorough_state(), 'done')
+        self.assertEqual(len(self.calls), 2 * self.sites)
+        self.assertEqual(wpscan_scan.queue_thorough(self.project.id, ['www.rt.test'], self.domain.id, dispatch=False), 0)  # fresh: not queued again
+        self.assertEqual(self.thorough()['done'], 0)
+
+    def test_a_cut_short_scan_keeps_what_it_read_and_is_asked_again_tomorrow(self):
+        self.quick()
+        partial = lambda url, token: {**PLUGIN_REPORT, 'cvengine_partial': 'Scan Aborted: duration'}  # noqa: E731
+        self.assertEqual(self.thorough(runner=partial)['partial'], self.sites)
+        self.assertEqual(self.thorough_state(), 'partial')
+        self.assertTrue(ServiceRun.objects.filter(service='wpscan-thorough-partial', asset='www.rt.test').exists())
+        self.assertFalse(ServiceRun.objects.filter(service='wpscan-thorough', asset='www.rt.test').exists())
+
+    def test_a_blocked_or_failing_site_is_recorded_once_and_the_next_one_goes_on(self):
+        self.quick()
+        def runner(url, token):
+            if 'www.' in url:
+                raise wpscan_scan.Blocked('403 forbidden')
+            raise RuntimeError('boom ' + (token or ''))
+        result = self.thorough(runner=runner)
+        self.assertEqual((result['blocked'], result['failed']), (1, self.sites - 1))  # each host once: nothing is retried in a loop
+        self.assertEqual(self.thorough_state(), 'blocked')
+        self.assertEqual(self.thorough_state('rt.test'), 'failed')
+
+    def test_scans_paused_leaves_the_hosts_waiting(self):
+        self.quick()
+        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+            result = self.thorough()
+        self.assertIn('paused', result['skipped'])
+        self.assertEqual(self.thorough_state(), 'pending')
+        self.assertEqual(len(self.calls), self.sites)
+
+    def test_a_pass_stopped_by_the_resource_gate_leaves_the_host_waiting_and_is_not_a_failure(self):
+        from reNgine.resources import ScanAborted
+        self.quick()
+
+        def runner(url, token):
+            raise ScanAborted('stopped')
+        result = self.thorough(runner=runner)
+        self.assertIn('stopped', result['skipped'])
+        self.assertEqual((result['failed'], self.thorough_state()), (0, 'pending'))  # S04-8: recorded neither as failed nor as done
+
+    def test_only_one_pass_runs_per_project_at_a_time(self):
+        self.quick()
+        from contextlib import contextmanager
+
+        @contextmanager
+        def taken(key, owner, ttl):
+            yield 'thorough-999'
+        with mock.patch('reNgine.resources.redis_claim', taken):
+            self.assertIn('another thorough pass', self.thorough()['skipped'])
+        self.assertEqual(len(self.calls), self.sites)
+
+    def test_an_excluded_host_is_not_scanned_thoroughly(self):
+        self.quick()
+        with mock.patch('cveFeed.exclusions.excluded_names', return_value={'www.rt.test'}):
+            result = self.thorough()
+        self.assertEqual((result['failed'], result['done']), (1, self.sites - 1))
+        self.assertEqual(len(self.calls), self.sites + self.sites - 1)
+
+    def test_the_thorough_timeout_is_hours_by_default_and_held_to_the_contract_range(self):
+        self.assertEqual(wpscan_scan.thorough_timeout(), 12 * 3600)
+        with mock.patch.dict('os.environ', {'CVENGINE_WPSCAN_THOROUGH_TIMEOUT': '60'}):
+            self.assertEqual(wpscan_scan.thorough_timeout(), 600)  # never shorter than ten minutes
+        with mock.patch.dict('os.environ', {'CVENGINE_WPSCAN_THOROUGH_TIMEOUT': '999999'}):
+            self.assertEqual(wpscan_scan.thorough_timeout(), 24 * 3600)  # nor longer than a day
+        with mock.patch.dict('os.environ', {'CVENGINE_WPSCAN_THOROUGH_TIMEOUT': 'soon'}):
+            self.assertEqual(wpscan_scan.thorough_timeout(), 12 * 3600)
+
+    def test_the_task_asks_again_later_when_no_scanner_could_take_the_pass_and_gives_up_after_its_tries(self):
+        from cveFeed import tasks
+        waiting = {'done': 0, 'skipped': 'no scanner could take this work (wpscan_thorough): the hosts stay waiting', 'unavailable': True}
+        with mock.patch('cveFeed.wpscan_scan.run_thorough', return_value=waiting), mock.patch('cveFeed.tasks.wpscan_thorough.apply_async') as again:
+            tasks.wpscan_thorough(self.project.id)
+            _args, kwargs = again.call_args
+            self.assertEqual((kwargs['args'], kwargs['countdown'], kwargs['queue']),
+                             ([self.project.id, 1], wpscan_scan.THOROUGH_RETRY_DELAY, 'wpscan_queue'))
+            again.reset_mock()
+            tasks.wpscan_thorough(self.project.id, wpscan_scan.THOROUGH_RETRIES)
+            again.assert_not_called()
+        with mock.patch('cveFeed.wpscan_scan.run_thorough', return_value={'done': 1}), mock.patch('cveFeed.tasks.wpscan_thorough.apply_async') as again:
+            tasks.wpscan_thorough(self.project.id)
+            again.assert_not_called()
+
+    def test_the_host_record_and_the_status_counts_show_the_thorough_pass(self):
+        self.quick()
+        self.assertEqual(self.state('www.rt.test')['thorough']['state'], 'pending')
+        self.assertEqual(wpscan_scan.status_counts([self.project.id])['thorough'], {'pending': self.sites})
+        self.thorough()
+        self.assertEqual(wpscan_scan.status_counts([self.project.id])['thorough'], {'done': self.sites})
 
 
 class ProcessExitTests(SimpleTestCase):

@@ -36,7 +36,7 @@ rough sizes of the work.
 | `cveFeed/nmap_scan.py` (545) | nmap | parser `parse_xml` is duplicated in `client/tools.py` |
 | `cveFeed/naabu_scan.py` (221) | naabu | |
 | `cveFeed/nuclei_scan.py` (781), `nuclei_templates.py` (401) | nuclei | three kinds; flags and `host_of` are duplicated; signed-in passes never dispatch |
-| `cveFeed/wpscan_scan.py` | WPScan | one task per site; the server only stores what a Sentinel reports (T8: the local runner is deleted, `NEVER_LOCAL`) |
+| `cveFeed/wpscan_scan.py` | WPScan | one task per site (`wpscan`, quick pass) and one per site for the hours-long thorough pass (`wpscan_thorough`); the server only stores what a Sentinel reports (T8: the local runner is deleted, both kinds are `NEVER_LOCAL`) |
 | `cveFeed/testssl_scan.py` (483) | testssl.sh | one task per host and port |
 | `cveFeed/udp_scan.py` (608) | nmap -sU | raw XML is the one result the server parses itself |
 | `cveFeed/openvas_scan.py` | GVM | opt-in; keeps its own compose profile |

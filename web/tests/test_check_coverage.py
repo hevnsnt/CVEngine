@@ -193,13 +193,17 @@ class ApplicabilityTests(SimpleTestCase):
 
 	def test_a_non_wordpress_host_is_not_counted_against_wpscan(self):
 		host = facts(ports=[port(443, 'https')])
-		self.assertEqual(state_of(host, 'wpscan')[0], 'not_applicable')
+		for check in ('wpscan', 'wpscan-thorough'):
+			self.assertEqual(state_of(host, check)[0], 'not_applicable', check)
 
 	def test_wordpress_signs_make_wpscan_apply_and_a_negative_probe_does_not(self):
 		def row(probe, outcome='found', evidence=None):
 			return SimpleNamespace(probe=probe, outcome=outcome, evidence=evidence or {}, source='x', version='', observed_at=NOW)
 		signals = facts(probe_rows=[row('wordpress-signals', evidence={'signals': ['tech']})])
 		self.assertEqual(state_of(signals, 'wpscan')[0], 'due')
+		self.assertEqual(state_of(signals, 'wpscan-thorough')[0], 'not_applicable')  # waits for the quick pass
+		scanned = facts(probe_rows=[row('wpscan', evidence={'state': 'scanned'})])
+		self.assertEqual(state_of(scanned, 'wpscan-thorough')[0], 'due')
 		absent = facts(probe_rows=[row('wordpress-detect', 'absent')])
 		self.assertEqual(state_of(absent, 'wpscan')[0], 'not_applicable')
 

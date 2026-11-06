@@ -33,6 +33,31 @@ PROBE_SERVICE = 'wp-probe'
 DEFAULT_MAX_SITES = 20
 DEFAULT_STAGE_SECONDS = 60 * 60
 QUEUE = 'wpscan_queue'
+# The thorough pass: plugin and theme detection in mixed mode asks the site for every plugin and theme slug the scanner knows (about 170,000
+# requests), which finds the ones a page never links. It takes hours, so it is never part of the scan: a one-site-at-a-time background task
+# (``run_thorough``) that hands each site to a Sentinel as the task kind ``wpscan_thorough`` (its own long budget, one per project at a time),
+# started after the quick pass, resumable and never blocking correlation or triage. This server never runs it.
+THOROUGH_PROBE = 'wpscan-thorough'
+THOROUGH_SERVICE = 'wpscan-thorough'
+THOROUGH_QUEUE = QUEUE
+THOROUGH_KIND = 'wpscan_thorough'
+DEFAULT_THOROUGH_TIMEOUT = 12 * 60 * 60
+MIN_THOROUGH_TIMEOUT = 600
+MAX_THOROUGH_TIMEOUT = 24 * 60 * 60  # what the contract and the Sentinel accept: a longer budget is held to this
+THOROUGH_RETRIES = 6  # times the pass is asked again when no scanner could take it (``cveFeed.tasks.wpscan_thorough``)
+THOROUGH_RETRY_DELAY = 30 * 60  # seconds; the n-th retry waits n times this
+THOROUGH_STATES = ('pending', 'running', 'done', 'partial', 'blocked', 'failed')
+
+
+def thorough_timeout():
+    """Seconds one site's thorough pass may take on a Sentinel (``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default, between ten minutes
+    and a day): it travels with the task, the Sentinel ends the scan 30 seconds before it and reports what it read, and the broker keeps the task's
+    lease alive for that long (plus a grace to report) and no longer."""
+    try:
+        value = int(os.environ.get('CVENGINE_WPSCAN_THOROUGH_TIMEOUT', DEFAULT_THOROUGH_TIMEOUT))
+    except ValueError:
+        return DEFAULT_THOROUGH_TIMEOUT
+    return min(MAX_THOROUGH_TIMEOUT, max(MIN_THOROUGH_TIMEOUT, value))
 
 
 def stage_seconds():
@@ -429,13 +454,34 @@ def record_state(project_id, domain_id, host, state, reason='', **extra):
                   'observed_at': timezone.now()})
 
 
+def record_thorough(project_id, domain_id, host, state, reason='', **extra):
+    """Record where the thorough pass stands on a host (one of THOROUGH_STATES), so the host page and the system status can say it."""
+    from cveFeed.models import ProbeObservation
+    ProbeObservation.objects.update_or_create(
+        project_id=project_id, host=host.lower(), probe=THOROUGH_PROBE, port=0, kind='wordpress', product='WordPress',
+        defaults={'domain_id': domain_id, 'variant': state, 'outcome': {'done': 'found', 'partial': 'found', 'blocked': 'challenged'}.get(state, 'hidden'),
+                  'confidence': 1.0 if state == 'done' else 0.0, 'source': 'wpscan',
+                  'evidence': {'state': state, 'reason': str(reason)[:300], **extra}, 'observed_at': timezone.now()})
+
+
+def thorough_of(rows):
+    """``{'state', 'reason', 'at', ...}`` for the thorough pass on one host, or None when it was never queued."""
+    row = next((r for r in rows if r.probe == THOROUGH_PROBE), None)
+    if row is None:
+        return None
+    evidence = row.evidence or {}
+    return {'state': evidence.get('state') or 'failed', 'reason': evidence.get('reason', ''), 'at': row.observed_at.isoformat(),
+            'plugins': evidence.get('plugins'), 'cut_short': evidence.get('cut_short', '')}
+
+
 def state_of(rows):
     """``{'state', 'reason', 'detected_how', ...}`` for one host from its probe rows, or None when nothing suggests WordPress. The scan's own
     state wins; without one, a positive probe is "detected" and any other sign is "candidate"."""
     scan = next((r for r in rows if r.probe == 'wpscan'), None)
     detect_row = next((r for r in rows if r.probe == 'wordpress-detect'), None)
     base = {'detected_how': detect_row.source if detect_row and detect_row.outcome == 'found' else '',
-            'probe': detect_row.outcome if detect_row else '', 'hint': ((detect_row.evidence or {}).get('hint') if detect_row else '') or ''}
+            'probe': detect_row.outcome if detect_row else '', 'hint': ((detect_row.evidence or {}).get('hint') if detect_row else '') or '',
+            'thorough': thorough_of(rows)}
     if scan is not None and (scan.evidence or {}).get('state') == 'not_wordpress' and base['detected_how']:
         return {**base, 'state': 'failed', 'reason': 'the scan could not see WordPress, the probe did', 'scanned_at': scan.observed_at.isoformat()}
     if scan is not None:
@@ -467,13 +513,13 @@ def record_signals(project_id, domain_id, host, signals):
 def status_counts(project_ids=None):
     """``{'hosts', 'scanned', 'never_scanned', 'reasons': {state: n}}`` over the hosts with any WordPress state: the system status line."""
     from cveFeed.models import ProbeObservation
-    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals'))
+    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals', THOROUGH_PROBE))
     if project_ids is not None:
         qs = qs.filter(project_id__in=project_ids)
     by_host = {}
     for row in qs.order_by('project_id', 'host'):
         by_host.setdefault((row.project_id, row.host), []).append(row)
-    reasons, scanned, hosts = {}, 0, 0
+    reasons, scanned, hosts, thorough = {}, 0, 0, {}
     for rows in by_host.values():
         state = state_of(rows)
         if state is None or state['state'] == 'not_wordpress':
@@ -483,7 +529,9 @@ def status_counts(project_ids=None):
             scanned += 1
         else:
             reasons[state['state']] = reasons.get(state['state'], 0) + 1
-    return {'hosts': hosts, 'scanned': scanned, 'never_scanned': hosts - scanned, 'reasons': reasons}
+        if state['thorough']:
+            thorough[state['thorough']['state']] = thorough.get(state['thorough']['state'], 0) + 1
+    return {'hosts': hosts, 'scanned': scanned, 'never_scanned': hosts - scanned, 'reasons': reasons, 'thorough': thorough}
 
 
 # ----------------------------------------------------------------------------- the stage
@@ -544,7 +592,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
 
     ``internal`` is the run for a host inside a declared internal network (``cveFeed.internal_scan``): the scan runs only through a Sentinel inside
     it, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
-    its own, to the site or to its plugin pages).
+    its own, to the site or to its plugin pages), and no thorough pass is queued (its Sentinel would not be inside the network).
 
     A site the stage cannot reach in time (over the per-scan limit, out of the stage's time budget, no memory for it) is not left for the next
     scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
@@ -676,6 +724,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
         scanned.append(host)
     summary['scanned'] = len(scanned)
     summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
+    summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
     message = (f'WordPress scan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
                + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')
@@ -761,6 +810,127 @@ def _quick(scan, only, attempt, runner=None, sleep=None, probe_get=None):
             queue_quick(scan, only, attempt)
             return {'skipped': 'another quick pass is running for this project'}
         return run_wpscan(scan.pk, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
+
+
+# ----------------------------------------------------------------------------- the thorough pass
+
+def queue_thorough(project_id, hosts, domain_id, dispatch=True):
+    """Mark the hosts the quick pass scanned as waiting for the thorough pass (unless one finished inside its window) and start the
+    background task. Returns how many were queued."""
+    from cveFeed import ledger
+    due = [h for h in hosts if h not in ledger.fresh(THOROUGH_SERVICE, [h], project_id)]
+    for host in due:
+        record_thorough(project_id, domain_id, host, 'pending', 'queued after the quick pass; it takes hours and runs in the background')
+    if due and dispatch:
+        try:
+            from cveFeed.tasks import wpscan_thorough
+            wpscan_thorough.apply_async(args=[project_id], queue=THOROUGH_QUEUE)
+        except Exception:  # noqa: BLE001 - the hosts stay pending: the next scan's quick pass asks again
+            logger.exception('could not start the thorough WordPress scan pass for project %s', project_id)
+    return len(due)
+
+
+def _pending_hosts(project_id):
+    """The hosts waiting for the thorough pass, longest-waiting first: ``[(host, domain_id)]``."""
+    from cveFeed.models import ProbeObservation
+    rows = ProbeObservation.objects.filter(project_id=project_id, probe=THOROUGH_PROBE, variant__in=('pending', 'running')).order_by('observed_at', 'host')
+    return [(r.host, r.domain_id) for r in rows]
+
+
+def _latest_row(project_id, host):
+    from startScan.models import Subdomain
+    from targetApp.models import Domain, in_target_scope_q
+    # a target set to manual only is never given the thorough pass on a schedule: its host is no longer one the pass may scan; nor is a name
+    # kept under a target that is now exactly one host
+    return (Subdomain.objects.filter(target_domain__project_id=project_id, name=host).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+            .filter(in_target_scope_q()).select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
+
+
+def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
+    """The thorough pass for one project: every host waiting for it, one at a time, each handed to a Sentinel as one ``wpscan_thorough`` task
+    (plugin and theme detection in mixed mode, as long a budget as it needs: ``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default; the
+    Sentinel ends the scan 30 seconds before it and reports what it read). One pass per project at a time (a Redis claim kept alive while it runs, and
+    the Sentinel side runs one such task per project at a time too). It stops when scans are paused or stopped, leaves the host waiting, and a later
+    run carries on. A site that cannot be reached or that an edge challenges is recorded as such, never retried in a loop.
+    Returns ``{'done', 'partial', 'blocked', 'failed', 'skipped'}`` counts.
+
+    This server never runs it (``wpscan_thorough`` is in ``agentapi.sentinel_dispatch.NEVER_LOCAL``): with no scanner able to take the work, or
+    one that did not finish it in time, the host stays ``pending`` and nothing is recorded as done, so a later pass asks again. The report is
+    classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
+    (``runner(url, token, timeout) -> report``)."""
+    from cveFeed import activity, exclusions, ledger, probes, wp_correlation
+    from reNgine import resources
+    summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
+    owner = f'thorough-{os.getpid()}'
+    with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:
+        if holder is not True:
+            return {**summary, 'skipped': 'another thorough pass is running for this project'}
+        from cveFeed.bounty_gate import Gate
+        while True:
+            if resources.global_pause_requested(fail_closed=True):
+                return {**summary, 'skipped': 'scanning is paused: the hosts stay waiting'}
+            gate = Gate()  # read again for every host: a confirmation withdrawn while the pass runs stops it at the next site
+            if gate.project_blocked(project_id):
+                return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing: the hosts stay waiting'}
+            todo = _pending_hosts(project_id)
+            if not todo:
+                return summary
+            host, domain_id = todo[0]
+            sub = _latest_row(project_id, host)
+            if sub is None or (exclusions.excluded_names(project_id) and exclusions.normalize(host) in exclusions.excluded_names(project_id)):
+                record_thorough(project_id, domain_id, host, 'failed', 'the host is no longer a target of the project, or its target is set to manual only or to that host only')
+                summary['failed'] += 1
+                continue
+            why = gate.refusal(project_id, host)  # a bug bounty project that has not confirmed automated testing, or a host outside the program's scope
+            if why:
+                record_thorough(project_id, domain_id, host, 'failed', 'not scanned: ' + why)
+                summary['failed'] += 1
+                continue
+            scan, url = sub.scan_history, _base_of(sub)
+            token = api_token(sub.target_domain.project)
+            record_thorough(project_id, domain_id, host, 'running', 'a Sentinel is asking the site for every plugin and theme it knows; this takes hours')
+            running = activity.log('run_check', f'Thorough WordPress scan on one WordPress site of {sub.target_domain.name}', project=project_id, status='running',
+                                   scan_id=scan.id)
+            try:
+                if runner is None:
+                    from agentapi import sentinel_dispatch
+                    report = _scan_site(sentinel_dispatch.wrap_wpscan_thorough_runner(sub.target_domain.project, scan=scan, timeout_seconds=thorough_timeout()),
+                                        url, token, sub, project_id)
+                else:
+                    report = _scan_site(runner, url, token, sub, project_id)
+            except Blocked as exc:
+                record_thorough(project_id, domain_id, host, 'blocked', _hint(str(exc), token))
+                ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
+                summary['blocked'] += 1
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass: {host} is protected by an edge that challenged the scanner')
+                continue
+            except resources.ScannerUnavailable as exc:  # no scanner can take it, or none finished it: not a failure, nothing is recorded as done
+                record_thorough(project_id, domain_id, host, 'pending', f'no scanner could take this work ({exc.kind}); it runs again later')
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: no scanner could take this work ({exc.kind}); the host stays waiting')
+                return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the hosts stay waiting', 'unavailable': True}
+            except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped or no memory: the host stays waiting, a later run carries on
+                record_thorough(project_id, domain_id, host, 'pending', 'the pass was stopped or memory was short; it runs again later')
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: stopped before it finished ({type(exc).__name__}); the host stays waiting')
+                return {**summary, 'skipped': 'scanning was stopped or memory was short: the hosts stay waiting'}
+            except Exception as exc:  # noqa: BLE001 - ValueError (not WordPress), a timeout, a crash: recorded, and the next host goes on
+                reason = _redact(str(exc), token) or 'the thorough scan failed'
+                record_thorough(project_id, domain_id, host, 'failed', reason)
+                ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
+                summary['failed'] += 1
+                activity.settle(running, 'failed', message=activity.diagnostic(f'Thorough WordPress scan pass on {host}', reason))
+                continue
+            new, _techs = persist_report(scan, sub, url, report)
+            titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project_id)
+            versioned = record_components(project_id, domain_id, host, report, titles)
+            wp_correlation.run_for_host(sub)
+            cut = report.get('cvengine_partial') or ''
+            state = 'partial' if cut else 'done'
+            service = THOROUGH_SERVICE + ('-partial' if cut else '')
+            ledger.record(service, [host], project_id, scan)
+            record_thorough(project_id, domain_id, host, state, cut and 'the scan stopped before it finished; what it read is kept and it runs again tomorrow',
+                            plugins=versioned, new_findings=new, **({'cut_short': cut} if cut else {}))
+            summary[state] += 1
+            activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: {state}, {versioned} plugin/theme version(s), {new} new finding(s)')
 
 
 REDIRECT = re.compile(r'redirects? to:?\s*(https?://[^\s\'"]{1,300})', re.I)

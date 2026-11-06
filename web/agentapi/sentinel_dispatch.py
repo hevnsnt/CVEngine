@@ -43,7 +43,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
+                      'nmap_udp': 900, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
                       'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'route_probe': 1800,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
@@ -1392,6 +1392,34 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
             raise RuntimeError('no Sentinel finished the WordPress scan')
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
     return runner
+
+
+def wrap_wpscan_thorough_runner(project, scan=None, timeout_seconds=None):
+    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_thorough``: the thorough pass of one site as one ``wpscan_thorough`` task, which
+    runs for hours. The task carries its own time limit (``timeout_seconds``, the target's value, held to the contract's range); the wait for the
+    report is that limit plus ``sentinel_stream.REPORT_GRACE``, and the broker keeps the task's lease alive for the same time and no longer
+    (``sentinel_broker.max_runtime``), so a Sentinel that is alive but never finishes still frees its slot. The kind is in ``NEVER_LOCAL``: with no
+    scanner able to take it, or none finishing it, this raises ``resources.ScannerUnavailable`` (the host stays pending). The token is scrubbed from
+    the stored task as for the quick pass. The outcome is classified by ``cveFeed.wpscan_scan._classify``."""
+    from cveFeed import wpscan_scan
+    seconds = timeout_seconds or wpscan_scan.thorough_timeout()
+    seconds = min(wpscan_scan.MAX_THOROUGH_TIMEOUT, max(wpscan_scan.MIN_THOROUGH_TIMEOUT, int(seconds)))
+    if not any_scanner_for(project, 'wpscan_thorough'):
+        _no_scanner('wpscan_thorough', project)  # NEVER_LOCAL: raises ScannerUnavailable
+
+    def runner(url, token):
+        target = {'url': url, 'token': token, 'timeout_seconds': seconds}
+        result = dispatch_or_none(project, 'wpscan_thorough', target, scan=scan, timeout=seconds + _report_grace(),
+                                  redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+        if result is None:  # the task was not finished and the kind may not run here (dispatch_or_none raised already): nothing was read
+            raise RuntimeError('no Sentinel finished the thorough WordPress scan')
+        return wpscan_scan._classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
+    return runner
+
+
+def _report_grace():
+    from agentapi import sentinel_stream
+    return sentinel_stream.REPORT_GRACE
 
 
 # --- the kinds of contract version 3: one task per item, several at once, through dispatch_many -----------------------------------------------

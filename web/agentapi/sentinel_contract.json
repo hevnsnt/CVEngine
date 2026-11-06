@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "route_probe": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "route_probe": 3, "wpscan_thorough": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -585,6 +585,32 @@
                   "null"
                 ],
                 "description": "the raw WPScan JSON report; at most 8 MiB serialised"
+              },
+              "returncode": {
+                "type": "integer"
+              },
+              "stderr_tail": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        ]
+      },
+      "wpscan_thorough": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "report": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "the raw JSON report of the thorough WordPress scan (one site, plugins and themes in mixed detection mode); at most 8 MiB serialised, partial when the run was cut at its time limit (exit code 4 and a scan_aborted text)"
               },
               "returncode": {
                 "type": "integer"
@@ -3520,6 +3546,32 @@
             "type": "string",
             "maxLength": 256,
             "description": "the project's WPScan API token, for this one run; the server replaces it with *** once the task ends"
+          }
+        }
+      },
+      "wpscan_thorough": {
+        "type": "object",
+        "required": [
+          "url",
+          "token",
+          "timeout_seconds"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "token": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "the project's WPScan API token, for this one run; the server replaces it with *** once the task ends"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 600,
+            "maximum": 86400,
+            "description": "the whole scan of this one site, in seconds (hours): the client ends it 30 seconds before and reports what it read; the server keeps the task's lease alive for this long plus a grace to report, and no longer"
           }
         }
       },

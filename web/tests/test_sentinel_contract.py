@@ -18,7 +18,8 @@ KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'te
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
            'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify', 'node2shell': 'node2shell',
            'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate',
-           'alive_check': 'alive_check', 'bucket_check': 'bucket_check', 'vhost_probe': 'vhost_probe', 'subdir_probe': 'subdir_probe', 'supplier_check': 'supplier_check', 'route_probe': 'route_probe'}
+           'alive_check': 'alive_check', 'bucket_check': 'bucket_check', 'vhost_probe': 'vhost_probe', 'subdir_probe': 'subdir_probe', 'supplier_check': 'supplier_check', 'route_probe': 'route_probe',
+           'wpscan_thorough': 'wpscan_thorough'}
 
 
 V1_SHA256 = {
@@ -371,3 +372,11 @@ class RealTargetBuilderTests(SimpleTestCase):
                 broker_dispatch.wrap_wpscan_runner(mock.Mock(), mock.Mock())('https://example.com/', 'example-token')
         seen = self.captured(run)
         self.check(seen, ['wpscan'])
+
+    def test_the_wpscan_thorough_target(self):
+        def run():
+            with self.assertRaises(RuntimeError):  # the stub answers nothing: the server never runs the scan itself, so nothing was read
+                broker_dispatch.wrap_wpscan_thorough_runner(mock.Mock(), mock.Mock(), timeout_seconds=7200)('https://example.com/', 'example-token')
+        seen = self.captured(run)
+        self.check(seen, ['wpscan_thorough'])
+        self.assertEqual(seen[0][1]['timeout_seconds'], 7200)

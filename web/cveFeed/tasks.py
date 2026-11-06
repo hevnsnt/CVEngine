@@ -44,6 +44,19 @@ def top_up_host_assessments():
     return top_up()
 
 
+@app.task(name='wpscan_thorough', bind=False, queue='wpscan_queue')
+def wpscan_thorough(project_id, attempt=0):
+    """The thorough WordPress scan pass (plugins and themes in mixed mode, hours per site, each site one task of kind ``wpscan_thorough`` on a
+    Sentinel) for one project: see ``wpscan_scan.run_thorough``. It has a queue of its own so a pass that takes hours never holds up the feed
+    workers. When no scanner could take the work the hosts stay pending and the pass is asked again a little later, ``THOROUGH_RETRIES`` times;
+    after that the next scan's quick pass starts it again."""
+    from cveFeed import wpscan_scan
+    result = wpscan_scan.run_thorough(project_id)
+    if result.get('unavailable') and attempt < wpscan_scan.THOROUGH_RETRIES:
+        wpscan_thorough.apply_async(args=[project_id, attempt + 1], countdown=wpscan_scan.THOROUGH_RETRY_DELAY * (attempt + 1), queue='wpscan_queue')
+    return result
+
+
 @app.task(name='wpscan_quick', bind=False, queue='wpscan_queue')
 def wpscan_quick(scan_id, hosts, attempt=1):
     """The quick WordPress scan pass for WordPress sites the scan's own stage could not reach in time (over its limit, out of its time budget, no memory),

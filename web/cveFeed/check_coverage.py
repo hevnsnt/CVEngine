@@ -584,6 +584,17 @@ def plan_wpscan(h, ev):
     return _one(h, ev, ('wpscan', 'wpscan-partial'))
 
 
+def plan_wpscan_thorough(h, ev):
+    if h.project_id in ev.blocked:
+        return BOUNTY_REASON
+    state = _wordpress(h)
+    if state is None or state['state'] == 'not_wordpress':
+        return 'no sign of WordPress'
+    if state['state'] != 'scanned':
+        return 'it follows the quick WordPress scan, which has not scanned this site yet'
+    return _one(h, ev, ('wpscan-thorough', 'wpscan-thorough-partial'))
+
+
 def plan_node2shell(h, ev):
     from cveFeed import node2shell_scan
     if not node2shell_scan.enabled():
@@ -821,7 +832,8 @@ CHECKS = (
     Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
     Check('wp-detect', 'WordPress detection probe', plan_wp_probe, kinds=('wp-probe',)),
-    Check('wpscan', 'WordPress scan', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
+    Check('wpscan', 'WordPress scan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
+    Check('wpscan-thorough', 'WordPress scan (thorough pass, on a Sentinel)', plan_wpscan_thorough, kinds=('wpscan-thorough', 'wpscan-thorough-partial')),
     Check('node2shell', 'node2shell check (CVE-2026-111497)', plan_node2shell, kinds=('node2shell',), stages=('node2shell',)),
     Check('vhost', 'Other sites on the host\'s addresses', plan_vhost, kinds=('vhost', 'vhost-ip'), sweeps=('vhost',), ttl_kind='vhost'),
     Check('subapps', 'Applications under subdirectories', plan_subapps, kinds=('subapp',), sweeps=('subapp',)),
