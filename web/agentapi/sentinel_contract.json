@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "alive_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "alive_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -2086,6 +2086,340 @@
             }
           }
         ]
+      },
+      "hygiene_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "certs": {
+                "type": "array",
+                "maxItems": 300,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "host",
+                    "port",
+                    "found"
+                  ],
+                  "properties": {
+                    "host": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 260
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "found": {
+                      "type": "boolean",
+                      "description": "a TLS service answered: its certificate is in cert; false with no error means nothing there speaks TLS"
+                    },
+                    "cert": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "subject",
+                        "issuer",
+                        "sans",
+                        "not_before",
+                        "not_after",
+                        "signature_algorithm",
+                        "key_description",
+                        "protocol",
+                        "cipher",
+                        "chain_error",
+                        "legacy_tls"
+                      ],
+                      "properties": {
+                        "subject": {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        "issuer": {
+                          "type": "string",
+                          "maxLength": 500
+                        },
+                        "sans": {
+                          "type": "array",
+                          "maxItems": 200,
+                          "items": {
+                            "type": "string",
+                            "maxLength": 255
+                          }
+                        },
+                        "not_before": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 40
+                        },
+                        "not_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 40
+                        },
+                        "signature_algorithm": {
+                          "type": "string",
+                          "maxLength": 100
+                        },
+                        "key_description": {
+                          "type": "string",
+                          "maxLength": 100
+                        },
+                        "protocol": {
+                          "type": "string",
+                          "maxLength": 20
+                        },
+                        "cipher": {
+                          "type": "string",
+                          "maxLength": 100
+                        },
+                        "chain_error": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "legacy_tls": {
+                          "type": "boolean"
+                        },
+                        "legacy_handshake": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "protocol": {
+                              "type": "string",
+                              "maxLength": 20
+                            },
+                            "cipher": {
+                              "type": "string",
+                              "maxLength": 100
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200,
+                      "description": "the endpoint was not asked or could not be probed: unknown, not \"nothing there\""
+                    }
+                  }
+                }
+              },
+              "mail": {
+                "type": "array",
+                "maxItems": 101,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "has_mx",
+                    "findings"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 253
+                    },
+                    "has_mx": {
+                      "type": "boolean"
+                    },
+                    "findings": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "check",
+                          "severity",
+                          "title",
+                          "detail",
+                          "host",
+                          "evidence"
+                        ],
+                        "properties": {
+                          "check": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64
+                          },
+                          "severity": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 2000
+                          },
+                          "host": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "evidence": {
+                            "type": "object",
+                            "description": "JSON data the check kept as its evidence; the server bounds its size"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "certs",
+                "mail",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "dangling_dns_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "ratings": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "state"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "state": {
+                      "enum": [
+                        "rated",
+                        "unknown"
+                      ],
+                      "description": "unknown: no usable answer, the server keeps the finding as baddns rated it"
+                    },
+                    "severity": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 1,
+                      "maximum": 3,
+                      "description": "null keeps baddns's severity"
+                    },
+                    "drop": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "zone": {
+                      "type": "string",
+                      "maxLength": 260
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "ratings",
+                "touched"
+              ]
+            }
+          }
+        ]
       }
     },
     "targets": {
@@ -3129,6 +3463,200 @@
               "type": "string",
               "maxLength": 500
             }
+          }
+        }
+      },
+      "hygiene_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tls",
+          "mail",
+          "scope"
+        ],
+        "properties": {
+          "tls": {
+            "type": "array",
+            "maxItems": 300,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "port"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            }
+          },
+          "mail": {
+            "type": "array",
+            "maxItems": 101,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "always": {
+                  "type": "boolean",
+                  "description": "reviewed whatever its records; any other name only when it has an MX record of its own and is not a CNAME"
+                }
+              }
+            }
+          },
+          "confirm_resolvers": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "description": "resolvers also asked whether a record is missing (CVENGINE_HYGIENE_CONFIRM_RESOLVERS)"
+          },
+          "rdap": {
+            "type": "boolean",
+            "description": "ask a registry whether a domain an SPF include or DMARC report address names is registered (default true)"
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "dangling_dns_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checks",
+          "providers",
+          "scope"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "host",
+                "kind"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "kind": {
+                  "enum": [
+                    "ns",
+                    "cname_nxdomain",
+                    "cname_http"
+                  ]
+                },
+                "triggers": {
+                  "type": "array",
+                  "maxItems": 10,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 260
+                  },
+                  "description": "the names baddns reported (its Trigger), lower case"
+                }
+              }
+            }
+          },
+          "providers": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cname",
+              "nameservers"
+            ],
+            "description": "cvENGINE's takeover provider lists (cveFeed/data/takeover_providers.json), the one copy",
+            "properties": {
+              "cname": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "service",
+                    "suffixes"
+                  ],
+                  "properties": {
+                    "service": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "suffixes": {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 253
+                      }
+                    }
+                  }
+                }
+              },
+              "nameservers": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "service",
+                    "patterns"
+                  ],
+                  "properties": {
+                    "service": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "patterns": {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "description": "regular expressions, matched case insensitively from the start of a name server name"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
           }
         }
       }

@@ -70,7 +70,8 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/supplier_scan.py` (647) | third-party supplier posture | move |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/hygiene.py` | DNS, TLS, SPF/DKIM/DMARC | the network helpers move; the evaluators are pure and stay |
+| `cveFeed/hygiene.py`, `mailfail.py` | DNS, TLS, SPF/DKIM/DMARC | moved: the `hygiene_check` kind (contract 3), one task per target's sweep (its TLS endpoints and the names that may have mail); the scanner reads the certificates and runs the mail checks (`cvengine_scanner.probes.hygiene`, `mailfail`, `rdap`), the server keeps `evaluate_cert`, the rating, the folding and what is stored; an endpoint or mail domain the scanner did not answer keeps its open findings; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
+| `cveFeed/dangling_dns.py` | rating bbot's baddns findings | moved: the `dangling_dns_check` kind (contract 3), a batch of findings per task with the server's provider lists (`cveFeed/data/takeover_providers.json`); the scanner walks the zone cut, asks the registry and sends the control request (`cvengine_scanner.probes.dangling_dns`); a finding it could not rate keeps baddns's rating; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | copied into the library (`cvengine_scanner.probes.transport`, `egress_proxy`, `legacy_tls`), held to the task's scope policy; a Sentinel takes its probe proxy from its own `CVENGINE_SENTINEL_PROBE_PROXY`, never from the server; the server's copies stay for the local paths |
 | DNS resolution in `discovery.resolve_names` | names to addresses | moved: the `dns_resolve` kind (contract 3) for `run_host_pipeline`; the local lookup stays behind `CVENGINE_LOCAL_FALLBACK` and for the retire check's lookups (`changes._retire`) |
 
@@ -184,9 +185,9 @@ which send nothing to the target and need no vantage point.
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
-   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, vhost and subdir, suppliers and the
-   hygiene network helpers.
+   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the TLS and mail hygiene sweep (`hygiene_check`), the dangling-DNS ratings (`dangling_dns_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, vhost and subdir, and suppliers (which
+   still call the hygiene helpers here).
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).

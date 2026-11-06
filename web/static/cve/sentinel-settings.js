@@ -41,6 +41,8 @@ export const SENTINEL_KINDS = [
   "nuclei_validate",
   "alive_check",
   "bucket_check",
+  "hygiene_check",
+  "dangling_dns_check",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -66,6 +68,8 @@ const KIND_WORDS = {
   nuclei_validate: "template check",
   alive_check: "retired host checks",
   bucket_check: "cloud storage checks",
+  hygiene_check: "TLS and email checks",
+  dangling_dns_check: "dangling DNS checks",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {

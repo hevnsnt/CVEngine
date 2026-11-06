@@ -19,6 +19,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **DNS and mail hygiene checks on the scanner** (`hygiene_check` and `dangling_dns_check`, contract version 3). The hygiene sweep of a target sends its TLS
+  endpoints and the names that may have mail to a Sentinel as one task: the scanner reads each certificate and runs the SPF, DMARC, DKIM, CAA and MailFail
+  checks from its own resolver, and the server evaluates the certificates and stores what comes back as it stores its own reads. The ratings of bbot's
+  dangling-DNS findings (the zone cut walk, the registration check and the control request) run on a Sentinel too, with the server's provider lists sent
+  along. An endpoint, a mail domain or a finding the scanner could not answer is unknown: its open findings stay open and baddns's rating stands. With no
+  scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the target stays due.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.

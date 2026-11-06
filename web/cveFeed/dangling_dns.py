@@ -424,6 +424,56 @@ def _assess_http(host, parsed, net):
     return None
 
 
+def providers_doc():
+    """The provider lists as a ``dangling_dns_check`` task carries them (the contract's ``providers``): this server's one copy, which a Sentinel applies."""
+    with open(DATA_FILE, encoding='utf-8') as handle:
+        data = json.load(handle)
+    return {'cname': [{'service': p['service'], 'suffixes': list(p['suffixes'])} for p in data['cname']],
+            'nameservers': [{'service': p['service'], 'patterns': list(p['patterns'])} for p in data['nameservers']]}
+
+
+def _rating_from(row):
+    """The ``Rating`` of a Sentinel's reported row (``probe_results.clean_dangling_dns_check``), or None when it had no usable answer."""
+    if not isinstance(row, dict) or row.get('state') != 'rated':
+        return None
+    severity = row.get('severity')
+    return Rating(severity=severity if severity in (ICE_SEVERITY, SMOKE_SEVERITY, FIRE_SEVERITY) else None, drop=bool(row.get('drop')),
+                  note=row.get('note') or '', zone=row.get('zone') or '')
+
+
+def assess_all(findings, project=None):
+    """``[rating or None]`` for each of ``findings`` (``assess``'s dicts), in order: the same answer ``assess`` gives each, but the lookups run on a Sentinel
+    when one can take ``dangling_dns_check`` (``agentapi.probe_dispatch``). A finding the Sentinel could not answer, or did not report, is None: baddns's
+    own rating stands, never a drop or a lower severity. With no Sentinel for the kind each finding is assessed here; with none able to take the work and
+    the kind off ``CVENGINE_LOCAL_FALLBACK`` (``ScannerUnavailable``) every finding keeps baddns's rating, and ``rerate_dangling_dns`` rates them later."""
+    findings = list(findings)
+    out = [None] * len(findings)
+    if not findings or not enabled():
+        return out
+    plan = []
+    for index, finding in enumerate(findings):
+        if (finding.get('module') or 'baddns') != 'baddns':
+            continue
+        parsed, host = parse(finding.get('description')), _clean(finding.get('host'))
+        if parsed is not None and host:
+            plan.append((index, {'id': str(index), 'host': host[:260], 'kind': parsed.kind, 'triggers': [t[:260] for t in parsed.triggers[:10]]}))
+    if project is not None and plan:
+        from agentapi import probe_dispatch
+        from reNgine.resources import ScannerUnavailable
+        try:
+            answered = probe_dispatch.try_dangling(project, [check for _i, check in plan], providers_doc())
+        except ScannerUnavailable as exc:
+            logger.info('dangling DNS rating of project %s waits for a scanner: %s', project.pk, exc)
+            return out
+        if answered is not None:
+            for index, check in plan:
+                out[index] = _rating_from(answered.get(check['id']))
+            return out
+    for index, _check in plan:
+        out[index] = assess(findings[index])
+    return out
+
+
 def with_note(description, rating):
     """The stored description: baddns's text, then the check's note (an earlier note is replaced)."""
     text = str(description or '').split(NOTE_MARKER, 1)[0]
