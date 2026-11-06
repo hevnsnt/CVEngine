@@ -1,5 +1,6 @@
 """The probe kinds of contract version 3 (``http_probe``, ``dns_resolve``, ``supplier_check``, and the later kinds): the scope policy the server computes for a task, the validation of what
 a Sentinel reports, and each stage end to end through the fake built-in scanner, served, offline and failed."""
+import datetime
 import json
 import os
 from datetime import timedelta
@@ -12,10 +13,12 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, discovery, domain_ownership, hosting, ledger, probe_scope, probes, route_auth, slow_web, subdir_apps, supplier_scan, vhost_scan
+from cveFeed import bucket_scan, changes, dangling_dns, discovery, domain_ownership, hosting, ledger, probe_scope, probes, route_auth, slow_web, subdir_apps, supplier_scan, vhost_scan
+from cveFeed import hygiene as hy
 from cveFeed.models import (AgentActivity, AssetChange, CVEEntry, DiscoveryEvent, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding,
-                            ServiceRun, SupplierFinding, SupplierHostCard)
-from startScan.models import Port, Subdomain, Technology
+                            ServiceRun, SupplierFinding, SupplierHostCard, TlsCertificate)
+from dashboard.models import Org, Project
+from startScan.models import IpAddress, Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_bucket_scan import Fixture as BucketFixture
@@ -1247,3 +1250,231 @@ class IdentityScopeTests(DispatchBase):
         self.assertEqual(scope['hosts'], ['www.example.test', '203.0.113.9'])
         self.assertEqual(scope['excluded'], ['secret.example.test'])
         self.assertEqual((scope['domains'], scope['excluded_trees']), ([], []))
+
+
+def hygiene_answer(task, expiring=('www.example.test',), findings=None, skip_mail=False, errors=()):
+    """A Sentinel's answer to a ``hygiene_check`` task: a certificate expiring in five days on each endpoint of ``expiring``, nothing speaking TLS elsewhere,
+    and the mail review of every name the task flagged ``always``."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certs = []
+    for t in task['target']['tls']:
+        row = {'host': t['host'], 'port': t['port'], 'found': False}
+        if (t['host'], t['port']) in errors:
+            row['error'] = 'not run: probe failed'
+        elif t['host'] in expiring:
+            row = {**row, 'found': True, 'cert': {'subject': t['host'], 'issuer': 'Example CA', 'sans': [t['host']], 'not_before': (now - datetime.timedelta(days=80)).isoformat(),
+                                                  'not_after': (now + datetime.timedelta(days=5)).isoformat(), 'signature_algorithm': 'sha256 (sha256WithRSAEncryption)',
+                                                  'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'cipher': 'X', 'chain_error': '', 'legacy_tls': False}}
+        certs.append(row)
+    default = [{'check': 'dmarc_none', 'severity': 2, 'title': 'DMARC policy is p=none (monitoring only)', 'detail': 'Spoofed mail is still delivered.',
+                'host': 'example.test', 'evidence': {'record': 'v=DMARC1; p=none'}}]
+    mail = [] if skip_mail else [{'name': m['name'], 'has_mx': True, 'findings': default if findings is None else findings}
+                                 for m in task['target']['mail'] if m.get('always')]
+    return {'outcome': 'done', 'certs': certs, 'mail': mail, 'touched': [t['host'] for t in task['target']['tls']], 'refused': []}
+
+
+class HygieneCheckStageTests(TestCase):
+    """``hygiene.run_hygiene``: the TLS endpoints and the mail names go to the scanner as one ``hygiene_check`` task; the server evaluates the certificates
+    and stores everything, and what the scanner did not answer is unknown: its open findings stay open."""
+
+    def setUp(self):
+        LocalFallback('none').apply(self)
+        now = timezone_now()
+        self.project = Project.objects.create(name='H', slug='hp', insert_date=now, org=Org.objects.create(name='H', slug='h'))
+        self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=now)
+        sub = Subdomain.objects.create(name='www.example.test', target_domain=self.domain)
+        ip = IpAddress.objects.create(address='192.0.2.7')
+        sub.ip_addresses.add(ip)
+        ip.ports.add(Port.objects.create(number=8443))
+        for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True),
+                      mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real'))):
+            patch.start()
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'hygiene_check')
+
+    def open_checks(self):
+        return set(HygieneFinding.objects.filter(domain=self.domain, status='open').values_list('check_name', flat=True))
+
+    def test_the_scanner_reads_the_endpoints_and_the_server_evaluates_and_stores(self):
+        with FakeScanner(kinds=['hygiene_check'], responders={'hygiene_check': hygiene_answer}) as fake:
+            counts = hy.run_hygiene(self.domain.id)
+        self.assertEqual(fake.served_kinds(), ['hygiene_check'])
+        self.assertEqual(self.guard.calls, [])
+        target = fake.served[0]['target']
+        self.assertEqual(sorted((t['host'], t['port']) for t in target['tls']), [('example.test', 443), ('www.example.test', 443), ('www.example.test', 8443)])
+        self.assertEqual(target['mail'], [{'name': 'example.test', 'always': True}, {'name': 'www.example.test', 'always': False}])
+        self.assertIn('mta-sts.example.test', target['scope']['hosts'])
+        self.assertEqual((target['confirm_resolvers'], target['rdap']), ([], True))
+        self.assertEqual(counts['tls_hosts'], 2)
+        self.assertEqual(TlsCertificate.objects.get(host='www.example.test', port=443).days_left, 4)
+        self.assertEqual(self.open_checks(), {'tls_expiring', 'dmarc_none'})  # the certificate rule is the server's; the DMARC finding is the scanner's
+        self.assertTrue(ledger.fresh('hygiene', [self.domain.name], self.project.id))
+
+    def test_with_the_scanner_offline_nothing_is_recorded_and_the_target_stays_due(self):
+        HygieneFinding.objects.create(domain=self.domain, host='example.test', check_name='dmarc_none', severity=2, title='t', status='open')
+        with FakeScanner(kinds=['hygiene_check'], mode='offline') as fake:
+            counts = hy.run_hygiene(self.domain.id)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(self.guard.calls, [])
+        self.assertIn('waiting for a scanner', counts['skipped'])
+        self.assertFalse(TlsCertificate.objects.exists())
+        self.assertEqual(self.open_checks(), {'dmarc_none'})  # not resolved for want of an answer
+        self.assertFalse(ledger.fresh('hygiene', [self.domain.name], self.project.id))
+
+    def test_what_the_scanner_did_not_answer_keeps_its_open_findings_open(self):
+        runs = []
+
+        def answer(task):  # the first run is answered in full; in the second www:443 was not probed (an error) and the apex's mail review is missing
+            runs.append(task)
+            return hygiene_answer(task) if len(runs) == 1 else hygiene_answer(task, expiring=(), skip_mail=True, errors={('www.example.test', 443)})
+        with FakeScanner(kinds=['hygiene_check'], responders={'hygiene_check': answer}):
+            hy.run_hygiene(self.domain.id)
+            self.assertEqual(self.open_checks(), {'tls_expiring', 'dmarc_none'})
+            hy.run_hygiene(self.domain.id)
+        rows = {(r.host, r.check_name): r.status for r in HygieneFinding.objects.filter(domain=self.domain)}
+        self.assertEqual(rows[('www.example.test:443', 'tls_expiring')], 'open')  # unknown, not "fixed"
+        self.assertEqual(rows[('www.example.test:8443', 'tls_expiring')], 'resolved')  # answered: nothing speaks TLS there now
+        self.assertEqual(rows[('example.test', 'dmarc_none')], 'open')  # the review did not come back
+
+    def test_a_finding_of_another_stage_or_out_of_range_is_dropped_before_anything_is_stored(self):
+        odd = [{'check': 'tls_expired', 'severity': 4, 'title': 'x', 'detail': '', 'host': 'example.test:443', 'evidence': {}},
+               {'check': 'bkt_public', 'severity': 4, 'title': 'x', 'detail': '', 'host': 'example.test', 'evidence': {}},
+               {'check': 'spf_allow_all', 'severity': 9, 'title': 'x', 'detail': '', 'host': 'example.test', 'evidence': {}},
+               {'check': 'spf_softfail', 'severity': 1, 'title': 'SPF ends in ~all (soft fail)', 'detail': '', 'host': 'example.test', 'evidence': {}}]
+        with FakeScanner(kinds=['hygiene_check'], responders={'hygiene_check': lambda task: hygiene_answer(task, expiring=(), findings=odd)}):
+            hy.run_hygiene(self.domain.id)
+        self.assertEqual(self.open_checks(), {'spf_softfail'})
+
+    def test_with_no_scanner_for_the_kind_and_the_fallback_allowed_it_runs_here_as_before(self):
+        LocalFallback('all').apply(self)
+        guard = mock.patch('cveFeed.hygiene._resolver', side_effect=RuntimeError('local DNS')).start()
+        out = hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda n, t: False)
+        self.assertEqual(out['tls_hosts'], 0)  # injected helpers keep the sweep here whatever scanners exist
+        guard.assert_not_called()
+
+
+def timezone_now():
+    from django.utils import timezone
+    return timezone.now()
+
+
+class HygieneResultTests(SimpleTestCase):
+    def body(self, **over):
+        return {'certs': [], 'mail': [], 'touched': [], 'refused': [], **over}
+
+    def cert(self, **over):
+        return {'subject': 's', 'issuer': 'i', 'sans': ['a.example.test'], 'not_before': '2026-01-01T00:00:00+00:00', 'not_after': '2026-04-01T00:00:00',
+                'signature_algorithm': 'sha256', 'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'cipher': 'X', 'chain_error': '', 'legacy_tls': False, **over}
+
+    def test_a_certificate_is_clipped_dated_with_a_zone_and_one_without_an_expiry_is_unknown(self):
+        out = probe_results.clean_hygiene_check(self.body(certs=[
+            {'host': 'a.example.test', 'port': 443, 'found': True, 'cert': self.cert(subject='S' * 900)},
+            {'host': 'b.example.test', 'port': 443, 'found': True, 'cert': self.cert(not_after='soon')},
+            {'host': 'c.example.test', 'port': 99999, 'found': False}, {'host': 'd.example.test', 'port': 443, 'found': False, 'error': 'not run: refused'}]))
+        good, bad, _gone, refused = out['certs'][0], out['certs'][1], None, out['certs'][2]
+        self.assertEqual(len(good['cert']['subject']), 500)
+        self.assertEqual(good['cert']['not_after'], '2026-04-01T00:00:00+00:00')
+        self.assertEqual((bad['found'], bad['error']), (False, 'the certificate could not be read'))
+        self.assertEqual((refused['host'], refused['found'], refused['error']), ('d.example.test', False, 'not run: refused'))
+        self.assertEqual(len(out['certs']), 3)  # the row with an impossible port is gone
+
+    def test_mail_findings_keep_only_the_checks_the_review_raises(self):
+        def f(check, severity=1, host='example.test', evidence=None):
+            return {'check': check, 'severity': severity, 'title': 't' * 500, 'detail': 'd', 'host': host, 'evidence': evidence if evidence is not None else {}}
+        out = probe_results.clean_hygiene_check(self.body(mail=[{'name': 'example.test', 'has_mx': True, 'findings': [
+            f('spf_softfail'), f('tls_expired'), f('cleartext_telnet'), f('ts_exposed'), f('DMARC_NONE'), f('dmarc_none', severity=5), f('dmarc_none', severity=True),
+            f('dmarc_none', host='bad host'), f('dkim_weak_key', evidence={'bits': 512}), f('mx_direct_send', evidence={'x': 'y' * 40000})]}]))
+        kept = out['mail'][0]['findings']
+        self.assertEqual([x['check'] for x in kept], ['spf_softfail', 'dkim_weak_key', 'mx_direct_send'])
+        self.assertEqual(len(kept[0]['title']), 300)
+        self.assertEqual((kept[1]['evidence'], kept[2]['evidence']), ({'bits': 512}, {}))  # oversize evidence is dropped
+
+    def test_a_result_past_its_bounds_is_refused_and_rows_the_task_did_not_ask_for_are_dropped(self):
+        with self.assertRaises(ApiError):
+            probe_results.clean_hygiene_check(self.body(certs=[{'host': 'a', 'port': 443, 'found': False}] * 301))
+        task = mock.Mock(target={'tls': [{'host': 'A.example.test', 'port': 443}], 'mail': [{'name': 'example.test', 'always': True}]})
+        got = probe_results.clean_hygiene_check(self.body(
+            certs=[{'host': 'a.example.test', 'port': 443, 'found': False}, {'host': 'a.example.test', 'port': 8443, 'found': False}, {'host': 'other.test', 'port': 443, 'found': False}],
+            mail=[{'name': 'example.test', 'has_mx': True, 'findings': []}, {'name': 'other.test', 'has_mx': True, 'findings': []}]))
+        bound = probe_results.bind('hygiene_check', got, task)
+        self.assertEqual(([(c['host'], c['port']) for c in bound['certs']], [m['name'] for m in bound['mail']], bound['dropped']),
+                         ([('a.example.test', 443)], ['example.test'], 3))
+
+
+class HygieneScopeTests(TestCase):
+    def test_the_policy_lists_the_endpoints_and_each_names_mta_sts_host_and_keeps_an_excluded_one_out(self):
+        project = Project.objects.create(name='S', slug='sp', insert_date=timezone_now(), org=Org.objects.create(name='S', slug='s'))
+        HostExclusion.objects.create(org=project.org, host='skip.example.test')
+        scope = probe_scope.for_hygiene(project.pk, [('www.example.test', 443), ('skip.example.test', 443)], ['example.test', 'skip.example.test'])
+        self.assertEqual(scope['hosts'], ['www.example.test', 'mta-sts.example.test', 'mta-sts.skip.example.test'])  # the name itself is not excluded, its mta-sts host is not either
+        self.assertEqual((scope['domains'], scope['excluded'], scope['private']), ([], ['skip.example.test'], False))
+        listed = probe_scope.for_dangling(project.pk, ['a.example.test', 'skip.example.test', 'A.example.test.'])
+        self.assertEqual((listed['hosts'], listed['excluded']), (['a.example.test'], ['skip.example.test']))
+
+
+class DanglingDnsCheckTests(TestCase):
+    NX = ('Dangling CNAME, possible subdomain takeover (NXDOMAIN technique). Confidence: [MEDIUM] Signature: [GENERIC] Indicator: [Generic Dangling CNAME] '
+          'Trigger: [app.example.test, gone.example.net] baddns Module: [CNAME]')
+    NS = ('Dangling NS Records (NS records without SOA) with known impact. Confidence: [LOW] Signature: [GENERIC] Indicator: [DNSWalk Analysis] '
+          'Trigger: [ns-cloud-c1.googledomains.com] baddns Module: [NS]')
+
+    def setUp(self):
+        LocalFallback('none').apply(self)
+        self.project = Project.objects.create(name='D', slug='dp', insert_date=timezone_now(), org=Org.objects.create(name='D', slug='d'))
+        self.findings = [{'host': 'app.example.test', 'description': self.NX, 'module': 'baddns'},
+                         {'host': 'old.example.test', 'description': self.NS, 'module': 'baddns'},
+                         {'host': 'x.example.test', 'description': 'No DMARC record found', 'module': 'baddns'}]
+        for patch in (mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True), mock.patch('time.sleep')):
+            patch.start()
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'dangling_dns_check')
+
+    def answer(self, task):
+        rows = {'0': {'id': '0', 'state': 'rated', 'severity': 1, 'drop': False, 'note': 'gone.example.net does not resolve: stale', 'zone': ''},
+                '1': {'id': '1', 'state': 'unknown'}}
+        return {'outcome': 'done', 'ratings': [rows[c['id']] for c in task['target']['checks']], 'touched': [], 'refused': []}
+
+    def test_the_scanner_rates_the_findings_and_one_it_could_not_answer_keeps_baddns_rating(self):
+        with FakeScanner(kinds=['dangling_dns_check'], responders={'dangling_dns_check': self.answer}) as fake:
+            got = dangling_dns.assess_all(self.findings, project=self.project)
+        self.assertEqual(fake.served_kinds(), ['dangling_dns_check'])
+        self.assertEqual(self.guard.calls, [])
+        target = fake.served[0]['target']
+        self.assertEqual([(c['id'], c['host'], c['kind'], c['triggers']) for c in target['checks']],
+                         [('0', 'app.example.test', 'cname_nxdomain', ['app.example.test', 'gone.example.net']),
+                          ('1', 'old.example.test', 'ns', ['ns-cloud-c1.googledomains.com'])])  # a finding this does not rate is never sent
+        self.assertEqual(target['providers'], dangling_dns.providers_doc())  # the server's own lists travel with the task
+        self.assertEqual(target['scope']['hosts'], ['app.example.test', 'old.example.test'])
+        self.assertEqual((got[0].severity, got[0].drop, got[0].note), (1, False, 'gone.example.net does not resolve: stale'))
+        self.assertEqual((got[1], got[2]), (None, None))
+
+    def test_a_dropped_rating_comes_back_as_a_drop_and_a_bad_severity_as_keep(self):
+        rows = [{'id': '0', 'state': 'rated', 'severity': None, 'drop': True, 'note': 'a CNAME into a provider', 'zone': 'app.example.test'}]
+        with FakeScanner(kinds=['dangling_dns_check'], responders={'dangling_dns_check': lambda task: {'outcome': 'done', 'ratings': rows, 'touched': [], 'refused': []}}):
+            got = dangling_dns.assess_all(self.findings[:1], project=self.project)
+        self.assertTrue(got[0].drop)
+        self.assertEqual(dangling_dns._rating_from({'state': 'rated', 'severity': 7, 'drop': False}).severity, None)
+        self.assertIsNone(dangling_dns._rating_from({'state': 'unknown'}))
+
+    def test_with_the_scanner_offline_every_finding_keeps_baddns_rating_and_nothing_runs_here(self):
+        with FakeScanner(kinds=['dangling_dns_check'], mode='offline') as fake:
+            got = dangling_dns.assess_all(self.findings, project=self.project)
+        self.assertEqual((fake.served, got, self.guard.calls), ([], [None, None, None], []))
+
+    def test_an_excluded_host_is_not_sent_and_a_rating_for_a_check_never_asked_is_ignored(self):
+        HostExclusion.objects.create(org=self.project.org, host='old.example.test')
+        extra = lambda task: {'outcome': 'done', 'touched': [], 'refused': [], 'ratings': [  # noqa: E731
+            {'id': '0', 'state': 'rated', 'severity': 1, 'drop': False, 'note': 'n', 'zone': ''}, {'id': '1', 'state': 'rated', 'severity': 3, 'drop': True, 'note': 'n', 'zone': ''}]}
+        with FakeScanner(kinds=['dangling_dns_check'], responders={'dangling_dns_check': extra}) as fake:
+            got = dangling_dns.assess_all(self.findings, project=self.project)
+        target = fake.served[0]['target']
+        self.assertEqual([c['host'] for c in target['checks']], ['app.example.test'])  # the excluded host is never sent
+        self.assertIn('old.example.test', target['scope']['excluded'])
+        self.assertEqual((got[0].severity, got[1]), (1, None))
+
+    def test_without_a_project_or_a_scanner_the_findings_are_assessed_here_as_before(self):
+        LocalFallback('all').apply(self)
+        with mock.patch.object(dangling_dns, 'assess', side_effect=lambda f, net=None: dangling_dns.Rating(note=f['host'])) as local:
+            got = dangling_dns.assess_all(self.findings, project=self.project)
+        self.assertEqual([r.note if r else None for r in got], ['app.example.test', 'old.example.test', None])
+        self.assertEqual(local.call_count, 2)

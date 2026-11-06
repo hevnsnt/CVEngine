@@ -729,6 +729,8 @@ def task_hosts(task):
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
         if isinstance(check, dict):
             raw += [v for v in (check.get('host'), check.get('ip')) if isinstance(v, str)]
+    raw += [t['host'] for t in target.get('tls') or [] if isinstance(t, dict) and isinstance(t.get('host'), str)]  # a hygiene_check batch: its TLS endpoints and mail names
+    raw += [m['name'] for m in target.get('mail') or [] if isinstance(m, dict) and isinstance(m.get('name'), str)]
     names, ips = [], []
     for value in raw:
         if not isinstance(value, str) or not value.strip():
@@ -2292,6 +2294,7 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
+             'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
              'identity_check': probe_results.clean_identity_check}
 
 
@@ -2302,7 +2305,8 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
-    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'route_probe', 'identity_check'):
+    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
+                                       'dangling_dns_check', 'route_probe', 'identity_check'):
         return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result
