@@ -1,0 +1,51 @@
+{
+  "checks": [
+    {
+      "id": "0",
+      "host": "app.example.com",
+      "kind": "cname_nxdomain",
+      "triggers": [
+        "app.example.com",
+        "gone.example.net"
+      ]
+    },
+    {
+      "id": "1",
+      "host": "old.example.com",
+      "kind": "ns",
+      "triggers": [
+        "old.example.com"
+      ]
+    }
+  ],
+  "providers": {
+    "cname": [
+      {
+        "service": "Example Cloud",
+        "suffixes": [
+          "cloud.example.net"
+        ]
+      }
+    ],
+    "nameservers": [
+      {
+        "service": "Example DNS",
+        "patterns": [
+          "^ns-\\d+\\.dns\\.example\\.net$"
+        ]
+      }
+    ]
+  },
+  "scope": {
+    "hosts": [
+      "app.example.com",
+      "old.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}
