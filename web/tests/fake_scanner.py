@@ -389,7 +389,7 @@ LOCAL_RUNNERS = {
     'nuclei_deep': ('cveFeed.nuclei_scan.stream_nuclei',),
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
-    'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),

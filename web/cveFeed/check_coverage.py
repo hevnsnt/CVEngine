@@ -1,13 +1,13 @@
 """Check coverage: which of the checks that apply to a host have run, and which are due.
 
-There are many checks now (port discovery, nuclei passes, WPScan, the TLS audit, the slow web sweeps, ...) and no single place said what had
+There are many checks now (port discovery, nuclei passes, the WordPress scan, the TLS audit, the slow web sweeps, ...) and no single place said what had
 run on a host. This module is that place. It is internal accounting: it reads what the checks already recorded and never runs, queues or
 changes anything.
 
 One registry (``CHECKS``) lists each check once: its id and label, the facts that make it apply to a host (open ports and services,
 technologies, whether the host is web, whether its project is bug bounty blocked, whether the feature switch is on), where its last run
 is recorded, and how long that run stays fresh. Only checks that apply are counted: a host with no TLS port is not counted against the TLS
-audit, a host that does not show WordPress is not counted against WPScan, a UDP sweep counts only the addresses it would scan.
+audit, a host that does not show WordPress is not counted against the WordPress scan, a UDP sweep counts only the addresses it would scan.
 
 States, per check and host:
 
@@ -584,17 +584,6 @@ def plan_wpscan(h, ev):
     return _one(h, ev, ('wpscan', 'wpscan-partial'))
 
 
-def plan_wpscan_thorough(h, ev):
-    if h.project_id in ev.blocked:
-        return BOUNTY_REASON
-    state = _wordpress(h)
-    if state is None or state['state'] == 'not_wordpress':
-        return 'no sign of WordPress'
-    if state['state'] != 'scanned':
-        return 'it follows the quick WPScan pass, which has not scanned this site yet'
-    return _one(h, ev, ('wpscan-thorough', 'wpscan-thorough-partial'))
-
-
 def plan_node2shell(h, ev):
     from cveFeed import node2shell_scan
     if not node2shell_scan.enabled():
@@ -793,7 +782,7 @@ def plan_internal_wpscan(h, ev):
     if state is None and not any(t.lower().startswith('wordpress') for t in h.techs):
         return 'no sign of WordPress'
     if state is not None and state['state'] == 'not_wordpress':
-        return 'WPScan found no WordPress'
+        return 'the WordPress scan found no WordPress'
     return _one(h, ev, ('wpscan', 'wpscan-partial'))
 
 
@@ -832,8 +821,7 @@ CHECKS = (
     Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
     Check('wp-detect', 'WordPress detection probe', plan_wp_probe, kinds=('wp-probe',)),
-    Check('wpscan', 'WPScan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
-    Check('wpscan-thorough', 'WPScan (thorough pass)', plan_wpscan_thorough, kinds=('wpscan-thorough', 'wpscan-thorough-partial')),
+    Check('wpscan', 'WordPress scan', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
     Check('node2shell', 'node2shell check (CVE-2026-111497)', plan_node2shell, kinds=('node2shell',), stages=('node2shell',)),
     Check('vhost', 'Other sites on the host\'s addresses', plan_vhost, kinds=('vhost', 'vhost-ip'), sweeps=('vhost',), ttl_kind='vhost'),
     Check('subapps', 'Applications under subdirectories', plan_subapps, kinds=('subapp',), sweeps=('subapp',)),
@@ -877,7 +865,7 @@ EXCLUDED = {
         'asset_changes': 'the change log of the scan, bookkeeping only',
         'web_screenshot': 'queues the web screenshots of the scan\'s hosts for the screenshot worker (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
         'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
-        'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
+        'internal_wpscan': 'the WordPress scan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
         'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',
     },
 }

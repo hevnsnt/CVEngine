@@ -9,8 +9,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import bounty_gate, conductor, discovery, openvas_scan, testssl_scan, web_shot, wpscan_scan
-from cveFeed.models import HostScreenshot, ProbeObservation
+from cveFeed import bounty_gate, conductor, discovery, openvas_scan, testssl_scan, web_shot
+from cveFeed.models import HostScreenshot
 from dashboard.models import Org, Project
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
@@ -58,10 +58,6 @@ def testssl_targets(self, w):
     return any(t[0] == w.host for t in testssl_scan.targets(w.project.id))
 
 
-def thorough_state(self, w):
-    return wpscan_scan._latest_row(w.project.id, w.host) is not None
-
-
 # name, function: each returns True when it started work on the host
 ENTRY_POINTS = [
     ('work conductor', conductor_round),
@@ -71,7 +67,6 @@ ENTRY_POINTS = [
     ('retest of changed hosts', gate_tests.retest_hosts_task),
     ('full TCP port sweep', gate_tests.full_port_sweep),
     ('weekly deep nuclei', gate_tests.weekly_deep_nuclei),
-    ('thorough WPScan', gate_tests.thorough_wpscan),
     ('discovery pipeline of a scan the system queued', discovery_pipeline),
     ('hygiene sweep', gate_tests.hygiene_sweep),
     ('OpenVAS automatic selection', openvas_automatic),
@@ -138,18 +133,6 @@ class APersonsRequestStillReachesTheHost(PlainWorld):
         w = self.plain(MANUAL)
         _, verdicts = openvas_scan.assess(w.project.id, [w.host], gate=False, resolve=lambda host, project: PUBLIC_IP, blocked=lambda host: False)
         self.assertIn('manual only', verdicts[w.host]['reason'])
-
-    def test_a_thorough_wpscan_waiting_for_a_target_made_manual_only_is_failed_not_run(self):
-        w = self.plain(STANDARD)
-        wpscan_scan.record_thorough(w.project.id, w.domain.id, w.host, 'pending', 'queued')
-        Domain.objects.filter(pk=w.domain.pk).update(discovery_mode=MANUAL)
-        runner = mock.Mock(side_effect=AssertionError('WPScan must not run'))
-        summary = wpscan_scan.run_thorough(w.project.id, runner=runner, sleep=lambda s: None, probe_get=mock.Mock())
-        runner.assert_not_called()
-        self.assertEqual(summary['failed'], 1)
-        row = ProbeObservation.objects.get(project=w.project, host=w.host, probe=wpscan_scan.THOROUGH_PROBE)
-        self.assertEqual(row.variant, 'failed')
-        self.assertIn('manual only', row.evidence.get('reason', '') + str(row.evidence))
 
 
 class VirtualHostSweepTests(test_vhost_scan.VhostFixture, TestCase):
@@ -269,15 +252,13 @@ class SharedHostTests(PlainWorld):
         self.assertEqual(ready, [])
         self.assertIn('manual only', verdicts[self.HOST]['reason'])
 
-    def test_the_tls_audit_and_wpscan_use_the_row_of_the_target_that_may_be_scanned(self):
+    def test_the_tls_audit_uses_the_row_of_the_target_that_may_be_scanned(self):
         w = self.shared()
         self.assertEqual(testssl_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
-        self.assertEqual(wpscan_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
         with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)):
             self.assertEqual({t[0] for t in testssl_scan.targets(w.project.id)}, {self.HOST})
             Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
             self.assertEqual(testssl_scan.targets(w.project.id), [])
-        self.assertIsNone(wpscan_scan._latest_row(w.project.id, self.HOST))
 
     def test_an_automatic_assessment_of_the_manual_only_row_goes_to_the_standard_target(self):
         from cveFeed.host_assessment import _admit

@@ -58,7 +58,10 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
-NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+NEVER_LOCAL = (  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+    'secrets_scan',
+    'wpscan',
+)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
 # here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
@@ -534,7 +537,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
 
     ``redact_target``, when given, is called with ``target`` once the task reaches a terminal state (done, failed or
     expired) and its return value replaces the stored ``target`` in the database - for a kind whose target carries a
-    secret the Sentinel needed only for this one run (today, only WPScan's API token), so the secret does not sit in
+    secret the Sentinel needed only for this one run (today, only the WordPress scan's API token), so the secret does not sit in
     the database for the rest of the task's retention window once nothing needs it there any more.
 
     ``outcome``, when given, is a dict that is told why a ``None`` came back: ``outcome['no_scanner']`` is True when no live, eligible Sentinel
@@ -1340,10 +1343,10 @@ def signed_in_stream(scan, kind, timeout=None):
     return run
 
 
-# --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
+# --- WordPress scan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
 
 def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
-    """Inside a StageRun, send the WPScan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
+    """Inside a StageRun, send the WordPress scan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
     the runner of ``wrap_wpscan_runner`` gives each, so the loop finds every report in one pass. Outside a StageRun it does nothing."""
     from urllib.parse import urlsplit
     items = []
@@ -1357,38 +1360,33 @@ def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
 
 
 def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
-    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,
-    unwrapped ``run_wpscan_process`` when no Sentinel is eligible (so ``runner is run_wpscan_process`` identity checks,
-    and every other local behaviour, are unaffected). The project's WPScan API token travels with the dispatched task -
-    the same blast radius it already has today, since it already leaves this process into a subprocess's environment -
-    for this one run only: ``dispatch_or_none``'s ``redact_target`` scrubs it from the stored task once the task is
-    done, failed or expired, so it never sits in the database beyond that. A Sentinel's reported outcome is classified
-    by the exact same ``cveFeed.wpscan_scan._classify`` a local run's own exit code and report go through, so a
-    dispatched site ends up ``NotWordPress``/``Blocked``/a normal report exactly as a local one would."""
-    from cveFeed.wpscan_scan import run_wpscan_process
-    if internal:  # a site inside a declared internal network: only a Sentinel inside it may run WPScan, and there is no local fallback
+    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter. The kind is in ``NEVER_LOCAL``: it runs on a
+    Sentinel or not at all, so with no scanner able to take it this raises ``resources.ScannerUnavailable`` (the stage waits and the sites stay due).
+    The project's vulnerability API token travels with the dispatched task for this one run only: ``dispatch_or_none``'s ``redact_target`` scrubs it
+    from the stored task once the task is done, failed or expired, so it never sits in the database beyond that. A Sentinel's reported outcome is
+    classified by ``cveFeed.wpscan_scan._classify``, so a dispatched site ends up ``NotWordPress``/``Blocked``/a normal report."""
+    from cveFeed.wpscan_scan import _classify
+
+    def redact(target):
+        return {**target, 'token': '***'} if target.get('token') else target
+    if internal:  # a site inside a declared internal network: only a Sentinel inside it may scan it
         from urllib.parse import urlsplit
 
         def internal_runner(url, token):
-            from cveFeed.wpscan_scan import _classify
             host = urlsplit(url).hostname or ''
             result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, host=host, ips=[host], scan=scan, timeout=timeout,
-                                      internal=True, redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+                                      internal=True, redact_target=redact)
             if result is None:
-                raise RuntimeError('no Sentinel inside the network ran WPScan (one must declare network:internal and wpscan and cover this project)')
+                raise RuntimeError('no Sentinel inside the network ran the WordPress scan (one must declare network:internal and wpscan and cover this project)')
             return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
-        _no_scanner('wpscan', project)
-        offline_fallback(project, 'wpscan')
-        return run_wpscan_process
+        _no_scanner('wpscan', project)  # NEVER_LOCAL: raises ScannerUnavailable
 
     def runner(url, token):
-        from cveFeed.wpscan_scan import _classify
-        result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout,
-                                  redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
-        if result is None:
-            return run_wpscan_process(url, token)
+        result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout, redact_target=redact)
+        if result is None:  # the task was not finished and the kind may not run here (dispatch_or_none raised already): nothing was read
+            raise RuntimeError('no Sentinel finished the WordPress scan')
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
     return runner
 

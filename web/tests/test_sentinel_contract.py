@@ -366,6 +366,8 @@ class RealTargetBuilderTests(SimpleTestCase):
             self.assertEqual(list(target_validator(kind).iter_errors(target)), [], (kind, target))
 
     def test_the_wpscan_target(self):
-        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', return_value={}):
-            seen = self.captured(lambda: broker_dispatch.wrap_wpscan_runner(mock.Mock(), mock.Mock())('https://example.com/', 'example-token'))
+        def run():
+            with self.assertRaises(RuntimeError):  # the stub answers nothing: the server never runs the scan itself, so nothing was read
+                broker_dispatch.wrap_wpscan_runner(mock.Mock(), mock.Mock())('https://example.com/', 'example-token')
+        seen = self.captured(run)
         self.check(seen, ['wpscan'])

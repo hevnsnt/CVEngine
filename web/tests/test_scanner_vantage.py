@@ -82,7 +82,7 @@ class VantageWarningTests(VantageBase):
         os.environ.pop(ENV, None)
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan to the built-in scanner', out[0])
+        self.assertIn('moves nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp to the built-in scanner', out[0])
 
     def test_an_image_that_applies_them_or_no_builtin_scanner_is_quiet(self):
         os.environ[ENV] = 'none'
@@ -109,7 +109,7 @@ class VantageWarningTests(VantageBase):
         self.proxy_on()
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, waf, bbot_discovery, http_probe, "
+        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, waf, bbot_discovery, http_probe, "
                                  "bucket_check, vhost_probe, subdir_probe, alive_check, nuclei_validate to the built-in scanner, whose image "
                                  "does not use this server's egress proxy; update it (the server's updater pulls the image this release pins).")
 
@@ -135,7 +135,7 @@ class VantageWarningTests(VantageBase):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
                       'bucket_check, vhost_probe, subdir_probe, alive_check, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
@@ -155,12 +155,12 @@ class VantageWarningTests(VantageBase):
         self.assertIn('moves testssl to the built-in scanner, whose image does not use the private Tailscale addresses', out[0])
 
     def test_private_targets_allowed_warns(self):
-        os.environ[ENV] = all_but('wpscan')
+        os.environ[ENV] = all_but('testssl')
         for value in ('1', 'true', 'YES'):
             os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = value
             out = scanner_state.vantage_warnings()
             self.assertEqual(len(out), 1, value)
-            self.assertIn('moves wpscan to the built-in scanner, whose image does not use the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)', out[0])
+            self.assertIn('moves testssl to the built-in scanner, whose image does not use the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)', out[0])
         for value in ('0', '', 'no'):
             os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = value
             self.assertEqual(scanner_state.vantage_warnings(), [], value)

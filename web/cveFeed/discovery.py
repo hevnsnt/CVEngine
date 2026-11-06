@@ -938,7 +938,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         wp_kwargs['probe_get'] = probe_get
     if retest or force:
         wp_kwargs['force'] = True
-    wpscan_result = _stage(scan, 'WordPress detection and WPScan', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
+    wpscan_result = _stage(scan, 'WordPress detection and scan', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),
                            fallback={'sites': 0})  # every host with any sign of WordPress, and the names grouped with it
     if stopped(scan_id):
         return gone

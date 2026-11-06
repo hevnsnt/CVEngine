@@ -26,6 +26,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
   clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
 
+- **The WordPress scan no longer runs on the server** (T8, kind `wpscan`). The local runner, its argument builder, its environment and resource-gate wiring, the
+  installed-binary check and the hours-long thorough pass (`wpscan_thorough`, which could not be handed to a Sentinel) are deleted from
+  `cveFeed/wpscan_scan.py`; `wpscan` joins `sentinel_dispatch.NEVER_LOCAL`, so whatever `CVENGINE_LOCAL_FALLBACK` says it runs on a Sentinel or the
+  sites wait and stay due. What stays is what the server does with a Sentinel's report: the candidate probe, classifying the reported outcome,
+  storing findings and versioned sightings, and the per-host state.
+
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.
   - **Operations check** (Haiku 5.5 by default). It runs four times a day and covers idle Sentinels, scanning that ran on the server instead of the Sentinels, nuclei template freshness, Sentinel and scan failures, the server's own problems, AI-written templates waiting for review, and failing AI calls. Problems become admin alerts, a banner for App Admins; the server raises and resolves them every 30 minutes even without an AI. The reviewer adds a diagnosis to each alert and may give idle Sentinels work or fetch new nuclei templates, only when a check offers that.

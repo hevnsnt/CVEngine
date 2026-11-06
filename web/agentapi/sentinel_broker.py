@@ -705,8 +705,8 @@ def _bare(host):
 
 def task_hosts(task):
     """``(names, ips)`` a task acts on: its own host and addresses plus whatever its target names (nmap/naabu addresses, nuclei targets, a
-    WPScan url, a testssl host, an nmap -sU address, an OpenVAS host map). What the Sentinel's ``scope.hosts`` and the internal-network rule
-    are matched against: a task that names its addresses only inside ``target`` (every nuclei task, an external WPScan task) is no exception."""
+    WordPress scan url, a testssl host, an nmap -sU address, an OpenVAS host map). What the Sentinel's ``scope.hosts`` and the internal-network rule
+    are matched against: a task that names its addresses only inside ``target`` (every nuclei task, an external WordPress scan task) is no exception."""
     from urllib.parse import urlsplit
     target = task.target if isinstance(task.target, dict) else {}
     raw = [h.strip() for h in (task.host or '').split(',')] + list(task.ips or [])
@@ -1293,7 +1293,7 @@ def _target(task):
 
 
 def _scrubbed(task):
-    """``{'target': ...}`` to store with a task that is over, with the one secret a target carries (a WPScan API token, needed only for the run)
+    """``{'target': ...}`` to store with a task that is over, with the one secret a target carries (a vulnerability API token, needed only for the run)
     replaced; empty when there is nothing to scrub. The dispatcher scrubs it too once its wait ends, but a worker that died in between, or a task
     cancelled, released or expired by the reaper, must not leave the token in the row until the retention sweep."""
     target = task.target if isinstance(task.target, dict) else {}
@@ -2011,17 +2011,15 @@ def _clean_nmap_udp_result(body):
     return {'xml': xml}
 
 
-MAX_WPSCAN_REPORT_BYTES = 8 * 1024 * 1024  # matches cveFeed.wpscan_scan.MAX_OUTPUT: a local run's own report is bounded the same way
+MAX_WPSCAN_REPORT_BYTES = 8 * 1024 * 1024  # a WordPress scan report is bounded here, whatever a Sentinel sends
 
 
 def _clean_wpscan_result(body):
-    """A Sentinel's WPScan run: its raw JSON report (or ``None`` for a run that wrote nothing), the process's exit code
-    and a trailing line of stderr - exactly what ``cveFeed.wpscan_scan._classify`` already reads from a local run, the
-    one function, local or dispatched, that turns a wpscan process's outcome into a report or a classified failure (not
-    WordPress, blocked by an edge, or another error). WPScan's own report routinely carries text from the scanned site
-    (plugin names, readme excerpts); that is exactly as untrusted dispatched as it already is from a local run, and the
-    same storage-time clipping (``cveFeed.wpscan_scan.persist_report`` and the functions beside it) absorbs it either
-    way - only the overall size is bounded here."""
+    """A Sentinel's WordPress scan: its raw JSON report (or ``None`` for a run that wrote nothing), the process's exit code
+    and a trailing line of stderr - what ``cveFeed.wpscan_scan._classify`` reads, the one function that turns the outcome
+    into a report or a classified failure (not WordPress, blocked by an edge, or another error). The report routinely
+    carries text from the scanned site (plugin names, readme excerpts): it is untrusted, and the storage-time clipping
+    (``cveFeed.wpscan_scan.persist_report`` and the functions beside it) absorbs it - only the overall size is bounded here."""
     report = body.get('report')
     if report is not None:
         if not isinstance(report, dict):

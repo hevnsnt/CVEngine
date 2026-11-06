@@ -978,16 +978,11 @@ const technologyTable = (h) => {
   }
   return box;
 };
-// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
+// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions the WordPress scan read.
 const WP_STATE_LABELS = {
-  scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
-  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting for the next scan", queued: "Queued, WPScan runs on it in the background", unavailable: "WPScan not available",
+  scanned: "Scanned", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
+  blocked: "Blocked by the edge", failed: "Scan failed", waiting: "Waiting for the next scan", queued: "Queued, the scan runs on it in the background", unavailable: "Scan not available",
   not_wordpress: "Not WordPress",
-};
-// The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
-const WP_THOROUGH_LABELS = {
-  pending: "Thorough pass queued (takes hours, runs in the background)", running: "Thorough pass running (takes hours)", done: "Thorough pass finished",
-  partial: "Thorough pass stopped early, what it read is kept", blocked: "Thorough pass blocked by the edge", failed: "Thorough pass failed",
 };
 const wordpressCard = (h) => {
   const wp = h.wordpress;
@@ -999,14 +994,10 @@ const wordpressCard = (h) => {
   if (st.reason) rows.push({ label: "Why", value: st.reason });
   if (st.detected_how) rows.push({ label: "Detected by", value: st.detected_how });
   if (wp.core) rows.push({ label: "Core version", value: wp.core });
-  if (st.scanned_at) rows.push({ label: "WPScan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
+  if (st.scanned_at) rows.push({ label: "Scan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
   if (st.vulnerability_data) rows.push({ label: "Vulnerability data", value: st.vulnerability_data });
   if (st.next_scan) rows.push({ label: "Next scan", value: st.next_scan });
   if (st.hint) rows.push({ label: "What to do", value: st.hint });
-  if (st.thorough) {
-    rows.push({ label: "Thorough pass", value: WP_THOROUGH_LABELS[st.thorough.state] || st.thorough.state });
-    if (st.thorough.reason) rows.push({ label: "Thorough pass note", value: st.thorough.reason });
-  }
   box.append(kvBox(rows));
   const list = (title, items, withLatest) => {
     if (!items.length) return;

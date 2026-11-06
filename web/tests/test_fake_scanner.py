@@ -571,7 +571,7 @@ class UdpServedTests(StageBase, UdpBase):
 
 
 class WpscanServedTests(StageBase, RouteFixture, TestCase):
-    """The WPScan stage: ``wpscan_scan.run_wpscan`` builds its own runner with ``wrap_wpscan_runner``."""
+    """The WordPress scan stage: ``wpscan_scan.run_wpscan`` builds its own runner with ``wrap_wpscan_runner``."""
 
     def setUp(self):
         super().setUp()
@@ -579,8 +579,7 @@ class WpscanServedTests(StageBase, RouteFixture, TestCase):
         wp = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
         wp.technologies.add(Technology.objects.create(name='WordPress'))
         LocalFallback('none').apply(self)
-        for target in ('cveFeed.wpscan_scan.queue_quick', 'cveFeed.wpscan_scan.queue_thorough'):  # the retry and thorough jobs would go to the real broker
-            mock.patch(target, return_value=[] if target.endswith('quick') else 0).start()
+        mock.patch('cveFeed.wpscan_scan.queue_quick', return_value=[]).start()  # the retry job would go to the real broker
 
     def go(self):
         return wpscan_scan.run_wpscan(self.scan_obj.id, probe_get=lambda url: {
@@ -598,7 +597,7 @@ class WpscanServedTests(StageBase, RouteFixture, TestCase):
         self.assertNotIn('error', out)
         self.assertEqual((out['sites'], out['scanned']), (1, 1))
         state = self.state()
-        self.assertEqual((state['state'], state['core']), ('scanned', '6.5'))  # the fixture's WordPress version, through the local classifier
+        self.assertEqual((state['state'], state['core']), ('scanned', '6.5'))  # the fixture's WordPress version, through the classifier
         self.assertEqual(list(ServiceRun.objects.filter(service=wpscan_scan.SERVICE).values_list('asset', 'status')), [('www.rt.test', 'done')])
         self.assertEqual(fake.served[0]['target']['url'], 'https://www.rt.test')
 

@@ -149,15 +149,6 @@ def deep_apex_sweep(self, w):
     return started.called or Domain.objects.count() != before
 
 
-def thorough_wpscan(self, w):
-    from cveFeed import wpscan_scan
-    wpscan_scan.record_thorough(w.project.id, w.domain.id, w.host, 'pending', 'queued')
-    runner = mock.Mock(side_effect=ValueError('not running WordPress'))
-    with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-        wpscan_scan.run_thorough(w.project.id, runner=runner, sleep=lambda s: None, probe_get=mock.Mock())
-    return runner.called
-
-
 def openvas_assess(self, w):
     from cveFeed import openvas_scan
     ready, _verdicts = openvas_scan.assess(w.project.id, [w.host], forced={w.host}, resolve=lambda host, project: PUBLIC_IP, blocked=lambda host: False)
@@ -235,7 +226,6 @@ ENTRY_POINTS = [
     ('full TCP port sweep', full_port_sweep, True, True, True),
     ('weekly deep nuclei', weekly_deep_nuclei, True, True, True),
     ('deep apex discovery', deep_apex_sweep, True, False, False),  # never touches a bug bounty project at all: it would widen the scope
-    ('thorough WPScan', thorough_wpscan, True, True, True),
     ('OpenVAS', openvas_assess, True, True, True),
     ('discovery pipeline', discovery_pipeline, True, True, True),
     ('template tests', template_tests, True, False, True),

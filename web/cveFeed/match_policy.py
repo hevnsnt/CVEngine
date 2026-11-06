@@ -112,7 +112,7 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
       * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
 
     Everything else is *version-only* (for triage: an AI verdict on it stays needs validation): a version read by nmap or a banner, by
-    technology detection (a script name, a page generator), by WPScan, an OpenVAS test below its quality bar, a template that matched a version
+    technology detection (a script name, a page generator), by the WordPress scan, an OpenVAS test below its quality bar, a template that matched a version
     string, or a CVE's version range read against any of those. An AI verdict is not evidence
     (text never confirms), and a version re-read by another tool is the same evidence again."""
     return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
@@ -260,7 +260,7 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
 
     Never proof: a version from a script's file name, CDN path or ``?ver=`` query (``version_source`` filename, 0.4), a copy a later one
     replaces, a fallback or a copy of an unresolved set (their caps, 0.4 and 0.5, are below the bar), a library version another tool read
-    (``version_source`` other), technology detection (Wappalyzer, httpx, a page generator, a header), WPScan, an OpenVAS test below its
+    (``version_source`` other), technology detection (Wappalyzer, httpx, a page generator, a header), the WordPress scan, an OpenVAS test below its
     quality bar, a version inherited from another host or a redirect (correlation records none of those as a file or probe reading), a
     nmap row from before the method was kept, and an AI verdict. To tighten it, drop a clause here (and in ``version_read_from_component_q``):
     the heat, lists, counts, scores, alerts and API all follow."""

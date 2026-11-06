@@ -1,7 +1,7 @@
 """Run an external scanner under the resource gate (``reNgine.resources.heavy_job``), as nmap, naabu and nuclei already do.
 
 ``subprocess.run(timeout=)`` kills only the direct child, knows nothing of a global pause, a stopped scan or memory pressure, and
-leaves the child's own children (testssl.sh's openssl, WPScan's ruby workers) behind. ``run`` starts the tool in its own session, hands it
+leaves the child's own children (testssl.sh's openssl) behind. ``run`` starts the tool in its own session, hands it
 to the gate so a pause, a stop or a low-memory kill reaches the whole process group, and on a timeout stops the group, not just the
 leader. It raises what the gate raises (``ScanAborted``, ``MemoryBusy``, ``MemoryKill``) and ``subprocess.TimeoutExpired``.
 """

@@ -21,7 +21,6 @@ What does **not** move yet, and so still runs on the server (the celery containe
 
 - bbot discovery (the work conductor goes on starting it);
 - the HTTP and version probes and the other in-process probes: route and signed-out checks, other sites on an address (vhost), applications under a path, cloud storage buckets, suppliers, retired-name checks, DNS and mail hygiene;
-- the thorough WPScan pass;
 - signed-in nuclei passes and signed-in template tests, which use a stored credential;
 - the maintainer's approval of a reviewed AI template (a loopback fixture) and `nuclei -update-templates`.
 

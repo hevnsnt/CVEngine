@@ -104,7 +104,6 @@ ALLOWED = {
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
-        'cveFeed/wpscan_scan.py',
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',
         'reNgine/definitions.py',
@@ -209,40 +208,27 @@ ALLOWED = {
     ],
     'wpscan': [
         'Dockerfile',
-        'agentapi/mcp.py',
-        'agentapi/rest.py',
-        'agentapi/sentinel_broker.py',
-        'agentapi/sentinel_dispatch.py',
-        'agentapi/services.py',
-        'agentapi/system_status.py',
+        'agentapi/mcp.py',  # capability list in a tool description names the kind, runs nothing
+        'agentapi/rest.py',  # capability and task kind lists in the route help name the kind, runs nothing
+        'agentapi/sentinel_broker.py',  # the kind name as a data value: result cleaner and token scrub, runs nothing
+        'agentapi/sentinel_dispatch.py',  # the kind name as a data value (NEVER_LOCAL, ceilings, dispatch of the task), runs nothing
         'celery-entrypoint.sh',
-        'cveFeed/api_credentials.py',
-        'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
-        'cveFeed/check_coverage.py',
-        'cveFeed/conductor.py',
-        'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
-        'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
-        'cveFeed/finding_lifecycle.py',  # 1.3.5 lifecycle (develop): closes stored WPScan findings past their fix, runs nothing
-        'cveFeed/heavy_process.py',
-        'cveFeed/host_context.py',
-        'cveFeed/internal_scan.py',
-        'cveFeed/ledger.py',
-        'cveFeed/management/commands/close_fixed_findings.py',  # 1.3.5 backfill (develop): closes stored WPScan findings past their fix, runs nothing
-        'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
-        'cveFeed/models.py',
-        'cveFeed/nuclei_templates.py',
-        'cveFeed/probes.py',
-        'cveFeed/report_data.py',
-        'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
-        'cveFeed/tasks.py',
-        'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): reads the WordPress version WPScan stored, runs nothing
-        'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
-        'cveFeed/upgrade_backfills.py',  # 1.3.5 automatic update steps (develop): a comment names WPScan findings, runs nothing
-        'cveFeed/wp_correlation.py',
-        'cveFeed/wpscan_scan.py',
-        'reNgine/input_guard.py',
-        'reNgine/resources.py',
+        'cveFeed/api_credentials.py',  # the stored credential service key is the kind name, a data value
+        'cveFeed/autotune_policy.py',  # T8 leftover: per-kind CPU shares sum to 1; the lead removes the heavy-kind tunables in the final slice
+        'cveFeed/check_coverage.py',  # ledger kinds and the check id are data values, runs nothing
+        'cveFeed/confirm_guide.py',  # matches the finding source stored in the database, runs nothing
+        'cveFeed/discovery.py',  # the pipeline stage name and its result key are data values, runs nothing
+        'cveFeed/finding_lifecycle.py',  # finding source and template id prefix stored in the database, runs nothing
+        'cveFeed/host_context.py',  # reads the stored probe name, runs nothing
+        'cveFeed/ledger.py',  # ledger kind names (freshness windows) are data values, runs nothing
+        'cveFeed/management/commands/close_fixed_findings.py',  # reads stored probe rows by source, runs nothing
+        'cveFeed/nuclei_templates.py',  # a template tag of the public nuclei template feed, not this tool
+        'cveFeed/report_data.py',  # the stage key of the report labels is a data value, runs nothing
+        'cveFeed/scan_concurrency.py',  # T8 leftover: heavy-kind setting key; the lead removes the heavy-kind tunables in the final slice
+        'cveFeed/threat.py',  # VERSION_READ_SOURCES names the stored finding source, runs nothing
+        'cveFeed/wp_correlation.py',  # evidence source stored with a correlated finding, runs nothing
+        'cveFeed/wpscan_scan.py',  # stores what a Sentinel reports: finding source, probe and ledger names are data values, runs nothing
+        'reNgine/resources.py',  # T8 leftover: heavy-kind memory and concurrency tables; the lead removes them in the final slice
     ],
     'testssl': [
         'Dockerfile',
@@ -365,7 +351,6 @@ ALLOWED = {
         'cveFeed/validation.py',
         'cveFeed/waf_scan.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
-        'cveFeed/wpscan_scan.py',
         'reNgine/bbot.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',
@@ -374,7 +359,6 @@ ALLOWED = {
     'heavy_process.run': [
         'cveFeed/testssl_scan.py',
         'cveFeed/waf_scan.py',
-        'cveFeed/wpscan_scan.py',
     ],
     '_BIN': [
         'cveFeed/naabu_scan.py',
@@ -385,7 +369,6 @@ ALLOWED = {
         'cveFeed/templategen.py',
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
-        'cveFeed/wpscan_scan.py',
         'reNgine/bbot.py',
     ],
 }

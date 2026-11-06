@@ -7,7 +7,7 @@ only a finding on a host whose product version is still affected, so ``GATES`` n
 release it affects, and a hit on a host whose version is known to be newer is not recorded: neither as a scanner finding (``nuclei_scan``,
 ``auth_nuclei``) nor as a template confirmation of a CVE match (``templategen``).
 
-The host's version is what a probe read (WPScan, the WordPress probe: ``cms_evidence.attested``), else what its technologies state once the
+The host's version is what a probe read (the WordPress scan, the WordPress probe: ``cms_evidence.attested``), else what its technologies state once the
 versions the evidence disproves are set aside (``cms_evidence.superseded``: jQuery's 3.7.1 read as WordPress'). A host whose version is not known keeps
 the hit: nothing says it is patched."""
 from cvengine_scanner import cms

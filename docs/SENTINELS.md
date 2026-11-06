@@ -25,7 +25,7 @@ Eleven kinds of work, each a capability the Sentinel declares (the list is `kind
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 | `waf`                                            | WAF fingerprinting (contract version 2; no stage dispatches it yet)          |
 
-Everything else (bbot, bucket checks, vhost and subdirectory sweeps, the weekly thorough WPScan pass, and any Nuclei pass that uses a stored sign-in) always runs on the server.
+Everything else (bbot, bucket checks, vhost and subdirectory sweeps, and any Nuclei pass that uses a stored sign-in) always runs on the server.
 
 ## External or internal, full or light
 

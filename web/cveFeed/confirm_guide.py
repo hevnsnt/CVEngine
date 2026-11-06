@@ -3,7 +3,7 @@ how to read the answer, what proves exploitability beyond the version, and how t
 
 The shared per-CVE record (cveFeed.detection) says how to check a CVE anywhere; this says how to check it HERE, from what the match itself
 recorded: the script URL the page loaded and every copy of the library on it, the port and banner nmap read, the header or path a probe
-read, the plugin WPScan found, the testssl test that fired, the nuclei template that matched.
+read, the plugin the WordPress scan found, the testssl test that fired, the nuclei template that matched.
 
 Safety. Every command is built here, by code, from values validated on the way in: a host name or IP address, a port number, an http(s)
 URL whose characters are checked, a version string, a plugin slug, a template id, and fixed constants. Each is shell-quoted. Text that came
@@ -754,7 +754,7 @@ def _cms(match, cve, strategy, host, bases):
     steps = []
     if url:
         steps.append(_step(f'Open the {kind}\'s {"style.css" if kind == "theme" else "readme.txt"}', f'The "{field}:" line states the version '
-                           'WPScan read.', run_in='browser', url=url))
+                           'the WordPress scan read.', run_in='browser', url=url))
         steps.append(_step('Or read that line from a shell', '', f"curl -gsS --max-time 15 {_q(url)} | grep -i -m1 -E {_q('^[[:space:]]*' + field + ':')}"))
     local = []
     if slug:

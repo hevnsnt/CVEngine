@@ -17,7 +17,7 @@ from unittest import mock
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
+from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan
 from reNgine import bbot, crypto_fields
 from scanEngine.models import Proxy
 
@@ -190,7 +190,6 @@ class ToolFragmentTests(ProxyOn, TestCase):
         self.turn_on(LOGIN_PROXY)
         self.assertEqual(egress_proxy.for_tool('nuclei', ['www.example.com']), ['-proxy', LOGIN_PROXY])
         self.assertEqual(egress_proxy.for_tool('wafw00f', ['www.example.com']), ['-p', LOGIN_PROXY])
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
         self.assertEqual(egress_proxy.for_tool('bbot'), ['-c', f'web.http_proxy={LOGIN_PROXY}'])
 
     def test_testssl_takes_a_plain_http_proxy_only(self):
@@ -205,13 +204,10 @@ class ToolFragmentTests(ProxyOn, TestCase):
         with self.assertRaises(egress_proxy.ProxyUnavailable) as raised:
             egress_proxy.for_tool('nuclei', ['www.example.com'])
         self.assertNotIn('203.0.113.5', str(raised.exception))
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com'])[0], '--proxy')
 
 
 class IntegrationTests(ProxyOn, TestCase):
     def test_argv_builders_add_the_proxy_only_when_given(self):
-        self.assertNotIn('--proxy', wpscan_scan.wpscan_args(600))
-        self.assertEqual(wpscan_scan.wpscan_args(600, proxy_args=['--proxy', HTTP_PROXY])[-2:], ['--proxy', HTTP_PROXY])
         self.assertNotIn('--proxy', testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x'))
         args = testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x', ['--proxy', '203.0.113.50:3128'])
         self.assertEqual((args[args.index('--proxy') + 1], args[-1]), ('203.0.113.50:3128', 'a.example.com:443'))
@@ -250,7 +246,7 @@ class IntegrationTests(ProxyOn, TestCase):
         with self.assertRaises(egress_proxy.ProxyUnavailable):  # never a direct run behind the administrator's back
             self.run_nuclei(['www.example.com'])
 
-    def test_wafw00f_wpscan_and_testssl_runs(self):
+    def test_wafw00f_and_testssl_runs(self):
         from cveFeed import heavy_process
         seen = []
 
@@ -272,13 +268,6 @@ class IntegrationTests(ProxyOn, TestCase):
             self.assertNotIn('-p', seen[-1])
             self.turn_on('socks5h://203.0.113.5:1080')
             self.assertIn('cannot use', waf_scan.run_wafw00f('https://www.example.com/')['error'])
-            self.turn_on(LOGIN_PROXY)
-            try:
-                wpscan_scan.run_wpscan_process('https://www.example.com/', '', timeout=120)
-            except Exception:  # the fake wrote no report: only the arguments matter here
-                pass
-            wp = seen[-1]
-            self.assertEqual((wp[wp.index('--proxy') + 1], wp[wp.index('--proxy-auth') + 1]), ('http://203.0.113.52:3128', 'bob:hunter2'))
             self.turn_on(SOCKS_PROXY)
             with self.assertRaises(testssl_scan.TestsslError) as raised:
                 testssl_scan.run_testssl('www.example.com', '203.0.113.5', 443)

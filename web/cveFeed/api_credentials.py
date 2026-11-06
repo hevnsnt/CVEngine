@@ -28,8 +28,8 @@ SERVICES = {
     'bevigil': ('BeVigil', [('api_key', 'API key', True)], [('modules.bevigil.api_key', 'api_key')]),
     'builtwith': ('BuiltWith', [('api_key', 'API key', True)], [('modules.builtwith.api_key', 'api_key')]),
     'bufferoverrun': ('BufferOver.run', [('api_key', 'API key', True)], [('modules.bufferoverrun.api_key', 'api_key')]),
-    # WPScan is run by CVEngine itself against WordPress sites it found (see cveFeed.wpscan_scan), not through bbot.
-    'wpscan': ('WPScan (WordPress vulnerability data)', [('api_key', 'API token from wpscan.com', True)], []),
+    # Used by the WordPress scan a Sentinel runs on sites this server found (see cveFeed.wpscan_scan), not through bbot.
+    'wpscan': ('WordPress vulnerability data', [('api_key', 'API token for the WordPress vulnerability data service', True)], []),
     # Retired, see RETIRED: kept only so a key someone already saved stays visible and removable.
     'binaryedge': ('BinaryEdge', [('api_key', 'API key', True)], []),
     # runZero is an asset-inventory platform, not a bbot module: its key is used by cveFeed.runzero_sync, which reads the
