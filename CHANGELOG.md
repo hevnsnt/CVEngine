@@ -19,6 +19,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **Virtual host and subdirectory application checks on the scanner** (`vhost_probe` and `subdir_probe`, contract version 3). The virtual host
+  sweep sends each due address with the project's own names to a Sentinel, which asks the address its default response and then each name as the
+  Host header; the subdirectory sweep sends each due web host with the curated mount paths and the directories its own URLs show, and the Sentinel
+  asks them at the sweep's own pace and request caps. The server compares what comes back with its own rules (it does not read the Sentinel's
+  verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
+  clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
 - **The web route check on the scanner** (`route_probe`, contract version 3). The anonymous half of the route and sign-in state check sends the
   routes it planned to a Sentinel, up to 25 hosts and 20 routes each per task. The Sentinel asks each route (one GET, no credential, no cookie, no
   redirect followed), classifies the answer, compares it with the answer for a path that cannot exist (`catch_all`), reads the front page's own

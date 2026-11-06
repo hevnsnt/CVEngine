@@ -12,15 +12,16 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes, route_auth
+from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes, route_auth, subdir_apps, vhost_scan
 from cveFeed.models import AgentActivity, AssetChange, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding, ServiceRun
 from startScan.models import Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_bucket_scan import Fixture as BucketFixture
-from tests.test_route_auth import RouteFixture
-from tests.test_route_auth import RouteFixture
 from tests.test_changes import ChangeFixture
+from tests.test_route_auth import RouteFixture
+from tests.test_subdir_apps import SubdirFixture
+from tests.test_vhost_scan import VhostFixture
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
 
 HOST = 'www.example.test'
@@ -210,6 +211,45 @@ class ResultTests(SimpleTestCase):
         with self.assertRaises(ApiError):
             probe_results.clean_http_probe({'probes': [{}] * 301})
 
+    def test_a_vhost_result_is_clipped_and_an_unanswered_name_carries_no_fingerprint(self):
+        fp = {'status': 200, 'title': 't' * 500, 'length': -4, 'location': '/' * 500, 'server': 's' * 99}
+        got = probe_results.clean_vhost_probe({'addresses': [
+            {'id': '203.0.113.10', 'default': {'state': 'answered', 'fingerprint': fp}, 'names': [
+                {'name': 'WWW.Example.test.', 'state': 'answered', 'fingerprint': fp, 'page': {'body': 'b' * 200_000, 'headers': {'Server': 'x', 'n': 5}}},
+                {'name': 'b.example.test', 'state': 'no_answer', 'fingerprint': fp},
+                {'name': 'c.example.test', 'state': 'answered'},  # an answer with no fingerprint is no answer
+                {'name': 'd.example.test', 'state': 'wat'}]},
+            {'id': 'x', 'default': {'state': 'maybe'}, 'names': []}], 'touched': [], 'refused': []})
+        self.assertEqual(len(got['addresses']), 1)
+        names = got['addresses'][0]['names']
+        self.assertEqual([n['name'] for n in names], ['www.example.test', 'b.example.test'])
+        self.assertEqual((len(names[0]['fingerprint']['title']), names[0]['fingerprint']['length'], len(names[0]['fingerprint']['location']), len(names[0]['fingerprint']['server'])),
+                         (200, 0, 200, 60))
+        self.assertEqual((len(names[0]['page']['body']), names[0]['page']['headers']), (65536, {'server': 'x'}))
+        self.assertNotIn('fingerprint', names[1])
+        self.assertNotIn('page', names[1])
+        with self.assertRaises(ApiError):
+            probe_results.clean_vhost_probe({'addresses': [{}] * 11})
+
+    def test_a_subdir_result_keeps_only_the_contract_s_shape(self):
+        fp = {'status': 200, 'title': 'x', 'length': 3, 'location': '', 'server': ''}
+        got = probe_results.clean_subdir_probe({'hosts': [
+            {'id': 'h0', 'state': 'challenged', 'requests': 9999, 'challenge': {'edge': 'e' * 99, 'status': 403, 'path': '/jira/'}, 'baseline': None,
+             'probed': ['/jira/', 7], 'answers': [{'path': '/jira/', 'source': 'wat', 'fingerprint': fp, 'found': {'product': 'Jira', 'confidence': 4, 'version': 'v' * 300}},
+                                                  {'path': '/x/', 'source': 'curated', 'fingerprint': {'status': 'no'}, 'found': None}]},
+            {'id': 'h1', 'state': 'exploded'}], 'touched': [], 'refused': []})
+        host = got['hosts'][0]
+        self.assertEqual(len(got['hosts']), 1)
+        self.assertEqual((host['requests'], len(host['challenge']['edge']), host['probed']), (0, 60, ['/jira/']))  # a count past its bound is no count
+        self.assertEqual(len(host['answers']), 1)
+        self.assertEqual((host['answers'][0]['source'], host['answers'][0]['found']['confidence'], len(host['answers'][0]['found']['version'])), ('curated', 1.0, 100))
+
+    def test_the_results_validate_against_the_contract_after_cleaning(self):
+        for kind in ('vhost_probe', 'subdir_probe'):
+            with self.subTest(kind=kind):
+                cleaned = broker._CLEANERS[kind](fixture(kind))
+                self.assertTrue(cleaned)
+
     def test_a_dns_result_keeps_only_plain_addresses(self):
         got = probe_results.clean_dns_resolve({'resolved': {'a.example.test': ['93.184.215.14', 'not-an-ip', '93.184.215.14'], 'b.example.test': ['x']},
                                                'errors': {'c.example.test': 'timeout', 'a.example.test': 'shadowed'}, 'refused': []})
@@ -352,6 +392,262 @@ class BucketCheckStageTests(BucketFixture, TestCase):
         self.assertEqual(out['unknown'], 1)
         self.assertFalse(HygieneFinding.objects.exists())
         self.assertTrue(ServiceRun.objects.filter(service=bucket_scan.FAILED_SERVICE).exists())
+
+
+def _page_of(response):
+    return {'status': response['status'], 'title': response['title'], 'server': response['server'], 'content_type': response['content_type'],
+            'powered_by': response['powered_by'], 'url': response['url'], 'body': response['body'], 'headers': response['headers']}
+
+
+class VhostProbeStageTests(VhostFixture, TestCase):
+    """The virtual host sweep (``vhost_scan.sweep``): the due addresses go to the scanner as one ``vhost_probe`` batch, and the server reaches the
+    verdicts itself from the fingerprints that come back."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.guard = assert_ran_nowhere_locally(self, 'vhost_probe')
+
+    def answers(self, task, drop=(), state=None):
+        """What a scanner reads from ``self.table`` for ``task``: the default, then each name; a name it never reached is left out."""
+        out = []
+        for item in task['target']['addresses']:
+            default = self.table[(item['address'], None)]
+            names = []
+            for entry in item['names']:
+                if entry['name'] in drop:
+                    continue
+                response = self.table.get((entry['name'], item['address']))
+                if response is None:
+                    names.append({'name': entry['name'], 'state': 'no_answer'})
+                    continue
+                row = {'name': entry['name'], 'state': state or 'answered', 'fingerprint': vhost_scan.fingerprint_of(response)}
+                if state == 'challenged':
+                    row['challenge'] = 'Cloudflare'
+                if not vhost_scan.similar(row['fingerprint'], vhost_scan.fingerprint_of(default)):
+                    row['page'] = _page_of(response)
+                names.append(row)
+            out.append({'id': item['id'], 'default': {'state': 'answered', 'fingerprint': vhost_scan.fingerprint_of(default)}, 'names': names})
+        return {'outcome': 'done', 'addresses': out, 'touched': [item['address'] for item in task['target']['addresses']], 'refused': []}
+
+    def test_the_scanner_asks_and_the_sweep_records_what_a_local_sweep_records(self):
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
+            out = self.run_sweep(fetch=None, pace=None)
+        self.assertEqual(fake.served_kinds(), ['vhost_probe'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual((out['asked'], out['distinct'], out['default_site'], out['same_app'], out['no_answer']), (4, 1, 1, 1, 1))
+        self.assertEqual(self.observations(), {('portal.example.test', 'found', 'distinct'), ('app.example.test', 'absent', 'default_site'),
+                                               ('wiki.example.test', 'absent', 'same_app')})
+        sub = Subdomain.objects.get(name='portal.example.test', scan_history__isnull=True)
+        self.assertEqual(sorted(t.name for t in sub.technologies.all()), ['PHP:8.1.2', 'nginx:1.25.3'])  # read from the page the scanner reported
+        self.assertEqual([ip.address for ip in sub.ip_addresses.all()], [self.ADDRESS])
+        self.assertTrue(ServiceRun.objects.filter(service=vhost_scan.SERVICE, asset=f'{self.ADDRESS}|portal.example.test').exists())
+
+    def test_the_task_names_the_address_the_names_and_the_stored_own_site_and_no_project_data_else(self):
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
+            self.run_sweep(fetch=None, pace=None)
+        target = fake.served[0]['target']
+        item = target['addresses'][0]
+        self.assertEqual((item['address'], item['scheme'], item['port']), (self.ADDRESS, 'https', 443))
+        names = {n['name']: n for n in item['names']}
+        self.assertEqual(sorted(names), ['app.example.test', 'files.example.test', 'portal.example.test', 'wiki.example.test'])
+        self.assertEqual(names['wiki.example.test']['own']['title'], 'Wiki')  # the stored front page travels, so the scanner need not ask for it
+        self.assertNotIn('own', names['portal.example.test'])
+        self.assertEqual(set(target['scope']['hosts']), {self.ADDRESS, *names})
+        self.assertGreaterEqual(target['gap'], 0.2)
+
+    def test_the_server_decides_the_verdict_not_the_scanner(self):
+        def liar(task):
+            out = self.answers(task)
+            for row in out['addresses'][0]['names']:
+                row['classification'] = 'distinct'  # a field the contract does not have: never read
+            return out
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': liar}):
+            self.run_sweep(fetch=None, pace=None)
+        self.assertEqual(self.observations(), {('portal.example.test', 'found', 'distinct'), ('app.example.test', 'absent', 'default_site'),
+                                               ('wiki.example.test', 'absent', 'same_app')})
+
+    def test_a_name_the_scanner_did_not_report_stays_due(self):
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': lambda task: self.answers(task, drop=('portal.example.test',))}):
+            self.run_sweep(fetch=None, pace=None)
+        self.assertNotIn('portal.example.test', {o[0] for o in self.observations()})
+        self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE, asset=f'{self.ADDRESS}|portal.example.test').exists())
+        self.assertFalse(Subdomain.objects.filter(name='portal.example.test', scan_history__isnull=True).exists())
+
+    def test_a_name_the_task_did_not_ask_is_dropped(self):
+        def extra(task):
+            out = self.answers(task)
+            out['addresses'][0]['names'].append({'name': 'other.example.test', 'state': 'answered', 'fingerprint': vhost_scan.fingerprint_of(self.table[('portal.example.test', self.ADDRESS)]),
+                                                 'page': _page_of(self.table[('portal.example.test', self.ADDRESS)])})
+            return out
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': extra}):
+            self.run_sweep(fetch=None, pace=None)
+        self.assertNotIn('other.example.test', {o[0] for o in self.observations()})
+        self.assertFalse(Subdomain.objects.filter(name='other.example.test').exists())
+
+    def test_a_challenge_is_recorded_and_the_address_left_alone(self):
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': lambda task: self.answers(task, state='challenged')}):
+            out = self.run_sweep(fetch=None, pace=None)
+        self.assertEqual(out['challenged'], 1)
+        self.assertEqual({o[1] for o in self.observations()}, {'challenged'})
+        self.assertTrue(ServiceRun.objects.filter(service=vhost_scan.IP_SERVICE, asset=self.ADDRESS).exists())
+
+    def test_with_the_scanner_offline_the_addresses_stay_due(self):
+        with FakeScanner(kinds=['vhost_probe'], mode='offline') as fake:
+            out = self.run_sweep(fetch=None, pace=None)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(self.guard.calls, [])
+        self.assertIn('waiting for a scanner', out['skipped'])
+        self.assertEqual(out['ips'], 0)
+        self.assertFalse(ServiceRun.objects.filter(service__in=(vhost_scan.SERVICE, vhost_scan.IP_SERVICE)).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=vhost_scan.PROBE).exists())
+
+    def test_a_failed_task_with_the_kind_off_the_fallback_list_records_nothing(self):
+        with FakeScanner(kinds=['vhost_probe'], mode='fail'):
+            out = self.run_sweep(fetch=None, pace=None)
+        self.assertEqual(out['ips'], 0)
+        self.assertFalse(ServiceRun.objects.filter(service__in=(vhost_scan.SERVICE, vhost_scan.IP_SERVICE)).exists())
+
+    def test_an_address_the_server_would_not_ask_is_never_sent(self):
+        with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
+            self.run_sweep(fetch=None, pace=None, vet_ip=lambda ip: False)
+        self.assertEqual(fake.served, [])
+
+
+class SubdirProbeStageTests(SubdirFixture, TestCase):
+    """The subdirectory sweep (``subdir_apps.sweep``): the due hosts go to the scanner as one ``subdir_probe`` batch."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.guard = assert_ran_nowhere_locally(self, 'subdir_probe')
+        self.mounts = {'/jenkins/': 'Jenkins'}
+
+    def report(self, task, **changes):
+        """What a scanner reads from ``self.site`` for ``task``: the baseline, then each curated path and each lead."""
+        hosts = []
+        for host in task['target']['hosts']:
+            base = f"{host['scheme']}://{host['name']}"
+            baseline = vhost_scan.fingerprint_of(self.site(base + subdir_apps.BASELINE_PATH))
+            answers, probed = [], []
+            plan = [(p, 'curated') for p in task['target']['paths']] + [(lead['path'], lead['source']) for lead in host.get('leads', [])]
+            for path, source in plan:
+                response = self.site(base + path)
+                probed.append(path)
+                fp = vhost_scan.fingerprint_of(response)
+                if fp['status'] in subdir_apps.THERE:
+                    answers.append({'path': path, 'source': source, 'fingerprint': fp, 'found': subdir_apps.identify(response, path)})
+            hosts.append({'id': host['id'], 'state': 'done', 'requests': len(plan) + 1, 'baseline': baseline, 'probed': probed, 'answers': answers, **changes})
+        return {'outcome': 'done', 'hosts': hosts, 'touched': [h['name'] for h in task['target']['hosts']], 'refused': []}
+
+    def sweep_remote(self, **kw):
+        kw.setdefault('vet_ip', lambda address: True)  # the documentation addresses of these tests are not scannable ones
+        return subdir_apps.sweep(self.project.id, **kw)
+
+    def test_the_scanner_asks_and_the_sweep_records_what_a_local_sweep_records(self):
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': self.report}) as fake:
+            summary = self.sweep_remote()
+        self.assertEqual(fake.served_kinds(), ['subdir_probe'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual((summary['hosts'], summary['confirmed'], summary['versions'], summary['leads']), (1, 3, 1, 1))
+        self.assertEqual(self.rows(), {('/jenkins/', 'Jenkins', '2.401.3', 'found', ''), ('/grafana/', 'Grafana', '', 'hidden', ''),
+                                       ('/phpmyadmin/', 'phpMyAdmin', '', 'hidden', ''), ('/portal/', '/portal/', '', 'found', 'lead')})
+        self.assertEqual(sorted(t.name for t in self.www.technologies.all()), ['Jenkins:2.401.3'])
+        self.assertTrue(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+
+    def test_the_task_carries_the_curated_paths_the_known_mounts_and_the_stored_front_page(self):
+        RouteAuth.objects.create(project=self.project, domain=self.domain, url='https://www.example.test/', host='www.example.test', path='/',
+                                 auth_state='open', http_status=200, title='Home', evidence={'bytes': 5000}, checked_at=timezone.now())
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': self.report}) as fake:
+            self.sweep_remote()
+        target = fake.served[0]['target']
+        self.assertEqual(target['paths'], subdir_apps.curated_paths())
+        self.assertEqual(target['max_requests'], subdir_apps.max_requests())
+        host = target['hosts'][0]
+        self.assertEqual((host['name'], host['scheme'], host['port']), ('www.example.test', 'https', 443))
+        self.assertEqual(host['leads'], [{'path': '/portal/', 'count': 1, 'source': 'crawled'}])
+        self.assertEqual(host['root']['title'], 'Home')
+        self.assertEqual(target['scope']['hosts'], ['www.example.test'])
+
+    def test_a_path_the_server_would_not_have_asked_is_ignored(self):
+        def stray(task):
+            out = self.report(task)
+            out['hosts'][0]['answers'].append({'path': '/../etc/passwd', 'source': 'curated', 'fingerprint': {'status': 200, 'title': 'x', 'length': 9, 'location': '', 'server': ''},
+                                               'found': {'product': 'Jenkins', 'confidence': 0.9, 'source': 'x', 'version': '1.0', 'indicated': '/jenkins/'}})
+            return out
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': stray}):
+            self.sweep_remote()
+        self.assertNotIn('/../etc/passwd', {o.url for o in ProbeObservation.objects.filter(probe=subdir_apps.PROBE)})
+
+    def test_a_product_that_is_not_in_the_curated_list_is_not_confirmed(self):
+        def invented(task):
+            out = self.report(task)
+            for answer in out['hosts'][0]['answers']:
+                if answer['found']:
+                    answer['found'] = {**answer['found'], 'product': 'Totally Real CMS'}
+            return out
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': invented}):
+            self.sweep_remote()
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE, product='Totally Real CMS').exists())
+        self.assertFalse(self.www.technologies.exists())
+
+    def test_an_answer_the_host_gives_to_any_path_is_no_mount_even_when_the_scanner_called_it_one(self):
+        everything = {'status': 200, 'title': 'Single page app', 'length': 900, 'location': '', 'server': ''}
+        def spa(task):
+            out = self.report(task)
+            out['hosts'][0]['baseline'] = dict(everything)
+            out['hosts'][0]['answers'] = [{'path': '/jira/', 'source': 'curated', 'fingerprint': dict(everything),
+                                           'found': {'product': 'Jira', 'confidence': 0.9, 'source': 'x', 'version': '9.4.1', 'indicated': '/jira/'}}]
+            return out
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': spa}):
+            summary = self.sweep_remote()
+        self.assertEqual((summary['catch_all'], summary['confirmed']), (1, 0))
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE).exists())
+
+    def test_a_host_that_asked_for_time_is_not_recorded_as_asked(self):
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': lambda task: self.report(task, state='busy')}):
+            self.sweep_remote()
+        self.assertFalse(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+
+    def test_a_challenge_is_recorded_and_the_host_is_complete(self):
+        def challenged(task):
+            out = self.report(task, state='challenged')
+            out['hosts'][0]['challenge'] = {'edge': 'Cloudflare', 'status': 403, 'path': '/jira/'}
+            out['hosts'][0]['answers'] = []
+            return out
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': challenged}):
+            summary = self.sweep_remote()
+        self.assertEqual(summary['challenged'], 1)
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, outcome='challenged').product, 'Cloudflare')
+        self.assertTrue(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+
+    def test_a_host_the_scanner_did_not_report_stays_due(self):
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': lambda task: {'outcome': 'done', 'hosts': [], 'touched': [], 'refused': []}}):
+            summary = self.sweep_remote()
+        self.assertEqual(summary['hosts'], 0)
+        self.assertFalse(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE).exists())
+
+    def test_with_the_scanner_offline_the_hosts_stay_due(self):
+        with FakeScanner(kinds=['subdir_probe'], mode='offline') as fake:
+            summary = self.sweep_remote()
+        self.assertEqual(fake.served, [])
+        self.assertEqual(self.guard.calls, [])
+        self.assertIn('waiting for a scanner', summary['skipped'])
+        self.assertFalse(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE).exists())
+
+    def test_a_virtual_host_is_asked_at_its_address_with_its_name(self):
+        ProbeObservation.objects.create(project=self.project, domain=self.domain, host='portal.example.test', probe=vhost_scan.PROBE, port=443, kind='vhost',
+                                        product=self.ADDRESS, outcome='found', confidence=0.85, url='/', source='host-header', evidence={'scheme': 'https'})
+        Subdomain.objects.create(target_domain=self.domain, name='portal.example.test', scan_history=None).ip_addresses.add(self.ip)
+        with FakeScanner(kinds=['subdir_probe'], responders={'subdir_probe': self.report}) as fake:
+            self.sweep_remote()
+        by_name = {h['name']: h for h in fake.served[0]['target']['hosts']}
+        self.assertEqual(by_name['portal.example.test']['connect_ip'], self.ADDRESS)
+        self.assertNotIn('connect_ip', by_name['www.example.test'])
 
 
 class RouteProbeStageTests(RouteFixture, TestCase):
