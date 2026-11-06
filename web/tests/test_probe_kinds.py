@@ -2,6 +2,7 @@
 a Sentinel reports, and each stage end to end through the fake built-in scanner, served, offline and failed."""
 import json
 import os
+from datetime import timedelta
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -11,13 +12,14 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes, subdir_apps, vhost_scan
-from cveFeed.models import AssetChange, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, ServiceRun
+from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes, route_auth, subdir_apps, vhost_scan
+from cveFeed.models import AgentActivity, AssetChange, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding, ServiceRun
 from startScan.models import Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_bucket_scan import Fixture as BucketFixture
 from tests.test_changes import ChangeFixture
+from tests.test_route_auth import RouteFixture
 from tests.test_subdir_apps import SubdirFixture
 from tests.test_vhost_scan import VhostFixture
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
@@ -646,3 +648,226 @@ class SubdirProbeStageTests(SubdirFixture, TestCase):
         by_name = {h['name']: h for h in fake.served[0]['target']['hosts']}
         self.assertEqual(by_name['portal.example.test']['connect_ip'], self.ADDRESS)
         self.assertNotIn('connect_ip', by_name['www.example.test'])
+
+
+class RouteProbeStageTests(RouteFixture, TestCase):
+    """The web route check (``route_auth.run_route_auth``): the planned routes of a scan go to the scanner as ``route_probe`` batches, one per 25 hosts, and
+    the server stores what comes back exactly as it stores its own readings (states, auth changes, the secrets inventory)."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'route_probe')
+        # every local request resolves its host first: a route asked here is a call to this (it is the network, which the tests block anyway)
+        self.local = mock.patch('cveFeed.pinned_transport.resolve', side_effect=OSError('asked here, not by the scanner')).start()
+
+    @staticmethod
+    def row(url, state='not_found', status=404, **extra):
+        return {'id': url, 'status': status, 'title': extra.pop('title', ''), 'content_type': 'text/html', 'state': state,
+                'evidence': {'markers': [], 'bytes': 0, 'cookies': [], 'provider': '', 'redirect_to': extra.pop('redirect_to', '')},
+                'sensitive': {}, 'sensitive_score': 0, 'bytes': 0, 'credentials': [], **extra}
+
+    def answer(self, known=None):
+        """A responder: every asked route is not found, except the paths of ``known`` (``{path: changes to the row}``)."""
+        known = known or {}
+
+        def responder(task):
+            urls = [u for h in task['target']['hosts'] for u in h['urls']]
+            return {'outcome': 'done', 'touched': [h['host'] for h in task['target']['hosts']], 'refused': [],
+                    'routes': [{**self.row(u), **known.get('/' + u.split('://', 1)[1].split('/', 1)[1], {})} for u in urls]}
+        return responder
+
+    def run_stage(self, scan, responder=None, **kw):
+        with FakeScanner(kinds=['route_probe'], responders={'route_probe': responder or self.answer()}, **kw) as fake:
+            out = route_auth.run_route_auth(scan.id)
+        return out, fake
+
+    def test_the_scanner_asks_the_routes_and_the_stage_stores_their_states(self):
+        known = {'/': {'status': 200, 'state': 'open', 'title': 'Home'}, '/login': {'status': 200, 'state': 'login', 'title': 'Sign in'},
+                 '/admin': {'status': 302, 'state': 'session_required', 'evidence': {'markers': ['redirect'], 'bytes': 0, 'cookies': [], 'provider': '',
+                                                                                  'redirect_to': '/login?next=/admin'}}}
+        out, fake = self.run_stage(self.scan(), self.answer(known))
+        self.assertEqual(fake.served_kinds(), ['route_probe'])
+        self.assertEqual((self.guard.calls, self.local.call_count), ([], 0))
+        self.assertEqual((out['routes'], out['errors']), (len(route_auth.COMMON_PATHS), 0))
+        rows = {r.path: r for r in RouteAuth.objects.filter(project=self.project)}
+        self.assertEqual((rows['/'].auth_state, rows['/'].title, rows['/'].host), ('open', 'Home', 'www.rt.test'))
+        self.assertEqual((rows['/admin'].auth_state, rows['/admin'].redirect_to), ('session_required', '/login?next=/admin'))
+        self.assertEqual(rows['/wp-login.php'].auth_state, 'not_found')
+        self.assertEqual(ServiceRun.objects.filter(service='route-auth', status='done').count(), len(route_auth.COMMON_PATHS))
+        target = fake.served[0]['target']
+        self.assertEqual([h['host'] for h in target['hosts']], ['www.rt.test'])
+        self.assertEqual(target['hosts'][0]['urls'][:2], ['https://www.rt.test/', 'https://www.rt.test/login'])
+        self.assertIn('www.rt.test', target['scope']['hosts'])
+        self.assertIn('code.jquery.com', target['scope']['hosts'])  # the public library CDNs: a page's scripts may be read there
+        self.assertEqual(target['scope']['domains'], [])
+
+    def test_the_routes_asked_are_the_plans_and_the_per_host_cap_is_kept(self):
+        out, fake = self.run_stage(self.scan(names=('a.rt.test', 'b.rt.test')))
+        asked = {u for t in fake.served for h in t['target']['hosts'] for u in h['urls']}
+        self.assertEqual(len(asked), 2 * len(route_auth.COMMON_PATHS))
+        self.assertEqual(out['hosts'], 2)
+
+    def test_more_than_25_hosts_go_in_more_than_one_task(self):
+        names = tuple(f'h{i:02d}.rt.test' for i in range(27))
+        with mock.patch.object(route_auth, 'MAX_URLS_PER_SCAN', 5000):
+            out, fake = self.run_stage(self.scan(names=names))
+        self.assertEqual([len(t['target']['hosts']) for t in fake.served], [25, 2])
+        self.assertEqual(out['hosts'], 27)
+
+    def test_a_credential_the_scanner_read_goes_to_the_inventory_and_is_never_stored_in_the_route(self):
+        value = 'AKIA0000000000000000'
+
+        def serve(task):
+            out = self.answer({'/': {'status': 200, 'state': 'open', 'content_type': 'application/json',
+                                     'sensitive': {'aws_key': {'count': 1, 'sample': 'AWS access key, 20 chars (AKIA...)'}}, 'sensitive_score': 3,
+                                     'credentials': [{'type': 'aws_key', 'value': value}]}})(task)
+            return out
+        self.run_stage(self.scan(), serve)
+        root = RouteAuth.objects.get(project=self.project, path='/')
+        self.assertEqual(root.sensitive_score, 25)  # the server's own score, not the scanner's
+        self.assertIn('aws_key', root.sensitive)
+        self.assertTrue(SecretFinding.objects.filter(project=self.project).exists())
+        self.assertNotIn(value, json.dumps(root.evidence) + json.dumps(root.sensitive))
+
+    def test_with_the_scanner_offline_the_routes_wait_and_stay_due(self):
+        out, fake = self.run_stage(self.scan(), mode='offline')
+        self.assertEqual(fake.served, [])
+        self.assertEqual((self.guard.calls, self.local.call_count), ([], 0))
+        self.assertEqual(out['routes'], 0)
+        self.assertIn('no scanner could take this work (route_probe)', out['skipped'])
+        self.assertFalse(RouteAuth.objects.exists())
+        self.assertFalse(ServiceRun.objects.filter(service='route-auth').exists())  # neither done nor failed: due
+        self.assertTrue(AgentActivity.objects.filter(message__icontains='waiting').exists())
+        with ledger.claim_many(f'route-auth@{self.project.id}', ['https://www.rt.test/']) as won:  # the claim was let go
+            self.assertEqual(len(won), 1)
+
+    def test_a_scanner_that_fails_the_task_leaves_the_routes_due(self):
+        out, fake = self.run_stage(self.scan(), mode='fail')
+        self.assertEqual(fake.served_kinds(), ['route_probe'])
+        self.assertEqual((self.guard.calls, self.local.call_count), ([], 0))
+        self.assertIn('skipped', out)
+        self.assertFalse(RouteAuth.objects.exists())
+        self.assertFalse(ServiceRun.objects.filter(service='route-auth').exists())
+
+    def test_a_route_the_scanner_could_not_ask_is_unanswered_never_a_state(self):
+        def partly(task):
+            out = self.answer({'/': {'status': 200, 'state': 'open'}})(task)
+            out['routes'] = [{'id': r['id'], 'error': 'TimeoutError: timed out'} if r['id'].endswith('/login') else r
+                             for r in out['routes'] if not r['id'].endswith('/admin')]  # an error row, and one the scanner never reported
+            return out
+        out, _ = self.run_stage(self.scan(), partly)
+        total = len(route_auth.COMMON_PATHS)
+        self.assertEqual((out['routes'], out['errors']), (total - 2, 2))
+        self.assertEqual(set(RouteAuth.objects.values_list('path', flat=True)) & {'/login', '/admin'}, set())
+        failed = set(ServiceRun.objects.filter(service='route-auth', status='failed').values_list('asset', flat=True))
+        self.assertEqual(len(failed), 2)
+        self.assertEqual(ServiceRun.objects.filter(service='route-auth', status='done').count(), total - 2)
+
+    def test_a_state_a_status_cannot_have_is_an_unanswered_route(self):
+        def lies(task):
+            out = self.answer()(task)
+            out['routes'] = [self.row(r['id'], state='not_found', status=200) if r['id'].endswith('/admin') else r for r in out['routes']]
+            return out
+        out, _ = self.run_stage(self.scan(), lies)
+        self.assertEqual(out['errors'], 1)
+        self.assertFalse(RouteAuth.objects.filter(path='/admin').exists())
+
+    def test_an_answer_for_a_route_the_task_did_not_ask_is_dropped(self):
+        def stranger(task):
+            out = self.answer()(task)
+            out['routes'].append(self.row('https://other.rt.test/', state='open', status=200))
+            return out
+        _, fake = self.run_stage(self.scan(), stranger)
+        self.assertEqual(fake.tasks()[0].result.get('dropped'), 1)
+        self.assertFalse(RouteAuth.objects.filter(host='other.rt.test').exists())
+
+    def test_a_catch_all_answer_is_stored_but_is_not_an_auth_change(self):
+        known = {'/admin': {'status': 200, 'state': 'open', 'title': 'Admin'}}
+        with FakeScanner(kinds=['route_probe'], responders={'route_probe': lambda task: self.answer(known)(task)}):
+            route_auth.run_route_auth(self.scan().id)
+            ServiceRun.objects.update(finished_at=timezone.now() - timedelta(days=8))
+            known['/admin'] = {'status': 200, 'state': 'catch_all'}
+            route_auth.run_route_auth(self.scan().id)
+        self.assertEqual(RouteAuth.objects.get(path='/admin').auth_state, 'catch_all')
+        self.assertFalse(AssetChange.objects.filter(kind='auth_changed').exists())
+
+    def test_with_the_fallback_allowed_and_no_scanner_the_routes_are_asked_here_as_before(self):
+        with mock.patch.dict(os.environ, {ENV: 'all'}):
+            out = route_auth.run_route_auth(self.scan().id)
+        self.assertGreaterEqual(self.local.call_count, len(route_auth.COMMON_PATHS))
+        self.assertEqual(out['errors'], len(route_auth.COMMON_PATHS))
+        self.assertFalse(SentinelTask.objects.exists())
+
+    def test_an_injected_probe_is_asked_here_even_with_a_scanner(self):
+        asked = []
+
+        def local(url):
+            asked.append(url)
+            return {'url': url, 'status': 404, 'location': '', 'www_authenticate': '', 'cookies': [], 'content_type': 'text/html', 'body': '', 'title': ''}
+        with FakeScanner(kinds=['route_probe']) as fake:
+            route_auth.run_route_auth(self.scan().id, probe=local)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(len([u for u in asked if '/cvengine-' not in u]), len(route_auth.COMMON_PATHS))
+
+
+class RouteProbeResultTests(SimpleTestCase):
+    def clean(self, **row):
+        good = fixture('route_probe')['routes'][0]
+        return broker.clean_result('route_probe', {**fixture('route_probe'), 'routes': [{**good, **row}]})['routes']
+
+    def test_the_fixture_goes_through_unchanged(self):
+        sent = fixture('route_probe')
+        self.assertEqual(broker.clean_result('route_probe', sent), sent)
+
+    def test_the_evidence_keeps_only_what_a_route_check_keeps(self):
+        evidence = {**fixture('route_probe')['routes'][0]['evidence'], 'page_scripts': {'scripts': []}, 'invented': 1, 'markers': 'not a list', 'server': 's' * 500}
+        got = self.clean(evidence=evidence)[0]['evidence']
+        self.assertNotIn('page_scripts', got)
+        self.assertNotIn('invented', got)
+        self.assertNotIn('markers', got)
+        self.assertEqual(len(got['server']), 100)
+
+    def test_evidence_that_is_too_large_makes_the_route_unanswered(self):
+        got = self.clean(evidence={'libraries': {'jquery': {'blob': 'x' * (probe_results.MAX_ROUTE_EVIDENCE_BYTES + 1)}}})[0]
+        self.assertEqual(set(got), {'id', 'error'})
+
+    def test_a_state_must_be_known_and_fit_the_status(self):
+        self.assertEqual(set(self.clean(state='owned')[0]), {'id', 'error'})
+        self.assertEqual(set(self.clean(state='not_found', status=200)[0]), {'id', 'error'})
+        self.assertEqual(set(self.clean(state='open', status=500)[0]), {'id', 'error'})
+        self.assertEqual(self.clean(state='sso', status=302)[0]['state'], 'sso')
+
+    def test_the_score_is_the_servers_own_and_a_credential_is_a_known_type_with_a_value(self):
+        got = self.clean(sensitive={'aws_key': {'count': 1, 'sample': 'x' * 900}, 'rm_rf': {'count': 1, 'sample': 'y'}}, sensitive_score=0,
+                         credentials=[{'type': 'aws_key', 'value': 'AKIA0000000000000000'}, {'type': 'shell', 'value': 'ls'}, {'type': 'jwt', 'value': ''}, 'nope'])[0]
+        self.assertEqual((got['sensitive_score'], list(got['sensitive'])), (25, ['aws_key']))
+        self.assertEqual(len(got['sensitive']['aws_key']['sample']), 200)
+        self.assertEqual(got['credentials'], [{'type': 'aws_key', 'value': 'AKIA0000000000000000'}])
+
+    def test_an_error_row_carries_no_state_and_the_lists_are_bounded(self):
+        got = self.clean(error='e' * 999)[0]
+        self.assertEqual((set(got), len(got['error'])), ({'id', 'error'}, 200))
+        with self.assertRaises(ApiError):
+            probe_results.clean_route_probe({'routes': [{}] * 501})
+        with self.assertRaises(ApiError):
+            probe_results.clean_route_probe({})
+
+    def test_the_hosts_of_a_task_are_matched_against_a_sentinels_scope(self):
+        task = SentinelTask(kind='route_probe', host='', ips=[], target={'hosts': [{'host': 'a.example.test', 'urls': ['https://a.example.test/']}]})
+        self.assertEqual(broker.task_hosts(task), (['a.example.test'], []))
+
+
+class RouteScopeTests(RouteFixture, TestCase):
+    def test_the_policy_names_the_planned_hosts_the_cdns_and_leaves_an_excluded_host_out(self):
+        scan = self.scan(names=('a.rt.test', 'b.rt.test'))
+        HostExclusion.objects.create(org=self.project.org, host='b.rt.test')
+        got = probe_scope.for_routes(self.project.id, scan, ['b.rt.test', 'a.rt.test'])
+        self.assertEqual(got['hosts'][0], 'a.rt.test')
+        self.assertNotIn('b.rt.test', got['hosts'])
+        self.assertIn('b.rt.test', got['excluded'])
+        self.assertIn('unpkg.com', got['hosts'])
+        self.assertEqual((got['domains'], got['excluded_trees']), ([], []))
+        self.assertEqual(probe_scope.for_routes(self.project.id, scan, ['a.rt.test', 'b.rt.test']), got)  # the same task on every pass
