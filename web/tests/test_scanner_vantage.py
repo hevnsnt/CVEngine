@@ -110,7 +110,7 @@ class VantageWarningTests(VantageBase):
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
         proxied = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'wpscan', 'waf', 'bbot_discovery', 'http_probe',
-                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'nuclei_validate']
+                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nuclei_validate', 'route_probe']
         moved = ', '.join(k for k in proxied if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertEqual(out[0], f"CVENGINE_LOCAL_FALLBACK moves {moved} to the built-in scanner, whose image "
                                  "does not use this server's egress proxy; update it (the server's updater pulls the image this release pins).")
@@ -118,8 +118,8 @@ class VantageWarningTests(VantageBase):
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
         # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
         # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
-        # probes (http_probe), the bucket checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check) and nuclei (nuclei_validate's test) do
-        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,nuclei_validate'
+        # probes (http_probe), the bucket checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check), the supplier checks (supplier_check), the route checks (route_probe) and nuclei (nuclei_validate's test) do
+        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,supplier_check,nuclei_validate,route_probe'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -138,8 +138,8 @@ class VantageWarningTests(VantageBase):
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
         taken_off = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'waf', 'bbot_discovery', 'http_probe', 'dns_resolve',
-                     'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'nmap_full', 'nmap_verify', 'node2shell', 'rdp_shot', 'db_probe', 'path_probe',
-                     'nuclei_validate']
+                     'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nmap_full', 'nmap_verify', 'node2shell', 'rdp_shot', 'db_probe',
+                     'path_probe', 'nuclei_validate', 'route_probe']
         moved = ', '.join(k for k in taken_off if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertIn(f'moves {moved} to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])

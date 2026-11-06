@@ -1,9 +1,10 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``vhost_probe`` and ``subdir_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
 not name), so a Sentinel can only ever answer for its own task's hosts. ``agentapi.sentinel_broker.clean_result`` calls both."""
 import json
+import re
 
 from agentapi.services import ApiError
 
@@ -150,6 +151,118 @@ def clean_bucket_check(body):
     return {'buckets': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
+MAX_SUPPLIER_DOMAINS = 25
+MAX_POSTURES = 200
+SUPPLIER_CATEGORIES = ('tls', 'email', 'web', 'exposed')  # decided on the Sentinel; the fifth category, cve, is matched here against the catalog
+SUPPLIER_RESOLVABLE = SUPPLIER_CATEGORIES + ('cve',)
+CARD_STATES = ('ok', 'unreachable', 'no_address', 'blocked', 'challenged')
+CHECK_NAME_RE = re.compile(r'^[A-Za-z0-9_@.:\-]{1,60}$')
+
+
+def _int(value, low, high, default=0):
+    return value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else default
+
+
+def _opt_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and -1 <= value <= 10 ** 9 else None
+
+
+def _strings(values, count, limit):
+    return [_text(v, limit) for v in values[:count] if isinstance(v, str)] if isinstance(values, list) else []
+
+
+def _supplier_posture(item):
+    """One finding of a supplier name, or None. The text to ask the supplier is never taken from the result: ``supplier_checks.ask_for`` writes it."""
+    if not isinstance(item, dict) or item.get('category') not in SUPPLIER_CATEGORIES:
+        return None
+    check, severity = item.get('check'), item.get('severity')
+    if not isinstance(check, str) or not CHECK_NAME_RE.match(check) or isinstance(severity, bool) or not isinstance(severity, int) or not 0 <= severity <= 4:
+        return None
+    return {'check': check, 'severity': severity, 'title': _text(item.get('title'), 300), 'detail': _text(item.get('detail'), 4000),
+            'category': item['category'], 'evidence': _evidence(item.get('evidence'))}
+
+
+def _supplier_card(raw):
+    """The host card sections of one name, each reduced to the keys and types the card stores. Anything else is dropped."""
+    import ipaddress
+    raw = raw if isinstance(raw, dict) else {}
+    state = raw.get('state') if raw.get('state') in CARD_STATES else 'unreachable'
+    addresses = []
+    for value in (raw.get('addresses') if isinstance(raw.get('addresses'), list) else [])[:6]:
+        try:
+            addresses.append(str(ipaddress.ip_address(str(value).strip())))
+        except ValueError:
+            continue
+    ev = raw.get('evidence') if isinstance(raw.get('evidence'), dict) else {}
+    evidence = {}
+    if ev.get('address') in ('ok', 'none', 'blocked', 'unknown'):
+        evidence['address'] = ev['address']
+    if ev.get('dns') in ('ok', 'nxdomain', 'unknown'):
+        evidence['dns'] = ev['dns']
+    for key, limit in (('note', 300), ('challenged', 60)):
+        if isinstance(ev.get(key), str):
+            evidence[key] = _text(ev[key], limit)
+    card = {'state': state, 'addresses': addresses, 'evidence': evidence}
+    tls = raw.get('tls')
+    if isinstance(tls, dict):
+        def stamp(value):
+            return _text(value, 40) if isinstance(value, str) and value else None
+        card['tls'] = {'subject': _text(tls.get('subject'), 500), 'issuer': _text(tls.get('issuer'), 500), 'sans': _strings(tls.get('sans'), 50, 255),
+                       'not_before': stamp(tls.get('not_before')), 'not_after': stamp(tls.get('not_after')), 'days_left': _opt_int(tls.get('days_left')),
+                       'key': _text(tls.get('key'), 100), 'signature': _text(tls.get('signature'), 100), 'protocol': _text(tls.get('protocol'), 20),
+                       'cipher': _text(tls.get('cipher'), 100), 'chain_error': _text(tls.get('chain_error'), 300), 'legacy_tls': tls.get('legacy_tls') is True}
+    mail = raw.get('mail')
+    if isinstance(mail, dict):
+        card['mail'] = {'handles_mail': mail.get('handles_mail') is True, 'mx': mail.get('mx') is True}
+    page = raw.get('http')
+    if isinstance(page, dict):
+        section = {'https_status': _opt_int(page.get('https_status')), 'http_status': _opt_int(page.get('http_status'))}
+        if isinstance(page.get('headers'), dict):  # a front page that answered: its response as read
+            headers = page['headers']
+            section.update({'url': _text(page.get('url'), 300), 'status': _opt_int(page.get('status')), 'title': _text(page.get('title'), 200),
+                            'content_type': _text(page.get('content_type'), 100), 'server': _text(page.get('server'), 200),
+                            'powered_by': _text(page.get('powered_by'), 200), 'location': _text(page.get('location'), 300),
+                            'cookies': _strings(page.get('cookies'), 20, 100), 'bytes': _opt_int(page.get('bytes')),
+                            'headers': {_text(k, 100).lower(): _text(v, 200) for k, v in list(headers.items())[:60] if isinstance(k, str) and isinstance(v, str)}})
+        card['http'] = section
+    elif 'http' in raw:
+        card['http'] = None
+    return card
+
+
+def _supplier_row(item):
+    if not isinstance(item, dict):
+        return None
+    domain = _host(item.get('domain'))
+    if not domain or len(domain) > 253:
+        return None
+    postures = [p for p in (_supplier_posture(x) for x in (item.get('postures') if isinstance(item.get('postures'), list) else [])[:MAX_POSTURES]) if p]
+    resolvable = {}
+    if isinstance(item.get('resolvable'), dict):
+        for category, prefixes in list(item['resolvable'].items())[:8]:
+            if category in SUPPLIER_RESOLVABLE and isinstance(prefixes, list):
+                resolvable[category] = sorted({_text(x, 60) for x in prefixes[:40] if isinstance(x, str)})
+    summary = {}
+    if isinstance(item.get('summary'), dict):
+        for key, value in list(item['summary'].items())[:8]:
+            if isinstance(key, str) and (value is None or isinstance(value, (bool, int)) or isinstance(value, str)):
+                summary[_text(key, 40)] = _text(value, 200) if isinstance(value, str) else value
+    fingerprints = [{'name': _text(f.get('name'), 120), 'source': _text(f.get('source'), 40)}
+                    for f in (item.get('fingerprints') if isinstance(item.get('fingerprints'), list) else [])[:20] if isinstance(f, dict) and isinstance(f.get('name'), str)]
+    return {'domain': domain, 'postures': postures, 'resolvable': resolvable, 'summary': summary, 'card': _supplier_card(item.get('card')),
+            'fingerprints': fingerprints, 'edges': _strings(item.get('edges'), 10, 60), 'distro': _text(item.get('distro'), 60),
+            'answered': item.get('answered') is True, 'stopped': item.get('stopped') is True, 'partial': item.get('partial') is True,
+            'requests': _int(item.get('requests'), 0, 5000)}
+
+
+def clean_supplier_check(body):
+    domains = body.get('domains')
+    if not isinstance(domains, list) or len(domains) > MAX_SUPPLIER_DOMAINS:
+        raise ApiError(400, 'a supplier_check result lists its domains (at most %d)' % MAX_SUPPLIER_DOMAINS)
+    out = [row for row in (_supplier_row(item) for item in domains) if row is not None]
+    return {'domains': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
 MAX_VHOST_ADDRESSES = 10
 MAX_VHOST_NAMES = 200
@@ -264,6 +377,114 @@ def clean_subdir_probe(body):
     return {'hosts': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
+MAX_ROUTES = 500  # 25 hosts of at most 20 routes
+ROUTE_STATES = ('open', 'login', 'sso', 'session_required', 'redirect', 'not_found', 'error', 'catch_all')
+MAX_ROUTE_EVIDENCE_BYTES = 128 * 1024
+MAX_ROUTE_CREDENTIALS = 20
+# the evidence a route check keeps (``cveFeed.route_auth.classify``, ``_read_scripts`` and ``_against_missing_page``): key -> the type it must have.
+# Anything else (the page's scripts to read, an invented key) is dropped, a key of the wrong type too.
+_ROUTE_EVIDENCE = {'markers': list, 'bytes': int, 'cookies': list, 'server': str, 'powered_by': str, 'headers': dict, 'fingerprints': list,
+                   'fingerprint_names': list, 'script_page': dict, 'script_urls': list, 'libraries': dict, 'provider': str, 'redirect_to': str,
+                   'www_authenticate': str, 'reason': str, 'catch_all': dict}
+
+
+def _json_size(value):
+    try:
+        return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _route_evidence(raw):
+    """The evidence of one route clipped to the keys and types the route check keeps, or None when it is not JSON or too large (the route is then
+    unanswered: a truncated reading would be read as what the page says)."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, kind in _ROUTE_EVIDENCE.items():
+        value = raw.get(key)
+        if value is None or isinstance(value, bool) or not isinstance(value, kind):
+            continue
+        if kind is str:
+            value = _text(value, 2000 if key == 'redirect_to' else 100)
+        elif key in ('markers', 'cookies', 'fingerprint_names', 'script_urls'):
+            value = [_text(v, 2000 if key == 'script_urls' else 120) for v in value[:40 if key != 'cookies' else 60] if isinstance(v, str)]
+        elif key == 'fingerprints':
+            value = [{'name': _text(v['name'], 120), 'source': _text(v.get('source'), 48)} for v in value[:40]
+                     if isinstance(v, dict) and isinstance(v.get('name'), str)]
+        out[key] = value
+    out.setdefault('provider', '')
+    out.setdefault('redirect_to', '')
+    size = _json_size(out)
+    return out if size is not None and size <= MAX_ROUTE_EVIDENCE_BYTES else None
+
+
+def _route_sensitive(raw):
+    """``{type: {'count', 'sample'}}`` for the kinds ``cveFeed.sensitive`` knows, counts bounded and samples clipped. The score is the server's own."""
+    from cveFeed import sensitive
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, row in raw.items():
+        if name in sensitive.PATTERNS and isinstance(row, dict):
+            count = row.get('count')
+            if isinstance(count, int) and not isinstance(count, bool) and 0 < count <= sensitive.MAX_PER_TYPE:
+                out[name] = {'count': count, 'sample': _text(row.get('sample'), 200)}
+    return out
+
+
+def _route_credentials(raw):
+    from cveFeed import sensitive
+    out = []
+    for item in raw[:MAX_ROUTE_CREDENTIALS] if isinstance(raw, list) else ():
+        if isinstance(item, dict) and item.get('type') in sensitive.CREDENTIAL_TYPES and isinstance(item.get('value'), str) and 0 < len(item['value']) <= 8192:
+            out.append({'type': item['type'], 'value': item['value']})
+    return out
+
+
+def _state_fits(state, status):
+    """Whether ``state`` is one the status can have: a page that is not there is a 404 or 410, an open page or a login page answered 2xx or 405.
+    The other states (a redirect, a session requirement, single sign-on) can come from several statuses, a meta refresh included."""
+    if state == 'not_found':
+        return status in (404, 410)
+    if state in ('open', 'login'):
+        return 200 <= status < 300 or status == 405
+    return True
+
+
+def _route(item):
+    """One route's reading, or None. A route reported with an error carries no state."""
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+        return None
+    row = {'id': _text(item['id'], 2000)}
+    if item.get('error'):
+        row['error'] = _text(item['error'], 200)
+        return row
+    status = item.get('status')
+    status = status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else None
+    state = item.get('state')
+    if state not in ROUTE_STATES or not _state_fits(state, status or 0):
+        return {**row, 'error': 'the scanner reported a state this route cannot have'}
+    evidence = _route_evidence(item.get('evidence'))
+    if evidence is None:
+        return {**row, 'error': 'the scanner reported more evidence than a route may carry'}
+    from cveFeed import sensitive
+    found = _route_sensitive(item.get('sensitive'))
+    size = item.get('bytes')
+    return {**row, 'status': status, 'state': state, 'title': _text(item.get('title'), 300), 'content_type': _text(item.get('content_type'), 100),
+            'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
+            'bytes': size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else 0,
+            'credentials': _route_credentials(item.get('credentials'))}
+
+
+def clean_route_probe(body):
+    routes = body.get('routes')
+    if not isinstance(routes, list) or len(routes) > MAX_ROUTES:
+        raise ApiError(400, 'a route_probe result lists its routes (at most %d)' % MAX_ROUTES)
+    out = [r for r in map(_route, routes) if r is not None]
+    return {'routes': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
@@ -283,12 +504,24 @@ def bind(kind, result, task):
         kept = [h for h in result['hosts'] if h['id'] in asked]
         dropped = len(result['hosts']) - len(kept)
         result = {**result, 'hosts': kept}
-    elif kind in ('http_probe', 'alive_check', 'bucket_check'):
-        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets'}[kind]
-        asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
+    elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe'):
+        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes'}[kind]
+        if kind == 'route_probe':  # the routes a task asked about are the urls of its hosts
+            asked = {u for h in target.get('hosts') or [] if isinstance(h, dict) for u in h.get('urls') or [] if isinstance(u, str)}
+        else:
+            asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
         kept = [p for p in result[key] if p['id'] in asked]
         dropped = len(result[key]) - len(kept)
         result = {**result, key: kept}
+    elif kind == 'supplier_check':  # only the names the task listed, once each
+        asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
+        kept, seen = [], set()
+        for row in result['domains']:
+            if row['domain'] in asked and row['domain'] not in seen:
+                seen.add(row['domain'])
+                kept.append(row)
+        dropped = len(result['domains']) - len(kept)
+        result = {**result, 'domains': kept}
     else:
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('names') or [] if isinstance(n, str)}
         resolved = {n: a for n, a in result['resolved'].items() if n in asked}
