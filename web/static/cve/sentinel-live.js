@@ -18,7 +18,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check", alive_check: "retired host checks", bucket_check: "cloud storage checks", supplier_check: "supplier posture checks" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check", alive_check: "retired host checks", bucket_check: "cloud storage checks", supplier_check: "supplier posture checks", vhost_probe: "virtual host checks", subdir_probe: "subdirectory application checks", route_probe: "web route checks" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {

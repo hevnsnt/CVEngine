@@ -1,0 +1,39 @@
+{
+  "addresses": [
+    {
+      "id": "203.0.113.10",
+      "address": "203.0.113.10",
+      "scheme": "https",
+      "port": 443,
+      "names": [
+        {
+          "name": "portal.example.com"
+        },
+        {
+          "name": "wiki.example.com",
+          "own": {
+            "status": 200,
+            "title": "Wiki",
+            "length": 3010,
+            "location": "",
+            "server": ""
+          }
+        }
+      ]
+    }
+  ],
+  "gap": 2.0,
+  "scope": {
+    "hosts": [
+      "203.0.113.10",
+      "portal.example.com",
+      "wiki.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}
