@@ -2,7 +2,6 @@ import datetime
 import http.server
 import json
 import os
-import stat
 import tempfile
 import threading
 from io import StringIO
@@ -16,7 +15,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import auth_checks, auth_nuclei, auth_routes, nuclei_scan, route_auth as ra, templategen
+from cveFeed import auth_checks, auth_nuclei, auth_routes, nuclei_scan, route_auth as ra
 from cveFeed.auth_checks import AuthScope, CredentialError
 from cveFeed.models import AgentActivity, AuthCredential, HostExclusion, RouteAuth, ScanControl, ServiceRun
 from reNgine import crypto_fields
@@ -451,9 +450,6 @@ class ScopeTests(Fixture):
 		self.make(host='')
 		self.assertEqual(self.scope(self.sibling).headers_for('app.example.test', 'https', 443), [])  # the sibling target's scope holds nothing
 		self.assertEqual(self.scope(self.foreign).headers_for('app.example.test', 'https', 443), [])
-		self.assertEqual(auth_checks.credentials_for_hosts(self.other_project.pk, ['app.example.test']), [])
-		self.assertEqual(len(auth_checks.credentials_for_hosts(self.project.pk, ['www.app.example.test'])), 1)
-		self.assertEqual(auth_checks.credentials_for_hosts(self.project.pk, ['shop.example.test']), [])
 
 	def test_a_host_only_target_does_not_extend_to_its_subdomains(self):
 		Domain.objects.filter(pk=self.domain.pk).update(scope_mode=Domain.SCOPE_HOST)
@@ -872,49 +868,51 @@ class NucleiTests(Fixture):
 		return scan
 
 	def stream(self, lines=None, error=None):
-		def stream(path, secret_file=None, **kwargs):
-			run = {'targets': open(path).read().split(), 'secret_file': secret_file, 'kwargs': kwargs}
-			if secret_file:
-				run['mode'] = stat.S_IMODE(os.stat(secret_file).st_mode)
-				run['dir_mode'] = stat.S_IMODE(os.stat(os.path.dirname(secret_file)).st_mode)
-				run['document'] = json.load(open(secret_file))
-				self.leftovers.append(secret_file)
-			self.runs.append(run)
-			if secret_file and error:
+		"""A stream as ``sentinel_dispatch.wrap_nuclei_stream`` builds one: the plain pass takes ``stream(path)``, the signed-in pass takes
+		``stream.signed_in(items)`` (the built-in scanner reads the stored credential itself, so nothing here is handed a value)."""
+		def plain(path, **kwargs):
+			self.runs.append({'targets': open(path).read().split(), 'signed': False, 'kwargs': kwargs})
+			return iter(())
+
+		def signed_in(items, **kwargs):
+			entries = auth_checks.entries_for(items)
+			self.runs.append({'targets': [item.url for item in items], 'signed': True, 'kwargs': kwargs,
+			                  'credentials': sorted(cred.pk for cred, _domains in entries),
+			                  'domains': sorted(domain for _cred, domains in entries for domain in domains)})
+			if error:
 				raise error
-			if secret_file:
-				yield from (lines if lines is not None else [nuclei_line()])
-		return stream
+			yield from (lines if lines is not None else [nuclei_line()])
+		plain.signed_in = signed_in
+		return plain
 
 	def signed_runs(self):
-		return [r for r in self.runs if r['secret_file']]
+		return [r for r in self.runs if r['signed']]
 
-	def test_a_signed_in_pass_runs_for_the_covered_origin_with_the_values_in_a_private_file(self):
-		self.make(host='app.example.test')
+	def test_a_signed_in_pass_runs_for_the_covered_origin_on_the_scanner_with_no_value_in_what_it_is_sent(self):
+		cred = self.make(host='app.example.test')
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		run, = self.signed_runs()
-		self.assertEqual(run['targets'], ['https://app.example.test'])  # an explicit origin, never a bare host nuclei could read as http
-		self.assertEqual((run['mode'], run['dir_mode']), (0o600, 0o700))
-		secret, = run['document']['static']
-		self.assertEqual((secret['type'], secret['domains']), ('Header', ['app.example.test']))
-		self.assertEqual({(h['key'], h['value']) for h in secret['headers']}, {('Authorization', SECRET), ('Cookie', COOKIE)})
-		self.assertNotIn(SECRET, json.dumps(run['kwargs']))
+		self.assertEqual(run['targets'], ['https://app.example.test'])  # an explicit origin, never a bare host a scanner could read as http
+		self.assertEqual((run['credentials'], run['domains']), ([cred.pk], ['app.example.test']))  # a reference to the credential, and where it may go
+		for plain_value in (SECRET, TOKEN, COOKIE, COOKIE_VALUE):
+			self.assertNotIn(plain_value, repr(run))
 		self.assertEqual(out['authenticated']['findings'], 1)
-		self.assertEqual(self.runs[0]['secret_file'], None)  # the plain pass ran first, without it
+		self.assertFalse(self.runs[0]['signed'])  # the plain pass ran first, without it
 
-	def test_the_file_and_its_directory_are_removed_afterwards_and_on_failure(self):
+	def test_a_stream_with_no_secure_read_never_runs_a_signed_in_pass(self):
 		self.make()
-		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
-		for path in self.leftovers:
-			self.assertFalse(os.path.exists(path))
-			self.assertFalse(os.path.exists(os.path.dirname(path)))
-		self.leftovers.clear()
-		ServiceRun.objects.all().delete()
-		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream(error=RuntimeError('boom')))
-		self.assertIn('boom', out['authenticated']['error'])
-		self.assertTrue(self.leftovers)
-		for path in self.leftovers:
-			self.assertFalse(os.path.exists(os.path.dirname(path)))
+		plain = self.stream()
+		del plain.signed_in  # an internal stream: a stored sign-in goes nowhere else
+		out = nuclei_scan.run_nuclei(self.scan().id, stream=plain)
+		self.assertEqual((self.signed_runs(), out['authenticated']['skipped']), ([], 'a signed-in pass runs only on the built-in scanner'))
+
+	def test_with_no_scanner_able_to_read_the_sign_in_the_pass_waits_and_the_targets_stay_due(self):
+		from reNgine.resources import ScannerUnavailable
+		self.make()
+		plain = self.stream(error=ScannerUnavailable('nuclei_targeted', 'no live built-in scanner'))
+		out = nuclei_scan.run_nuclei(self.scan().id, stream=plain)
+		self.assertIn('skipped', out['authenticated'])
+		self.assertFalse(ServiceRun.objects.filter(service__startswith=auth_nuclei.SERVICE).exists())  # nothing is recorded: not done, not failed
 
 	def test_a_stored_finding_carries_no_secret_and_is_marked(self):
 		self.make()
@@ -945,11 +943,9 @@ class NucleiTests(Fixture):
 		plain['info'] = {**plain['info'], 'description': 'plain'}
 		both = [nuclei_line(), nuclei_line(matched='https://app.example.test/billing', name='Billing exposed')]
 
-		def stream(path, secret_file=None, **k):
-			if secret_file:
-				yield from both
-			else:
-				yield plain
+		def stream(path, **k):
+			yield plain
+		stream.signed_in = lambda items, **k: iter(both)
 		out = nuclei_scan.run_nuclei(scan.id, stream=stream)
 		self.assertEqual(Vulnerability.objects.filter(scan_history=scan).count(), 2)
 		self.assertEqual(out['authenticated'], {'targets': 1, 'findings': 2, 'new': 1})  # one of the two was not there without signing in
@@ -961,7 +957,7 @@ class NucleiTests(Fixture):
 		nuclei_scan.run_nuclei(scan.id, stream=self.stream())
 		run, = self.signed_runs()
 		self.assertEqual(run['targets'], ['https://app.example.test'])  # not app...:8443, not the address, not another name
-		self.assertEqual(run['document']['static'][0]['domains'], ['app.example.test'])
+		self.assertEqual(run['domains'], ['app.example.test'])
 		plain = self.runs[0]['targets']
 		self.assertIn('app.example.test:8443', plain)  # the plain pass still covers every port and the address
 		self.assertTrue([t for t in plain if t.startswith('203.0.113.')])
@@ -975,7 +971,7 @@ class NucleiTests(Fixture):
 		line = AgentActivity.objects.filter(message__contains='Trust this certificate anyway').get().message
 		self.assertIn('https://app.example.test', line)
 		self.assertIn('Nuclei does not verify TLS', line)
-		self.assertEqual(self.runs[0]['secret_file'], None)  # the plain pass still ran
+		self.assertFalse(self.runs[0]['signed'])  # the plain pass still ran
 
 	def test_a_withheld_sign_in_is_recorded_and_the_check_coverage_says_it_is_not_sent(self):
 		from cveFeed import check_coverage as cc
@@ -1030,7 +1026,7 @@ class NucleiTests(Fixture):
 		nuclei_scan.run_nuclei(scan.id, stream=self.stream())
 		run, = self.signed_runs()
 		self.assertEqual(run['targets'], ['https://app.example.test:8443'])
-		self.assertEqual(run['document']['static'][0]['domains'], ['app.example.test:8443'])
+		self.assertEqual(run['domains'], ['app.example.test:8443'])
 
 	def test_plain_http_is_covered_only_when_it_was_named(self):
 		self.make(host='app.example.test', origins=['https:443', 'http:80'])
@@ -1044,9 +1040,9 @@ class NucleiTests(Fixture):
 		nuclei_scan.run_nuclei(scan.id, stream=self.stream())
 		run, = self.signed_runs()
 		self.assertEqual(sorted(run['targets']), ['https://api.app.example.test', 'https://app.example.test'])
-		self.assertEqual(sorted(run['document']['static'][0]['domains']), ['api.app.example.test', 'app.example.test'])
+		self.assertEqual(run['domains'], ['api.app.example.test', 'app.example.test'])
 
-	def test_an_expired_sign_in_is_never_written_to_a_file(self):
+	def test_an_expired_sign_in_is_never_sent(self):
 		self.make(expires=timezone.now() - datetime.timedelta(minutes=1))
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		self.assertEqual(self.signed_runs(), [])
@@ -1102,194 +1098,6 @@ class NucleiTests(Fixture):
 		Domain.objects.filter(pk=self.foreign.pk).update(name='app.example.test')  # the same name, held by another organization
 		nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		self.assertEqual(self.signed_runs(), [])
-
-
-class FakeProc:
-	"""subprocess.Popen as stream_nuclei and run_template use it."""
-	instances = []
-	returncode = 0
-	lines = []
-
-	def __init__(self, cmd, **kwargs):
-		self.cmd, self.kwargs = cmd, kwargs
-		self.stdout = iter(json.dumps(line) + '\n' for line in type(self).lines)
-		type(self).instances.append(self)
-
-	def poll(self):
-		return self.returncode
-
-	def wait(self):
-		return self.returncode
-
-	def communicate(self, timeout=None):
-		return '\n'.join(json.dumps(line) for line in type(self).lines), ''
-
-
-class _Job:
-	def __enter__(self):
-		return self
-
-	def __exit__(self, *exc):
-		return False
-
-	def attach(self, proc):
-		pass
-
-	def raise_if_killed(self):
-		pass
-
-
-class CommandTests(TestCase):
-	def setUp(self):
-		FakeProc.instances, FakeProc.lines = [], []
-
-	def test_the_nuclei_command_never_holds_a_value(self):
-		cred = SimpleNamespace(pk=1, secret={'headers': [['Authorization', SECRET]], 'cookie': COOKIE})
-		with auth_checks.secrets_file([(cred, ['app.example.test'])]) as path, \
-				mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev', 1)), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(nuclei_scan.subprocess, 'Popen', FakeProc):
-			with tempfile.NamedTemporaryFile('w', suffix='.txt') as handle:
-				handle.write('https://app.example.test\n')
-				handle.flush()
-				list(nuclei_scan.stream_nuclei(handle.name, secret_file=path))
-				list(nuclei_scan.stream_nuclei(handle.name))
-		signed, plain = FakeProc.instances
-		self.assertEqual(signed.cmd[signed.cmd.index('-sf') + 1], path)
-		self.assertIn('-dr', signed.cmd)
-		self.assertNotIn('-sf', plain.cmd)
-		self.assertNotIn('-dr', plain.cmd)
-		for instance in (signed, plain):
-			joined = ' '.join(map(str, instance.cmd)) + repr(instance.kwargs)
-			for plain_value in (SECRET, TOKEN, COOKIE, COOKIE_VALUE, 'Authorization'):
-				self.assertNotIn(plain_value, joined)
-			self.assertNotIn('env', instance.kwargs)  # no environment carries a value either
-		self.assertFalse(os.path.exists(path))
-
-	def test_the_secrets_file_is_nuclei_static_format_for_exactly_the_listed_domains(self):
-		cred = SimpleNamespace(pk=1, secret={'headers': [['X-Api-Key', 'abcdef123456']], 'cookie': ''})
-		doc = auth_checks.secrets_document([(cred, ['app.example.test', 'app.example.test:8443'])])
-		self.assertEqual(doc['static'], [{'type': 'Header', 'domains': ['app.example.test', 'app.example.test:8443'],
-			'headers': [{'key': 'X-Api-Key', 'value': 'abcdef123456'}]}])
-
-	def test_run_template_signed_in_adds_the_file_and_redacts_output(self):
-		FakeProc.lines = [{'host': 'https://app.example.test', 'matched-at': 'https://app.example.test/x', 'template-id': 't', 'matcher-name': 'm',
-			'request': f'GET /x HTTP/1.1\r\nAuthorization: {SECRET}', 'response': f'echo {TOKEN}', 'curl-command': f'curl -H "Authorization: {SECRET}"'}]
-		values = auth_checks.secret_values([SimpleNamespace(secret={'headers': [['Authorization', SECRET]], 'cookie': ''})])
-		with mock.patch('cveFeed.validation.approved_template', return_value=('id: fixture', '')), \
-				mock.patch('targetApp.target_types.blocked_names', return_value=set()), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', FakeProc):
-			out = templategen.run_template('/t.yaml', ['https://app.example.test'], secret_file='/tmp/x/secrets.json', redact=values)[0]
-			plain = templategen.run_template('/t.yaml', ['app.example.test'])[0]
-		signed_cmd, plain_cmd = (p.cmd for p in FakeProc.instances)
-		self.assertEqual(signed_cmd[signed_cmd.index('-sf') + 1], '/tmp/x/secrets.json')
-		self.assertIn('-dr', signed_cmd)
-		self.assertNotIn('-sf', plain_cmd)
-		self.assertTrue(out['vulnerable'])
-		self.assertNotIn(TOKEN, json.dumps(out))
-		self.assertIn(TOKEN, json.dumps(plain))  # without a redaction list the run is exactly as it was
-
-	def test_run_template_error_text_is_redacted(self):
-		values = auth_checks.secret_values([SimpleNamespace(secret={'headers': [['Authorization', SECRET]], 'cookie': ''})])
-
-		class Failing(FakeProc):
-			returncode = 2
-
-			def communicate(self, timeout=None):
-				return '', f'invalid header {SECRET}'
-		with mock.patch('cveFeed.validation.approved_template', return_value=('id: fixture', '')), \
-				mock.patch('reNgine.resources.heavy_job', lambda *a, **k: _Job()), mock.patch.object(templategen.subprocess, 'Popen', Failing):
-			out = templategen.run_template('/t.yaml', ['https://app.example.test'], secret_file='/tmp/x/s.json', redact=values)[0]
-		self.assertNotIn(TOKEN, out['error'])
-
-
-class TemplateCheckTests(Fixture):
-	"""The CVE template check (templategen.run_cve_tests) with a stored sign-in."""
-
-	def setUp(self):
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
-		patcher.start()
-		self.addCleanup(patcher.stop)
-		self.verify = mock.patch('cveFeed.auth_checks.certificate_verifies', return_value=(True, '')).start()
-		self.addCleanup(mock.patch.stopall)
-
-	def make(self, *args, allow_untrusted_certificate=True, **kwargs):
-		cred = super().make(*args, **kwargs)
-		cred.allow_untrusted_certificate = allow_untrusted_certificate
-		cred.save(update_fields=['allow_untrusted_certificate'])
-		return cred
-
-	def runs(self, plain_hit, signed_hit):
-		calls = []
-
-		def run_template(path, hosts, secret_file=None, redact=()):
-			calls.append((list(hosts), secret_file, redact))
-			hit = signed_hit if secret_file else plain_hit
-			return [{'host': h, 'vulnerable': hit, 'output': '', 'hit': {'host': h, 'matcher-name': 'm', 'request': f'Authorization: {SECRET}'} if hit else None}
-				for h in hosts]
-		return calls, run_template
-
-	def merge(self, plain_hit, signed_hit, hosts=('app.example.test',)):
-		calls, fake = self.runs(plain_hit, signed_hit)
-		outcomes = [{'host': h, 'vulnerable': plain_hit, 'output': ''} for h in hosts]
-		with mock.patch.object(templategen, 'run_template', fake):
-			merged = auth_nuclei.merge_template_outcomes('/t.yaml', list(hosts), outcomes, self.project.pk)
-		return calls, merged
-
-	def test_a_host_vulnerable_only_when_signed_in_is_reported_and_marked(self):
-		self.make()
-		calls, merged = self.merge(False, True)
-		(urls, secret_file, redact), = calls
-		self.assertEqual((urls, bool(secret_file)), (['https://app.example.test'], True))
-		self.assertTrue(merged[0]['vulnerable'] and merged[0]['authenticated'])
-		self.assertEqual(merged[0]['host'], 'app.example.test')
-
-	def test_nothing_changes_without_a_sign_in_or_when_the_plain_run_already_matched(self):
-		calls, merged = self.merge(False, True)
-		self.assertEqual((calls, merged[0]['vulnerable']), ([], False))
-		self.make()
-		calls, merged = self.merge(True, True)
-		self.assertNotIn('authenticated', merged[0])
-
-	def test_signed_in_template_requires_explicit_unverified_tls_opt_in(self):
-		cred = self.make(allow_untrusted_certificate=False)
-		calls, merged = self.merge(False, True)
-		self.assertEqual((calls, merged[0]['vulnerable']), ([], False))
-		self.verify.assert_not_called()
-		AuthCredential.objects.filter(pk=cred.pk).update(allow_untrusted_certificate=True)
-		calls, merged = self.merge(False, True)
-		self.assertEqual(len(calls), 1)
-		self.assertTrue(merged[0]['vulnerable'])
-
-	def test_a_host_the_sign_in_does_not_cover_is_not_run_signed_in(self):
-		self.make(host='app.example.test')
-		calls, merged = self.merge(False, True, hosts=('shop.example.test', 'cdn.thirdparty.test'))
-		self.assertEqual(calls, [])
-		self.assertFalse(any(m['vulnerable'] for m in merged))
-
-	def test_a_paused_instance_and_a_failing_run_leave_the_plain_result(self):
-		self.make()
-		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
-		calls, merged = self.merge(False, True)
-		self.assertEqual((calls, merged[0]['vulnerable']), ([], False))
-		ScanControl.objects.update_or_create(pk=1, defaults={'paused': False})
-		with mock.patch.object(templategen, 'run_template', side_effect=RuntimeError(f'boom {SECRET}')):
-			merged = auth_nuclei.merge_template_outcomes('/t.yaml', ['app.example.test'], [{'host': 'app.example.test', 'vulnerable': False, 'output': ''}], self.project.pk)
-		self.assertFalse(merged[0]['vulnerable'])
-
-	def test_the_finding_a_signed_in_template_check_saves_is_tagged_and_clean(self):
-		from cveFeed.models import CVEEntry
-		self.make()
-		scan = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True),
-			start_scan_date=timezone.now(), scan_status=2)
-		Subdomain.objects.create(name='app.example.test', target_domain=self.domain, scan_history=scan)
-		cve = CVEEntry.objects.create(cve_id='CVE-2099-7', cvss=8.0)
-		calls, merged = self.merge(False, True)
-		values = auth_checks.secret_values(auth_checks.credentials_for_hosts(self.project.pk, ['app.example.test']))
-		merged[0]['hit'] = auth_checks.redact_obj(merged[0]['hit'], values)
-		self.assertEqual(templategen.record_outcomes(cve, merged, project=self.project.pk, template_id='t'), 1)
-		vuln = Vulnerability.objects.get(scan_history=scan)
-		self.assertIn(auth_checks.SEEN_TAG, [t.name for t in vuln.tags.all()])
-		self.assertNotIn(TOKEN, everything_stored())
 
 
 class PlanTests(Fixture):

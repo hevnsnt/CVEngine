@@ -3,7 +3,7 @@ import importlib
 from django.apps import apps
 from django.test import TestCase
 
-from cveFeed import nmap_scan
+from cveFeed import port_inventory
 from reNgine import discovery_events as bbot_lib
 from reNgine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Port
@@ -13,7 +13,7 @@ class BbotPortsArePerIpTests(TestCase):
 	"""Review 2.4: bbot used to attach one Port row per port number to every IP."""
 
 	def test_bbot_for_another_ip_does_not_inherit_the_nmap_service(self):
-		nmap_scan.persist_inventory([{'ip': '192.0.2.10', 'ports': [
+		port_inventory.persist_inventory([{'ip': '192.0.2.10', 'ports': [
 			{'number': 443, 'state': 'open', 'product': 'nginx', 'version': '1.18.0', 'service_name': 'https'}]}])
 		a_port = IpAddress.objects.get(address='192.0.2.10').ports.get(number=443)
 		persist_bbot_result(bbot_lib.BbotResult(ports={('192.0.2.11', 443)}), ctx={})

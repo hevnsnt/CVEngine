@@ -7,10 +7,9 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cvengine_scanner import flags as scan_flags
 
 from agentapi.auth import create_token
-from cveFeed import hygiene, ledger, nmap_scan, udp_scan
+from cveFeed import hygiene, ledger, port_inventory, udp_scan
 from cveFeed.models import AgentActivity, HostExclusion, HygieneFinding, ScanControl, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
 from reNgine import resources
@@ -64,6 +63,21 @@ def udp_xml(address, states, extra=''):
 	        f'<host><status state="up"/><address addr="{address}" addrtype="ipv4"/><ports>{body}</ports></host></nmaprun>')
 
 
+def run_udp(runner=None, **kwargs):
+    """``udp_scan.run`` with ``runner(targets, flags, timeout)`` standing in for the Sentinel: its raw XML is read exactly as ``try_nmap_udp`` reads
+    a Sentinel's report (the one parser, the host named by the address); a report that names no host leaves the address due."""
+    from reNgine.resources import ScannerUnavailable
+
+    def try_nmap_udp(project, address, scan=None, timeout=None):
+        text = runner([address], [], '20m')
+        host = next((h for h in port_inventory.parse_xml(text or '') if h.get('ip') == address), None)
+        if host is None:
+            raise ScannerUnavailable('nmap_udp', 'a Sentinel scanned the address but its report named no host for it')
+        return host
+    with mock.patch('agentapi.sentinel_dispatch.try_nmap_udp', try_nmap_udp):
+        return udp_scan.run(**kwargs)
+
+
 class UdpBase(TestCase):
 	def setUp(self):
 		now = timezone.now()
@@ -97,7 +111,7 @@ class UdpBase(TestCase):
 		return ip
 
 	def host_of(self, xml, address):
-		return next(h for h in nmap_scan.parse_xml(xml) if h['ip'] == address)
+		return next(h for h in port_inventory.parse_xml(xml) if h['ip'] == address)
 
 	def udp(self, ip, number=None):
 		rows = ip.ports.filter(protocol='udp')
@@ -106,7 +120,7 @@ class UdpBase(TestCase):
 
 class ParsingTests(SimpleTestCase):
 	def test_a_real_shaped_report_gives_a_state_per_udp_port(self):
-		host = nmap_scan.parse_xml(ANSWERED)[0]
+		host = port_inventory.parse_xml(ANSWERED)[0]
 		states = {r['number']: (r['protocol'], r['state']) for r in host['ports']}
 		self.assertEqual(states, {53: ('udp', 'closed'), 69: ('udp', 'open|filtered'), 123: ('udp', 'open'), 161: ('udp', 'open'),
 		                          1900: ('udp', 'open|filtered'), 11211: ('udp', 'open')})
@@ -114,56 +128,34 @@ class ParsingTests(SimpleTestCase):
 		self.assertIsNone(host['scanned'])  # a UDP run says nothing about TCP: no TCP port may be closed by it
 
 	def test_a_version_detected_service_keeps_product_version_and_cpe(self):
-		ntp = next(r for r in nmap_scan.parse_xml(ANSWERED)[0]['ports'] if r['number'] == 123)
+		ntp = next(r for r in port_inventory.parse_xml(ANSWERED)[0]['ports'] if r['number'] == 123)
 		self.assertEqual((ntp['product'], ntp['version'], ntp['service_extra'], ntp['cpe'], ntp['method']),
 		                 ('NTP', '4.2.8p15', 'Ubuntu', 'cpe:/a:ntp:ntp:4.2.8p15', 'probed'))
 		self.assertIn('ntpd 4.2.8p15', ntp['scripts']['ntp-info'])
 
 	def test_classify_reads_open_open_filtered_closed_and_summarised_ports(self):
-		states, answered = udp_scan.classify(nmap_scan.parse_xml(ANSWERED)[0])
+		states, answered = udp_scan.classify(port_inventory.parse_xml(ANSWERED)[0])
 		self.assertEqual(states[123], 'open')
 		self.assertEqual(states[69], 'open|filtered')
 		self.assertEqual(states[53], 'closed')
 		self.assertTrue(answered)
-		states, answered = udp_scan.classify(nmap_scan.parse_xml(COLLAPSED)[0])
+		states, answered = udp_scan.classify(port_inventory.parse_xml(COLLAPSED)[0])
 		self.assertEqual((states[7], states[38], states[123], states[161]), ('closed', 'closed', 'open', 'open|filtered'))  # extraports fill the rest
 		self.assertEqual(len(states), 40)
 
 	def test_a_host_that_only_stays_silent_has_not_answered(self):
-		states, answered = udp_scan.classify(nmap_scan.parse_xml(SILENT)[0])
+		states, answered = udp_scan.classify(port_inventory.parse_xml(SILENT)[0])
 		self.assertEqual(set(states.values()), {'open|filtered'})
 		self.assertFalse(answered)
 
 class FlagTests(SimpleTestCase):
-	def test_the_command_is_slow_and_low(self):
-		flags = udp_scan.nmap_flags()
-		self.assertEqual(flags[:2], ['-sU', '-sV'])
-		self.assertEqual(flags[flags.index('--version-intensity') + 1], '3')
-		self.assertEqual(flags[flags.index('--max-retries') + 1], '1')
-		self.assertEqual(flags[flags.index('--max-rate') + 1], '20')
-		self.assertIn('-Pn', flags)
-		self.assertIn('-n', flags)
-		self.assertNotIn('-T4', flags)
-		self.assertNotIn('-p-', flags)
-		scripts = flags[flags.index('--script') + 1].split(',')
-		self.assertTrue(set(scripts) <= scan_flags.NSE_SCRIPT_SET)
-		self.assertEqual(flags[flags.index('-p') + 1], 'U:' + ','.join(str(p) for p in udp_scan.DEFAULT_PORTS))
-		self.assertEqual(udp_scan.host_timeout(), '20m')
+	def test_the_command_is_slow_and_low_is_the_scanners_business(self):
+		self.assertEqual(udp_scan.ports(), list(udp_scan.DEFAULT_PORTS))  # the sweep's flags (rate, retries, scripts) are the scanner library's
 
 	def test_the_default_list_is_the_documented_exposure_list(self):
 		self.assertEqual(set(udp_scan.DEFAULT_PORTS), set(udp_scan.PORT_NOTES))
 		for port in (53, 67, 68, 69, 123, 137, 161, 500, 514, 623, 1194, 1812, 1813, 1900, 4500, 5060, 5353, 11211):
 			self.assertIn(port, udp_scan.DEFAULT_PORTS)
-
-	def test_the_port_list_and_rate_are_configurable_and_a_bad_list_is_ignored(self):
-		with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN_PORTS': '161, 123,161', 'CVENGINE_UDPSCAN_MAX_RATE': '5'}):
-			self.assertEqual(udp_scan.ports(), [123, 161])
-			self.assertEqual(udp_scan.nmap_flags()[udp_scan.nmap_flags().index('--max-rate') + 1], '5')
-		for bad in ('', 'dns', '0', '70000', '161,abc', ','.join(str(n) for n in range(1, 80))):
-			with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN_PORTS': bad}):
-				self.assertEqual(udp_scan.ports(), list(udp_scan.DEFAULT_PORTS), bad)
-		with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN_MAX_RATE': 'fast'}):
-			self.assertEqual(udp_scan.max_rate(), 20)
 
 	def test_the_off_switch(self):
 		for value, expected in (('0', False), ('off', False), ('1', True), ('', True)):
@@ -197,13 +189,13 @@ class PortKeyTests(UdpBase):
 	def test_tcp_and_udp_ports_with_one_number_are_two_rows(self):
 		ip = self.ip('192.0.2.10')
 		tcp = '<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="tcp" portid="161"><state state="open"/><service name="http" product="Acme" version="1"/></port></ports></host></nmaprun>'
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(tcp), org_id=self.org.id)
+		port_inventory.persist_inventory(port_inventory.parse_xml(tcp), org_id=self.org.id)
 		udp_scan.record_run(ip, self.host_of(ANSWERED, '192.0.2.10'))
 		self.assertEqual(ip.ports.filter(number=161).count(), 2)
 		self.assertEqual(ip.ports.get(number=161, protocol='tcp').product, 'Acme')
 		self.assertEqual(ip.ports.get(number=161, protocol='udp').service_name, 'snmp')
 		# a TCP re-scan updates the TCP row and leaves the UDP one alone
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(tcp.replace('version="1"', 'version="2"')), org_id=self.org.id)
+		port_inventory.persist_inventory(port_inventory.parse_xml(tcp.replace('version="1"', 'version="2"')), org_id=self.org.id)
 		self.assertEqual(ip.ports.get(number=161, protocol='tcp').version, '2')
 		self.assertEqual(ip.ports.get(number=161, protocol='udp').state, 'open')
 		self.assertEqual(ip.ports.filter(number=161).count(), 2)
@@ -223,7 +215,7 @@ class PortKeyTests(UdpBase):
 		udp_scan.record_run(ip, self.host_of(ANSWERED, '192.0.2.10'))  # UDP 53 is closed in this report
 		self.assertEqual(ip.ports.get(number=53, protocol='tcp').state, 'open')
 		tcp_sweep = '<nmaprun><scaninfo type="syn" protocol="tcp" services="1-1000"/><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/><ports><extraports state="closed" count="999"/><port protocol="tcp" portid="22"><state state="open"/></port></ports></host></nmaprun>'
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(tcp_sweep), org_id=self.org.id)
+		port_inventory.persist_inventory(port_inventory.parse_xml(tcp_sweep), org_id=self.org.id)
 		self.assertEqual(ip.ports.get(number=161, protocol='udp').state, 'open')
 		self.assertEqual(ip.ports.get(number=11211, protocol='udp').state, 'open')
 
@@ -485,13 +477,12 @@ class SweepTests(UdpBase):
 	def test_a_sweep_scans_one_ip_records_it_and_stamps_the_ledger(self):
 		ip = self.ip('192.0.2.10', name='edge.udp.test')
 		runner = self.runner()
-		out = udp_scan.run(runner=runner, pipeline=lambda d, n: None)
+		out = run_udp(runner=runner, pipeline=lambda d, n: None)
 		self.assertEqual(len(out['scanned']), 1)
 		result = out['scanned'][0]
 		self.assertTrue(result['ok'])
 		self.assertEqual((result['open'], result['findings']), ([123, 161, 11211], 3))
 		self.assertEqual(runner.calls[0][0], ['192.0.2.10'])  # one IP per nmap process
-		self.assertEqual(runner.calls[0][1], udp_scan.nmap_flags())
 		self.assertEqual(sorted(p.number for p in open_services(ip)), [123, 161, 11211])
 		self.assertTrue(ledger.fresh(udp_scan.SERVICE, [udp_scan.asset_of(ip)]))
 		self.assertEqual(result['retested'], ['edge.udp.test'])
@@ -501,15 +492,15 @@ class SweepTests(UdpBase):
 	def test_each_ip_is_scanned_at_most_once_per_ttl_and_the_oldest_goes_first(self):
 		a, b, c = self.ip('192.0.2.1'), self.ip('192.0.2.2'), self.ip('192.0.2.3')
 		runner = self.runner(lambda addr: udp_xml(addr, {53: 'closed'}))
-		udp_scan.run(runner=runner)
+		run_udp(runner=runner)
 		self.assertEqual(sorted(t[0][0] for t in runner.calls), ['192.0.2.1', '192.0.2.2', '192.0.2.3'])  # all in one firing, one at a time
 		self.assertTrue(all(len(t[0]) == 1 for t in runner.calls))
 		again = self.runner(lambda addr: udp_xml(addr, {53: 'closed'}))
-		self.assertEqual(udp_scan.run(runner=again), {'scanned': []})  # the week has not passed
+		self.assertEqual(run_udp(runner=again), {'scanned': []})  # the week has not passed
 		self.assertEqual(again.calls, [])
 		ServiceRun.objects.filter(service=udp_scan.SERVICE, asset=udp_scan.asset_of(b)).update(finished_at=timezone.now() - timedelta(days=8))
 		ServiceRun.objects.filter(service=udp_scan.SERVICE, asset=udp_scan.asset_of(c)).update(finished_at=timezone.now() - timedelta(days=9))
-		udp_scan.run(runner=again)
+		run_udp(runner=again)
 		self.assertEqual([t[0][0] for t in again.calls], ['192.0.2.3', '192.0.2.2'])  # stale ones, longest waiting first; a is still fresh
 		self.assertIsNotNone(a.pk)
 
@@ -523,14 +514,14 @@ class SweepTests(UdpBase):
 			self.ip(f'192.0.2.{n}')
 		runner = self.runner(lambda addr: udp_xml(addr, {53: 'closed'}))
 		ticks = iter([0, 1, 2, 10 ** 6, 10 ** 6, 10 ** 6])
-		out = udp_scan.run(runner=runner, clock=lambda: next(ticks))
+		out = run_udp(runner=runner, clock=lambda: next(ticks))
 		self.assertEqual(len(out['scanned']), 2)
 
 	def test_scanning_paused_runs_nothing(self):
 		self.ip('192.0.2.10')
 		ScanControl.objects.create(pk=1, paused=True)
 		runner = self.runner()
-		self.assertEqual(udp_scan.run(runner=runner), {'skipped': 'scanning is paused'})
+		self.assertEqual(run_udp(runner=runner), {'skipped': 'scanning is paused'})
 		self.assertEqual(runner.calls, [])
 
 	def test_a_pause_that_arrives_between_two_addresses_stops_the_next(self):
@@ -540,7 +531,7 @@ class SweepTests(UdpBase):
 		def runner(targets, flags, host_timeout):
 			ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
 			return udp_xml(targets[0], {53: 'closed'})
-		out = udp_scan.run(runner=runner)
+		out = run_udp(runner=runner)
 		self.assertEqual(len(out['scanned']), 2)
 		self.assertEqual(out['scanned'][1], {'skipped': 'scanning is paused'})
 		self.assertEqual(ServiceRun.objects.filter(service=udp_scan.SERVICE).count(), 1)
@@ -549,7 +540,7 @@ class SweepTests(UdpBase):
 		self.ip('192.0.2.10')
 		runner = self.runner()
 		with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': '0'}):
-			self.assertEqual(udp_scan.run(runner=runner), {'skipped': 'CVENGINE_UDPSCAN is off'})
+			self.assertEqual(run_udp(runner=runner), {'skipped': 'CVENGINE_UDPSCAN is off'})
 		self.assertEqual(runner.calls, [])
 
 	def test_one_sweep_at_a_time(self):
@@ -558,7 +549,7 @@ class SweepTests(UdpBase):
 		with resources.redis_claim(udp_scan.CLAIM_KEY, 'someone-else', 60) as mine:
 			if mine is not True:
 				self.skipTest('nothing to hold the claim with')
-			out = udp_scan.run(runner=runner)
+			out = run_udp(runner=runner)
 		self.assertIn('another UDP sweep is running', out['skipped'])
 		self.assertEqual(runner.calls, [])
 
@@ -567,18 +558,18 @@ class SweepTests(UdpBase):
 
 		def broken(targets, flags, host_timeout):
 			raise RuntimeError('nmap exploded at /srv/secret/path')
-		out = udp_scan.run(runner=broken)
+		out = run_udp(runner=broken)
 		self.assertEqual(out['scanned'], [{'ip': '192.0.2.10', 'ok': False, 'error': 'RuntimeError'}])
 		self.assertFalse(ledger.fresh(udp_scan.SERVICE, [udp_scan.asset_of(ip)]))
 		self.assertTrue(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
 		self.assertNotIn('/srv/secret', ' '.join(AgentActivity.objects.values_list('message', flat=True)))  # the raw message stays in the worker log
 		runner = self.runner()
-		self.assertEqual(udp_scan.run(runner=runner), {'scanned': []})
+		self.assertEqual(run_udp(runner=runner), {'scanned': []})
 		self.assertEqual(runner.calls, [])
 
 	def test_an_empty_report_is_a_failure_not_an_all_clear(self):
 		ip = self.ip('192.0.2.10')
-		out = udp_scan.run(runner=lambda t, f, h: '')
+		out = run_udp(runner=lambda t, f, h: '')  # a report naming no host leaves the address due
 		self.assertFalse(out['scanned'][0]['ok'])
 		self.assertFalse(ledger.fresh(udp_scan.SERVICE, [udp_scan.asset_of(ip)]))
 		self.assertEqual(ip.ports.count(), 0)
@@ -588,48 +579,29 @@ class SweepTests(UdpBase):
 
 		def busy(targets, flags, host_timeout):
 			raise resources.MemoryBusy('waited too long')
-		udp_scan.run(runner=busy)
+		ticks = iter([0, 1] + [10 ** 6] * 20)  # one address is tried, then the firing's time is up (nothing marks it done, so it would be picked again)
+		run_udp(runner=busy, clock=lambda: next(ticks))
 		self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
 
-	def test_the_default_runner_uses_the_udp_heavy_job_and_rechecks_scope_before_launch(self):
-		with mock.patch('cveFeed.nmap_scan.run_nmap_xml', return_value='') as run:
-			udp_scan._runner(['192.0.2.10'], udp_scan.nmap_flags(), '20m', org_id=self.org.id)
-		self.assertEqual(run.call_args.kwargs['kind'], 'nmap-udp-bg')
-		self.assertTrue(callable(run.call_args.kwargs['before_launch']))
-
-	def test_a_host_excluded_while_the_job_waits_is_never_scanned(self):
-		self.ip('192.0.2.10', name='edge.udp.test')
-		launched = []
-
-		def fake_nmap(targets, flags, host_timeout, kind=None, wait_timeout=None, before_launch=None):
-			HostExclusion.objects.create(org=self.org, host='edge.udp.test')  # excluded while it waited for memory
-			before_launch()
-			launched.append(targets)
-			return ANSWERED
-		with mock.patch('cveFeed.nmap_scan.run_nmap_xml', fake_nmap):
-			result = udp_scan.scan_ip(IpAddress.objects.get(address='192.0.2.10'))
-		self.assertEqual(launched, [])
-		self.assertFalse(result['ok'])
-		self.assertEqual(Port.objects.count(), 0)
-
-
-class LocalFallbackPolicyTests(UdpBase):
-	"""``CVENGINE_LOCAL_FALLBACK`` without ``nmap_udp``: nmap -sU never runs on this server, whatever path led to it."""
+class NoScannerTests(UdpBase):
+	"""nmap -sU never runs on this server, whatever ``CVENGINE_LOCAL_FALLBACK`` says."""
 
 	def test_an_address_no_project_scans_waits_instead_of_running_here(self):
 		lonely = self.ip('192.0.2.11', name=False)  # attached to no host, so no project and no Sentinel path
-		runner = mock.Mock(return_value=ANSWERED)
-		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'none'}):
-			result = udp_scan.scan_ip(lonely, runner=runner)
-		runner.assert_not_called()
+		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'all'}), mock.patch('agentapi.sentinel_dispatch.try_nmap_udp') as sent:
+			result = udp_scan.scan_ip(lonely)
+		sent.assert_not_called()
 		self.assertTrue(result.get('waiting'))
 		self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(lonely)]))
 
-	def test_the_default_policy_still_runs_it_here(self):
-		lonely = self.ip('192.0.2.11', name=False)
-		runner = mock.Mock(return_value=ANSWERED.replace('192.0.2.10', '192.0.2.11'))
-		udp_scan.scan_ip(lonely, runner=runner)
-		runner.assert_called_once()
+	def test_with_no_scanner_the_address_waits_and_stays_due(self):
+		ip = self.ip('192.0.2.11')
+		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'all'}):
+			result = udp_scan.scan_ip(ip)
+		self.assertTrue(result.get('waiting'))
+		self.assertFalse(ledger.fresh(udp_scan.SERVICE, [udp_scan.asset_of(ip)]))
+		self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
+		self.assertEqual(ip.ports.count(), 0)
 
 
 class GatingTests(UdpBase):
@@ -657,9 +629,9 @@ class GatingTests(UdpBase):
 		ip = self.ip('192.0.2.1', name='bb.udp.test')
 		self.assertIsNone(udp_scan.pick())
 		self.assertEqual(udp_scan.due(), [])
-		runner = []
-		self.assertEqual(udp_scan.run(runner=lambda *a: runner.append(a))['scanned'], [])
-		self.assertEqual(runner, [])
+		with mock.patch('agentapi.sentinel_dispatch.try_nmap_udp') as sent:
+			self.assertEqual(udp_scan.run()['scanned'], [])
+		sent.assert_not_called()
 		BountyEngagement.objects.filter(pk=engagement.pk).update(automated_ok=True, policy_ack_at=timezone.now())
 		self.assertEqual(udp_scan.pick().pk, ip.pk)
 
@@ -690,60 +662,6 @@ class GatingTests(UdpBase):
 		a = IpAddress.objects.create(address='192.0.2.5', org=self.org)
 		b = IpAddress.objects.create(address='192.0.2.5', org=other)
 		self.assertNotEqual(udp_scan.asset_of(a), udp_scan.asset_of(b))
-
-
-class DegradeTests(UdpBase):
-	def test_without_raw_sockets_the_sweep_does_not_run_and_says_why(self):
-		self.ip('192.0.2.10')
-
-		def denied(*args, **kwargs):
-			raise PermissionError(1, 'Operation not permitted')
-		ok, reason = udp_scan.raw_sockets_available(opener=denied)
-		self.assertFalse(ok)
-		self.assertIn('CAP_NET_RAW', reason)
-		with mock.patch('cveFeed.udp_scan.shutil.which', return_value='/usr/local/bin/nmap'), \
-				mock.patch('cveFeed.nmap_scan.run_nmap_xml') as nmap:
-			out = udp_scan.run(raw_check=lambda: (ok, reason))
-		nmap.assert_not_called()
-		self.assertEqual(out, {'skipped': reason})
-		recorded = udp_scan.recorded_status()
-		self.assertEqual((recorded['state'], recorded['reason']), ('unavailable', reason))
-		self.assertTrue(AgentActivity.objects.filter(message__contains='UDP scanning is off on this worker').exists())
-		self.assertEqual(ServiceRun.objects.filter(service=udp_scan.SERVICE).count(), 0)  # nothing was stamped as scanned
-
-	def test_the_note_in_the_feed_is_one_a_day_but_the_status_is_every_firing(self):
-		with mock.patch.object(ledger, 'sweep_claim', side_effect=[True, False]):
-			udp_scan.run(raw_check=lambda: (False, 'no raw sockets'))
-			udp_scan.run(raw_check=lambda: (False, 'no raw sockets'))
-		self.assertEqual(AgentActivity.objects.filter(message__contains='UDP scanning is off').count(), 1)
-
-	def test_a_missing_nmap_is_a_recorded_reason_too(self):
-		with mock.patch('cveFeed.udp_scan.shutil.which', return_value=None):
-			out = udp_scan.run(raw_check=lambda: (True, ''))
-		self.assertIn('nmap is not installed', out['skipped'])
-		self.assertIn('nmap is not installed', udp_scan.recorded_status()['reason'])
-
-	def test_another_oserror_is_reported_with_its_type(self):
-		def broken(*args, **kwargs):
-			raise OSError(97, 'Address family not supported')
-		ok, reason = udp_scan.raw_sockets_available(opener=broken)
-		self.assertFalse(ok)
-		self.assertIn('OSError', reason)
-
-	def test_this_process_check_returns_a_boolean_and_a_reason(self):
-		ok, reason = udp_scan.raw_sockets_available()
-		self.assertIsInstance(ok, bool)
-		self.assertEqual(bool(reason), not ok)
-
-	def test_the_system_status_shows_the_unavailable_reason_as_a_problem(self):
-		from agentapi import system_status
-		udp_scan.record_status('unavailable', 'no raw sockets here')
-		problems = []
-		out = system_status._udp_scan(problems)
-		self.assertEqual((out['state'], out['reason']), ('unavailable', 'no raw sockets here'))
-		self.assertEqual(problems, ['udp scan: no raw sockets here'])
-		with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': '0'}):
-			self.assertEqual(system_status._udp_scan([])['state'], 'off')
 
 
 class StatusTests(UdpBase):

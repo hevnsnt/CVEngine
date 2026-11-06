@@ -3,7 +3,7 @@
 The add-on is OFF by default and costs nothing while it is off: its containers belong to the compose profile ``openvas`` (docs/OPENVAS.md),
 the beat entry that drives it is created disabled, and nothing in this module contacts the sidecar unless an App Admin switched it on
 (Settings > OpenVAS) and opted a project's hosts in. Nothing here runs inside a scan: it is a slow background sweep on its own queue
-(``openvas_queue``), like ``cveFeed.testssl_scan``.
+(``openvas_queue``), like ``cveFeed.tls_audit``.
 
 How it works. cvENGINE talks GMP (the Greenbone Management Protocol) to gvmd with python-gvm, over the unix socket the sidecar publishes in a
 volume (or, for a gvmd on another machine, TLS: ``CVENGINE_OPENVAS_HOST``, always verified, see ``_connection``). gvmd drives the OpenVAS scanner; cvENGINE never talks to the scanner itself. A beat entry calls

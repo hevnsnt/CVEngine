@@ -15,15 +15,15 @@ from django.utils import timezone
 from agentapi import scanner_state, sentinel_broker, sentinel_contract, sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
-from cveFeed import conductor, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import conductor, tls_audit, wpscan_scan
 from cveFeed.models import AgentActivity, ProbeObservation, ScanControl, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from targetApp.models import Domain
 from tests.test_route_auth import RouteFixture
 from tests.test_system_status import call, patched
-from tests.test_testssl_scan import CLEAN
-from tests.test_udp_scan import UdpBase, udp_xml
+from tests.test_tls_audit import CLEAN
+from tests.test_udp_scan import UdpBase, run_udp, udp_xml
 from tests.test_wpscan_quick import WP
 from tests.test_wordpress import WordPressFixture
 
@@ -97,14 +97,14 @@ class HelperTests(SentinelWorld, TestCase):
         warned = mock.patch.object(sentinel_dispatch, '_WARNED_FALLBACK', set())
         warned.start()
         self.addCleanup(warned.stop)
-        self.policy('nmpa, Naabu,wpscn,nmpa')
+        self.policy('nmpa, Openvas,wpscn,nmpa')
         with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
-            self.assertEqual(sentinel_dispatch.local_fallback_kinds(), {'naabu'})  # the semantics are unchanged: the unknown names are dropped
+            self.assertEqual(sentinel_dispatch.local_fallback_kinds(), {'openvas'})  # the semantics are unchanged: the unknown names are dropped
             self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), ['nmpa', 'wpscn'])  # in order, each once
             self.assertFalse(sentinel_dispatch.fallback_allowed('nmap'))
         self.assertEqual(len(seen.records), 1)  # three reads, one warning
         self.assertIn('nmpa, wpscn', seen.output[0])
-        self.policy('nmap,tesssl')  # another value is another warning
+        self.policy('openvas,tesssl')  # another value is another warning
         with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
             sentinel_dispatch.local_fallback_kinds()
             sentinel_dispatch.local_fallback_kinds()
@@ -112,7 +112,7 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertIn('tesssl', seen.output[0])
 
     def test_nothing_is_warned_about_when_every_name_is_a_kind(self):
-        for value in (None, '', 'all', '*', 'none', 'nmap,naabu', ' NMAP , wpscan '):
+        for value in (None, '', 'all', '*', 'none', 'openvas,testssl', ' OPENVAS , wpscan '):
             self.policy(value)
             self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), [], value)
         with self.assertNoLogs('agentapi.sentinel_dispatch', 'WARNING'):
@@ -192,10 +192,10 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(scanner_state.state()['never_seen'], ALL_KINDS)
 
     def test_only_the_kinds_off_the_list_can_wait(self):
-        self.policy('nmap,naabu')
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('nmap', 'naabu')])
-        self.sentinel(['nmap'])  # a Sentinel for a kind that may run here anyway changes nothing about the others
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('nmap', 'naabu')])
+        self.policy('openvas,wpscan')
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
+        self.sentinel(['openvas'])  # a Sentinel for a kind that may run here anyway changes nothing about the others
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
 
     def test_a_kind_the_sentinel_cannot_run_yet_is_still_waiting(self):
         self.policy('none')
@@ -474,44 +474,37 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
     def setUp(self):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
-        self.calls = []
         mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
 
-    def runner(self, args, env, timeout):
-        self.calls.append(args)
-        with open(args[args.index('--jsonfile') + 1], 'w') as out:
-            json.dump(CLEAN, out)
-
     def sweep(self):
-        return testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
-
-    def test_unset_it_runs_exactly_as_before(self):
-        out = self.sweep()
-        self.assertEqual(out['tested'], 1)
-        self.assertEqual(len(self.calls), 1)
-        self.assertTrue(AgentActivity.objects.exists())
+        return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
 
     def test_waiting_for_a_scanner_it_does_not_run_log_or_raise(self):
         self.policy('none')
-        out = self.sweep()
+        with mock.patch('agentapi.sentinel_dispatch.try_testssl') as dispatched:
+            out = self.sweep()
         self.assertEqual(out['skipped'], 'no scanner is online for testssl; the targets stay due')
         self.assertEqual((out['tested'], out['failed']), (0, 0))
-        self.assertEqual(self.calls, [])
+        dispatched.assert_not_called()
         self.assertQuiet()
         self.assertFalse(ServiceRun.objects.exists())  # the target is still due: nothing was recorded, so nothing is fresh
+
+    def test_it_never_runs_here_whatever_the_policy_says(self):
+        for value in (None, 'all', 'testssl'):
+            with self.subTest(policy=value):
+                self.policy(value)
+                out = self.sweep()  # with other kinds still local the stage itself finds no scanner and waits (NEVER_LOCAL)
+                self.assertRegex(out['skipped'], r'no scanner (is online for|could take this work \() ?testssl')
+                self.assertEqual((out['tested'], out['failed']), (0, 0))
+                self.assertFalse(ServiceRun.objects.exists())
 
     def test_the_daily_sweep_over_all_projects_returns_before_taking_its_claim(self):
         self.policy('none')
         with mock.patch('cveFeed.ledger.sweep_claim') as claim:
-            out = testssl_scan.sweep_all(runner=self.runner)
+            out = tls_audit.sweep_all()
         self.assertEqual(out, {'skipped': 'no scanner is online for testssl; the targets stay due'})
         claim.assert_not_called()
-        self.assertEqual(self.calls, [])
         self.assertQuiet()
-
-    def test_only_its_own_kind_stops_it(self):
-        self.policy('testssl')  # may run here: unaffected, however many other kinds wait
-        self.assertEqual(self.sweep()['tested'], 1)
 
     def test_a_live_scanner_for_it_lets_it_through(self):
         self.policy('none')
@@ -520,8 +513,8 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
         Agent.objects.create(token=token, name='tls', kind='scanner', status='active', capabilities=['testssl'], last_seen=timezone.now(),
                              scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []})
         self.assertIsNone(scanner_state.skip_note('testssl'))
-        with mock.patch('agentapi.sentinel_dispatch.try_testssl', return_value=None):
-            self.assertEqual(self.sweep()['tested'], 1)  # the sweep goes on (here the runner stands in for the Sentinel's answer)
+        with mock.patch('agentapi.sentinel_dispatch.try_testssl', return_value=CLEAN):
+            self.assertEqual(self.sweep()['tested'], 1)  # the sweep goes on with the Sentinel's report
 
 
 class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
@@ -539,7 +532,7 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
         self.policy('none')
         runner = self.runner()
         with mock.patch('cveFeed.coverage_topup.log_deferral') as deferral:
-            out = udp_scan.run(runner=runner)
+            out = run_udp(runner=runner)
         self.assertEqual(out, {'skipped': 'no scanner is online for nmap_udp; the targets stay due'})
         self.assertEqual(runner.calls, [])
         deferral.assert_not_called()
@@ -549,21 +542,21 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
     def test_it_answers_before_the_coverage_check_and_before_any_claim(self):
         self.policy('none')
         with mock.patch('cveFeed.coverage_topup.backlog_exists') as backlog, mock.patch('reNgine.resources.redis_claim') as claim:
-            udp_scan.run(runner=self.runner())
+            run_udp(runner=self.runner())
         backlog.assert_not_called()
         claim.assert_not_called()
 
     def test_unset_it_runs_exactly_as_before(self):
         self.ip('192.0.2.10')
         runner = self.runner()
-        out = udp_scan.run(runner=runner, pipeline=lambda d, n: None)
+        out = run_udp(runner=runner, pipeline=lambda d, n: None)
         self.assertEqual(len(out['scanned']), 1)
         self.assertEqual(len(runner.calls), 1)
 
     def test_the_off_switch_is_still_answered_first(self):
         self.policy('none')
         with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': '0'}):
-            self.assertEqual(udp_scan.run(runner=self.runner()), {'skipped': 'CVENGINE_UDPSCAN is off'})
+            self.assertEqual(run_udp(runner=self.runner()), {'skipped': 'CVENGINE_UDPSCAN is off'})
 
     def test_a_scanner_for_another_kind_does_not_let_it_through(self):
         self.policy('none')
@@ -572,13 +565,6 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
         Agent.objects.create(token=token, name='nmap-only', kind='scanner', status='active', capabilities=['nmap'], last_seen=timezone.now(),
                              scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []})
         self.assertIn('nmap_udp', scanner_state.waiting_kinds())
-
-    def test_only_its_own_kind_stops_it(self):
-        self.ip('192.0.2.10')
-        self.policy('nmap_udp')
-        runner = self.runner()
-        out = udp_scan.run(runner=runner, pipeline=lambda d, n: None)
-        self.assertEqual(len(out['scanned']), 1)
 
 
 class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):

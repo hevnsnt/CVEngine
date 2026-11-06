@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import db_exposure as dbx
-from cveFeed import nmap_scan
+from cveFeed import port_inventory
 from cveFeed.models import CVEMatch
 from cvengine_scanner import nmap as nmap_service
 from startScan.models import IpAddress, Subdomain, Vulnerability
@@ -54,7 +54,7 @@ class NmapRecordTests(TestCase):
 			'extrainfo="Ubuntu Linux; protocol 2.0" ostype="Linux" method="probed"><cpe>cpe:/a:openbsd:openssh:8.9p1</cpe>'
 			'<cpe>cpe:/o:canonical:ubuntu_linux:22.04</cpe></service></port>'
 			'<port protocol="tcp" portid="8080"><state state="open"/><service name="http-proxy" method="table"/></port></ports></host></nmaprun>')
-		nmap_scan.persist_inventory(nmap_scan.parse_xml(xml))
+		port_inventory.persist_inventory(port_inventory.parse_xml(xml))
 		ip = IpAddress.objects.get(address='198.51.100.40')
 		ssh, guessed = ip.ports.get(number=22), ip.ports.get(number=8080)
 		self.assertEqual(ssh.extra, {'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04'], 'ostype': 'Linux', 'method': 'probed'})
