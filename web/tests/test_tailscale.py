@@ -28,6 +28,7 @@ from targetApp.target_types import is_scannable_ip
 from tests.test_agentapi import call, tool_call
 from tests.test_settings import send
 from tests.test_tenancy import client_for
+from tests.port_stage_stub import port_double
 
 SECRET = 'tskey-client-SECRETSECRETSECRET'
 TOKEN = 'tskey-api-TOPSECRETTOKEN'
@@ -719,11 +720,11 @@ class PipelineReachTests(ScopeFixture, TestCase):
             scan = discovery.start_discovery(domain)
         nmap = []
 
-        def runner(targets, flags, timeout):
+        def runner(targets):
             nmap.append(list(targets))
             return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
         kwargs = dict(light_stream=lambda path, **k: iter([]),
-                      targeted_stream=lambda path, **k: iter([]), nmap_runner=runner, db_exposure_checks={}, provider=None,
+                      targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner), db_exposure_checks={}, provider=None,
                       route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                       ip_lookups={'ptr': lambda ip: [], 'certificate': lambda ip: []})
         with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \

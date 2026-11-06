@@ -1,49 +1,39 @@
-"""TLS configuration audit with testssl.sh.
+"""TLS configuration audit: schedules the audit of each TLS port on a Sentinel and stores what the Sentinel reports.
 
-``hygiene`` reads a server's certificate and checks whether it still accepts TLS 1.0 / 1.1. testssl.sh (GPLv2, run as a separate
-program, never linked) tests what a handshake cannot show: the protocols and cipher categories a server offers, forward secrecy,
-renegotiation, and the TLS vulnerabilities that have names (Heartbleed, CCS injection, ROBOT, POODLE, FREAK, DROWN, Logjam, SWEET32,
-Ticketbleed, RC4, CRIME, Winshock and the rest).
+``hygiene`` reads a server's certificate and checks whether it still accepts TLS 1.0 / 1.1. The TLS audit tests what a handshake cannot show: the
+protocols and cipher categories a server offers, forward secrecy, renegotiation, and the TLS vulnerabilities that have names (Heartbleed, CCS
+injection, ROBOT, POODLE, FREAK, DROWN, Logjam, SWEET32, Ticketbleed, RC4, CRIME, Winshock and the rest). The test itself runs on a Sentinel (task kind
+``testssl``, never on this server: ``agentapi.sentinel_dispatch.NEVER_LOCAL``); this module chooses the targets, hands each to a Sentinel
+(``agentapi.sentinel_dispatch.try_testssl``) and reads the report items that come back through ``evaluate()``. With no scanner able to take the work
+the sweep waits and the targets stay due.
 
-This is a slow, polite background sweep, never part of a scan: one target at a time (a test of one port takes about a minute), the
-longest-waiting first, at most ``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused.
-Each target is tested at the address ``cveFeed.pinned_transport`` vetted (``--ip``, with ``--nodns none``), so a name that was pointed
-at a prohibited address after it was stored is never contacted.
-
-Before running testssl.sh itself, each target is offered to a live, eligible Sentinel first (``agentapi.sentinel_dispatch.try_testssl``);
-a project with none registered pays one cheap existence check and runs exactly as before. Either way the raw report items run through
-the same ``evaluate()`` below, so a Sentinel's result is read identically to a local run's.
+This is a slow, polite background sweep, never part of a scan: one target at a time, the longest-waiting first, at most
+``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused. Each target is tested at the address
+``cveFeed.pinned_transport`` vetted, so a name that was pointed at a prohibited address after it was stored is never contacted.
 
 What it records:
 
 * configuration findings (``HygieneFinding``, check names ``tlsa_*``): SSLv2/SSLv3 offered, NULL, anonymous, export, low-strength and
-  3DES ciphers, no forward secrecy, insecure renegotiation, and every named vulnerability testssl.sh reports as vulnerable or
+  3DES ciphers, no forward secrecy, insecure renegotiation, and every named vulnerability the report gives as vulnerable or
   potentially vulnerable. A finding resolves only when a later test of the same port ran and no longer reports it. A listener that
   completes no handshake with any protocol gets one low "TLS listener does not negotiate" finding (``tlsa_no_handshake``) in place of its
   cipher results, and a fallback test whose downgraded handshake never completed (a refusal without the standard alert) is no finding;
 * a durable ``ProbeObservation`` per vulnerability test (kind ``tls-vuln``), found or absent, which is the evidence;
-* hard CVE evidence: a vulnerability testssl.sh proved (Heartbleed answered with memory, a ROBOT oracle, an accepted export cipher)
+* hard CVE evidence: a vulnerability the audit proved (Heartbleed answered with memory, a ROBOT oracle, an accepted export cipher)
   is a ``CVEMatch`` (source ``testssl``, ``template_result`` ``vulnerable``) for each CVE the test names. A later test that finds it
   gone closes it; a rescan's new host row gets it back from the stored observation until then.
 
 Tests that could not run or came back inconclusive change nothing."""
-import json
 import logging
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
 
 from django.utils import timezone
 
-from cveFeed import egress_proxy
-
 logger = logging.getLogger(__name__)
 
-TESTSSL_BIN = 'testssl.sh'
 SERVICE = 'testssl'
 FAILED_SERVICE = 'testssl-failed'  # a target that could not be tested: asked again in three days, not at every sweep
 PROBE = 'testssl'
@@ -51,16 +41,9 @@ OBS_VULN = 'tls-vuln'
 OBS_AUDIT = 'tls-audit'
 SOURCE = 'testssl'  # CVEMatch.source
 QUEUE = 'testssl_queue'
-DEFAULT_TIMEOUT = 15 * 60
 DEFAULT_MAX_TARGETS = 40
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
-MAX_OUTPUT = 8 * 1024 * 1024
 
-# testssl.sh options: protocols (-p), cipher categories (-s), server defaults and certificate (-S), vulnerabilities (-U), forward
-# secrecy (-f). Not client simulation (-c, which only describes browsers), not each cipher (-e, hundreds of handshakes), not HTTP
-# headers (-h, the web probes read those). --nodns none: the name was resolved and vetted by cveFeed.pinned_transport, --ip pins it.
-BASE_ARGS = ['--quiet', '--warnings', 'off', '--color', '0', '--nodns', 'none', '--connect-timeout', '15', '--openssl-timeout', '15',
-             '--overwrite', '-p', '-s', '-S', '-U', '-f']
 STARTTLS_PORTS = {25: 'smtp', 587: 'smtp', 143: 'imap', 110: 'pop3', 21: 'ftp', 389: 'ldap'}
 IMPLICIT_PORTS = (443, 8443, 9443, 993, 995, 465, 636)
 
@@ -93,19 +76,8 @@ NO_HANDSHAKE = 'tlsa_no_handshake'
 FALLBACK_REFUSED = re.compile(r"handshake.?failure|no cipher|did ?n[o']t complete|never completes?|aborted|connection (?:was )?(?:closed|reset)", re.I)
 
 
-class TestsslError(RuntimeError):
-    """testssl.sh could not test the target (no connection, a timeout, no usable output)."""
-
-
-def installed():
-    return shutil.which(TESTSSL_BIN) is not None
-
-
-def timeout_seconds():
-    try:
-        return max(120, int(os.environ.get('CVENGINE_TESTSSL_TIMEOUT', DEFAULT_TIMEOUT)))
-    except ValueError:
-        return DEFAULT_TIMEOUT
+class TlsAuditError(RuntimeError):
+    """The target could not be audited (no connection, a timeout, no usable report)."""
 
 
 def max_targets():
@@ -113,71 +85,6 @@ def max_targets():
         return max(1, int(os.environ.get('CVENGINE_TESTSSL_MAX_TARGETS', DEFAULT_MAX_TARGETS)))
     except ValueError:
         return DEFAULT_MAX_TARGETS
-
-
-# ----------------------------------------------------------------------------- running testssl.sh
-
-def _destination(host, port):
-    return f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
-
-
-def command(host, ip, port, starttls, out_path, proxy_args=()):
-    args = [TESTSSL_BIN, *BASE_ARGS, '--ip', ip, *proxy_args, '--jsonfile', out_path]
-    if starttls:
-        args += ['--starttls', starttls]
-    return args + [_destination(host, port)]
-
-
-def run_testssl(host, ip, port, starttls=None, runner=None, on_start=None):
-    """Run testssl.sh against ``host:port`` at ``ip`` and return its findings, a flat list of ``{id, severity, finding, cve?}``.
-    ``runner(args, env, timeout)`` replaces the subprocess in tests. ``on_start()`` is called once testssl.sh is let start (after the memory
-    wait), right before it runs, and may raise ``local_egress.PortHeld`` to stop it there. Raises ``TestsslError``."""
-    from cveFeed import local_egress
-    from targetApp.target_types import refuse_local
-    refuse_local('testssl.sh')
-    with tempfile.TemporaryDirectory(prefix='testssl-') as work:
-        out = os.path.join(work, 'out.json')
-        try:
-            proxy_args = egress_proxy.for_tool('testssl', [host, ip])
-        except egress_proxy.ProxyUnavailable as exc:  # Settings > Proxy is on and testssl.sh cannot use it: never a direct run
-            raise TestsslError(str(exc)) from None
-        args = command(host, ip, port, starttls, out, proxy_args)
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': work, 'TERM': 'dumb', 'LC_ALL': 'C'}
-        try:
-            if runner is None:
-                _run(args, env, timeout_seconds(), on_start=on_start)
-            else:
-                if on_start is not None:
-                    on_start()
-                runner(args, env, timeout_seconds())
-        except subprocess.TimeoutExpired:
-            raise TestsslError('testssl.sh did not finish in time') from None
-        except local_egress.PortHeld:
-            raise
-        except OSError as exc:
-            raise TestsslError(f'testssl.sh could not be started: {type(exc).__name__}') from None
-        try:
-            if os.path.getsize(out) > MAX_OUTPUT:
-                raise TestsslError('testssl.sh output was too large')
-            with open(out, encoding='utf-8', errors='replace') as handle:
-                report = json.load(handle)
-        except (OSError, ValueError):
-            raise TestsslError('testssl.sh wrote no usable report') from None
-    return flatten(report)
-
-
-def _run(args, env, timeout, on_start=None):
-    from cveFeed import heavy_process  # under the resource gate: a pause or stop kills testssl.sh and its openssl children, and memory is admitted
-    heavy_process.run('testssl', args, timeout, label=args[-1], env=env, on_start=on_start)
-
-
-def flatten(report):
-    """The finding objects of a testssl.sh JSON report, flat (``--jsonfile``) or grouped (``--jsonfile-pretty``)."""
-    if isinstance(report, dict):
-        results = report.get('scanResult') or []
-        report = [item for group in results if isinstance(group, dict) for key, value in group.items()
-                  if isinstance(value, list) for item in value]
-    return [i for i in report if isinstance(i, dict) and i.get('id')] if isinstance(report, list) else []
 
 
 # ----------------------------------------------------------------------------- reading the result
@@ -400,7 +307,7 @@ def tls_ports(ports):
 
 
 def targets(project_id):
-    """``[(host, port, starttls, domain_id)]`` for the project's hosts: the TLS ports nmap found open, and 443 for a host with no port data.
+    """``[(host, port, starttls, domain_id)]`` for the project's hosts: the TLS ports found open, and 443 for a host with no port data.
     Names a scanner must not be pointed at (excluded, or resolving to a prohibited range) are dropped, and so are the hosts of a target set to
     manual only and the names under a target set to exactly one host."""
     from startScan.models import Subdomain, open_ports
@@ -441,21 +348,19 @@ def _latest_row(project_id, host):
 
 
 def _address(host, port, project_id):
-    """The one vetted address testssl.sh is pinned to (IPv4 first): a name that resolves somewhere prohibited raises."""
+    """The one vetted address the audit is pinned to (IPv4 first): a name that resolves somewhere prohibited raises."""
     from cveFeed import pinned_transport
     addresses = pinned_transport.resolve(host, port, project=project_id)
     ordered = sorted(addresses, key=lambda item: item[0] != 2)  # AF_INET is 2
     return ordered[0][1][0]
 
 
-def sweep(project_id, runner=None, resolve=None):
-    """Test the due targets of one project, one at a time. Returns ``{'tested', 'failed', 'issues', 'proven'}`` (and ``skipped`` with the
-    reason when nothing ran)."""
-    from cveFeed import activity, exclusions, ledger, local_egress
+def sweep(project_id, resolve=None):
+    """Audit the due targets of one project on a Sentinel, one at a time. Returns ``{'tested', 'failed', 'issues', 'proven'}`` (and ``skipped``
+    with the reason when nothing ran). Nothing runs on this server: with no scanner able to take a target it stays due."""
+    from cveFeed import activity, exclusions, ledger
     from reNgine import resources
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
-    if runner is None and not installed():
-        return {**summary, 'skipped': 'testssl.sh is not installed'}
     from agentapi import scanner_state
     waiting = scanner_state.skip_note('testssl')  # no scanner can run it and this server may not: no dispatch, no raise, no activity line
     if waiting:
@@ -484,53 +389,24 @@ def sweep(project_id, runner=None, resolve=None):
             if sub is None or (names and exclusions.normalize(host) in names):
                 continue
             where, asset = f'{host}:{port}', f'{host}:{port}'
-            running = activity.log('run_check', f'TLS audit of {where} (testssl.sh)', project=project_id, status='running', scan_id=sub.scan_history_id)
+            running = activity.log('run_check', f'TLS audit of {where}', project=project_id, status='running', scan_id=sub.scan_history_id)
             try:
                 ip = resolve(host, port, project_id)
                 from agentapi import sentinel_dispatch
                 items = sentinel_dispatch.try_testssl(sub.target_domain.project, host, ip, port, starttls, scan=sub.scan_history)
-                if items is None:
-                    if port in local_egress.skipped_ports():  # the opt-in skip list (cveFeed.local_egress)
-                        local_egress.admit_one(port, 'testssl', ip)  # logs it skipped
-                        local_egress.note_skipped('testssl.sh', {port})
-                        activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
-                                        f'{local_egress.held_text(port, local_egress.SKIPPED)}; the target stays due')
-                        continue
-
-                    # a run on a budgeted port that needs its 15 minutes alone (port 25) waits here for them, outside the memory gate, with
-                    # priority after an hour (cveFeed.local_egress.wait_alone); not in time: not run, the target stays due
-                    if not local_egress.wait_alone(port, local_egress.TESTSSL_CONNECTIONS):
-                        local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.EXACT, outcome=local_egress.PACED,
-                                                     project=project_id, scan_id=sub.scan_history_id)
-                        activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
-                                        f'{local_egress.held_text(port, local_egress.PACED)}; the target stays due')
-                        continue
-
-                    def started(ip=ip, port=port, scan_id=sub.scan_history_id):
-                        # once testssl.sh is let start (after its memory wait): the egress governor charges the run, whole and alone, now; no
-                        # room raises PortHeld and nothing is sent. testssl.sh opens 159 to 231 sockets to this one host and port (measured):
-                        # counted as TESTSSL_CONNECTIONS (240)
-                        held = local_egress.admit_one(port, 'testssl', ip, weight=local_egress.TESTSSL_CONNECTIONS, burst=False,
-                                                 now=local_egress.launch_now())
-                        if held:
-                            raise local_egress.PortHeld(port, held)
-                        local_egress.record('testssl', local_egress.TESTSSL_CONNECTIONS, {port: local_egress.TESTSSL_CONNECTIONS}, project=project_id)
-                        local_egress.log_connections([ip], [port], 'testssl', mode=local_egress.ESTIMATED, project=project_id, scan_id=scan_id)
-                    items = run_testssl(host, ip, port, starttls, runner=runner, on_start=started)
+                if items is None:  # a Sentinel took it and did not finish: asked again at the next sweep (nothing runs here)
+                    activity.settle(running, 'done', message=f'TLS audit of {where} did not finish on a scanner; the target stays due')
+                    continue
                 result = evaluate(items, where)
                 if not result.tested:
-                    raise TestsslError(_why(items))
-            except local_egress.PortHeld as held:  # no room in the port's window when it was let start: not run, the target stays due
-                activity.settle(running, 'done', message=f'TLS audit of {where} not run from this server: '
-                                f'{local_egress.held_text(held.port, held.reason)}; the target stays due')
-                continue
-            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped, short of memory, or no scanner: not the target's failure
+                    raise TlsAuditError(_why(items))
+            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped, or no scanner: not the target's failure
                 if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
                     activity.settle(running, 'done', message=f'TLS audit of {where} is waiting: no scanner could take this work ({exc.kind}); the target stays due until one can')
                     return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due until one can'}
                 activity.settle(running, 'done', message=f'TLS audit of {where} stopped before it finished ({type(exc).__name__}); the target stays due')
                 return {**summary, 'skipped': 'scanning was stopped or memory was short: the targets stay due'}
-            except (TestsslError, OSError, ValueError) as exc:
+            except (TlsAuditError, OSError, ValueError) as exc:
                 ledger.record(FAILED_SERVICE, [asset], project_id, sub.scan_history)
                 summary['failed'] += 1
                 activity.settle(running, 'done', message=activity.diagnostic(f'TLS audit of {where}', str(exc)))
@@ -554,10 +430,10 @@ def _why(items):
             text = str(item['finding'])
             if 'engine' not in text.lower():
                 return text[:200]
-    return 'testssl.sh could not connect or answered no test'
+    return 'the audit could not connect or answered no test'
 
 
-def sweep_all(runner=None):
+def sweep_all():
     """Every project's due targets. One sweep at a time; the work is spread over days by ``max_targets`` per run. A target a Sentinel tests is
     waited for without holding the worker (``agentapi.stage_runs``): the sweep's callback goes on with the next one."""
     from cveFeed import ledger
@@ -565,24 +441,22 @@ def sweep_all(runner=None):
     waiting = scanner_state.skip_note('testssl')
     if waiting:
         return {'skipped': waiting}
-    if runner is None and stage_runs.enabled() and stage_runs.busy('sweep.testssl'):
+    if stage_runs.enabled() and stage_runs.busy('sweep.testssl'):
         return {'skipped': 'another sweep is running (it waits on a Sentinel)'}
     if not ledger.sweep_claim('testssl', 3 * 60 * 60):
         return {'skipped': 'another sweep is running'}
-    if runner is None:
-        return stage_runs.run('sweep.testssl', {}, first=lambda: _sweep_projects(None))
-    return _sweep_projects(runner)
+    return stage_runs.run('sweep.testssl', {}, first=_sweep_projects)
 
 
 def _resume_sweep(context):
-    return _sweep_projects(None)
+    return _sweep_projects()
 
 
-def _sweep_projects(runner):
+def _sweep_projects():
     from dashboard.models import Project
     totals = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     for project_id in Project.objects.values_list('id', flat=True):
-        part = sweep(project_id, runner=runner)
+        part = sweep(project_id)
         for key in totals:
             totals[key] += part.get(key, 0)
         if part.get('skipped', '').startswith('scanning is paused'):

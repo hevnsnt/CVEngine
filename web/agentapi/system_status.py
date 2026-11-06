@@ -377,7 +377,7 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # testssl.sh colours its banner
+        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # a tool may colour its banner
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
         value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
@@ -437,8 +437,7 @@ def _tools():
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
-                         'testssl': _tool_version(('testssl.sh', '--version'))}}
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
 
 
 def _runzero(problems):
@@ -537,7 +536,7 @@ def _egress(problems):
     """Outbound connections from this server's own scanners (``cveFeed.local_egress``): the last hour, 24 hours and seven days per watched
     port (25, 465, 587, 23, 3389 by default) and for all ports, the budget of each paced port and its use this hour, ports owed to the paced
     pass, the top sources (scan kind and project), and how many Sentinel tasks fell back to local execution in the last hour (a problem while it
-    stays high). nmap, naabu, testssl.sh and nuclei are counted from their probe plan, an estimate."""
+    stays high). nmap, naabu and nuclei are counted from their probe plan, an estimate."""
     from cveFeed import local_egress
     return local_egress.status(problems)
 

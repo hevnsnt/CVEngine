@@ -33,7 +33,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 		self.assertTrue(rows['nmap']['behind'])
 		self.assertEqual(rows['nmap']['latest'], '99.1')
 		self.assertTrue(rows['wpscan']['behind'])
-		for tool in ('nuclei', 'nuclei (CI smoke test)', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
+		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
 			self.assertTrue(rows[tool]['behind'], tool)
 		self.assertEqual((rows['naabu']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
 		self.assertEqual((rows['testssl.sh']['latest'], rows['testssl.sh']['behind']), ('99.1', True))  # a development tag is not a release

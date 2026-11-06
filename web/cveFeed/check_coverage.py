@@ -241,16 +241,16 @@ def _chunks(items, size=CHUNK):
 def _tls_numbers(h, starttls=False):
     """The TCP ports of the host the TLS checks would test: the sweep's own rule (an implicit TLS port, a service that says ssl or https, and
     for the audit the STARTTLS mail and directory ports). A host with no port data is counted for 443 only when its own URL is https."""
-    from cveFeed import testssl_scan
+    from cveFeed import tls_audit
     numbers = set()
     for entry in h.addresses.values():
         for port in entry.ports:
             if port.protocol not in TCP:
                 continue
             name = (port.service_name or '').lower()
-            if port.number in testssl_scan.IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
+            if port.number in tls_audit.IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
                 numbers.add(port.number)
-            elif starttls and port.number in testssl_scan.STARTTLS_PORTS:
+            elif starttls and port.number in tls_audit.STARTTLS_PORTS:
                 numbers.add(port.number)
     if not numbers and not any(e.ports for e in h.addresses.values()) and h.http_url.startswith('https'):
         numbers.add(443)
@@ -448,8 +448,8 @@ def plan_nmap(h, ev):
 
 
 def plan_naabu(h, ev):
-    from cveFeed import naabu_scan
-    if not naabu_scan.enabled():
+    from cveFeed import port_stage
+    if not port_stage.enabled():
         return 'naabu is switched off (CVENGINE_NAABU=0)'
     return _by_address(h, ev, ('naabu',))
 
@@ -530,8 +530,8 @@ def plan_nuclei_cve(h, ev):
 
 
 def plan_waf(h, ev):
-    from cveFeed import waf_scan
-    if not waf_scan.enabled():
+    from cveFeed import waf_fingerprint
+    if not waf_fingerprint.enabled():
         return 'the WAF fingerprint is switched off (CVENGINE_WAFW00F=0)'
     if not h.http_up:
         return 'the host did not answer over HTTP'
@@ -827,7 +827,7 @@ CHECKS = (
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei',), stages=('nuclei_targeted_scan',)),
     Check('nuclei-deep', 'Weekly deep Nuclei', plan_nuclei_deep, kinds=('nuclei-deep-host', 'nuclei-deep-target')),
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
-    Check('waf', 'WAF fingerprint (wafw00f)', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),
+    Check('waf', 'WAF fingerprint', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),
     Check('web-routes', 'Web route auth check', plan_routes, kinds=('route-auth',), stages=('route_auth_scan',)),
     Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
@@ -837,7 +837,7 @@ CHECKS = (
     Check('node2shell', 'node2shell check (CVE-2026-111497)', plan_node2shell, kinds=('node2shell',), stages=('node2shell',)),
     Check('vhost', 'Other sites on the host\'s addresses', plan_vhost, kinds=('vhost', 'vhost-ip'), sweeps=('vhost',), ttl_kind='vhost'),
     Check('subapps', 'Applications under subdirectories', plan_subapps, kinds=('subapp',), sweeps=('subapp',)),
-    Check('tls-audit', 'TLS configuration audit (testssl.sh)', plan_testssl, kinds=('testssl', 'testssl-failed'), sweeps=('testssl',),
+    Check('tls-audit', 'TLS configuration audit', plan_testssl, kinds=('testssl', 'testssl-failed'), sweeps=('testssl',),
           ttl_kind='testssl'),
     Check('certificates', 'Certificate and legacy TLS check', plan_certificates, stages=('host_hygiene',), ttl_kind='hygiene'),
     Check('cleartext', 'Cleartext services (Telnet, FTP, rlogin, plain-HTTP login)', plan_cleartext, stages=('host_hygiene',), ttl_kind='hygiene'),
@@ -867,10 +867,8 @@ EXCLUDED = {
         'triage': 'AI review of findings, not a check of a host',
         'validate': 'validation of CVE matches, recorded on the match',
         'rescore': 'recomputes host scores from stored data',
-        'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
         'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
-        'egress-catch-up': 'the paced pass over ports the egress governor held back (cveFeed.local_egress); it finishes the nmap pass of an address, whose own check (nmap-fast) is already judged',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',

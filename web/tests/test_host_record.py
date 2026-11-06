@@ -5,7 +5,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import fullscan, hosting, nmap_scan, route_auth
+from cveFeed import fullscan, hosting, port_stage, route_auth
 from cveFeed.models import RouteAuth
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -146,9 +146,9 @@ class PortScanGuardTests(Fixture):
 
 	def test_the_host_nmap_pass_leaves_a_shared_platform_address_alone(self):
 		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
-		runner = mock.Mock()
-		out = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-		runner.assert_not_called()
+		with mock.patch('agentapi.sentinel_dispatch.try_nmap') as sent:
+			out = port_stage.run_for_scan(self.scan.id)
+		sent.assert_not_called()
 		self.assertEqual(out, {'targets': 0, 'shared': 1})
 		self.assertTrue(IpAddress.objects.get(address='192.0.2.50').is_cdn)
 
@@ -157,11 +157,11 @@ class PortScanGuardTests(Fixture):
 		self.host('www.own.test', '192.0.2.51')
 		seen = []
 
-		def runner(targets, flags, host_timeout):
+		def sent(project, scan, targets, **kwargs):
 			seen.append(list(targets))
-			return '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		with mock.patch('cveFeed.naabu_scan.discover', return_value=None):
-			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
+			return {'ports': 0, 'hosts_with_os': 0}
+		with mock.patch('cveFeed.port_stage.enabled', return_value=False), mock.patch('agentapi.sentinel_dispatch.try_nmap', sent):
+			port_stage.run_for_scan(self.scan.id)
 		self.assertEqual(seen, [['192.0.2.51']])
 
 

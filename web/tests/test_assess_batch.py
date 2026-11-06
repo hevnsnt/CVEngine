@@ -19,6 +19,7 @@ from cveFeed.host_assessment import BATCH_STOPPED, batch_size, batches, enqueue,
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
+from reNgine.resources import ScannerUnavailable
 from startScan.models import ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
@@ -638,13 +639,12 @@ class SentinelChunkTests(SimpleTestCase):
             return {'hosts': [{'ip': ip, 'ports': []} for ip in ips]}
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
                 mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch), \
-                mock.patch('cveFeed.nmap_scan.persist_inventory', return_value={'ports': 1, 'hosts_with_os': 0}):
-            remaining, totals, _ = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
+                mock.patch('cveFeed.port_inventory.persist_inventory', return_value={'ports': 1, 'hosts_with_os': 0}):
+            totals = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
         self.assertEqual([len(ips) for _, ips in sent], [64, 64, 22])
-        self.assertEqual(totals, {'ports': 3, 'hosts_with_os': 0})
-        self.assertEqual(remaining, [])  # every address was reported by a Sentinel, in whichever chunk
+        self.assertEqual(totals, {'ports': 3, 'hosts_with_os': 0})  # every address was reported by a Sentinel, in whichever chunk
 
-    def test_the_first_chunk_no_sentinel_takes_ends_the_dispatching_and_the_rest_runs_here(self):
+    def test_the_first_chunk_no_sentinel_takes_ends_the_dispatching_and_the_rest_waits(self):
         targets = [f'198.51.100.{i}' for i in range(1, 101)]
         calls = []
 
@@ -653,18 +653,16 @@ class SentinelChunkTests(SimpleTestCase):
             return None
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
                 mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch):
-            remaining, totals, _ = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
+            with self.assertRaises(ScannerUnavailable) as caught:
+                sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
         self.assertEqual(calls, [64])  # not a wait for each remaining chunk
-        self.assertEqual((remaining, totals), (targets, {'ports': 0, 'hosts_with_os': 0}))
+        self.assertEqual(caught.exception.done, [])
 
-    def test_naabu_sends_every_chunk_and_runs_what_no_sentinel_took_here(self):
+    def test_naabu_sends_every_chunk_and_waits_for_what_no_sentinel_took(self):
         ips = [f'198.51.100.{i}' for i in range(1, 151)]
         answers = [{'ports': {ips[0]: [22]}}, None]
-        local = mock.Mock(return_value={ips[70]: [443]})
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
-                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=answers) as sent, \
-                mock.patch('cveFeed.naabu_scan.run_naabu', local):
-            found = sentinel_dispatch.wrap_naabu_runner(mock.Mock(), mock.Mock())(ips)
+                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=answers) as sent:
+            with self.assertRaises(ScannerUnavailable):  # the chunk no Sentinel took, and everything after it, is not scanned here
+                sentinel_dispatch.wrap_naabu_runner(mock.Mock(), mock.Mock())(ips)
         self.assertEqual(sent.call_count, 2)
-        local.assert_called_once_with(ips[64:])  # the chunk no Sentinel took and everything after it
-        self.assertEqual(found, {ips[0]: [22], ips[70]: [443]})

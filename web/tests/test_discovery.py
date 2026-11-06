@@ -15,6 +15,7 @@ from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdoma
 from targetApp.models import Domain
 from tests.discovery_fixtures import sentinel_discovery
 from tests.test_tenancy import client_for
+from tests.port_stage_stub import port_double
 
 EVENTS = [
 	{'type': 'DNS_NAME', 'id': 'D1', 'data': 'example.test', 'host': 'example.test', 'module': 'SEED', 'resolved_hosts': ['192.0.2.1'], 'parent': 'S'},
@@ -494,7 +495,7 @@ class NucleiStageTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		kwargs = dict(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-			nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+			port_stage_run=port_double(), db_exposure_checks={}, provider=None,
 			route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		discover = overrides.pop('discover', None) or sentinel_discovery(events)
 		kwargs.update(overrides)
@@ -504,10 +505,10 @@ class NucleiStageTests(TestCase):
 	def test_a_run_that_stopped_part_way_still_runs_the_later_stages_on_what_it_found(self):
 		ran = []
 
-		def nmap(targets, flags, timeout):
+		def nmap(targets):
 			ran.append(list(targets))
 			return ''
-		scan, out = self._pipeline(discover=sentinel_discovery([EVENTS[0]], incomplete='the lease expired after producing partial results'), nmap_runner=nmap)
+		scan, out = self._pipeline(discover=sentinel_discovery([EVENTS[0]], incomplete='the lease expired after producing partial results'), port_stage_run=port_double(nmap))
 		scan.refresh_from_db()
 		self.assertEqual(scan.scan_status, 2)  # the hosts it found are the domain's current inventory
 		self.assertIn('bbot_discovery', out['failed_stages'])  # and the cut-short discovery is on record
@@ -572,7 +573,7 @@ class NucleiStageTests(TestCase):
 		def targeted(path, **kwargs):
 			seen.append((sorted(kwargs['tags']), open(path).read().split(), kwargs.get('severities')))
 			return iter([])
-		scan, out = self._pipeline(nmap_runner=lambda *a, **k: self.MYSQL_XML, light_stream=lambda path, **k: iter([self.WORDPRESS]),
+		scan, out = self._pipeline(port_stage_run=port_double(lambda targets: self.MYSQL_XML), light_stream=lambda path, **k: iter([self.WORDPRESS]),
 			targeted_stream=targeted)
 		self.assertEqual(seen, [(['cms', 'mysql', 'nginx', 'wordpress'], ['www.example.test', 'www.example.test:3306'], None)])
 		self.assertEqual(out['nuclei_light']['techs'], {'www.example.test': ['WordPress']})
@@ -725,11 +726,8 @@ class NucleiLedgerTests(TestCase):
 		def stream(path, **kwargs):
 			seen.append(open(path).read().split())
 			return iter(self._lines('shared.example.test'))
-		# stands in for the real scanner, so the approved-template snapshot is stubbed too (no template library on disk here)
-		with mock.patch('cveFeed.nuclei_scan.stream_nuclei', stream), \
-				mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved-templates', 'test-rev', 1)):
-			nuclei_scan.run_nuclei(first.id, stream=stream)
-			out = nuclei_scan.run_nuclei(second.id, stream=stream)
+		nuclei_scan.run_nuclei(first.id, stream=stream)
+		out = nuclei_scan.run_nuclei(second.id, stream=stream)
 		self.assertEqual(seen, [['shared.example.test']])  # the second run had nothing left to scan
 		self.assertEqual(out['reused'], 1)
 		copied = Vulnerability.objects.get(scan_history=second)
@@ -789,12 +787,12 @@ class BbotCoverageTests(TestCase):
 		bbot, nmap, nuclei = mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run')).start(), [], []
 		self.addCleanup(mock.patch.stopall)
 
-		def nmap_runner(targets, flags, timeout):
+		def nmap_runner(targets):
 			nmap.append(list(targets))
 			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, light_stream=lambda path, **k: nuclei.append(open(path).read().split()) or iter([]),
-				targeted_stream=lambda path, **k: iter([]), nmap_runner=nmap_runner, db_exposure_checks={}, provider=None,
+				targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(nmap_runner), db_exposure_checks={}, provider=None,
 				route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		return scan, out, bbot, nmap, nuclei
 
@@ -849,7 +847,7 @@ class QueuedScanTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(batches=[[]], after_batch=started):
 			discovery.run_pipeline(scan.id, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-				nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				port_stage_run=port_double(), db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 		self.assertEqual(seen, [(discovery.RUNNING, discovery.RUNNING)])
 
 	def test_a_queued_scan_blocks_a_duplicate_whatever_its_age_but_a_stale_running_one_does_not(self):
@@ -879,10 +877,10 @@ class IpTargetTests(TestCase):
 		bbot, nmap = mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run for an IP')).start(), []
 		self.addCleanup(mock.patch.stopall)
 
-		def runner(targets, flags, timeout):
+		def runner(targets):
 			nmap.append(list(targets))
 			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		kwargs = dict(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
+		kwargs = dict(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner),
 			db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 			ip_lookups={'ptr': lambda ip: ['host-5.example.net'], 'certificate': lambda ip: ['shop.example.org', 'www.example.org']})
 		kwargs.update(overrides)

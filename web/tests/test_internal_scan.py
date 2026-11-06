@@ -16,6 +16,7 @@ from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram, HostExc
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
+from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_agentapi import call
 from tests.test_internal_ranges import World
 from tests.test_sentinels import reset_rates
@@ -89,10 +90,8 @@ class RunTests(Base):
         def dispatch(project, kind, target, **kwargs):
             calls.append((kind, target, kwargs))
             return NMAP_RESULT
-        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}) as correlate, \
-                mock.patch('cveFeed.nmap_scan.scan_in_chunks') as local_nmap:
+        with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}) as correlate:
             out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None)
-            local_nmap.assert_not_called()
         self.assertEqual(out['status'], SUCCESS, out)
         self.assertEqual(calls[0][:2], ('nmap', {'addresses': ['10.20.0.7']}))
         self.assertTrue(all(kw['internal'] for _k, _t, kw in calls))  # every step is for an internal Sentinel
@@ -134,11 +133,10 @@ class RunTests(Base):
 
     def test_no_sentinel_answering_fails_the_scan_and_nothing_runs_locally(self):
         scan = self.queued_scan()
-        with mock.patch('cveFeed.tasks.correlate_cves') as correlate, mock.patch('cveFeed.nmap_scan.scan_in_chunks') as local_nmap, \
-                mock.patch('cveFeed.nmap_scan.run_nmap_xml') as local_xml:
+        guard = assert_ran_nowhere_locally(self, 'nmap')
+        with mock.patch('cveFeed.tasks.correlate_cves') as correlate:
             out = internal_scan.run(scan.id, dispatch=lambda *a, **k: None, nuclei_stream=lambda kind: iter_none, provider=None)
-            local_nmap.assert_not_called()
-            local_xml.assert_not_called()
+            self.assertEqual(guard.calls, [])
             correlate.assert_not_called()
         self.assertEqual(out['status'], FAILED)
         scan.refresh_from_db()
@@ -410,27 +408,15 @@ class StageTests(Base):
         import tempfile
         with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
             handle.write('10.20.0.7\n')
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei') as local, self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError):
             list(stream(handle.name))  # no Sentinel at all
-        local.assert_not_called()
-
-    def test_an_internal_stream_refuses_a_secrets_file_instead_of_dropping_it(self):
-        scan = self.queued_scan()
-        stream = sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_targeted', internal=True)
-        with mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as dispatched, self.assertRaises(RuntimeError) as caught:
-            list(stream('/nonexistent', secret_file='/tmp/secrets.yaml'))
-        dispatched.assert_not_called()
-        self.assertIn('signed-in', str(caught.exception))
+        self.assertFalse(hasattr(stream, 'signed_in'))  # a stored sign-in is never sent inside a network: only the built-in scanner reads one
 
     def test_every_local_scanner_refuses_inside_an_internal_scan(self):
-        from cveFeed import naabu_scan, nmap_scan, nuclei_scan, testssl_scan, wpscan_scan
+        from cveFeed import wpscan_scan
         from targetApp.target_types import internal_scope
         with internal_scope():
-            for call_ in (lambda: naabu_scan.run_naabu(['10.20.0.7'], binary='/bin/true'),
-                          lambda: nmap_scan.run_nmap_xml(['10.20.0.7'], [], 1),
-                          lambda: testssl_scan.run_testssl('10.20.0.7', '10.20.0.7', 443),
-                          lambda: wpscan_scan.run_wpscan_process('https://10.20.0.7/', 'token'),
-                          lambda: list(nuclei_scan.stream_nuclei('/nonexistent'))):
+            for call_ in (lambda: wpscan_scan.run_wpscan_process('https://10.20.0.7/', 'token'),):
                 with self.assertRaises(RuntimeError) as caught:
                     call_()
                 self.assertIn('only a Sentinel inside the network', str(caught.exception))

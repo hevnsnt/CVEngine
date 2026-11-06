@@ -33,11 +33,10 @@ rough sizes of the work.
 
 | Module | Tool | Notes |
 |---|---|---|
-| `cveFeed/nmap_scan.py` (545) | nmap | parser `parse_xml` is duplicated in `client/tools.py` |
-| `cveFeed/naabu_scan.py` (221) | naabu | |
+| `cveFeed/port_stage.py`, `cveFeed/port_inventory.py` | nmap, naabu | the tools run on a Sentinel only; the server stores the report (`port_inventory.persist_inventory`) and reads it with the library's `parse_xml` |
 | `cveFeed/nuclei_scan.py` (781), `nuclei_templates.py` (401) | nuclei | three kinds; flags and `host_of` are duplicated; signed-in passes never dispatch |
 | `cveFeed/wpscan_scan.py` (977) | WPScan | one task per site |
-| `cveFeed/testssl_scan.py` (483) | testssl.sh | one task per host and port |
+| `cveFeed/tls_audit.py` | testssl.sh | one task per host and port; the server's local run is deleted (`NEVER_LOCAL`), the module only picks targets and stores the report |
 | `cveFeed/udp_scan.py` (608) | nmap -sU | raw XML is the one result the server parses itself |
 | `cveFeed/openvas_scan.py` | GVM | opt-in; keeps its own compose profile |
 | `cveFeed/internal_discovery.py` | nmap -sn | the `discover` kind, internal ranges only |
@@ -50,9 +49,9 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 
 | Module | What it runs | Kind | Notes |
 |---|---|---|---|
-| `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `nmap_scan.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
+| `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `port_inventory.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
 | `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
-| `cveFeed/waf_scan.py` | wafw00f | `waf` | one task per site at the address the server vetted; the result goes through the same product rules as a local run |
+| `cveFeed/waf_fingerprint.py` | wafw00f | `waf` | one task per site at the address the server vetted; the local run is deleted (`NEVER_LOCAL`), the result goes through the product rule `_named` |
 | `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
 | `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | deleted locally (`NEVER_LOCAL`): the capture client is gone from the server. The PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
 | `cveFeed/web_shot.py` | headless Chromium on every web page of every host | `web_screenshot` | deleted locally (`NEVER_LOCAL`): the browser, the sandbox check, the proxy and the worker are gone from the server, and so is Chromium from its image. The server queues pages and sends tasks of at most six with the scope policy (`probe_scope.for_screenshots`); the Sentinel proves Chromium's sandbox before any page, vets every connection and returns PNGs, which `agentapi/web_screenshot_results.py` checks (signature, header checksum, sides, size, closing chunk) and the server stores under names it chooses. With no Sentinel able to take it, pages stay queued |
@@ -71,7 +70,8 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/hygiene.py` | DNS, TLS, SPF/DKIM/DMARC | the network helpers move; the evaluators are pure and stay |
+| `cveFeed/hygiene.py`, `mailfail.py` | DNS, TLS, SPF/DKIM/DMARC | moved: the `hygiene_check` kind (contract 3), one task per target's sweep (its TLS endpoints and the names that may have mail); the scanner reads the certificates and runs the mail checks (`cvengine_scanner.probes.hygiene`, `mailfail`, `rdap`), the server keeps `evaluate_cert`, the rating, the folding and what is stored; an endpoint or mail domain the scanner did not answer keeps its open findings; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
+| `cveFeed/dangling_dns.py` | rating bbot's baddns findings | moved: the `dangling_dns_check` kind (contract 3), a batch of findings per task with the server's provider lists (`cveFeed/data/takeover_providers.json`); the scanner walks the zone cut, asks the registry and sends the control request (`cvengine_scanner.probes.dangling_dns`); a finding it could not rate keeps baddns's rating; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | copied into the library (`cvengine_scanner.probes.transport`, `egress_proxy`, `legacy_tls`), held to the task's scope policy; a Sentinel takes its probe proxy from its own `CVENGINE_SENTINEL_PROBE_PROXY`, never from the server; the server's copies stay for the local paths |
 | DNS resolution in `discovery.resolve_names` | names to addresses | moved: the `dns_resolve` kind (contract 3) for `run_host_pipeline`; the local lookup stays behind `CVENGINE_LOCAL_FALLBACK` and for the retire check's lookups (`changes._retire`) |
 
@@ -82,7 +82,7 @@ constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the su
 
 Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
 runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
-`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `nmap_scan.parse_xml` is the library's reader,
+`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
 re-exported under its old name. Two parts stay on the server because they are not pure:
 - reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
   hands what it read to the library's `fingerprint.from_response` as `from_scripts` pairs;
@@ -95,7 +95,7 @@ The flag builders and policy constants are the library's too (`cvengine_scanner.
 - the UDP sweep (`udp_nmap_flags`, `UDP_PORTS`), `port_argument`, `CLOSED_PROBE_PORTS`, `MAX_OPEN_PER_IP`;
 - the version probe's per-service scripts (`probe_nmap_flags`) and `KERNEL_MARKERS`.
 
-A server module still names a constant where its own callers read it (`nmap_scan.FAST_FLAGS`, `udp_scan.DEFAULT_PORTS`, `naabu_scan.port_argument`).
+A server module still names a constant where its own callers read it (`udp_scan.DEFAULT_PORTS`).
 Each of those names is an import of the library's value, never a copy.
 
 ### E. Stays on the server
@@ -107,9 +107,10 @@ which send nothing to the target and need no vantage point.
 
 ### Open items from the inventory
 
-- `cveFeed/templategen.py` runs nuclei to validate AI-written templates and to test approved ones: decided, the `nuclei_validate` kind (contract
-  version 3, built-in scanner only). Still on the server: the maintainer's approval of a reviewed draft (`approve_reviewed_template`, a loopback
-  fixture), the signed-in template run (`auth_nuclei`, which needs the secure read), and `nuclei -update-templates` in `cveFeed/tasks.py`.
+- `cveFeed/templategen.py` ran nuclei to validate AI-written templates and to test approved ones: done, the `nuclei_validate` kind (contract
+  version 3, built-in scanner only, in `NEVER_LOCAL`); the local runners, the maintainer's loopback-fixture approval of a draft
+  (`approve_reviewed_template`) and the signed-in template run were deleted with the local nuclei paths (T8). Still on the server:
+  `nuclei -update-templates` in `cveFeed/tasks.py`, which keeps the template library the Sentinel bundle is packed from fresh.
 - `reNgine/resources.py` and `reNgine/tasks.py` still start subprocesses (legacy `run_command`); check what remains of them.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
@@ -185,9 +186,8 @@ which send nothing to the target and need no vantage point.
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
-   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the supplier posture checks (`supplier_check`), the anonymous web route check (`route_probe`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half and the
-   hygiene network helpers.
+   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the supplier posture checks (`supplier_check`), the anonymous web route check (`route_probe`), the TLS and mail hygiene sweep (`hygiene_check`), the dangling-DNS ratings (`dangling_dns_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half.
 8. Drop the scan tools, Go and bbot from the server image.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).
@@ -264,7 +264,7 @@ the card of the built-in scanner shows a Built-in chip and no Update now button.
 
 ## `CVENGINE_LOCAL_FALLBACK`
 
-Unset, every kind except the built-in scanner's (`sentinel_dispatch.BUILTIN_SCANNER_KINDS`: nmap, naabu, the three nuclei passes, testssl, the UDP sweep and WPScan) may still run on this server once the built-in scanner has enrolled, and every kind before that or with the scanner turned off (`default_fallback_kinds`). `all` is every kind, as in 1.3. `none` or a comma list of kinds
+Kinds in `sentinel_dispatch.NEVER_LOCAL` (`secrets_scan` and the nuclei kinds: the three passes and `nuclei_validate`) never run on this server, whatever this variable says; a name of one in it is ignored. Unset, every other kind except the built-in scanner's (`sentinel_dispatch.BUILTIN_SCANNER_KINDS`: nmap, naabu, the three nuclei passes, testssl, the UDP sweep and WPScan) may still run on this server once the built-in scanner has enrolled, and every kind before that or with the scanner turned off (`default_fallback_kinds`). `all` is every kind, as in 1.3. `none` or a comma list of kinds
 (`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
 `resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
 nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released; the one exception is the nmap fast scan,
@@ -326,7 +326,7 @@ results as before, and goes on with the next stage. `CVENGINE_ASYNC_STAGES=0` br
 technology and AI-targeted passes, WPScan (in the pipeline and the quick pass), the weekly deep nuclei pass, the testssl.sh sweep, the UDP sweep,
 an internal scan and an internal range's discovery. Their entry points are `discovery._run_pipeline` and `run_host_pipeline` (adapters `pipeline`
 and `pipeline.host`, which also serve host assessments and re-tests through continuations), `internal_scan.run` (`pipeline.internal`),
-`internal_discovery.discover_range` (`internal.discover`), `testssl_scan.sweep_all` (`sweep.testssl`), `udp_scan.run` (`sweep.udp`),
+`internal_discovery.discover_range` (`internal.discover`), `tls_audit.sweep_all` (`sweep.testssl`), `udp_scan.run` (`sweep.udp`),
 `tasks.weekly_deep_nuclei` (`nuclei.weekly`) and `wpscan_scan.run_quick` (`wpscan.quick`). OpenVAS never blocked (each tick polls its task);
 its task is now watched (`stage_runs.watch`, adapter `openvas.import`), so a report is imported as soon as it arrives instead of at the next tick. A bbot discovery on a Sentinel (`sentinel_stream.dispatch_stream`, a streamed task) still waits in its worker, because it stores each batch as it arrives; moving it to a run is the `watch` pattern below, with the batches stored by the callback.
 
@@ -400,6 +400,6 @@ and the module goes in `stage_runs.ADAPTER_MODULES`, so a worker that did not im
 (`discovery._run_stages`) nothing more is needed: the `pipeline` adapter replays the pipeline and `_stage` keeps the finished stages. A caller
 that does something with the result passes `then=('<continuation>', {args})` and registers it with `@stage_runs.continuation`; `run` returns
 `stage_runs.is_waiting(result)` while it waits. Code before the dispatch must be safe to repeat: use the ledger, `stage_runs.once`, and
-`stage_runs.remember` / `recall` for a sweep's place in its list (see `testssl_scan.sweep`). A job that creates its own tasks (a streamed bbot job)
+`stage_runs.remember` / `recall` for a sweep's place in its list (see `tls_audit.sweep`). A job that creates its own tasks (a streamed bbot job)
 uses `stage_runs.watch(adapter, task_ids, context)` to be called back when they end.
 

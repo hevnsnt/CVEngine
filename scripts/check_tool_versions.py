@@ -3,8 +3,7 @@
 
   python3 scripts/check_tool_versions.py [--json] [--fail-if-behind]
 
-Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml and the nuclei version the CI smoke
-test downloads). This compares each pin with the newest release: nmap, WPScan, nuclei (the image and the CI smoke test), naabu, bbot, tzdata,
+Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml). This compares each pin with the newest release: nmap, WPScan, nuclei, naabu, bbot, tzdata,
 wafw00f, python-gvm, the Go toolchain and, when the Tailscale profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no
 version tags to compare (only the moving tags stable and community, pinned by digest in docker-compose.yml); docs/OPENVAS.md says how to update them. Nuclei's templates are not pinned: they refresh at runtime.
 Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
@@ -118,8 +117,6 @@ TOOLS = [
     ('wpscan', 'web/Dockerfile', r'ARG WPSCAN_VERSION=([0-9.]+)', 'https://rubygems.org/api/v1/gems/wpscan.json', latest_wpscan, True, False),
     ('nuclei', 'web/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'),
      latest_go_module, True, False),
-    ('nuclei (CI smoke test)', '.github/workflows/build-pr.yml', r'nuclei_([0-9.]+)_linux_amd64',
-     GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'), latest_go_module, True, False),
     ('naabu', 'web/Dockerfile', r'ARG NAABU_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/naabu/v2'),
      latest_go_module, True, False),
     ('bbot', 'web/Dockerfile', r'ARG BBOT_VERSION=([0-9.]+)', 'https://pypi.org/pypi/bbot/json', latest_pypi, True, False),

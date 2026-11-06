@@ -15,7 +15,7 @@ from django.utils import timezone
 from agentapi import sentinel_broker, sentinel_notify, stage_runs
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import ScannerFallback, SentinelTask, StageRun
-from cveFeed import discovery, ledger, nmap_scan, reaper
+from cveFeed import discovery, ledger, port_stage, reaper
 from cveFeed.models import AgentActivity, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanActivity, ScanHistory, Subdomain
@@ -45,8 +45,8 @@ class StageFreesItsWorkerTests(AsyncBase):
     """The nmap stage (naabu, then nmap: two waits) under a StageRun."""
 
     def nmap_stage(self, guard):
-        name = adapter('test.nmap', lambda ctx: nmap_scan.run_nmap_for_scan(ctx['scan_id'], runner=guard.runner))
-        return stage_runs.run(name, {'scan_id': self.scan.id}, first=lambda: nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner),
+        name = adapter('test.nmap', lambda ctx: port_stage.run_for_scan(ctx['scan_id']))
+        return stage_runs.run(name, {'scan_id': self.scan.id}, first=lambda: port_stage.run_for_scan(self.scan.id),
                               project=self.project, scan=self.scan)
 
     def test_the_stage_returns_at_once_and_the_callback_finishes_it_as_the_blocking_wait_did(self):
@@ -70,8 +70,8 @@ class StageFreesItsWorkerTests(AsyncBase):
         self.assertEqual((run.state, run.rounds, len(run.task_ids)), ('done', 2, 2))
         self.assertEqual(guard.calls, [])
         # the passes repeated the stage's opening lines: each is in the feed once, and none is left running
-        self.assertEqual(list(AgentActivity.objects.filter(message__startswith='nmap fingerprinted').values_list('status', flat=True)), ['done'])
-        self.assertFalse(AgentActivity.objects.filter(message__startswith='nmap is fingerprinting').exists())
+        self.assertEqual(list(AgentActivity.objects.filter(message__startswith='fingerprinted').values_list('status', flat=True)), ['done'])
+        self.assertFalse(AgentActivity.objects.filter(message__startswith='a scanner is fingerprinting').exists())
         self.assertFalse(AgentActivity.objects.filter(status='running').exists())
 
     def test_a_claim_taken_in_a_pass_is_held_while_the_run_waits(self):
@@ -90,25 +90,25 @@ class ExpiryTests(AsyncBase):
 
     def one(self, ips=('192.0.2.10',)):
         def body(ctx=None):
-            return dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
+            return dispatch.dispatch_or_none(self.project, 'wpscan', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
         name = adapter('test.one', lambda ctx: body())
         return stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
 
     def test_unclaimed_where_local_is_allowed_returns_none_with_one_fallback_row(self):
         LocalFallback('all').apply(self)
-        with FakeScanner(kinds=['nmap'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results, [None])  # the caller runs it here, as before
         task = SentinelTask.objects.get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('nmap', 'not_claimed_in_time')])
-        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up nmap work').values_list('status', flat=True)),
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('wpscan', 'not_claimed_in_time')])
+        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up wpscan work').values_list('status', flat=True)),
                          ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
 
     def test_unclaimed_where_local_is_not_allowed_raises_scanner_unavailable_in_the_callback(self):
-        with FakeScanner(kinds=['nmap'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results[0]['status'], 'failed')
@@ -118,10 +118,10 @@ class ExpiryTests(AsyncBase):
     def test_a_stage_that_waits_and_falls_back_keeps_the_stage_semantics(self):
         """The nmap stage whose nmap task fails, with the fallback off: the stage says it waits and leaves the address due (the blocking test's case)."""
         guard = assert_ran_nowhere_locally(self, 'nmap')
-        name = adapter('test.nmapfail', lambda ctx: nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner))
+        name = adapter('test.nmapfail', lambda ctx: port_stage.run_for_scan(self.scan.id))
         with FakeScanner(kinds=['naabu', 'nmap'], modes={'nmap': 'fail'}, responders={'naabu': fixture('naabu', ports={IP: [22]})},
                          async_stages=True) as fake:
-            stage_runs.run(name, {}, first=lambda: nmap_scan.run_nmap_for_scan(self.scan.id, runner=guard.runner), scan=self.scan)
+            stage_runs.run(name, {}, first=lambda: port_stage.run_for_scan(self.scan.id), scan=self.scan)
             result = fake.drain()[-1]
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (nmap)', result['skipped'])
@@ -138,11 +138,11 @@ class FanOutTests(AsyncBase):
         seen = []
 
         def body(ctx=None):
-            for index, result in dispatch.dispatch_many(self.project, 'nmap', chunks, scan=self.scan):
+            for index, result in dispatch.dispatch_many(self.project, 'testssl', chunks, scan=self.scan):
                 seen.append((index, bool(result)))
             return len(seen)
         name = adapter('test.many', lambda ctx: body())
-        with FakeScanner(kinds=['nmap'], max_concurrent=2, async_stages=True) as fake, \
+        with FakeScanner(kinds=['testssl'], max_concurrent=2, async_stages=True) as fake, \
                 mock.patch('agentapi.sentinel_dispatch.stage_parallel', return_value=2), mock.patch('cveFeed.discovery.stopped', return_value=False):
             first = stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
             self.assertTrue(stage_runs.is_waiting(first))
@@ -155,9 +155,9 @@ class FanOutTests(AsyncBase):
 
     def test_a_stopped_scan_cancels_its_chunks_and_the_stage_ends_aborted(self):
         def body(ctx=None):
-            return list(dispatch.dispatch_many(self.project, 'nmap', [['192.0.2.1'], ['192.0.2.2']], scan=self.scan))
+            return list(dispatch.dispatch_many(self.project, 'testssl', [['192.0.2.1'], ['192.0.2.2']], scan=self.scan))
         name = adapter('test.stop', lambda ctx: body())
-        with FakeScanner(kinds=['nmap'], mode='idle', async_stages=True) as fake, mock.patch('agentapi.sentinel_dispatch.stage_parallel', return_value=2):
+        with FakeScanner(kinds=['testssl'], mode='idle', async_stages=True) as fake, mock.patch('agentapi.sentinel_dispatch.stage_parallel', return_value=2):
             stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
             with mock.patch('agentapi.sentinel_dispatch._stopped', return_value=True):
                 results = fake.drain()
@@ -181,13 +181,13 @@ class PipelineTests(AsyncBase):
             stubs[path] = mock.patch(path, return_value=value).start()
         mock.patch('cveFeed.discovery._announce').start()
         mock.patch('cveFeed.web_shot.has_work_for_scan', return_value=False).start()
-        mock.patch('cveFeed.waf_scan.enabled', return_value=False).start()
+        mock.patch('cveFeed.waf_fingerprint.enabled', return_value=False).start()
         mock.patch('cveFeed.node2shell_scan.enabled', return_value=False).start()
         found = {'scan_id': self.scan.id, 'status': discovery.SUCCESS, 'error': ''}
-        guard = assert_ran_nowhere_locally(self, 'nmap')
+        assert_ran_nowhere_locally(self, 'nmap')
         with FakeScanner(kinds=['naabu', 'nmap', 'nuclei_light', 'nuclei_targeted'], responders={'naabu': fixture('naabu', ports={IP: [22]})},
                          async_stages=True) as fake, \
-                mock.patch('cveFeed.discovery.stopped', return_value=False), mock.patch('cveFeed.nmap_scan.run_nmap_xml', guard.runner):
+                mock.patch('cveFeed.discovery.stopped', return_value=False):
             first = stage_runs.run('pipeline', {'scan_id': self.scan.id, 'found': found, 'kwargs': {'hygiene': False}, 'domain_id': self.domain.id},
                                    first=lambda: discovery._run_stages(self.scan.id, found, hygiene=False), project=self.project, scan=self.scan)
             self.assertTrue(stage_runs.is_waiting(first))
@@ -211,13 +211,13 @@ class RestartTests(AsyncBase):
 
     def waiting_run(self, fake):
         def body(ctx=None):
-            return dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], scan=self.scan)
+            return dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], scan=self.scan)
         name = adapter('test.restart', lambda ctx: body())
         out = stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
         return StageRun.objects.get(pk=out['stage_run'])
 
     def test_a_pass_whose_worker_died_is_continued_by_the_tick(self):
-        with FakeScanner(kinds=['nmap'], async_stages=True) as fake:
+        with FakeScanner(kinds=['testssl'], async_stages=True) as fake:
             run = self.waiting_run(fake)
             fake.serve_once()
             run.refresh_from_db()
@@ -228,11 +228,11 @@ class RestartTests(AsyncBase):
                 self.assertEqual(stage_runs.tick(), {'recovered': 1})
             self.assertEqual(StageRun.objects.get(pk=run.pk).state, 'ready')
             result = stage_runs.resume(run.pk)
-        self.assertEqual(result['hosts'][0]['ip'], '192.0.2.10')
+        self.assertEqual(result['outcome'], 'done')
         self.assertEqual(StageRun.objects.get(pk=run.pk).state, 'done')
 
     def test_a_lost_callback_message_is_sent_again_and_a_missed_deadline_is_driven(self):
-        with FakeScanner(kinds=['nmap'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['testssl'], mode='idle', async_stages=True) as fake:
             run = self.waiting_run(fake)
             StageRun.objects.filter(pk=run.pk).update(deadline=timezone.now() - timedelta(minutes=5))
             fake.clock.offset += 30
@@ -247,7 +247,7 @@ class RestartTests(AsyncBase):
 
     def test_the_orphan_reaper_leaves_a_waiting_scan_alone(self):
         ScanHistory.objects.filter(pk=self.scan.pk).update(start_scan_date=timezone.now() - timedelta(hours=1), celery_ids=['gone'])
-        with FakeScanner(kinds=['nmap'], async_stages=True) as fake:
+        with FakeScanner(kinds=['testssl'], async_stages=True) as fake:
             self.waiting_run(fake)
             self.assertEqual(reaper.expire_orphaned_running(live=set()), {})
             self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).scan_status, 1)
@@ -255,20 +255,20 @@ class RestartTests(AsyncBase):
         self.assertEqual(reaper.expire_orphaned_running(live=set()), {'ScanHistory': 1})  # once nothing carries it, it is an orphan again
 
     def test_with_async_stages_off_the_stage_waits_in_its_worker_as_before(self):
-        with FakeScanner(kinds=['nmap']):  # async_stages=False: CVENGINE_ASYNC_STAGES=0
+        with FakeScanner(kinds=['testssl']):  # async_stages=False: CVENGINE_ASYNC_STAGES=0
             name = adapter('test.sync', lambda ctx: None)
-            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']},
+            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': ['192.0.2.10']},
                                                                                      ips=['192.0.2.10'], scan=self.scan))
-        self.assertEqual(out['hosts'][0]['ip'], '192.0.2.10')
+        self.assertEqual(out['outcome'], 'done')
         self.assertFalse(StageRun.objects.exists())
 
 
 class MetricsTests(AsyncBase):
     def test_waiting_runs_the_oldest_wait_the_callback_latency_and_the_worker_time_given_back(self):
-        with FakeScanner(kinds=['nmap'], async_stages=True) as fake:
-            name = adapter('test.metric', lambda ctx: dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']},
+        with FakeScanner(kinds=['testssl'], async_stages=True) as fake:
+            name = adapter('test.metric', lambda ctx: dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': ['192.0.2.10']},
                                                                                 ips=['192.0.2.10'], scan=self.scan))
-            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']},
+            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': ['192.0.2.10']},
                                                                                      ips=['192.0.2.10'], scan=self.scan), project=self.project)
             StageRun.objects.filter(pk=out['stage_run']).update(waiting_since=timezone.now() - timedelta(seconds=90))
             m = stage_runs.metrics()
@@ -303,17 +303,17 @@ class NotifyTests(DispatchBase):
             self.client.delete(key)
 
     def test_a_queued_task_wakes_the_long_poll_of_a_sentinel_that_could_take_it_and_not_another(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['testssl'])
         with self.captureOnCommitCallbacks(execute=True):
-            SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': [IP]}, ips=[IP])
+            SentinelTask.objects.create(project=self.project, kind='testssl', target={'addresses': [IP]}, ips=[IP])
         started = time.monotonic()
         self.assertTrue(sentinel_notify.wait_agent(agent.pk, 5))
         self.assertLess(time.monotonic() - started, 1)  # at once, not at the next poll
         self.assertFalse(sentinel_notify.wait_agent(agent.pk + 1000, 0.2))  # nobody else was woken
 
     def test_a_reported_or_expired_task_wakes_the_stage_waiting_for_it_and_frees_the_sentinels_poll(self):
-        agent = self.make_sentinel(['nmap'])
-        task = SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': [IP]}, ips=[IP], status='claimed', agent=agent,
+        agent = self.make_sentinel(['testssl'])
+        task = SentinelTask.objects.create(project=self.project, kind='testssl', target={'addresses': [IP]}, ips=[IP], status='claimed', agent=agent,
                                            lease_expires_at=timezone.now() + timedelta(minutes=5))
         with self.captureOnCommitCallbacks(execute=True):
             sentinel_broker.expire(task, 'test')
@@ -331,7 +331,7 @@ class NotifyTests(DispatchBase):
         self.assertGreaterEqual(time.monotonic() - started, 0.25)
 
     def test_the_long_poll_waits_on_its_wake_key_with_the_safety_interval_and_polls_each_second_while_a_task_is_held_back(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['testssl'])
         with mock.patch.object(sentinel_notify, 'wait_agent') as waited:
             sentinel_broker._await_work(agent, 'no eligible work is queued', 30)
         waited.assert_called_once()
@@ -358,9 +358,9 @@ class NotifyTests(DispatchBase):
 
 class ResultWakesTheCallbackTests(AsyncBase):
     def test_the_report_of_the_last_task_queues_the_callback_at_once(self):
-        with FakeScanner(kinds=['nmap'], async_stages=True) as fake:
+        with FakeScanner(kinds=['testssl'], async_stages=True) as fake:
             name = adapter('test.wake', lambda ctx: None)
-            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': [IP]}, ips=[IP], scan=self.scan))
+            out = stage_runs.run(name, {}, first=lambda: dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': [IP]}, ips=[IP], scan=self.scan))
             with mock.patch('cveFeed.tasks.stage_run_resume.apply_async') as queued, self.captureOnCommitCallbacks(execute=True):
                 fake.serve_once()
             self.assertEqual(StageRun.objects.get(pk=out['stage_run']).state, 'ready')
@@ -428,22 +428,21 @@ class SweepTests(RouteFixture, TestCase):
         self.scan(names=('a.rt.test', 'b.rt.test'), ports=((443, 'https'),))
         LocalFallback('none').apply(self)
         for patcher in (mock.patch('reNgine.resources.global_pause_requested', return_value=False),
-                        mock.patch('cveFeed.testssl_scan.installed', return_value=True),
-                        mock.patch('cveFeed.testssl_scan._address', return_value='203.0.113.5'),
+                        mock.patch('cveFeed.tls_audit._address', return_value='203.0.113.5'),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True)):
             patcher.start()
 
     def test_each_target_waits_without_the_worker_and_none_is_audited_twice(self):
-        from cveFeed import testssl_scan
-        from tests.test_testssl_scan import CLEAN
+        from cveFeed import tls_audit
+        from tests.test_tls_audit import CLEAN
         guard = assert_ran_nowhere_locally(self, 'testssl')
         with FakeScanner(kinds=['testssl'], responders={'testssl': {'outcome': 'done', 'items': CLEAN}}, async_stages=True) as fake:
-            first = testssl_scan.sweep_all()
+            first = tls_audit.sweep_all()
             self.assertTrue(stage_runs.is_waiting(first))
-            self.assertEqual(testssl_scan.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
+            self.assertEqual(tls_audit.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
             fake.drain()
         self.assertEqual(sorted(t['target']['host'] for t in fake.served), ['a.rt.test', 'b.rt.test'])  # each once, one wait each
-        self.assertEqual(sorted(ServiceRun.objects.filter(service=testssl_scan.SERVICE).values_list('asset', 'status')),
+        self.assertEqual(sorted(ServiceRun.objects.filter(service=tls_audit.SERVICE).values_list('asset', 'status')),
                          [('a.rt.test:443', 'done'), ('b.rt.test:443', 'done')])
         self.assertEqual(StageRun.objects.get().rounds, 2)
         self.assertEqual(guard.calls, [])

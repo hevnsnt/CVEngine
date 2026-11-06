@@ -11,6 +11,7 @@ from startScan.models import Port, Subdomain, Vulnerability
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_route_auth import RouteFixture
 from tests.test_service_intel import RDP_ENC, RDP_NLA_ONLY
+from tests.port_stage_stub import port_double
 
 try:
 	from PIL import Image
@@ -253,7 +254,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 	def stages(self, scan, **kw):
 		from cveFeed import discovery
 		return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-									 nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+									 port_stage_run=port_double(), db_exposure_checks={}, provider=None,
 									 light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 									 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kw)
 

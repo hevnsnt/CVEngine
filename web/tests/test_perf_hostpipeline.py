@@ -12,17 +12,18 @@ from scanEngine.models import EngineType
 from startScan.models import ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call, rpc
+from tests.port_stage_stub import port_double
 
 
 def _stages(**over):
 	"""Stage doubles, so no scanner binary runs."""
 	nmap = []
 
-	def runner(targets, flags, timeout):
+	def runner(targets):
 		nmap.append(list(targets))
 		return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'  # an empty report is a failed scan
 	kwargs = dict(resolver=lambda names: {(n, '192.0.2.%d' % (10 + i)) for i, n in enumerate(sorted(names))},
-		light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
+		light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner),
 		db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
 	kwargs.update(over)
 	return nmap, kwargs
@@ -72,9 +73,9 @@ class HostPipelineTests(TestCase):
 		exposure.assert_not_called()
 
 	def test_a_stage_failure_does_not_stop_the_pipeline(self):
-		def boom(targets, flags, timeout):
-			raise RuntimeError('nmap exploded')
-		_, kwargs = _stages(nmap_runner=boom)
+		def boom(targets):
+			raise RuntimeError('the port stage exploded')
+		_, kwargs = _stages(port_stage_run=port_double(boom))
 		out = discovery.run_host_pipeline(self.domain.id, ['www.hp.test'], **kwargs)
 		scan = ScanHistory.objects.get(pk=out['scan_id'])
 		self.assertEqual(scan.scan_status, discovery.SUCCESS)  # the host it found stands; the failed stage is on record

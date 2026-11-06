@@ -382,13 +382,13 @@ class LocalRunDetected(AssertionError):
 
 # what each task kind's local path goes through: the module functions that run the tool, and the resource-gate job kinds (``heavy_job``) they use
 LOCAL_RUNNERS = {
-    'nmap': ('cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
-    'naabu': ('cveFeed.naabu_scan.run_naabu',),
-    'nuclei_light': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_targeted': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_deep': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
-    'testssl': ('cveFeed.testssl_scan.run_testssl',),
+    'nmap': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'naabu': (),  # likewise
+    'nuclei_light': (),  # likewise
+    'nuclei_targeted': (),  # likewise
+    'nuclei_deep': (),  # likewise
+    'nmap_udp': (),  # likewise
+    'testssl': (),  # likewise
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
@@ -400,16 +400,17 @@ LOCAL_RUNNERS = {
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
     'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
+    'hygiene_check': ('cveFeed.hygiene._fetch_cert', 'cveFeed.hygiene._resolver'),  # the certificate read and every DNS lookup of the sweep
+    'dangling_dns_check': ('cveFeed.dangling_dns.Net.ns', 'cveFeed.dangling_dns.Net.ask', 'cveFeed.dangling_dns.Net.registered', 'cveFeed.dangling_dns.Net.http_control'),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'waf': ('cveFeed.waf_scan.run_wafw00f',),
-    'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
-    'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
-                    'cveFeed.nmap_scan.run_nmap_args'),
+    'waf': (),  # likewise
+    'nmap_full': (),  # likewise
+    'nmap_verify': (),  # likewise
     'node2shell': ('cveFeed.node2shell_scan.run_check',),
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
-    'path_probe': ('cveFeed.path_probe.send_probe',),
-    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
+    'path_probe': (),  # likewise
+    'nuclei_validate': (),  # likewise
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -430,6 +431,8 @@ HEAVY_KINDS = {
     'vhost_probe': (),
     'subdir_probe': (),
     'supplier_check': (),
+    'hygiene_check': (),
+    'dangling_dns_check': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
     'waf': ('route-probe',),
     'nmap_full': ('nmap-full-bg',),
@@ -444,8 +447,7 @@ HEAVY_KINDS = {
 
 class LocalGuard:
     """What ``assert_ran_nowhere_locally`` returns: ``calls`` (every local run attempted, as ``(where, args)``) and ``runner``, a callable that records
-    and raises, for the stage parameters that take an injected runner (``nmap_scan.run_nmap_for_scan(runner=guard.runner)``, ``udp_scan.run(runner=...)``,
-    ``testssl_scan.sweep(runner=...)``). A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
+    and raises, for the stage parameters that take an injected runner (``wpscan_scan.run_wpscan(runner=...)``). A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
     when the test ends: a swallowed local run still fails the test."""
 
     def __init__(self, kind):
@@ -468,7 +470,7 @@ def assert_ran_nowhere_locally(testcase, kind):
     """From now until the end of ``testcase``, any local run of ``kind`` fails the test with ``LocalRunDetected`` (an ``AssertionError``): the module
     functions in ``LOCAL_RUNNERS`` that run the tool, the resource gate (``resources.heavy_job``) for the job kinds the tool uses, and
     ``heavy_process.run`` (testssl.sh, WPScan, wafw00f) for the same. The gates catch a stage that reached the tool through a default argument
-    bound before the patch (``runner=run_nmap_xml``). Returns the ``LocalGuard``; the test also fails at the end when anything was attempted, even if
+    bound before the patch (``runner=run_testssl``). Returns the ``LocalGuard``; the test also fails at the end when anything was attempted, even if
     the stage swallowed the error."""
     from cveFeed import heavy_process
     from reNgine import resources

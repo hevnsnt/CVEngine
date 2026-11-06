@@ -73,20 +73,6 @@ jobs:
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
           python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0  # jsonschema checks the Sentinel result contract (web/agentapi/sentinel_contract.json) in the tests; tblib lets a failure in a parallel test worker show its real traceback
-      - name: Nuclei positive and negative loopback fixture smoke
-        working-directory: web
-        env:
-          XDG_CONFIG_HOME: ${{ runner.temp }}/cvengine-nuclei-config
-          XDG_CACHE_HOME: ${{ runner.temp }}/cvengine-nuclei-cache
-        run: |
-          nuclei_archive="$RUNNER_TEMP/nuclei_3.11.1_linux_amd64.zip"
-          curl --fail --location --retry 2 --max-time 120 \
-            --output "$nuclei_archive" \
-            https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip
-          printf '%s  %s\n' 'ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6' "$nuclei_archive" | sha256sum --check --status
-          unzip -p "$nuclei_archive" nuclei > "$RUNNER_TEMP/cvengine-nuclei"
-          chmod 700 "$RUNNER_TEMP/cvengine-nuclei"
-          CVENGINE_NUCLEI_SMOKE_BIN="$RUNNER_TEMP/cvengine-nuclei" python tests/nuclei_fixture_smoke.py
       - name: No model change without its migration
         working-directory: web
         env:

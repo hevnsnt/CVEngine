@@ -17,7 +17,7 @@ from agentapi.auth import create_token
 from cveFeed import hygiene as hy
 from cveFeed import hygiene_rating as hr
 from cveFeed import mailfail as mf
-from cveFeed import testssl_scan
+from cveFeed import tls_audit
 from cveFeed.models import HostLabel, HygieneFinding, RouteAuth
 from cveFeed.threat import host_heat
 from dashboard.models import Org, Project, ProjectMembership
@@ -93,10 +93,10 @@ class VendorEndpointTests(Base):
 		self.host('msoid.example.com', 'clientconfig.microsoftonline-p.net')
 		HygieneFinding.objects.create(domain=self.domain, host='msoid.example.com:443', check_name='tlsa_breach', severity=hy.MEDIUM,
 									  title='msoid.example.com:443: BREACH may apply')
-		result = testssl_scan.evaluate([{'id': 'BREACH', 'severity': 'MEDIUM', 'cve': 'CVE-2013-3587',
+		result = tls_audit.evaluate([{'id': 'BREACH', 'severity': 'MEDIUM', 'cve': 'CVE-2013-3587',
 										 'finding': "potentially VULNERABLE, gzip HTTP compression detected - only supplied '/' tested"}],
 									   'msoid.example.com:443')
-		testssl_scan.store(self.domain, 'msoid.example.com', 443, result, 'msoid.example.com:443')
+		tls_audit.store(self.domain, 'msoid.example.com', 443, result, 'msoid.example.com:443')
 		row = HygieneFinding.objects.get(host='msoid.example.com:443', check_name='tlsa_breach')
 		self.assertEqual(row.status, 'resolved')  # Microsoft's sign-in service, not a client asset
 
@@ -161,7 +161,7 @@ class BreachTests(Base):
 
 	def breach(self, host):
 		where = f'{host}:443'
-		testssl_scan.store(self.domain, host, 443, testssl_scan.evaluate([self.ITEM], where), where)
+		tls_audit.store(self.domain, host, 443, tls_audit.evaluate([self.ITEM], where), where)
 		return HygieneFinding.objects.get(host=where, check_name='tlsa_breach')
 
 	def route(self, host, state='open', cookies=()):
