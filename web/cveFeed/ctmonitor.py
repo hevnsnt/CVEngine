@@ -2,7 +2,7 @@
 issued for a new subdomain shows up here on its own, without waiting for the next active discovery pass.
 
 This is purely passive: one read-only HTTPS GET to a public CT log aggregator per check, the same source
-bbot's own ``crt`` module uses. Nothing is sent to the target itself.
+the discovery's own ``crt`` module uses. Nothing is sent to the target itself.
 """
 import json
 import logging

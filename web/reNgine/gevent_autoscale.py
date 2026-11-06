@@ -10,7 +10,7 @@ runs. Two things go wrong together:
   waiter is the worker's consumer, blocked in ``Pool.spawn`` with the next message, so no further message is taken until the running task
   ends. Then the swollen pool lets everything waiting in at once, above the ceiling.
 
-So a discovery worker with an autoscale ceiling of 8 ran one discovery or host assessment at a time for as long as that one ran (a bbot run
+So a discovery worker with an autoscale ceiling of 8 ran one discovery or host assessment at a time for as long as that one ran (a discovery run
 or an assessment waiting on Sentinels takes hours), with hundreds of messages waiting behind it. ``tests/test_gevent_autoscale.py`` pins it.
 
 This subclass counts the pool's limit (``Pool.size``) and grows it with ``Semaphore.release``, which wakes the waiting consumer: the worker

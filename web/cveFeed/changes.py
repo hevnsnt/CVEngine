@@ -16,7 +16,7 @@ from cveFeed import scoring, shots
 
 logger = logging.getLogger(__name__)
 
-MAX_HOSTS_PER_DIFF = 5000  # bbot already caps a scan at MAX_EVENTS_PER_SCAN events
+MAX_HOSTS_PER_DIFF = 5000  # a discovery already caps a scan at MAX_EVENTS_PER_SCAN events
 MAX_CHANGES_PER_SCAN = 2000
 MAX_RETIRE_CHECKS = 200
 CHUNK = 500

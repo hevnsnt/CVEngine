@@ -15,7 +15,7 @@ from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, Hos
 	ServiceRun)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
-from reNgine import bbot as bbot_lib, resources
+from reNgine import discovery_events as bbot_lib, resources
 from reNgine.tasks import persist_bbot_result, save_subdomain
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Vulnerability
@@ -445,7 +445,7 @@ class EnforcementTests(Base):
 		target = Domain.objects.create(name='late.test', project=self.a1, insert_date=timezone.now())
 		scan = ScanHistory.objects.create(domain=target, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=-1)
 		HostExclusion.objects.create(org=self.org_a, host='late.test')
-		with mock.patch('reNgine.bbot.stream_events', side_effect=AssertionError('bbot must not run')):
+		with mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run')):
 			out = discovery._run_pipeline(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
 		self.assertEqual(ScanHistory.objects.get(pk=scan.pk).scan_status, discovery.FAILED)

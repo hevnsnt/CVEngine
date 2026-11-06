@@ -1,4 +1,4 @@
-"""Rating bbot's baddns dangling-DNS findings by what an outsider can actually claim.
+"""Rating the discovery's baddns dangling-DNS findings by what an outsider can actually claim.
 
 baddns rates every dangling record medium, so cvENGINE showed them all as smoke: a claimable zone takeover and a stale CNAME no one else can
 use looked the same. Each finding is checked again here when it is stored (``reNgine.tasks._persist_bbot_findings``) and by the
@@ -100,7 +100,7 @@ def _field(text, name, following):
 
 def parse(description):
     """The parts of a baddns description that the rating reads, or None for a finding it does not rate (MX, TXT, a whois finding...).
-    bbot writes ``<description>. Confidence: [..] Signature: [..] Indicator: [..] Trigger: [a, b] baddns Module: [..]``."""
+    The discovery writes ``<description>. Confidence: [..] Signature: [..] Indicator: [..] Trigger: [a, b] baddns Module: [..]``."""
     text = str(description or '').split(NOTE_MARKER, 1)[0]
     head = text.split('. Confidence: [', 1)[0].strip()
     if head.startswith('Dangling NS Records'):
@@ -334,7 +334,7 @@ class Rating:
 
 
 def assess(finding, net=None):
-    """The rating of one bbot finding (a dict with ``host``, ``description``, ``module``), or None when it is not a baddns finding this rates,
+    """The rating of one discovery finding (a dict with ``host``, ``description``, ``module``), or None when it is not a baddns finding this rates,
     the checks are off or the network gave no usable answer. Never raises."""
     if not enabled() or (finding.get('module') or 'baddns') != 'baddns':
         return None

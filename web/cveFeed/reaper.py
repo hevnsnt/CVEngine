@@ -125,7 +125,7 @@ REDISPATCH_SCAN_EVERY_HOURS = 2  # and no more often than this per scan
 
 
 def redispatch_mode(scan):
-    """The bbot mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
+    """The discovery mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
     target's own, and a manual only target (which no automatic start ever queues, so this is a scan someone asked for before changing it) is
     sent as passive: a recovery never widens what was asked for, and never sends traffic the target's mode does not allow."""
     from targetApp.models import Domain
@@ -141,7 +141,7 @@ def redispatch_queued_scans(now=None, live=None):
     until it starts, so the broker is asked whether any message still exists for its scan id (``broker_recovery.live_tasks``: a queue, an
     unacknowledged hold or a worker). Only a scan the broker holds nothing for, and only when that can be told, is sent again: a long queue
     after a bulk add is waiting its turn and is left alone. A second message is harmless (the domain lock answers 'duplicate', and a finished
-    scan is not run again). The bbot mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
+    scan is not run again). The discovery mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
     the broker holds (None: cannot be told), injectable for tests. Returns how many were queued again."""
     from cveFeed import broker_recovery, ledger
     from cveFeed.discovery import QUEUED

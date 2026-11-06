@@ -1,35 +1,30 @@
-"""Live bbot discovery for a target: streams events into the DB as they arrive.
+"""Live discovery for a target: a Sentinel streams what it finds and each batch lands in the DB as it arrives.
 
 Entering a domain starts this. A ScanHistory row is created (so the scan shows up
-in Scans, scoped to the project like every other scan), bbot runs in the celery
-worker, and every few seconds the batch it has seen is persisted as Subdomain,
+in Scans, scoped to the project like every other scan), the scan is driven from the celery
+worker (the discovery itself runs on a Sentinel, never here), and every few seconds the batch it has seen is persisted as Subdomain,
 IP and Port rows plus DiscoveryEvent rows, which the dashboard polls to draw the
 discovery graph and the live feed while it happens.
 """
 import functools
 import logging
 import os
-import shutil
-import time
 from contextlib import contextmanager
 
 from django.conf import settings
 from django.utils import timezone
 
 from cveFeed import scanner_wait
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 
 logger = logging.getLogger(__name__)
 
-FLUSH_EVERY_EVENTS = 15
-FLUSH_EVERY_SECONDS = 2.0
 MAX_EVENTS_PER_SCAN = 5000
 DEFAULT_DISCOVERY_TIMEOUT = 6 * 3600
-BBOT_SCANS_HOME = os.path.expanduser('~/.bbot/scans')
 
 
 def discovery_timeout():
-    """Seconds bbot may run, from the App Admin timings (read at the start of each run)."""
+    """Seconds a discovery may run, from the App Admin timings (read at the start of each run)."""
     try:
         from dashboard.models import SystemTimings
         return SystemTimings.current().discovery_timeout_hours * 3600
@@ -60,7 +55,6 @@ def pick_engine():
             or EngineType.objects.filter(default_engine=True).order_by('id').first() or EngineType.objects.order_by('id').first())
 
 
-FALLBACK = {'deep': ['deep', 'standard', 'passive'], 'standard': ['standard', 'passive']}  # modes tried when memory runs out
 HOST_PIPELINE_TASK = 'host_pipeline'  # marks a ScanHistory made by run_host_pipeline (in ScanHistory.tasks)
 RETEST_TASK = 'retest'  # also on a host pipeline started because its hosts changed (cveFeed.retest)
 MAX_PIPELINE_HOSTS = 200
@@ -85,7 +79,7 @@ def running_discovery(domain):
 
 
 def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiated_by=None):
-    """Queue the streaming bbot task for each domain, in the order given, with rows created in bulk. Returns one ScanHistory
+    """Queue the streaming discovery task for each domain, in the order given, with rows created in bulk. Returns one ScanHistory
     per domain; a domain that is already being discovered returns that scan instead of a second, since two runs of one target
     only compete for memory. Scans are created queued (-1); the pipeline marks one running when a worker starts it.
 
@@ -119,7 +113,7 @@ def start_discoveries(domains, mode=bbot_lib.DEFAULT_MODE, quiet=False, initiate
         from cveFeed import activity
         for d in domains:
             if d.id in created:
-                activity.log('discovery', f'Queued bbot discovery of {d.name}', project=d.project_id, scan_id=created[d.id].id)
+                activity.log('discovery', f'Queued discovery of {d.name}', project=d.project_id, scan_id=created[d.id].id)
             elif d.id in active:
                 activity.log('discovery', f'{d.name} is already being discovered (scan #{active[d.id].id}); not starting another',
                              project=d.project_id, scan_id=active[d.id].id)
@@ -173,13 +167,12 @@ def mark_running(scan_id):
     ScanActivity.objects.filter(scan_of_id=scan_id, name='bbot_discovery', status=QUEUED).update(status=RUNNING, time=timezone.now())
 
 
-def _flush(scan, ctx, batch, observed, bbot_scan_name='', stored=0):
+def _flush(scan, ctx, batch, observed, stored=0):
     """Persist what the stream has produced since the last flush. ``stored`` is how many events the scan already has
     (the caller keeps the running count, so a flush never needs a COUNT(*)); returns the new total."""
     from cveFeed.models import DiscoveryEvent
     from reNgine.tasks import persist_bbot_result
     persist_bbot_result(batch, ctx=ctx)
-    persist_screenshots(scan, batch.screenshots, bbot_scan_name)
     room = MAX_EVENTS_PER_SCAN - stored
     if room > 0 and observed:
         DiscoveryEvent.objects.bulk_create([
@@ -190,49 +183,8 @@ def _flush(scan, ctx, batch, observed, bbot_scan_name='', stored=0):
     return stored
 
 
-def persist_screenshots(scan, screenshots, bbot_scan_name):
-    """Copy each gowitness screenshot bbot saved (under its own ~/.bbot/scans/<name>/ home, which bbot
-    may clean up later) into this scan's permanent scan-results storage, Shodan-style, and record it on
-    the matching Subdomain. A missing source file, an unknown bbot scan name, or no matching Subdomain
-    is skipped quietly - this must never interrupt discovery."""
-    if not (screenshots and bbot_scan_name):
-        return
-    from cveFeed import shots
-    from startScan.models import Subdomain
-    dest_dir = os.path.join(settings.MEDIA_ROOT, f'{scan.domain.name}_{scan.id}', 'screenshots')
-    hashed = 0
-    shots.warn_unavailable(scan)
-    for shot in screenshots:
-        host, rel_path = shot.get('host'), shot.get('rel_path')
-        if not (host and rel_path):
-            continue
-        base = os.path.realpath(os.path.join(BBOT_SCANS_HOME, str(bbot_scan_name)))
-        source = os.path.realpath(os.path.join(base, str(rel_path)))
-        if not source.startswith(base + os.sep):  # event fields are tool output: never copy outside bbot's own scan dir
-            logger.warning('ignoring bbot screenshot path outside its scan dir: %r', rel_path)
-            continue
-        if not os.path.isfile(source):
-            logger.warning('bbot screenshot missing on disk: %s', source)
-            continue
-        subdomain = Subdomain.objects.filter(scan_history=scan, name=host).first()
-        if not subdomain:
-            continue
-        os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, os.path.basename(rel_path))
-        try:
-            shutil.copy2(source, dest)
-        except OSError:
-            logger.exception('could not copy bbot screenshot %s', source)
-            continue
-        subdomain.screenshot_path = os.path.relpath(dest, settings.MEDIA_ROOT)
-        if hashed < shots.MAX_HASH_PER_FLUSH:  # one small image decode per screenshot, at copy time
-            subdomain.screenshot_hash = shots.dhash_file(dest)
-            hashed += 1
-        subdomain.save(update_fields=['screenshot_path', 'screenshot_hash'])
-
-
 def _report_key_problems(problems, extra_args, scan):
-    """One activity line per service whose key bbot rejected (or never received). bbot skips such a module and carries on, so without
+    """One activity line per service whose key the scanner rejected (or never received). The scanner skips such a module and carries on, so without
     this a stored key that is wrong looks like a service that found nothing."""
     from cveFeed import activity
     from cveFeed.api_credentials import service_for_module
@@ -248,36 +200,14 @@ def _report_key_problems(problems, extra_args, scan):
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
-def outside_exact_host(event, domain):
-    """True when a bbot event names a host other than ``domain`` itself and ``domain`` is exactly one host (``Domain.exact_host_only``):
-    bbot already runs with --strict-scope there, and this keeps a module that reports a child anyway out of the inventory and the live
-    feed. An event that names no host (SCAN, a statistic) is kept."""
-    from urllib.parse import urlsplit
-    names = [event.get('host')]
-    payload = event.get('data_json') if event.get('data_json') is not None else event.get('data')
-    kind = event.get('type')
-    if kind == 'DNS_NAME' and isinstance(payload, str):
-        names.append(payload)
-    elif kind == 'URL' and isinstance(payload, str):
-        names.append(urlsplit(payload).hostname)
-    elif kind == 'OPEN_TCP_PORT' and isinstance(payload, str):
-        names.append(payload.rpartition(':')[0].strip('[]'))
-    elif isinstance(payload, dict):
-        names.append(payload.get('host'))
-        if payload.get('url'):
-            names.append(urlsplit(str(payload['url'])).hostname)
-    from targetApp.target_types import IP, classify_target
-    return any(n and classify_target(str(n)) != IP and not domain.includes_host(n) for n in names)
+MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign the scanner's web module did not work
 
 
-MIN_HOSTS_FOR_WEB_CHECK = 5  # a target with a handful of hosts may honestly have no web page; many hosts and not one is a sign bbot's web module did not work
-
-
-def _report_no_web_pages(scan, mode, web_events, bbot_scan_name='', on_sentinel=False):
-    """One activity line when a standard or deep discovery found many hosts and bbot reported no web page at all (no URL and no HTTP_RESPONSE event).
+def _report_no_web_pages(scan, mode, web_events):
+    """One activity line when a standard or deep discovery found many hosts and the scanner reported no web page at all (no URL and no HTTP_RESPONSE event).
     Its web module (``http``) is what turns a host into a URL, so without it a discovery records no endpoint, no HTTP status and no page title, and
-    gowitness has nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
-    cvENGINE keeps. The line says what to look at, with the name of bbot's own scan directory."""
+    there is nothing to photograph; that was seen on a live instance (a 43 host discovery with 0 endpoints) and the cause was not in the logs
+    cvENGINE keeps. The line says what to look at."""
     if mode not in ('standard', 'deep') or any(web_events.values()):
         return
     from cveFeed import activity
@@ -285,30 +215,30 @@ def _report_no_web_pages(scan, mode, web_events, bbot_scan_name='', on_sentinel=
     hosts = Subdomain.objects.filter(scan_history=scan).count()
     if hosts < MIN_HOSTS_FOR_WEB_CHECK:
         return
-    where = f'~/.bbot/scans/{bbot_scan_name}/scan.log' if bbot_scan_name else "bbot's scan.log"
-    where += ' on the Sentinel that ran it' if on_sentinel else ' in the celery container'
-    activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but bbot reported no web page for any of them '
-                 f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. bbot\'s web module may have failed '
-                 f'to start or reach the hosts: look in {where} (docs/PIPELINE.md, "When discovery finds no web pages"). '
+    activity.log('discovery', f'{mode.capitalize()} discovery of {scan.domain.name} found {hosts} hosts but the scanner reported no web page for any of them '
+                 f'(no URL and no HTTP_RESPONSE event), so no endpoint, HTTP status or title was recorded from it. Its web module may have failed '
+                 f'to start or reach the hosts: look in the scan log on the Sentinel that ran it (docs/PIPELINE.md, "When discovery finds no web pages"). '
                  'Web screenshots and the route checks make their own requests and are not affected.',
                  project=scan.domain.project_id, status='failed', scan_id=scan.id, hosts=hosts)
 
 
-def _report_screenshot_failure(hard_failures, scan):
-    """One activity line when bbot's gowitness module (the only front-page screenshot taker) failed to set up. With --force bbot
-    carries on without it, so without this line a discovery that took no screenshots looks like one that found no web pages."""
+def _report_module_failures(hard_failures, scan):
+    """One activity line per module the scanner could not set up (a front-page screenshot module without a working browser is the usual one). With
+    --force the scanner carries on without it, so without this line a discovery that lacks what the module finds looks like one that found nothing."""
     from cveFeed import activity
-    reasons = [reason for module, reason in hard_failures if module == 'gowitness']
-    if not reasons:
-        return
-    reason = ((reasons[0] or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
-    activity.log('discovery', f'Screenshots unavailable: the gowitness module failed to set up ({reason}); '
-                 'no discovery-time screenshots will be taken until it is fixed (the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
+    seen = set()
+    for module, reason in hard_failures:
+        if module in seen:
+            continue
+        seen.add(module)
+        reason = ((reason or '').strip().splitlines() or ['no reason given'])[0][:160] or 'no reason given'
+        activity.log('discovery', f'A discovery module failed to set up: {module} ({reason}); what it covers is missing from this run '
+                     '(the browser screenshot stage is separate and not affected)', project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
 
 def persist_screenshot_blobs(scan, screenshots):
-    """Write each screenshot a Sentinel sent with a bbot discovery batch (``sentinel_stream.clean_partial`` already checked its host, name, type and
-    size) into this scan's scan-results storage and record it on the matching Subdomain, as ``persist_screenshots`` does for a local run's files.
+    """Write each screenshot a Sentinel sent with a discovery batch (``sentinel_stream.clean_partial`` already checked its host, name, type and
+    size) into this scan's scan-results storage and record it on the matching Subdomain.
     A screenshot whose host has no Subdomain in this scan, or whose bytes cannot be written, is skipped quietly."""
     if not screenshots:
         return
@@ -341,7 +271,7 @@ def persist_screenshot_blobs(scan, screenshots):
 
 
 def batch_result(batch):
-    """A Sentinel's batch (``sentinel_stream.clean_partial``) as the ``BbotResult`` and live feed lines a local run builds from bbot's events."""
+    """A Sentinel's batch (``sentinel_stream.clean_partial``) as the ``BbotResult`` and the live feed lines."""
     result = bbot_lib.BbotResult(
         subdomains=set(batch.get('subdomains') or ()), ips=set(batch.get('ips') or ()),
         ports={(p['host'], p['port']) for p in batch.get('ports') or ()}, urls={(u['url'], u['status']) for u in batch.get('urls') or ()},
@@ -355,13 +285,13 @@ def batch_result(batch):
 
 
 def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
-    """Run the discovery on a Sentinel that declares ``bbot_discovery`` (contract version 3), persisting each batch it posts as it arrives, through the
-    same code as a local run's flushes. ``None`` when no Sentinel did any of it (run it here; ``sentinel_dispatch``'s one decision already recorded
-    the fallback, or raised ``ScannerUnavailable`` when bbot may not run here). Otherwise ``{stored, mode, scan_name, web_events, problems,
-    hard_failures, incomplete}``; ``incomplete`` says why a run stopped part way after it found something (empty for a whole run).
+    """Run the discovery on a Sentinel that declares ``bbot_discovery`` (contract version 3), persisting each batch it posts as it arrives.
+    The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): with no Sentinel able to take it, ``ScannerUnavailable`` is raised and the
+    target stays due. Returns ``{stored, mode, scan_name, web_events, problems, hard_failures, incomplete}``; ``incomplete`` says why a run stopped
+    part way after it found something (empty for a whole run).
 
-    A project's API keys for bbot's modules are never in the task: such a task names them by reference and only the built-in scanner is offered it
-    (it reads them once through the secure read)."""
+    A project's API keys for the scanner's modules are never in the task: such a task names them by reference and only the built-in scanner is
+    offered it (it reads them once through the secure read)."""
     from agentapi import sentinel_stream
     domain = scan.domain
     api_keys = bool(extra_args and any(a != bbot_lib.TRUFFLEHOG_FLAG for a in extra_args))
@@ -373,14 +303,15 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
         result, observed = batch_result(batch)
         fresh = [o for o in observed if (o.type, o.label) not in shown]
         shown.update((o.type, o.label) for o in fresh)
-        state['stored'] = _flush(scan, ctx, result, fresh, '', state['stored'])
+        state['stored'] = _flush(scan, ctx, result, fresh, state['stored'])
         persist_screenshot_blobs(scan, batch.get('screenshots'))
 
     out = sentinel_stream.dispatch_stream(domain.project, sentinel_stream.KIND, target, scan, on_partial, label=domain.name,
                                           secret_ref=sentinel_stream.keys_ref(domain.project_id) if api_keys and domain.project_id else None,
                                           builtin_only=api_keys)
-    if out is None:
-        return None
+    if out is None:  # unreachable while the kind is in NEVER_LOCAL (dispatch_stream raises); never let a missing answer read as a finished run
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable(sentinel_stream.KIND)
     final = out['result'] or {}
     return {'stored': state['stored'], 'mode': final.get('mode') or mode, 'scan_name': final.get('scan_name') or '',
             'web_events': final.get('web_events') or {'URL': 0, 'HTTP_RESPONSE': 0},
@@ -389,8 +320,9 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
             'incomplete': final.get('incomplete') or ('' if out['result'] is not None else out.get('error') or 'the Sentinel did not finish the run')}
 
 
-def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, finalize=True):
-    """Body of the celery task; ``stream`` is injectable so tests need no bbot binary."""
+def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
+    """Body of the celery task: the discovery runs on a Sentinel (``bbot_discovery``) and never on this server. With no Sentinel able to take it the
+    scan ends as waiting for a scanner and the target stays due."""
     from cveFeed.api_credentials import bbot_config_args
     from startScan.models import ScanActivity, ScanHistory
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
@@ -399,26 +331,18 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     extra_args = bbot_config_args(scan.domain.project) if scan.domain.project_id else []
     if bbot_lib.trufflehog_allowed(scan.domain.project_id):  # opt-in (CVENGINE_BBOT_TRUFFLEHOG=1), never for a bug bounty project
         extra_args = [*extra_args, bbot_lib.TRUFFLEHOG_FLAG]
-    strict_scope = scan.domain.is_host_scoped()  # a tenant on a shared provider domain: this host only, never its parent or siblings
-    exact_host = scan.domain.exact_host_only()  # added as exactly this host (=example.com): no event about a name under it is kept
-    batch, hosts, observed = bbot_lib.BbotResult(), {}, []
-    shown = set()  # bbot reports the same name from several modules; show each thing once
-    bbot_scan_name = ''  # bbot's own directory name for this run (~/.bbot/scans/<name>/), from its SCAN event
-    last_flush = time.time()
+    shown = set()  # the scanner reports the same name from several modules; show each thing once
     status, error, partial = SUCCESS, '', ''
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import MemoryKill, ScanAborted, ScannerUnavailable
+    from reNgine.resources import ScanAborted, ScannerUnavailable
     stored = DiscoveryEvent.objects.filter(scan=scan).count()  # once; _flush is then told the running total
-    running = activity.log('discovery', f'bbot is discovering {scan.domain.name}', project=scan.domain.project_id,
+    running = activity.log('discovery', f'Discovering {scan.domain.name}', project=scan.domain.project_id,
                            status='running', scan_id=scan.id)
-    # A run that is stopped for lack of memory (by the gate's watchdog, or by the kernel: status -9) is retried one step
-    # lighter: deep as standard, standard as passive. What the heavier run already found is kept.
-    modes = FALLBACK.get(mode, [mode])
     finished_mode = mode
-    problems = []  # (bbot module, reason) for modules bbot skipped at start-up, e.g. because a key was rejected
-    web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what bbot's web module reported, counted over the whole run (``batch`` is emptied at every flush)
-    hard_failures = []  # (bbot module, reason) for modules whose set-up hard-failed, e.g. gowitness without a working Chrome
+    problems = []  # (module, reason) for modules the scanner skipped at start-up, e.g. because a key was rejected
+    web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what the scanner's web module reported, counted over the whole run
+    hard_failures = []  # (module, reason) for modules whose set-up hard-failed, e.g. a screenshot module without a working browser
     try:
         # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
@@ -429,62 +353,21 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
             raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
                              'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
-        remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)  # a Sentinel that runs bbot, else None: run it here
-        if remote is not None:
-            stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']
-            problems[:], hard_failures[:], partial = remote['problems'], remote['hard_failures'], remote['incomplete'][:290]
-        for attempt, run_mode in enumerate(modes if remote is None else ()):
-            try:
-                for event in stream([scan.domain.name], mode=run_mode, timeout=discovery_timeout(), extra_args=extra_args,
-                               strict_scope=strict_scope, problems=problems, hard_failures=hard_failures):
-                    if not bbot_scan_name and event.get('type') == 'SCAN':
-                        bbot_scan_name = (event.get('data_json') or {}).get('name') or ''
-                    if exact_host and outside_exact_host(event, scan.domain):
-                        continue
-                    if event.get('type') in web_events:
-                        web_events[event['type']] += 1
-                    seen = bbot_lib.parse_event(event, batch, hosts)
-                    if seen and (seen.type, seen.label) not in shown:
-                        shown.add((seen.type, seen.label))
-                        observed.append(seen)
-                    if len(observed) >= FLUSH_EVERY_EVENTS or time.time() - last_flush >= FLUSH_EVERY_SECONDS:
-                        stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
-                        batch, observed, last_flush = bbot_lib.BbotResult(), [], time.time()
-                finished_mode = run_mode
-                break
-            except Exception as exc:
-                out_of_memory = isinstance(exc, MemoryKill) or getattr(exc, 'returncode', None) == -9
-                if out_of_memory and attempt + 1 < len(modes):
-                    lighter = modes[attempt + 1]
-                    logger.warning('bbot ran out of memory on scan %s; retrying as %s discovery', scan_id, lighter)
-                    activity.log('discovery', f'{run_mode.capitalize()} discovery of {scan.domain.name} ran out of memory; '
-                                 f'retrying as {lighter}', project=scan.domain.project_id, scan_id=scan.id)
-                    continue
-                raise
-        stored = _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
+        remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)
+        stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']
+        problems[:], hard_failures[:], partial = remote['problems'], remote['hard_failures'], remote['incomplete'][:290]
         _report_key_problems(problems, extra_args, scan)
-        _report_no_web_pages(scan, finished_mode, web_events, bbot_scan_name, on_sentinel=remote is not None)
-        _report_screenshot_failure(hard_failures, scan)
+        _report_no_web_pages(scan, finished_mode, web_events)
+        _report_module_failures(hard_failures, scan)
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
-    except ScannerUnavailable as exc:  # bbot may not run here (CVENGINE_LOCAL_FALLBACK) and no Sentinel could take it: nothing ran, the target stays due
+    except ScannerUnavailable as exc:  # no Sentinel could take it and it may not run here: nothing ran, the target stays due
         status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
         logger.warning('discovery of scan %s is waiting for a scanner: %s', scan_id, exc)
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
-        logger.exception('bbot discovery failed for scan %s', scan_id)
+        logger.exception('discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
-        if isinstance(exc, bbot_lib.BbotProcessError) and (observed or any(vars(batch).values()) or stored):
-            # bbot crashed or reached the time limit part way. What it found is real: keep it AND let the scan go on with it (a failed scan's
-            # hosts are not the domain's current inventory, so failing here would hide everything bbot did find and keep the previous scan's
-            # picture). The incompleteness is recorded on the discovery stage and in the scan's failed stages, and it is not counted as a
-            # finished discovery, so another target does not reuse it as a parent's.
-            try:
-                _flush(scan, ctx, batch, observed, bbot_scan_name, stored)
-                partial = error
-                status, error = SUCCESS, ''
-            except Exception:  # noqa: BLE001 - a persistence fault must not hide the scanner failure
-                logger.exception('could not persist partial bbot evidence for scan %s', scan_id)
     ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
         status=FAILED if partial else status, time=timezone.now(), error_message=(partial or error) or None)
     if finalize or status == FAILED:
@@ -610,7 +493,7 @@ def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT, project=None):
 
 
 def discover_ip(scan, ptr=None, certificate=None):
-    """Stand in for bbot on an IP target. bbot is a subdomain finder, and an IP has no subdomains: all it could do here is a
+    """Stand in for the discovery on an IP target. The discovery finds subdomains, and an IP has none: all it could do here is a
     reverse lookup and read the certificate, which is cheap to do directly. Creates the host for the IP, records the names
     it answers to (PTR and certificate) as DNS events on it, and leaves them out of the targets: they may be out of scope.
     ``ptr`` and ``certificate`` (``ip -> [names]``) are injectable so tests need no network. Returns the discovery result."""
@@ -620,7 +503,7 @@ def discover_ip(scan, ptr=None, certificate=None):
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity
     domain, ip = scan.domain, scan.domain.name
-    running = activity.log('discovery', f'Looking up {ip}: reverse DNS and certificate names (no bbot for a bare IP)',
+    running = activity.log('discovery', f'Looking up {ip}: reverse DNS and certificate names (no subdomain discovery for a bare IP)',
                            project=domain.project_id, status='running', scan_id=scan.id)
     status, error, found = SUCCESS, '', {}
     try:
@@ -648,8 +531,8 @@ def discover_ip(scan, ptr=None, certificate=None):
 
 
 def covering_scan(scan):
-    """A scan of a parent (or an earlier Domain of the same name) in this project whose bbot run finished inside the bbot TTL
-    and found hosts under this target, as (ScanHistory, Domain name), else None. Its hosts make a second bbot run pointless."""
+    """A scan of a parent (or an earlier Domain of the same name) in this project whose discovery finished inside the discovery TTL
+    and found hosts under this target, as (ScanHistory, Domain name), else None. Its hosts make a second discovery pointless."""
     from datetime import timedelta
     from django.db.models import Q
     from cveFeed import ledger
@@ -695,9 +578,9 @@ def seed_from_scan(scan, source):
 
 
 def reuse_discovery(scan, source, parent):
-    """Stand in for bbot when ``source`` (a scan of ``parent``) already discovered this target: copy its hosts and settle
-    the bbot activity as done. The pipeline carries on to nmap and nuclei, where the ledger dedupes them. Returns False
-    (nothing copied) if the copy failed, so the caller runs bbot after all."""
+    """Stand in for the discovery when ``source`` (a scan of ``parent``) already discovered this target: copy its hosts and settle
+    the discovery activity as done. The pipeline carries on to nmap and nuclei, where the ledger dedupes them. Returns False
+    (nothing copied) if the copy failed, so the caller runs the discovery after all."""
     from cveFeed import activity
     from startScan.models import ScanActivity
     try:
@@ -708,7 +591,7 @@ def reuse_discovery(scan, source, parent):
     ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
         status=SUCCESS, time=timezone.now(), title=f'BBOT discovery (covered by scan #{source.id} of {parent})')
     activity.log('discovery', f'Discovery of {scan.domain.name} covered by scan #{source.id} of {parent}: {copied} host(s) reused, '
-                 f'bbot not run', project=scan.domain.project_id, scan_id=scan.id, hosts=copied)
+                 f'discovery not run', project=scan.domain.project_id, scan_id=scan.id, hosts=copied)
     return True
 
 
@@ -758,9 +641,9 @@ def _waiting_for_scanner(scan, what, exc, result):
     return {**result, 'skipped': message}
 
 
-def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, light_stream=None, targeted_stream=None,
+def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, light_stream=None, targeted_stream=None,
                   nmap_runner=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
-    """Discovery (bbot for a domain; a reverse lookup and the certificate for a bare IP), then nmap (fingerprint + full port
+    """Discovery (a scanner's subdomain run for a domain; a reverse lookup and the certificate for a bare IP), then nmap (fingerprint + full port
     sweep, by IP), then a read-only unauthenticated-database exposure check, then a light nuclei technology pass, then CVE
     correlation for this scan, then the AI-targeted nuclei pass. The scan stays "running" until the whole pipeline is
     done, so the dashboard never reports a half-finished scan as finished. Every stage after discovery records its own
@@ -786,7 +669,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from targetApp.target_types import IP, classify_target
     covered = None
-    if classify_target(scan.domain.name) == IP:  # bbot finds subdomains; a bare IP has none
+    if classify_target(scan.domain.name) == IP:  # the discovery finds subdomains; a bare IP has none
         found = discover_ip(scan, **(ip_lookups or {}))
         if found['status'] != SUCCESS:
             ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=found['error'] or None)
@@ -794,12 +677,12 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
     else:
         try:
             covered = covering_scan(scan)
-        except Exception:  # noqa: BLE001 - a ledger problem means "run bbot"
+        except Exception:  # noqa: BLE001 - a ledger problem means "run the discovery"
             logger.exception('could not look for a covering discovery of scan %s', scan_id)
         if covered and reuse_discovery(scan, *covered):
             found = {'scan_id': scan.id, 'status': SUCCESS, 'error': '', 'covered_by': covered[0].id}
         else:
-            found = run_discovery(scan_id, mode, stream=stream, finalize=False)
+            found = run_discovery(scan_id, mode, finalize=False)
             if found['status'] != SUCCESS:
                 return found
     stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, nmap_runner=nmap_runner, db_exposure_checks=db_exposure_checks,
@@ -831,7 +714,7 @@ def _resume_pipeline(context):
 
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
-                force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
+                force=False, hygiene_host=None, wpscan_runner=None, rdp_reader=None,
                 node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
@@ -853,14 +736,12 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         return gone
     from cveFeed import rdp_shot
     rdp_kwargs = {}
-    if rdp_capturer:
-        rdp_kwargs['capturer'] = rdp_capturer
     if rdp_reader:
         rdp_kwargs['reader'] = rdp_reader
     if retest or force:
         rdp_kwargs['force'] = True
     rdp_result = None
-    if (rdp_capturer or rdp_shot.runnable(scan.domain.project_id)) and rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
+    if rdp_shot.rdp_candidates(scan):  # only hosts nmap already confirmed are RDP without NLA
         rdp_result = _stage(scan, 'RDP screenshot', 'rdp_screenshot', lambda: rdp_shot.run_for_scan(scan_id, **rdp_kwargs),
                             fallback={'attempted': 0})
         if stopped(scan_id):

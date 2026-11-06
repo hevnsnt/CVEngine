@@ -1,6 +1,6 @@
 """Web screenshots: a picture of the front page of every web port of every host, taken by a real browser (Playwright's Chromium).
 
-Why this exists: the only screenshots cvENGINE used to take were a side effect of a full bbot discovery (gowitness), so a host that was
+Why this exists: the only screenshots cvENGINE used to take were a side effect of a full discovery run, so a host that was
 rescanned, found by certificate transparency, retested or only ever assessed never got one, and a rescan could hide the one it had.
 
 How it works (docs/PIPELINE.md, "Web screenshots"):
