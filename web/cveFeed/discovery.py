@@ -759,7 +759,7 @@ def _waiting_for_scanner(scan, what, exc, result):
 
 
 def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_events, light_stream=None, targeted_stream=None,
-                  nmap_runner=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
+                  port_stage_run=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
     """Discovery (bbot for a domain; a reverse lookup and the certificate for a bare IP), then nmap (fingerprint + full port
     sweep, by IP), then a read-only unauthenticated-database exposure check, then a light nuclei technology pass, then CVE
     correlation for this scan, then the AI-targeted nuclei pass. The scan stays "running" until the whole pipeline is
@@ -802,7 +802,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, stream=bbot_lib.stream_ev
             found = run_discovery(scan_id, mode, stream=stream, finalize=False)
             if found['status'] != SUCCESS:
                 return found
-    stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, nmap_runner=nmap_runner, db_exposure_checks=db_exposure_checks,
+    stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, port_stage_run=port_stage_run, db_exposure_checks=db_exposure_checks,
                         provider=provider, cve_runner=cve_runner, route_probe=route_probe)
     from agentapi import stage_runs
     # the stages wait on Sentinels without this worker when they can (agentapi.stage_runs): the callback continues them (``_resume_pipeline``)
@@ -829,10 +829,10 @@ def _resume_pipeline(context):
                 return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
 
 
-def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
+def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_stage_run=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_capturer=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
+                node2shell_checker=None, waf_runner=None, probe_get=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -844,9 +844,9 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         return gone
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
 
-    nmap_kwargs = {'runner': nmap_runner} if nmap_runner else {}
-    if force:
-        nmap_kwargs['force'] = True
+    nmap_kwargs = {'force': True} if force else {}
+    if port_stage_run:  # a stage double (tests): replaces the Sentinel-backed port stage
+        nmap_kwargs['run'] = port_stage_run
     nmap_result = _stage(scan, 'nmap scan', 'nmap_scan', lambda: service_intel.run_nmap_stage(scan_id, **nmap_kwargs),
                          fallback={'targets': 0})
     if stopped(scan_id):
@@ -924,7 +924,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if stopped(scan_id):
         return gone
     from cveFeed import probes, wpscan_scan
-    probe_kwargs = {k: v for k, v in (('get', probe_get), ('nmap_runner', probe_nmap)) if v}
+    probe_kwargs = {k: v for k, v in (('get', probe_get),) if v}
     if retest or force:
         probe_kwargs['force'] = True
     probe_result = _stage(scan, 'Version and identity probes', 'version_probes', lambda: probes.run_for_scan(scan_id, **probe_kwargs),

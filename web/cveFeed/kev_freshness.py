@@ -120,7 +120,7 @@ def request_reread(subdomain_ids):
     return len(due)
 
 
-def reread(subdomain_ids, get=None, nmap_runner=None):
+def reread(subdomain_ids, get=None):
     """Read the version of each host again with the web probes a scan runs for its products (the front page's headers and generator, the
     WordPress probe and the like), then correlate it again whatever they found, so a held KEV match is raised on a fresh reading or not at
     all. A host of a passive or manual only target, an excluded or archived host, or one whose project is paused is left for its next scan.
@@ -150,7 +150,7 @@ def reread(subdomain_ids, get=None, nmap_runner=None):
         plan = [e for e in probes.plan_for_host(sub, leads) if e['family'] == 'http']
         for entry in plan:
             try:
-                probes.run_one(project, target.id, sub, entry, get=get, nmap_runner=nmap_runner, fresh=True)
+                probes.run_one(project, target.id, sub, entry, get=get, fresh=True)
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; the next scan reads the host anyway
                 logger.info('version re-read %s on host %s failed: %s', entry['probe'], sub.pk, type(exc).__name__)
         probes.recorrelate(sub)

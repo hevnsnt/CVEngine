@@ -29,13 +29,14 @@ class PolicyParsingTests(SimpleTestCase):
         self.assertEqual(self.kinds('none'), set())
 
     def test_a_list_allows_exactly_its_kinds_and_ignores_unknown_ones(self):
-        self.assertEqual(self.kinds('nmap, naabu'), {'nmap', 'naabu'})
-        self.assertEqual(self.kinds('nmap,telnet,'), {'nmap'})
+        self.assertEqual(self.kinds('openvas, testssl'), {'openvas', 'testssl'})
+        self.assertEqual(self.kinds('openvas,telnet,'), {'openvas'})
+        self.assertEqual(self.kinds('nmap, naabu, nmap_udp, nmap_full, nmap_verify, path_probe, secrets_scan'), set())  # these never run here, whatever the list says
 
     def test_the_scanner_unavailable_error_is_a_memory_busy_so_stages_leave_the_work_due(self):
-        error = resources.ScannerUnavailable('nmap', 'no Sentinel is live')
+        error = resources.ScannerUnavailable('openvas', 'no Sentinel is live')
         self.assertIsInstance(error, resources.MemoryBusy)
-        self.assertEqual(error.kind, 'nmap')
+        self.assertEqual(error.kind, 'openvas')
         self.assertIn('stays due', str(error))
 
 
@@ -53,46 +54,46 @@ class DispatchPolicyTests(DispatchBase):
         os.environ[ENV] = value
 
     def test_by_default_no_sentinel_means_none_so_the_caller_runs_it_locally(self):
-        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10']))
+        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10']))
 
     def test_with_no_local_fallback_no_sentinel_raises_and_creates_no_task(self):
         self.set_policy('none')
         with self.assertRaises(resources.ScannerUnavailable) as caught:
-            dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
-        self.assertEqual(caught.exception.kind, 'nmap')
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
+        self.assertEqual(caught.exception.kind, 'openvas')
         self.assertFalse(SentinelTask.objects.exists())
 
     def test_only_the_kinds_taken_off_the_list_raise(self):
-        self.set_policy('nmap')  # nmap may still run here; everything else may not
-        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10']))
+        self.set_policy('openvas')  # openvas may still run here; everything else may not
+        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10']))
         with self.assertRaises(resources.ScannerUnavailable):
-            dispatch.dispatch_or_none(self.project, 'naabu', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
+            dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
 
     def test_an_internal_task_is_unchanged_it_never_had_a_local_run(self):
         self.set_policy('none')
-        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], internal=True))
+        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], internal=True))
 
     def test_a_task_nobody_claims_raises_instead_of_running_locally(self):
         self.set_policy('none')
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             with self.assertRaises(resources.ScannerUnavailable):
-                dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5)
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')
 
     def test_a_task_the_sentinel_reports_failed_raises_instead_of_running_locally(self):
         self.set_policy('none')
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'error': 'boom'}, status='failed')):
             with self.assertRaises(resources.ScannerUnavailable):
-                dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5)
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5)
 
     def test_a_task_the_sentinel_answers_is_returned_whatever_the_policy(self):
         self.set_policy('none')
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         result = {'outcome': 'done', 'hosts': []}
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
-            self.assertEqual(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5), result)
+            self.assertEqual(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'], timeout=5), result)
 
 
 class ActivityWordingTests(DispatchBase):
@@ -116,38 +117,38 @@ class ActivityWordingTests(DispatchBase):
         import os
         if policy is not None:
             os.environ[ENV] = policy
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             try:
-                dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, host='www.example.test', ips=['192.0.2.10'], timeout=5)
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', ips=['192.0.2.10'], timeout=5)
             except resources.ScannerUnavailable:
                 pass
         return self._entries()[-1].message, SentinelTask.objects.get().error
 
     def test_when_the_kind_may_fall_back_the_wording_says_it_ran_locally(self):
         message, reason = self.unclaimed(None)
-        self.assertIn('No Sentinel picked up nmap work for www.example.test in time; it ran locally instead', message)
+        self.assertIn('No Sentinel picked up openvas work for www.example.test in time; it ran locally instead', message)
         self.assertIn('the stage fell back to local execution', reason)
 
     def test_when_the_kind_may_not_the_wording_says_the_targets_stay_due(self):
         message, reason = self.unclaimed('none')
-        self.assertIn(f'No Sentinel picked up nmap work for www.example.test in time; {self.STAYS_DUE}', message)
+        self.assertIn(f'No Sentinel picked up openvas work for www.example.test in time; {self.STAYS_DUE}', message)
         self.assertIn(self.STAYS_DUE, reason)
         for text in (message, reason):
             self.assertNotIn('locally', text)
             self.assertNotIn('local execution', text)
 
     def test_a_list_that_names_the_kind_still_says_it_ran_locally(self):
-        message, reason = self.unclaimed('nmap,naabu')
+        message, reason = self.unclaimed('openvas,testssl')
         self.assertIn('it ran locally instead', message)
         self.assertIn('fell back to local execution', reason)
 
     def test_a_task_nobody_finished_expires_with_a_true_default_reason(self):
         from agentapi import sentinel_broker
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         for policy, wanted in (('all', 'fell back to local execution'), ('none', self.STAYS_DUE)):
             with mock.patch.dict('os.environ', {ENV: policy}):
-                task = SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': ['192.0.2.10']})
+                task = SentinelTask.objects.create(project=self.project, kind='openvas', target={'addresses': ['192.0.2.10']})
                 self.assertIn(wanted, sentinel_broker.expire(task).error)
 
 
@@ -177,36 +178,35 @@ class WrapperPolicyTests(DispatchBase):
 
     def test_the_wrappers_still_hand_back_to_a_local_run_by_default(self):
         with mock.patch.dict('os.environ', {ENV: 'all'}):
-            self.assertEqual(dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'])[0], ['192.0.2.10'])
             self.assertIsNone(dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443))
-            self.assertIsNone(dispatch.try_nmap_udp(self.project, '192.0.2.10'))
-            self.assertIsNone(dispatch.wrap_naabu_runner(self.project, self.scan))
+            for kind, call in (('nmap', lambda: dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'])),  # these kinds have no local path at all
+                               ('nmap_udp', lambda: dispatch.try_nmap_udp(self.project, '192.0.2.10')),
+                               ('naabu', lambda: dispatch.wrap_naabu_runner(self.project, self.scan))):
+                with self.assertRaises(resources.ScannerUnavailable) as caught:
+                    call()
+                self.assertEqual(caught.exception.kind, kind)
 
     def test_naabu_never_runs_the_remainder_beyond_one_task_locally(self):
         # the addresses beyond one task go to the Sentinel in further chunk tasks (sentinel_dispatch.dispatch_many): nothing runs here
         self.make_sentinel(['naabu'])
         many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
-        local = mock.Mock(return_value={})
         result = {'outcome': 'done', 'ports': {}}
         for parallel in ('1', '4'):
             with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
-                    mock.patch('cveFeed.naabu_scan.run_naabu', local), mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
+                    mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
                 runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
                 self.assertEqual(runner(many), {})
-        local.assert_not_called()
         self.assertEqual(SentinelTask.objects.filter(kind='naabu', status='done').count(), 4)
 
     def test_naabu_remainder_after_an_unclaimed_chunk_waits_instead_of_running_here(self):
         self.make_sentinel(['naabu'])
         many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
-        local = mock.Mock(return_value={})
         for parallel in ('1', '4'):
             with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
-                    mock.patch('cveFeed.naabu_scan.run_naabu', local), mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
+                    mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):
                 runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
                 with self.assertRaises(resources.ScannerUnavailable):
                     runner(many)
-        local.assert_not_called()
 
     def test_nuclei_does_not_run_unresolvable_targets_locally(self):
         self.make_sentinel(['nuclei_light'])

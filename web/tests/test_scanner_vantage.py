@@ -82,7 +82,7 @@ class VantageWarningTests(VantageBase):
         os.environ.pop(ENV, None)
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan to the built-in scanner', out[0])
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan to the built-in scanner', out[0])
 
     def test_an_image_that_applies_them_or_no_builtin_scanner_is_quiet(self):
         os.environ[ENV] = 'none'
@@ -131,12 +131,12 @@ class VantageWarningTests(VantageBase):
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
     def test_the_tailscale_profile_warns_for_every_kind_taken_off(self):
-        os.environ[ENV] = 'nmap,naabu'
+        os.environ[ENV] = 'secrets_scan,nmap,naabu'  # kinds with no local path are never part of the list
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
-                      'bucket_check, vhost_probe, subdir_probe, alive_check, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, whose image does not use '
+        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
+                      'bucket_check, vhost_probe, subdir_probe, alive_check, node2shell, rdp_shot, db_probe, nuclei_validate to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
 

@@ -336,14 +336,14 @@ class IngestTests(Base):
 		self.assertEqual((ip.os_guess, ip.os_accuracy), ('Ubuntu 22.04.3 LTS', 100))
 		self.assertEqual(ip.fingerprint['host_reported']['inventory_id'], inv.id)
 		self.assertTrue(host_inventory.keeps_reported_os(ip))
-		from cveFeed import nmap_scan
-		nmap_scan.persist_inventory([{'ip': '192.0.2.10', 'os_guess': 'Linux 5.4', 'os_accuracy': 95, 'ports': []}], org_id=self.org.pk)
+		from cveFeed import port_inventory
+		port_inventory.persist_inventory([{'ip': '192.0.2.10', 'os_guess': 'Linux 5.4', 'os_accuracy': 95, 'ports': []}], org_id=self.org.pk)
 		ip.refresh_from_db()
 		self.assertEqual(ip.os_guess, 'Ubuntu 22.04.3 LTS')  # the scan did not replace it
 		stamp = ip.fingerprint['host_reported']
 		stamp['at'] = (timezone.now() - timedelta(days=host_inventory.REPORTED_OS_DAYS + 1)).isoformat()
 		IpAddress.objects.filter(pk=ip.pk).update(fingerprint={'host_reported': stamp})
-		nmap_scan.persist_inventory([{'ip': '192.0.2.10', 'os_guess': 'Linux 5.4', 'os_accuracy': 95, 'ports': []}], org_id=self.org.pk)
+		port_inventory.persist_inventory([{'ip': '192.0.2.10', 'os_guess': 'Linux 5.4', 'os_accuracy': 95, 'ports': []}], org_id=self.org.pk)
 		ip.refresh_from_db()
 		self.assertEqual(ip.os_guess, 'Linux 5.4')  # an old report no longer outranks a fresh scan
 

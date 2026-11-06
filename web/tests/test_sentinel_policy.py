@@ -276,7 +276,7 @@ class CapacityQueueTests(DispatchBase):
     """S03-17: tasks already waiting are promised the free slots."""
 
     def sentinel(self, slots):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['nmap', 'openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=slots)
         return agent
 
@@ -317,7 +317,7 @@ class CapacityQueueTests(DispatchBase):
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, timeout=120)
+            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, timeout=120)
         self.assertIsNone(out)
         self.assertLess(clock.now - 1000, 30)  # its own queued task did not turn the wait into the 300 s queue wait
 

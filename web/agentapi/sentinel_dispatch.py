@@ -13,11 +13,11 @@ Sentinel that did pick the work up keeps the full budget (counted from when it c
 created) to actually run it. **A Sentinel at its concurrency limit is not a missing one**: when every live, eligible Sentinel
 is busy the task waits in the queue for a slot, under its own wait budget (``_queue_timeout``) separate from both, and the stage
 falls back only when that runs out or the last live Sentinel goes away. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
-takes and handed to the *same persistence function* local execution uses (``cveFeed.nmap_scan.persist_inventory``,
-``cveFeed.naabu_scan.persist_open_ports``, or - for nuclei - a reconstructed result line fed through the untouched
+takes and handed to the *same persistence function* local execution uses (``cveFeed.port_inventory.persist_inventory``,
+``cveFeed.port_stage.persist_open_ports``, or - for nuclei - a reconstructed result line fed through the untouched
 ``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel, the caller falls
-back to running the tool locally, exactly as today; the subprocess-running code itself (``nmap_scan.run_nmap_xml``,
-``naabu_scan.run_naabu``, ``nuclei_scan.stream_nuclei``) is never touched by this module.
+back to running the tool locally, exactly as today; the code that launches a tool (``nuclei_scan.stream_nuclei``) is never touched by this module. The port kinds (nmap, naabu, nmap_udp, nmap_full,
+nmap_verify, path_probe) have no local path at all (``NEVER_LOCAL``).
 
 A stage that splits into several chunk tasks (nmap and naabu: 64 addresses each, nuclei: 64 targets each) sends them side by side
 through ``dispatch_many``: a bounded window of chunk tasks, created up front and waited for in one poll loop, refilled as chunks finish
@@ -58,7 +58,16 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
-NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+# kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1); one entry per line
+NEVER_LOCAL = (
+    'secrets_scan',
+    'nmap',
+    'naabu',
+    'nmap_udp',
+    'nmap_full',
+    'nmap_verify',
+    'path_probe',
+)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
 # here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
@@ -237,8 +246,8 @@ def any_scanner_for(project, kind, internal=False):
 def offline_fallback(project, kind, internal=False):
     """Whether a stage of ``kind`` runs here although ``project`` has a Sentinel for it, because every such Sentinel is offline (called once
     no live one was found). Such a run is a local fallback like a task nobody claimed: it is counted for the warning
-    (``cveFeed.local_egress.note_fallback``), and the nmap and naabu stages put it under their hourly cap. A project that never had a Sentinel
-    for ``kind`` runs here as its normal mode: never counted, never capped. Never raises."""
+    (``cveFeed.local_egress.note_fallback``). A project that never had a Sentinel for ``kind`` runs here as its normal mode: never
+    counted. Never raises."""
     from agentapi import sentinel_broker
     try:
         configured = bool(sentinel_broker.eligible_sentinels(project, kind, internal=internal))
@@ -950,35 +959,19 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
 
 # --- nmap: dispatch a chunk of addresses, persist a hit through the exact same function local nmap uses ---------------
 
-def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None):
-    """Return local targets, Sentinel totals, and the local port plan.
+def try_nmap(project, scan, targets, org_id=None, timeout=None):
+    """Fingerprint ``targets`` on Sentinels and persist what they report; return the persist totals.
 
-    An address is covered only when the Sentinel reports a host row. When naabu found ports that the Sentinel did not
-    report scanning, the local pass fingerprints just those ports. An absent host row keeps the whole local fallback.
-
-    Those addresses (a Sentinel finished their chunk and left part of the work undone) go through ``_no_local`` once, like every other local
-    fallback: one ``partial_result`` row of fallback telemetry when nmap may run here, and ``ScannerUnavailable`` when it may not, so they stay
-    due instead of running here. A chunk no Sentinel did has been through ``_no_local`` already (``dispatch_many``). Whenever this raises
-    ``ScannerUnavailable`` after a Sentinel finished part of the work, the exception's ``done`` lists the addresses a Sentinel fully covered
-    (persisted already), so the caller marks only those done and the rest stay due.
+    Nothing runs on this server. An address is covered only when a Sentinel reports a host row for it. Raises ``ScannerUnavailable`` when no
+    scanner can take the work, or when a Sentinel finished a chunk without reporting every host in it: the exception's ``done`` lists the
+    addresses a Sentinel did cover (persisted already), so the caller marks only those done and the rest stay due.
     """
+    from cveFeed.port_inventory import persist_inventory
     from reNgine.resources import ScannerUnavailable
     targets = list(targets)
-    zero = {'ports': 0, 'hosts_with_os': 0}
-    local_ports = dict(ports_by_ip) if ports_by_ip is not None else None
     if not any_scanner_for(project, 'nmap'):
-        _no_scanner('nmap', project)
-        return targets, zero, local_ports
-    from cveFeed.nmap_scan import persist_inventory
-    # every chunk of MAX_ADDRESSES goes to a Sentinel (a batch of hosts has more addresses than one task takes), several at once when there are
-    # free slots; a chunk no Sentinel did is simply not reported, and what the caller fingerprints here is every address without a report
-    totals, reported, finished = None, {}, set()
-
-    def missing_ports(ip):  # the ports naabu found on an address the Sentinel reported that the Sentinel did not report scanning
-        if local_ports is None or ip not in local_ports:
-            return []
-        return sorted(set(local_ports[ip]) - reported[ip])
-
+        _no_scanner('nmap', project)  # raises: this kind never runs here
+    totals, reported = {'ports': 0, 'hosts_with_os': 0}, set()
     chunks = _chunks(targets)
     try:
         with contextlib.closing(dispatch_many(project, 'nmap', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
@@ -986,39 +979,25 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
                 if result is None:
                     continue
                 chunk = chunks[index]
-                finished.update(chunk)
                 inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
                              for host in result.get('hosts', []) if host.get('ip') in chunk]
                 # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
                 # judged and marked as a local scan, cveFeed.os_detection)
                 reliable = None if getattr(result, 'ran_here', False) else result.get('os_reliable') is not False
                 done = persist_inventory(inventory, org_id=org_id, os_reliable=reliable)
-                totals = done if totals is None else {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
-                for host in inventory:
-                    reported.setdefault(host['ip'], set()).update(p.get('number') for p in host['ports'])
-    except ScannerUnavailable as exc:  # a chunk nobody did may not run here: what a Sentinel fully covered is done, the rest stays due
-        exc.done = [ip for ip in targets if ip in reported and not missing_ports(ip)]
+                totals = {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
+                reported.update(host['ip'] for host in inventory)
+    except ScannerUnavailable as exc:  # a chunk nobody did: what a Sentinel covered is done, the rest stays due
+        exc.done = [ip for ip in targets if ip in reported]
         raise
-    if totals is None:
-        return targets, zero, local_ports
-    remaining = []
-    for ip in targets:
-        if ip not in reported:
-            remaining.append(ip)
-        else:
-            missing = missing_ports(ip)
-            if missing:
-                local_ports[ip] = missing
-                remaining.append(ip)
-    partial = [ip for ip in remaining if ip in finished]  # a Sentinel finished the chunk but did not report the host, or every port naabu found
-    if partial:
+    missing = [ip for ip in targets if ip not in reported]
+    if missing:  # a Sentinel finished the chunk but did not report the host: it stays due
         try:
-            _no_local('nmap', f'a Sentinel finished {len(partial)} address(es) without reporting the host or every port naabu found',
-                      'partial_result', project)
+            _no_local('nmap', f'a Sentinel finished {len(missing)} address(es) without reporting the host', 'partial_result', project)
         except ScannerUnavailable as exc:
-            exc.done = [ip for ip in targets if ip not in remaining]
+            exc.done = [ip for ip in targets if ip in reported]
             raise
-    return remaining, totals, local_ports
+    return totals
 
 
 # --- testssl: one host:port at a time, the Sentinel's raw report items run through the same local evaluate() -----------
@@ -1040,74 +1019,43 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
 # --- nmap -sU: raw XML through the Sentinel, parsed by the exact function a local run's own XML already goes through --
 
 def try_nmap_udp(project, ip_address, scan=None, timeout=None):
-    """The parsed ``nmap -sU`` host record for ``ip_address`` from a Sentinel's raw XML report, or ``None`` when no
-    Sentinel is eligible, on timeout, or on failure - in which case the caller runs the local ``-sU`` scan exactly as
-    before. Unlike every other dispatched kind here, the Sentinel's result is raw XML text, not pre-parsed JSON: UDP's
-    own state vocabulary (``open|filtered``, extraports summarisation) and the NSE script output
-    ``cveFeed.udp_scan.identify`` reads are read correctly only by ``cveFeed.nmap_scan.parse_xml`` (hardened against a
-    custom ENTITY declaration precisely because it now also reads a Sentinel's report, not only this process's own
-    nmap output), so that is the one function - local or dispatched - that ever turns the XML into a record. Never
-    chunked: one address per task, like testssl."""
+    """The parsed ``-sU`` host record for ``ip_address`` from a Sentinel's raw XML report. Raises ``ScannerUnavailable`` when no Sentinel can take
+    the work, or when its report names no host for the address (the address stays due). Unlike every other dispatched kind here, the result is raw
+    XML text, not pre-parsed JSON: UDP's own state vocabulary (``open|filtered``, extraports summarisation) and the NSE script output
+    ``cveFeed.udp_scan.identify`` reads are read correctly only by the scanner library's ``parse_xml`` (hardened against a custom ENTITY declaration
+    because it reads a Sentinel's report), so that is the one function that ever turns the XML into a record. Never chunked: one address per task."""
+    from reNgine.resources import ScannerUnavailable
     if not any_scanner_for(project, 'nmap_udp'):
         _no_scanner('nmap_udp', project)
-        offline_fallback(project, 'nmap_udp')
-        return None
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
-        return None
-    from cveFeed.nmap_scan import parse_xml
+        raise ScannerUnavailable('nmap_udp', 'no scanner finished the work')
+    from cveFeed.port_inventory import parse_xml
     host = next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
     if host is None:
-        # the Sentinel finished but its report names no host for the address: a local -sU only when the kind may run here (recorded as a
-        # partial result, like the nmap stage's leftover), otherwise the address stays due (ScannerUnavailable)
         _no_local('nmap_udp', 'a Sentinel scanned the address but its report named no host for it', 'partial_result', project)
     return host
 
 
-# --- naabu: an injectable runner wrapping cveFeed.naabu_scan.discover's own seam, untouched otherwise ------------------
+# --- naabu: the runner of the port discovery stage (cveFeed.port_stage.discover) ----------------------------------------
 
 def wrap_naabu_runner(project, scan, timeout=None):
-    """A ``runner(ips) -> {ip: [open ports]}`` for ``naabu_scan.discover``'s own ``runner`` parameter, or ``None`` when no
-    Sentinel is eligible (so ``discover`` uses its unmodified default, ``run_naabu``, exactly as today). The addresses a
-    Sentinel actually attempted (its whole chunk, whether or not each had an open port: no entry means none, exactly as
-    naabu's own JSON output already means) are never scanned locally too; a chunk no Sentinel did (left over on a timeout, or
-    never sent once an earlier one went unclaimed) falls back to the real, unmodified ``naabu_scan.run_naabu``, when the kind
-    may run here (``_no_local``)."""
+    """A ``runner(ips) -> {ip: [open ports]}`` for ``port_stage.discover``. Every address is dispatched to a Sentinel in chunks (several at once when
+    slots are free); an address a Sentinel attempted has an entry only when it had an open port. Nothing runs here: with no Sentinel able to take
+    it, ``ScannerUnavailable`` is raised and the addresses stay due."""
+    from reNgine.resources import ScannerUnavailable
     if not any_scanner_for(project, 'naabu'):
-        _no_scanner('naabu', project)  # raises ScannerUnavailable when naabu may not run here
-        if not offline_fallback(project, 'naabu'):
-            return None  # no Sentinel configured for naabu: local is this project's normal mode, discover uses run_naabu as before
-
-        def offline_runner(ips):  # every Sentinel that could take it is offline: a local fallback, under the hourly cap
-            from cveFeed.local_egress import admit_fallback
-            from cveFeed.naabu_scan import PortMap, run_naabu
-            ips = list(ips)
-            if admit_fallback('naabu', getattr(project, 'pk', project)):
-                return run_naabu(ips)
-            return PortMap({}, deferred=ips)
-        return offline_runner
+        _no_scanner('naabu', project)  # raises: this kind never runs here
 
     def runner(ips):
-        from cveFeed.naabu_scan import run_naabu
-        ips = list(ips)
-        found, unserved = {}, []
-        chunks = _chunks(ips)  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
+        found = {}
+        chunks = _chunks(list(ips))  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
         with contextlib.closing(dispatch_many(project, 'naabu', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
             for index, result in results:
-                if result is None:  # no Sentinel did this chunk: it, and with the serial limit everything after it, is scanned here, as before
-                    unserved.append(index)
-                else:
-                    found.update(dict(result.get('ports') or {}))
-        from cveFeed.local_egress import admit_fallback
-        from cveFeed.naabu_scan import PortMap
-        deferred = []
-        if unserved:
-            left = [ip for index in sorted(unserved) for ip in chunks[index]]
-            if admit_fallback('naabu', getattr(project, 'pk', project)):
-                found.update(run_naabu(left))
-            else:  # over the local fallback cap: not scanned here now; discover leaves them due for the next run
-                deferred = left
-        return PortMap(found, deferred=deferred)
+                if result is None:
+                    raise ScannerUnavailable('naabu', 'no scanner finished the work')
+                found.update(dict(result.get('ports') or {}))
+        return found
     return runner
 
 
@@ -1458,12 +1406,12 @@ def waf_outcome(result):
     return {'products': products, 'generic': result.get('generic') is True and not products, 'error': ''}
 
 
-# nmap_full and nmap_verify: one address, the raw report read by cveFeed.nmap_scan.parse_xml --------------------------------------------------
+# nmap_full and nmap_verify: one address, the raw report read by the scanner library's parse_xml --------------------------------------------------
 
 def nmap_hosts(xml, address):
-    """The host records of a Sentinel's raw nmap report, read by ``cveFeed.nmap_scan.parse_xml`` (strict, hardened against a custom ENTITY
+    """The host records of a Sentinel's raw report, read by the scanner library's ``parse_xml`` (strict, hardened against a custom ENTITY
     declaration) and cut to ``address``: a report that names any other host never puts it in the inventory."""
-    from cveFeed.nmap_scan import parse_xml
+    from cveFeed.port_inventory import parse_xml
     return [h for h in parse_xml(xml or '', strict=True) if h.get('ip') == address]
 
 
@@ -1479,12 +1427,18 @@ def _scanner_first(project, kind):
 
 
 def try_nmap_full(project, address, scan=None):
-    """The host records (``nmap_hosts``) of a full TCP sweep of ``address`` on a Sentinel, or ``None`` to sweep it here (no Sentinel took it and
-    nmap_full may run here). Raises ``ScannerUnavailable`` when it may not."""
-    if not _scanner_first(project, 'nmap_full'):
-        return None
-    result = dispatch_or_none(project, 'nmap_full', {'address': address}, ips=[address], scan=scan)
-    return None if result is None else nmap_hosts(result.get('xml'), address)
+    """The host records (``nmap_hosts``) of a full TCP sweep of ``address`` on a Sentinel. Raises ``ScannerUnavailable`` when no scanner can take it:
+    the sweep never runs here."""
+    return _hosts_of_task(project, 'nmap_full', {'address': address}, address, scan)
+
+
+def _hosts_of_task(project, kind, target, address, scan=None):
+    from reNgine.resources import ScannerUnavailable
+    _scanner_first(project, kind)  # raises when no scanner can take it (these kinds never run here)
+    result = dispatch_or_none(project, kind, target, ips=[address], scan=scan)
+    if result is None:
+        raise ScannerUnavailable(kind, 'no scanner finished the work')
+    return nmap_hosts(result.get('xml'), address)
 
 
 def nmap_verify_target(address, ports, version_all=False, intensity=None, scripts=(), host_timeout=None):
@@ -1504,12 +1458,8 @@ def nmap_verify_target(address, ports, version_all=False, intensity=None, script
 
 
 def try_nmap_verify(project, target, scan=None):
-    """The host records (``nmap_hosts``) of an ``nmap_verify`` task on a Sentinel, or ``None`` to run it here. Raises ``ScannerUnavailable`` when it
-    may not run here."""
-    if not _scanner_first(project, 'nmap_verify'):
-        return None
-    result = dispatch_or_none(project, 'nmap_verify', target, ips=[target['address']], scan=scan)
-    return None if result is None else nmap_hosts(result.get('xml'), target['address'])
+    """The host records (``nmap_hosts``) of an ``nmap_verify`` task on a Sentinel. Raises ``ScannerUnavailable`` when no scanner can take it."""
+    return _hosts_of_task(project, 'nmap_verify', target, target['address'], scan)
 
 
 # node2shell: the vendored detector on the scanner, the verdict in run_check's shape ---------------------------------------------------------
@@ -1534,15 +1484,14 @@ def rdp_image(result):
 
 def try_path_probe(groups):
     """The path survey rows (``cveFeed.path_probe.survey``'s shape) from the built-in scanner, one task per project of ``groups`` (``{project_id: [(ip,
-    port)]}``, so no task names another tenant's address), or ``None`` to survey from here. Raises ``ScannerUnavailable`` when the built-in scanner
-    cannot take it and the survey may not run here."""
+    port)]}``, so no task names another tenant's address); ``None`` when no address of ``groups`` belongs to a project. Raises ``ScannerUnavailable``
+    when the built-in scanner cannot take it: the survey never runs here."""
     from reNgine.resources import ScannerUnavailable
     projects = [(p, targets) for p, targets in ((_project_of(pid), t) for pid, t in groups.items()) if p is not None]
     if not projects:
         return None
     if not any(any_scanner_for(p, 'path_probe') for p, _t in projects):
-        _no_scanner('path_probe', projects[0][0])
-        return None
+        _no_scanner('path_probe', projects[0][0])  # raises: this kind never runs here
     rows = []
     for project, targets in projects:
         if not any_scanner_for(project, 'path_probe'):
@@ -1551,7 +1500,7 @@ def try_path_probe(groups):
                                   ips=[ip for ip, _port in targets])
         if result is not None:
             rows.extend(result.get('results') or [])
-    if not rows and not fallback_allowed('path_probe'):
+    if not rows:
         raise ScannerUnavailable('path_probe', 'the built-in scanner returned no path survey')
     return rows
 

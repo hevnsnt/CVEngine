@@ -8,10 +8,11 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi import sentinel_dispatch as dispatch
-from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, performance_review, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import discovery, ledger, nuclei_scan, performance_review, port_stage, testssl_scan, udp_scan, wpscan_scan
 from cveFeed.models import AgentActivity, BackgroundCursor, ServiceRun
 from reNgine import resources
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Technology
+from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_testssl_scan import CLEAN
@@ -63,15 +64,12 @@ class FallbackOffBase(WaitsMixin, DispatchBase):
 
 class NmapFastTests(FallbackOffBase):
     def run_fast(self, **kwargs):
-        runner = mock.Mock(return_value='<nmaprun/>')
-        with mock.patch('cveFeed.naabu_scan.run_naabu') as naabu:
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner, **kwargs)
-        return result, runner, naabu
+        return port_stage.run_for_scan(self.scan.id, **kwargs)
 
     def test_with_no_sentinel_the_stage_waits_and_nothing_runs_here(self):
-        result, runner, naabu = self.run_fast()
-        runner.assert_not_called()
-        naabu.assert_not_called()
+        guard = assert_ran_nowhere_locally(self, 'nmap')
+        result = self.run_fast()
+        self.assertEqual(guard.calls, [])
         self.assertEqual(result['targets'], 1)
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (naabu)', result['skipped'])
@@ -80,13 +78,13 @@ class NmapFastTests(FallbackOffBase):
         self.assertNamesTheScanner('naabu')
 
     def test_when_only_naabu_can_be_reached_nmap_itself_waits(self):
+        guard = assert_ran_nowhere_locally(self, 'nmap')
         self.make_sentinel(['naabu'])
         answer = {'outcome': 'done', 'ports': {IP: [443]}}
-        runner = mock.Mock(return_value='<nmaprun/>')
         from tests.test_sentinel_dispatch import _answer_queued_task
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-        runner.assert_not_called()
+            result = self.run_fast()
+        self.assertEqual(guard.calls, [])
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (nmap)', result['skipped'])
         self.assertNothingRecorded('nmap-fast')
@@ -94,7 +92,7 @@ class NmapFastTests(FallbackOffBase):
 
     def test_the_activity_line_is_settled_not_left_running_and_not_failed(self):
         self.run_fast()
-        running = AgentActivity.objects.filter(kind='run_check', message__icontains='nmap')
+        running = AgentActivity.objects.filter(kind='run_check', message__icontains='port scan')
         self.assertTrue(running.exists())
         self.assertFalse(running.filter(status__in=('running', 'failed')).exists())
 
@@ -103,53 +101,48 @@ class NmapFastTests(FallbackOffBase):
         with ledger.claim_many(f'nmap-fast@{self.project.id}', [IP]) as won:
             self.assertEqual(list(won), [IP])
 
-    def test_a_genuine_tool_failure_still_records_failed_exactly_as_before(self):
-        with mock.patch.dict(os.environ, {ENV: 'nmap,naabu'}):  # nmap may run here, so the runner is reached and breaks
-            runner = mock.Mock(side_effect=RuntimeError('nmap exploded'))
-            with mock.patch('cveFeed.naabu_scan.naabu_path', return_value=None):
-                result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-        self.assertEqual(result['error'], 'nmap exploded')
+    def test_a_genuine_failure_still_records_failed(self):
+        with mock.patch('agentapi.sentinel_dispatch.try_nmap', side_effect=RuntimeError('the report broke')), \
+                mock.patch('cveFeed.port_stage.enabled', return_value=False):
+            result = self.run_fast()
+        self.assertEqual(result['error'], 'the report broke')
         self.assertEqual(list(ServiceRun.objects.filter(service='nmap-fast').values_list('status', flat=True)), ['failed'])
 
-    def test_by_default_nothing_changes_and_a_missing_scanner_runs_the_local_tool(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(ENV, None)
-            runner = mock.Mock(return_value='<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>')
-            with mock.patch('cveFeed.naabu_scan.naabu_path', return_value=None):
-                result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-        runner.assert_called_once()
-        self.assertNotIn('skipped', result)
-        self.assertEqual(list(ServiceRun.objects.filter(service='nmap-fast').values_list('status', flat=True)), ['done'])
+    def test_even_with_the_fallback_switch_open_for_the_kind_nothing_runs_here(self):
+        # nmap and naabu are in NEVER_LOCAL: CVENGINE_LOCAL_FALLBACK naming them (or ``all``) changes nothing
+        for value in ('nmap,naabu', 'all'):
+            with mock.patch.dict(os.environ, {ENV: value}):
+                self.assertFalse(dispatch.fallback_allowed('nmap'))
+                self.assertFalse(dispatch.fallback_allowed('naabu'))
+                result = self.run_fast()
+                self.assertIn('no scanner could take this work', result['skipped'])
+        self.assertNothingRecorded('nmap-fast', 'naabu')
 
 
 class NaabuDiscoverTests(FallbackOffBase):
     def test_a_runner_no_scanner_could_serve_returns_none_without_a_failed_row(self):
         self.make_sentinel(['naabu'])  # live, but nobody claims the task in time
-        local = mock.Mock(return_value={})
-        with mock.patch('cveFeed.naabu_scan.run_naabu', local), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
-            self.assertIsNone(naabu_scan.discover([IP], self.scan, runner))
-        local.assert_not_called()
+            self.assertIsNone(port_stage.discover([IP], self.scan, runner))
         self.assertNothingRecorded('naabu')
         self.assertNamesTheScanner('naabu')
 
     def test_the_runner_raising_scanner_unavailable_directly_is_the_same(self):
         runner = mock.Mock(side_effect=resources.ScannerUnavailable('naabu', 'no Sentinel is live for this project'))
-        with mock.patch('cveFeed.naabu_scan.run_naabu') as local:
-            self.assertIsNone(naabu_scan.discover([IP], self.scan, runner))
-        local.assert_not_called()
+        self.assertIsNone(port_stage.discover([IP], self.scan, runner))
         runner.assert_called_once()
         self.assertNothingRecorded('naabu')
         self.assertNamesTheScanner('naabu')
 
     def test_the_claim_is_released_when_it_waits(self):
-        naabu_scan.discover([IP], self.scan, mock.Mock(side_effect=resources.ScannerUnavailable('naabu')))
-        with ledger.claim_many(f'{naabu_scan.SERVICE}@{self.project.id}', [IP]) as won:
+        port_stage.discover([IP], self.scan, mock.Mock(side_effect=resources.ScannerUnavailable('naabu')))
+        with ledger.claim_many(f'{port_stage.SERVICE}@{self.project.id}', [IP]) as won:
             self.assertEqual(list(won), [IP])
 
     def test_a_genuine_naabu_failure_still_records_failed(self):
-        self.assertIsNone(naabu_scan.discover([IP], self.scan, mock.Mock(side_effect=RuntimeError('naabu broke'))))
-        self.assertEqual(list(ServiceRun.objects.filter(service=naabu_scan.SERVICE).values_list('status', flat=True)), ['failed'])
+        self.assertIsNone(port_stage.discover([IP], self.scan, mock.Mock(side_effect=RuntimeError('naabu broke'))))
+        self.assertEqual(list(ServiceRun.objects.filter(service=port_stage.SERVICE).values_list('status', flat=True)), ['failed'])
 
 
 class NucleiStageTests(FallbackOffBase):
@@ -230,19 +223,19 @@ class PipelineStageTests(FallbackOffBase):
     """No Sentinel is live at all, so the wrappers themselves raise before any stage body runs: the pipeline's own stage rows are not failed."""
 
     def test_the_nmap_nuclei_and_wpscan_stages_are_not_marked_failed(self):
-        nmap_runner, naabu, wpscan = mock.Mock(), mock.Mock(), mock.Mock()
+        wpscan = mock.Mock()
         local_nuclei = mock.Mock(return_value=iter(()))
         scan = self.scan
         Subdomain.objects.filter(scan_history=scan).update(target_domain=self.domain)
         Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name='WordPress'))  # a site for WPScan to wait on
-        with mock.patch('cveFeed.discovery.stopped', return_value=False), mock.patch('cveFeed.naabu_scan.run_naabu', naabu), \
+        with mock.patch('cveFeed.discovery.stopped', return_value=False), \
                 mock.patch('cveFeed.wpscan_scan.run_wpscan_process', wpscan), mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_nuclei):
             out = discovery._run_stages(
-                scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, nmap_runner=nmap_runner, db_exposure_checks={}, provider=None,
+                scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, db_exposure_checks={}, provider=None,
                 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})
-        for tool in (nmap_runner, naabu, wpscan, local_nuclei):
+        for tool in (wpscan, local_nuclei):
             tool.assert_not_called()
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=scan)}
         for name in ('nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan'):
@@ -300,9 +293,9 @@ class UdpTests(WaitsMixin, UdpBase):
 
     def test_the_sweep_waits_names_the_scanner_and_runs_no_local_nmap(self):
         ip = self.ip(IP, name='edge.udp.test')
-        local = mock.Mock(return_value='')
-        out = udp_scan.run(runner=local)
-        local.assert_not_called()
+        guard = assert_ran_nowhere_locally(self, 'nmap_udp')
+        out = udp_scan.run()
+        self.assertEqual(guard.calls, [])
         self.assertEqual(out['scanned'], [{'ip': IP, 'ok': False, 'error': 'ScannerUnavailable', 'waiting': True}])
         self.assertNothingRecorded('udp-scan')
         self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
@@ -311,19 +304,10 @@ class UdpTests(WaitsMixin, UdpBase):
     def test_a_firing_does_not_ask_the_same_address_again_and_stops_after_a_few(self):
         for n in range(1, 7):
             self.ip(f'192.0.2.{n}', name=f'h{n}.udp.test')
-        local = mock.Mock(return_value='')
-        out = udp_scan.run(runner=local)
-        local.assert_not_called()
+        out = udp_scan.run()
         asked = [row['ip'] for row in out['scanned']]
         self.assertEqual(len(asked), udp_scan.MAX_WAITING)
         self.assertEqual(len(set(asked)), udp_scan.MAX_WAITING)  # never the same address twice in one firing
-
-    def test_a_real_memory_wait_is_still_a_failed_line_with_no_failed_row(self):
-        ip = self.ip(IP, name='edge.udp.test')
-        with mock.patch.dict(os.environ, {ENV: 'all'}):  # the local run is allowed, so it is reached and its memory gate gives up
-            out = udp_scan.scan_ip(ip, runner=mock.Mock(side_effect=resources.MemoryBusy('waited too long for memory')))
-        self.assertEqual(out, {'ip': IP, 'ok': False, 'error': 'MemoryBusy'})
-        self.assertFalse(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
 
 
 class WpscanTests(WaitsMixin, RouteFixture, TestCase):
@@ -404,10 +388,3 @@ class MemoryPressureResponseTests(SimpleTestCase):
         self.assertNotIsInstance(error, resources.MemoryKill)  # the one a memory-pressure retry reacts to
         self.assertNotIn('memory', str(error).lower())
         self.assertEqual(error.kind, 'nmap')
-
-    def test_the_memory_retries_of_nmap_and_nuclei_do_not_catch_it(self):
-        # nmap's chunk halving and nuclei's lighter profile react to MemoryKill (the container ran low), which it is not: it propagates to the stage
-        runner = mock.Mock(side_effect=resources.ScannerUnavailable('nmap'))
-        with self.assertRaises(resources.ScannerUnavailable):
-            nmap_scan.scan_in_chunks(runner, ['192.0.2.1'] * 8, [], '5m', size=8)
-        runner.assert_called_once()  # not halved and retried

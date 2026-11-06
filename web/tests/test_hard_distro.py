@@ -234,8 +234,8 @@ class DistroCorrelationTests(Fixture):
 		self.assertEqual((match.distro_status, match.ai_verdict), ('patched', ''))
 
 	def test_nmap_persists_the_distro_on_the_port(self):
-		from cveFeed import nmap_scan
-		nmap_scan.persist_inventory([{'ip': '192.0.2.61', 'ports': [
+		from cveFeed import port_inventory
+		port_inventory.persist_inventory([{'ip': '192.0.2.61', 'ports': [
 			{'number': 22, 'state': 'open', 'product': 'OpenSSH', 'version': '8.9p1 Ubuntu 3ubuntu0.6',
 			 'service_extra': 'Ubuntu Linux; protocol 2.0', 'cpe': 'cpe:/a:openbsd:openssh:8.9p1',
 			 'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04']}]}])

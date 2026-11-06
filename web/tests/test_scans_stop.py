@@ -17,6 +17,7 @@ from scanEngine.models import EngineType
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call, rpc
+from tests.port_stage_stub import port_double
 
 
 class ScansListAndStopTests(TestCase):
@@ -161,7 +162,7 @@ class ScansListAndStopTests(TestCase):
             return ''
         with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('reNgine.celery.app.control.revoke'), \
                 mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene:
-            out = discovery.run_pipeline(scan.id, stream=lambda *a, **k: iter(events), nmap_runner=nmap_runner,
+            out = discovery.run_pipeline(scan.id, stream=lambda *a, **k: iter(events), port_stage_run=port_double(nmap_runner),
                 light_stream=lambda path, **k: later.append('light') or iter([]), targeted_stream=lambda path, **k: later.append('t') or iter([]),
                 db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
         self.assertEqual(out['status'], 'aborted')

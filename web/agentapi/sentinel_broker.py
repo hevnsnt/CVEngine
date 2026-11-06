@@ -1895,8 +1895,8 @@ def _clean_naabu_result(body):
             continue
         if values is None or len(values) > MAX_OPEN_PER_IP:
             # an address with more open ports than that is a tarpit or a firewall that accepts everything: its list is no port list. It is kept
-            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and naabu_scan.discover then
-            # leaves the address to nmap's default ports.
+            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and port_stage.discover then
+            # leaves the address to the fingerprint pass's default ports.
             out[ip] = None
             continue
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
@@ -1999,8 +1999,8 @@ MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU repor
 def _clean_nmap_udp_result(body):
     """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
     (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
-    only by ``cveFeed.nmap_scan.parse_xml`` - the exact function a local run's own XML already goes through - so the
-    Sentinel's report is parsed by that same function (hardened against a custom ENTITY declaration) instead of
+    only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``) - so the
+    Sentinel's report is parsed by that one function (hardened against a custom ENTITY declaration) instead of
     duplicating its logic here. Only the size is bounded; parsing itself, and its safety against malicious XML, is
     parse_xml's job."""
     xml = body.get('xml')
@@ -2131,8 +2131,8 @@ def _clean_waf_result(body):
 
 
 def _clean_nmap_report(body):
-    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.nmap_scan.parse_xml``, hardened
-    against a custom ENTITY declaration, is the one reader of an nmap report, local or not). Only the size is bounded here."""
+    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.port_inventory.parse_xml``, hardened
+    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here."""
     return _clean_nmap_udp_result(body)
 
 

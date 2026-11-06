@@ -33,8 +33,7 @@ rough sizes of the work.
 
 | Module | Tool | Notes |
 |---|---|---|
-| `cveFeed/nmap_scan.py` (545) | nmap | parser `parse_xml` is duplicated in `client/tools.py` |
-| `cveFeed/naabu_scan.py` (221) | naabu | |
+| `cveFeed/port_stage.py`, `cveFeed/port_inventory.py` | nmap, naabu | the tools run on a Sentinel only; the server stores the report (`port_inventory.persist_inventory`) and reads it with the library's `parse_xml` |
 | `cveFeed/nuclei_scan.py` (781), `nuclei_templates.py` (401) | nuclei | three kinds; flags and `host_of` are duplicated; signed-in passes never dispatch |
 | `cveFeed/wpscan_scan.py` (977) | WPScan | one task per site |
 | `cveFeed/testssl_scan.py` (483) | testssl.sh | one task per host and port |
@@ -50,7 +49,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 
 | Module | What it runs | Kind | Notes |
 |---|---|---|---|
-| `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `nmap_scan.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
+| `cveFeed/fullscan.py` | nmap, all 65,535 ports of one IP; `-sV` on the new ports | `nmap_full`, then `nmap_verify` | the raw report is read by `port_inventory.parse_xml` and cut to the address asked about (`sentinel_dispatch.nmap_hosts`); waiting is not the address's failure, so no back-off |
 | `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
 | `cveFeed/waf_scan.py` | wafw00f | `waf` | one task per site at the address the server vetted; the result goes through the same product rules as a local run |
 | `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
@@ -81,7 +80,7 @@ constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the su
 
 Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
 runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
-`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `nmap_scan.parse_xml` is the library's reader,
+`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
 re-exported under its old name. Two parts stay on the server because they are not pure:
 - reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
   hands what it read to the library's `fingerprint.from_response` as `from_scripts` pairs;
@@ -94,7 +93,7 @@ The flag builders and policy constants are the library's too (`cvengine_scanner.
 - the UDP sweep (`udp_nmap_flags`, `UDP_PORTS`), `port_argument`, `CLOSED_PROBE_PORTS`, `MAX_OPEN_PER_IP`;
 - the version probe's per-service scripts (`probe_nmap_flags`) and `KERNEL_MARKERS`.
 
-A server module still names a constant where its own callers read it (`nmap_scan.FAST_FLAGS`, `udp_scan.DEFAULT_PORTS`, `naabu_scan.port_argument`).
+A server module still names a constant where its own callers read it (`udp_scan.DEFAULT_PORTS`).
 Each of those names is an import of the library's value, never a copy.
 
 ### E. Stays on the server

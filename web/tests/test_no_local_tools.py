@@ -67,7 +67,6 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
         'cveFeed/egress_proxy.py',
-        'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
@@ -79,14 +78,13 @@ ALLOWED = {
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',
         'cveFeed/models.py',
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): reads the stored nmap service name of a port (echo), runs nothing
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/os_detection.py',
-        'cveFeed/path_probe.py',
         'cveFeed/performance_review.py',
+        'cveFeed/port_inventory.py',  # the scanner library's parser module name and the stored Port source / OS source values: data, runs nothing
+        'cveFeed/port_stage.py',  # the fingerprint ledger service name 'nmap-fast' (a stored data value) and kind names: runs nothing
         'cveFeed/probes.py',
         'cveFeed/rdp_shot.py',
         'cveFeed/report_data.py',
@@ -151,7 +149,6 @@ ALLOWED = {
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
         'cveFeed/migrations/0079_nuclei_templates_every_six_hours.py',
         'cveFeed/models.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/notify.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
         'cveFeed/nuclei_scan.py',
@@ -199,8 +196,7 @@ ALLOWED = {
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
+        'cveFeed/port_stage.py',  # the ledger service and Port source of the discovery pass, and the discovery pass's own activity text: data values, runs nothing
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
@@ -304,7 +300,6 @@ ALLOWED = {
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
         'cveFeed/models.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/reaper.py',
@@ -354,8 +349,6 @@ ALLOWED = {
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',
         'cveFeed/heavy_process.py',
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_scan.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
@@ -377,10 +370,7 @@ ALLOWED = {
         'cveFeed/wpscan_scan.py',
     ],
     '_BIN': [
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_scan.py',
-        'cveFeed/probes.py',
         'cveFeed/template_fixtures.py',
         'cveFeed/templategen.py',
         'cveFeed/testssl_scan.py',

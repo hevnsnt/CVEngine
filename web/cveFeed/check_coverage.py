@@ -448,8 +448,8 @@ def plan_nmap(h, ev):
 
 
 def plan_naabu(h, ev):
-    from cveFeed import naabu_scan
-    if not naabu_scan.enabled():
+    from cveFeed import port_stage
+    if not port_stage.enabled():
         return 'naabu is switched off (CVENGINE_NAABU=0)'
     return _by_address(h, ev, ('naabu',))
 
@@ -867,10 +867,8 @@ EXCLUDED = {
         'triage': 'AI review of findings, not a check of a host',
         'validate': 'validation of CVE matches, recorded on the match',
         'rescore': 'recomputes host scores from stored data',
-        'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
         'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
-        'egress-catch-up': 'the paced pass over ports the egress governor held back (cveFeed.local_egress); it finishes the nmap pass of an address, whose own check (nmap-fast) is already judged',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',

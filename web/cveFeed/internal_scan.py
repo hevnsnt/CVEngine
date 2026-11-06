@@ -140,7 +140,7 @@ def sweep():
 def _nmap(scan, project, ip, org_id, dispatch):
     """Fingerprint ``ip`` through an internal Sentinel and store what it found; an ``error`` when none answered."""
     from cveFeed import ledger
-    from cveFeed.nmap_scan import persist_inventory
+    from cveFeed.port_inventory import persist_inventory
     result = dispatch(project, 'nmap', {'addresses': [ip]}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered (one must declare network:internal and cover this project)'}
@@ -186,13 +186,13 @@ def _testssl(scan, project, domain, ip, org_id, dispatch):
 
 
 def _udp(scan, project, ip, org_id, dispatch):
-    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw nmap XML is parsed and stored by the external sweep's own functions."""
-    from cveFeed import ledger, nmap_scan, udp_scan
+    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw report is parsed and stored by the external sweep's own functions."""
+    from cveFeed import ledger, port_inventory, udp_scan
     from startScan.models import IpAddress
     result = dispatch(project, 'nmap_udp', {'address': ip}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered'}
-    host = next((h for h in nmap_scan.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
+    host = next((h for h in port_inventory.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     if host is None or ip_obj is None:
         if ip_obj is not None:
