@@ -401,7 +401,7 @@ def org_api_credential_set(request, actor, org_id, service):
     for name, _label, _secret in fields:
         if data.get(name) and str(data[name]).strip():
             value[name] = str(data[name]).strip()[:500]
-    if not value:  # never store an empty row: it would show as configured while feeding nothing to bbot
+    if not value:  # never store an empty row: it would show as configured while feeding nothing to the discovery
         raise AdminError(400, 'enter a value to save')
     cred.value = value
     cred.save()

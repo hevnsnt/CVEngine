@@ -54,11 +54,11 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
 | `cveFeed/waf_scan.py` | wafw00f | `waf` | one task per site at the address the server vetted; the result goes through the same product rules as a local run |
 | `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
-| `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | the PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
+| `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | deleted locally (`NEVER_LOCAL`): the capture client is gone from the server. The PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
 | `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | built-in scanner only (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. One task per project that holds the addresses |
 | `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | built-in scanner only. The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
-| `reNgine/bbot.py`, `cveFeed/discovery.py` | bbot, a streaming producer for up to six hours | `bbot_discovery` | a streamed task, also contract version 3 (see **bbot** under Target shape) |
+| `reNgine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
 
 ### C. In-process network probes (Python in server workers)
 
@@ -139,8 +139,8 @@ which send nothing to the target and need no vantage point.
     scanner may touch). `POST /api/v1/sentinel/tasks/<id>/partial` (`agentapi.sentinel_stream.report_partial`) takes numbered batches once and in
     order, holds them to the task's scope and stores them as `SentinelPartial` rows; `sentinel_stream.dispatch_stream` (the discovery stage) reads
     them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
-    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind and runs bbot here otherwise, through the same
-    `_no_local` decision as every other kind. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
+    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind; the kind is in `NEVER_LOCAL`, so with none able to take it
+    the scan waits (`ScannerUnavailable`) and the target stays due. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
     scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
@@ -180,7 +180,7 @@ which send nothing to the target and need no vantage point.
    and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
    source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
-   **bbot** above); the local run stays as the fallback until its telemetry shows none.
+   **bbot** above); the local run is deleted (T8).
    Probes in progress: contract version 3 has the scope policy
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
@@ -300,7 +300,7 @@ reconnects.") and, for an App Admin, the never-seen sentence, and as a strip on 
 colour and wording of its own, never the scanning pause's. The sweeps that run on their own schedules and would dispatch, raise, catch and log an
 activity line every tick (the testssl sweep, the UDP sweep, the WPScan quick pass) return `{'skipped': 'no scanner is online for <kind>; the targets stay
 due'}` before doing any of that. The WPScan quick pass asks again at the same attempt, so a returning scanner finds it and its tries are not spent.
-It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, bbot discovery (which runs here, so the work
+It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, the discovery start (the run is on a Sentinel, so the
 conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path and the thorough WPScan pass (never
 dispatched) are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
 for a cool-off and so also reads as waiting.

@@ -192,7 +192,7 @@ def _persist_bbot_findings(result, ctx, subdomains):
 	if not (scan and domain):
 		return
 	from cveFeed.labels import record_label
-	from reNgine.bbot import finding_key, label_for
+	from reNgine.discovery_events import finding_key, label_for
 	from cveFeed.exclusions import excluded_names, normalize
 	banned = ctx.get('_excluded_hosts')
 	if banned is None:
@@ -204,7 +204,7 @@ def _persist_bbot_findings(result, ctx, subdomains):
 		if banned and normalize(f['host']) in banned:  # nothing is recorded for a host the organization excluded for good
 			continue
 		if f.get('informational'):
-			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.bbot)
+			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.discovery_events)
 			record_label(domain.project_id, domain.id, f['host'], label_for(f['name']), detail=f['description'])
 			continue
 		severity, description = f['severity'], f['description']

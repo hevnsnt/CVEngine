@@ -1,7 +1,7 @@
 """Auth state per web route: how a route answers an anonymous request (and, when the owner stored a sign-in for the target, how it answers
 signed in: see cveFeed.auth_routes).
 
-For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths bbot saw are asked
+For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths a discovery saw are asked
 once with a plain GET and classified as open, a login page, a session requirement, single sign-on, a redirect or not found.
 The anonymous probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
 each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
@@ -148,7 +148,7 @@ def _clean_path(url):
 
 def route_paths(endpoint_urls, priority_paths=()):
     """The common paths plus up to MAX_ENDPOINT_PATHS distinct paths from a host's EndPoint URLs: static assets and very long
-    paths dropped, query strings dropped. ``priority_paths`` (paths bbot once saw gone, to see whether they answer again) come
+    paths dropped, query strings dropped. ``priority_paths`` (paths a discovery once saw gone, to see whether they answer again) come
     first among them."""
     paths = list(COMMON_PATHS)
     seen, extra = set(paths), []
