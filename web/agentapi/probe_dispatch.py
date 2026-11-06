@@ -127,6 +127,31 @@ def try_buckets(project, candidates, rate):
     return answered
 
 
+MAX_SUPPLIER_DOMAINS_PER_TASK = 25  # the contract's bound
+MAX_SUPPLIER_REQUESTS = 5000  # the contract's bound
+
+
+def try_suppliers(project, domains, max_requests):
+    """``{domain: row}`` for the supplier names a Sentinel checked (each row as ``probe_results.clean_supplier_check`` leaves it), or ``None`` when
+    no Sentinel can take ``supplier_check`` or one did not answer (the caller checks them here, as before). A name the task did not ask about, or
+    that the Sentinel did not report, is simply not in the answer: it was not checked. ``max_requests`` is what the sweep's budget still allows
+    (the Sentinel counts requests as the server does and reports a name that does not fit as partial). Raises ``ScannerUnavailable`` when no Sentinel
+    can take the work and the kind may not run here."""
+    from cveFeed import probe_scope, slow_web
+    domains = list(dict.fromkeys(domains))[:MAX_SUPPLIER_DOMAINS_PER_TASK]
+    if not domains or max_requests < 1 or not _offered(project, 'supplier_check'):
+        return None
+    target = {'domains': domains,
+              'pace': {'gap': min(60.0, max(0.25, slow_web.global_gap())), 'host_gap': min(60.0, max(0.5, slow_web.host_gap()))},
+              'max_requests': min(MAX_SUPPLIER_REQUESTS, int(max_requests)), 'scope': probe_scope.for_suppliers(project.pk, domains)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'supplier_check', target, host=_hosts_label(domains))
+    if result is None:
+        return None
+    if result.get('refused'):
+        logger.info('supplier_check task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['domain']: row for row in result.get('domains') or []}
+
+
 MAX_VHOST_ADDRESSES_PER_TASK = 10  # the contract's bound
 MAX_SUBDIR_HOSTS_PER_TASK = 10     # the contract's bound
 

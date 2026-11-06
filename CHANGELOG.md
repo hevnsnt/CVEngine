@@ -25,6 +25,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   asks them at the sweep's own pace and request caps. The server compares what comes back with its own rules (it does not read the Sentinel's
   verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
   clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
+- **Supplier posture checks on the scanner** (`supplier_check`, contract version 3). Each due supplier's names go to a Sentinel as one task that carries
+  the pacing, the request budget still left and a scope policy naming only those names (and their `mta-sts.` hosts, never a private address). The
+  Sentinel does the DNS, the certificate read, the page requests and the MTA-STS file, and reports a row per name; the server keeps the schedule, the
+  budget, the CVE match against the catalog (the scanner only reports what the page announces), the text of what to ask the supplier and what is
+  stored, and a category the scanner claims to have decided resolves nothing the card does not show it read. With no scanner able to take the work
+  and the kind off `CVENGINE_LOCAL_FALLBACK`, the suppliers stay due and nothing is recorded as checked.
 - **The web route check on the scanner** (`route_probe`, contract version 3). The anonymous half of the route and sign-in state check sends the
   routes it planned to a Sentinel, up to 25 hosts and 20 routes each per task. The Sentinel asks each route (one GET, no credential, no cookie, no
   redirect followed), classifies the answer, compares it with the answer for a path that cannot exist (`catch_all`), reads the front page's own
