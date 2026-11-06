@@ -2143,7 +2143,7 @@ MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT
 
 
 def _clean_node2shell_result(body):
-    """The vendored node2shell detector's verdict on one URL (``cveFeed.node2shell_scan.run_check``'s shape): ``vulnerable`` is True, False or None
+    """The vendored node2shell detector's verdict on one URL (the detector's own result shape): ``vulnerable`` is True, False or None
     (inconclusive), and only the verdict, the reason, the status code and a bounded excerpt of the response are kept. A ``vulnerable`` that is not
     a boolean is read as inconclusive, never as a finding."""
     vulnerable = body.get('vulnerable')

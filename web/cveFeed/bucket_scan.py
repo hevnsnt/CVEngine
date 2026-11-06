@@ -25,7 +25,7 @@ read of its root, and no key name or value is ever kept. A referenced database t
 the label. A finding resolves when a later check of the same bucket ran and no longer finds it, and when the reference that led there is gone. A
 check with no answer changes nothing.
 
-Politeness: one global request rate (``bucket_probe.Pacer``), ``CVENGINE_BUCKETS_MAX_PER_SWEEP`` buckets per project per sweep, a weekly
+Politeness: one global request rate (sent as the task's ``rate``, held by the Sentinel), ``CVENGINE_BUCKETS_MAX_PER_SWEEP`` buckets per project per sweep, a weekly
 ledger window per bucket, one sweep at a time, a stop while scanning is paused, a stop for a project whose bug bounty engagement has not
 confirmed automated testing, and no name an organization excluded."""
 import functools
@@ -603,8 +603,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
         return {**summary, 'skipped': 'bucket checks are turned off (CVENGINE_BUCKETS=0)'}
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
-    injected = fetch is not None or dns is not None  # tests replace the network: the local path
-    fetch, dns = fetch or probe.http_fetch, dns or probe.dns_exists
+    injected = fetch is not None or dns is not None  # tests replace the network; production asks a Sentinel (the kind has no local path)
     owner = f'buckets-{os.getpid()}'
     with resources.redis_claim(f'cvengine:buckets:{project_id}', owner, 300) as holder:
         if holder is not True:
@@ -630,7 +629,12 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
                 break
             if not _runnable(project_id, cand, domains, manual):
                 continue
-            verdict = remote[cand.asset] if cand.asset in remote else probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
+            if cand.asset in remote:
+                verdict = remote[cand.asset]
+            elif injected:
+                verdict = probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
+            else:  # a Sentinel did not report it: unknown, checked again later (never checked from here)
+                verdict = probe.Verdict(state='unknown')
             summary['checked'] += 1
             if verdict.state == 'unknown':
                 summary['unknown'] += 1
@@ -672,8 +676,8 @@ def _runnable(project_id, cand, domains, manual):
 
 
 def _remote_verdicts(project_id, candidates):
-    """``(verdicts, waiting)``: the verdicts a Sentinel's ``bucket_check`` tasks gave (``{asset: Verdict}``, empty when no Sentinel can take the
-    kind and the sweep checks here, as before), and whether the sweep must wait because none can and the kind may not run here."""
+    """``(verdicts, waiting)``: the verdicts a Sentinel's ``bucket_check`` tasks gave (``{asset: Verdict}``), and whether the sweep must wait
+    because no Sentinel can take the kind (it has no local path)."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
     from reNgine.resources import ScannerUnavailable

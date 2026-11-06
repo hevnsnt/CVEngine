@@ -395,7 +395,7 @@ LOCAL_RUNNERS = {
     'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'alive_check': (),  # likewise
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
-    'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
+    'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
     'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
@@ -404,7 +404,7 @@ LOCAL_RUNNERS = {
     'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
     'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
                     'cveFeed.nmap_scan.run_nmap_args'),
-    'node2shell': ('cveFeed.node2shell_scan.run_check',),
+    'node2shell': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
     'path_probe': ('cveFeed.path_probe.send_probe',),

@@ -107,12 +107,12 @@ MAX_BUCKETS_PER_TASK = 100  # the contract's bound
 
 
 def try_buckets(project, candidates, rate):
-    """``{asset: Verdict}`` for the bucket candidates (``bucket_scan.Candidate``) a Sentinel checked, or ``None`` when no Sentinel can take
-    ``bucket_check`` or one did not answer (the caller checks them here, as before). Raises ``ScannerUnavailable`` when no Sentinel can take the
-    work and the kind may not run here."""
+    """``{asset: Verdict}`` for the bucket candidates (``bucket_scan.Candidate``) a Sentinel checked. The kind has no local path
+    (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A candidate no Sentinel reported is missing from the
+    answer: unknown, checked again later."""
     from cveFeed import bucket_probe, probe_scope
     if not candidates or not _offered(project, 'bucket_check'):
-        return None
+        return {}
     answered = {}
     for start in range(0, len(candidates), MAX_BUCKETS_PER_TASK):
         chunk = candidates[start:start + MAX_BUCKETS_PER_TASK]
@@ -121,8 +121,8 @@ def try_buckets(project, candidates, rate):
                   'rate': bucket_probe.request_rate(), 'scope': probe_scope.for_buckets(project.pk, chunk)}
         result = sentinel_dispatch.dispatch_or_none(project, 'bucket_check', target,
                                                     host=_hosts_label(h for c in chunk for h in (c.hosts or [c.asset])))
-        if result is None:
-            return None
+        if result is None:  # a task nobody finished: these candidates are unknown
+            continue
         answered.update({row['id']: bucket_probe.Verdict(**row['verdict']) for row in result.get('buckets') or []})
     return answered
 

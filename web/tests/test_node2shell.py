@@ -122,12 +122,6 @@ class RunForScanTests(RouteFixture, TestCase):
 		self.assertEqual((out['vulnerable'], out['errors']), (0, 1))
 		self.assertFalse(Vulnerability.objects.filter(source='node2shell').exists())
 
-	def test_a_raising_checker_is_caught_by_run_check_not_the_stage(self):
-		# run_check (the real default) never lets an exception through; prove that contract directly
-		out = node2shell_scan.run_check('https://nowhere.invalid/', timeout_s=1)
-		self.assertIsNone(out['vulnerable'])
-		self.assertIn('verdict', out)
-
 	def test_runs_once_per_window_then_only_on_force(self):
 		self.result = NOT_VULNERABLE
 		self.go()

@@ -62,6 +62,8 @@ NEVER_LOCAL = (  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALL
     'secrets_scan',
     'bbot_discovery',
     'rdp_shot',
+    'bucket_check',  # the storage requests: a Sentinel's, the server carries only the readers of what comes back
+    'node2shell',  # the Brotli decoder check: the detector is vendored on the scanner only, this server carries no copy of it
     'dns_resolve',  # the discovery and retire-check name lookups (agentapi.probe_dispatch.try_dns_resolve): a Sentinel's resolver, never this server's
     'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
@@ -1519,10 +1521,10 @@ def try_nmap_verify(project, target, scan=None):
     return None if result is None else nmap_hosts(result.get('xml'), target['address'])
 
 
-# node2shell: the vendored detector on the scanner, the verdict in run_check's shape ---------------------------------------------------------
+# node2shell: the vendored detector on the scanner, the detector's own result shape ---------------------------------------------------------
 
 def node2shell_outcome(result):
-    """A Sentinel's ``node2shell`` result in the shape ``cveFeed.node2shell_scan.run_check`` returns (the detector's own dict)."""
+    """A Sentinel's ``node2shell`` result in the detector's own result shape (the detector's own dict)."""
     return {'vulnerable': result.get('vulnerable'), 'verdict': result.get('verdict') or '', 'reason': result.get('reason') or '',
             'status_code': result.get('status_code'), 'response': result.get('evidence') or ''}
 
