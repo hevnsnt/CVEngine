@@ -1,8 +1,6 @@
 """Template safety regressions. All scanner processes and external traffic are mocked."""
-import os
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import TestCase, mock
 
 from django.test import TestCase as DatabaseTestCase
