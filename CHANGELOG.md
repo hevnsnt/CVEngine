@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **A PDF report no longer waits behind the CVE feed or certificate lookups, and a report no worker takes stops spinning.** Reports were queued on the CVE feed worker's queue, whose four slots a certificate lookup in backoff can hold for minutes at a time; on a stack that lost its other workers a report waited for hours with the page saying "working". Reports now have their own queue (`report_queue`), served by the classic worker, and a report still queued after ten minutes is marked failed with a message to try again (it was two hours), and a worker that takes the message late skips it. No migration, no setting to change, nothing to run after the update.
+
 ## v1.3.7 (2026-11-06)
 
 ### Fixed

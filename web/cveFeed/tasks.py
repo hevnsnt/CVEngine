@@ -2231,9 +2231,9 @@ def check_os_path():
     return os_detection.record_path(path_probe.check())
 
 
-@app.task(name='generate_report', bind=True, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
+@app.task(name='generate_report', bind=True, queue='report_queue', time_limit=3600, soft_time_limit=3300)
 def generate_report(self, export_id):
-    """Make one queued PDF report (cveFeed.report_export): read for the project as the user who asked, rendered in a child process,
+    """Make one queued PDF report (cveFeed.report_export, on ``report_queue``): read for the project as the user who asked, rendered in a child process,
     written under the report directory with a random name. The broker carries only the row id."""
     from cveFeed import report_export
     return report_export.execute(export_id, celery_id=self.request.id)
