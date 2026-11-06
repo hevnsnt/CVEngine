@@ -1,5 +1,5 @@
 """The streamed Sentinel kind (``bbot_discovery``, contract version 3): numbered partial batches held to the task's scope, stored once and in order,
-consumed by the stage that dispatched the task through the same persistence as a local bbot run, then a final result that closes it."""
+consumed by the stage that dispatched the task, then a final result that closes it."""
 import base64
 import copy
 import json
@@ -19,6 +19,7 @@ from agentapi import sentinel_dispatch
 from agentapi import sentinel_stream as stream
 from agentapi.models import Agent, SentinelPartial, SentinelTask
 from agentapi.services import ApiError
+from reNgine.resources import ScannerUnavailable
 from tests.test_agentapi import call
 from tests.test_sentinel_secret_read import SecretBase
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
@@ -226,7 +227,7 @@ class DispatchStreamTests(StreamBase):
         self.assertEqual((out['consumed'], out['result']['partials']), (3, 3))
         self.assertFalse(SentinelPartial.objects.exists())
 
-    def test_a_run_that_failed_after_batches_keeps_them_and_none_means_run_it_here(self):
+    def test_a_run_that_failed_after_batches_keeps_them_and_no_scanner_means_waiting(self):
         def fails(_seconds):
             task = SentinelTask.objects.filter(kind='bbot_discovery').latest('id')
             SentinelPartial.objects.create(task=task, seq=1, body=self.batch(1))
@@ -236,11 +237,12 @@ class DispatchStreamTests(StreamBase):
             out = stream.dispatch_stream(self.pa, 'bbot_discovery', self.target, self.scan, lambda b: None)
         self.assertEqual((out['result'], out['consumed'], out['error']), (None, 1, 'bbot crashed'))
         with mock.patch.object(broker, 'capacity_state', return_value={'state': 'none', 'message': 'no Sentinel', 'slots': 0}):
-            self.assertIsNone(stream.dispatch_stream(self.pa, 'bbot_discovery', self.target, self.scan, lambda b: None))
+            with self.assertRaises(ScannerUnavailable):  # no local path: the stage waits for a scanner
+                stream.dispatch_stream(self.pa, 'bbot_discovery', self.target, self.scan, lambda b: None)
 
     def test_a_task_that_names_the_projects_keys_is_kept_for_the_builtin_scanner(self):
         none = {'state': 'none', 'reason': 'none', 'message': 'no built-in scanner is live', 'slots': 0}
-        with mock.patch.object(broker, 'capacity_state', return_value=none) as capacity:
+        with mock.patch.object(broker, 'capacity_state', return_value=none) as capacity, self.assertRaises(ScannerUnavailable):  # waits: no local path
             stream.dispatch_stream(self.pa, 'bbot_discovery', self.target, self.scan, lambda b: None, secret_ref=stream.keys_ref(self.pa.pk),
                                    builtin_only=True)
         self.assertEqual(capacity.call_count, 1)
@@ -249,7 +251,7 @@ class DispatchStreamTests(StreamBase):
 
 
 class TargetTests(StreamBase):
-    def test_the_target_is_what_a_local_run_of_the_mode_would_run_and_its_scope(self):
+    def test_the_target_is_what_the_mode_runs_and_its_scope(self):
         from cveFeed.models import HostExclusion, InternalRange
         HostExclusion.objects.create(org=self.org1, host='vpn.a.example', include_subdomains=True)
         HostExclusion.objects.create(org=self.org1, host='other.example', include_subdomains=False)
@@ -266,7 +268,7 @@ class TargetTests(StreamBase):
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='bbot-stream-'))
 class DiscoveryOnSentinelTests(StreamBase):
-    """``run_discovery`` hands the run to a Sentinel when one takes it, and stores its batches as a local run's flushes."""
+    """``run_discovery`` hands the run to a Sentinel and stores its batches; with none able to take it the target stays due."""
 
     def batch_for(self):
         body = json.loads(json.dumps(PARTIAL).replace('example.com', 'a.example'))
@@ -282,10 +284,9 @@ class DiscoveryOnSentinelTests(StreamBase):
             self.assertEqual((kind, target['domain'], kwargs['secret_ref'], kwargs['builtin_only']), ('bbot_discovery', 'a.example', None, False))
             on_partial(batch)
             return {'result': {**RESULT, 'partials': 1}, 'consumed': 1}
-        local = mock.Mock(side_effect=AssertionError('bbot must not run here'))
         with mock.patch.object(stream, 'dispatch_stream', side_effect=fake), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
-            out = discovery.run_discovery(self.scan.pk, 'standard', stream=local)
+            out = discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual(out['status'], discovery.SUCCESS, out)
         names = set(Subdomain.objects.filter(scan_history=self.scan).values_list('name', flat=True))
         self.assertLessEqual({'www.a.example', 'api.a.example'}, names)
@@ -296,7 +297,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         self.assertTrue(os.path.isfile(os.path.join(settings.MEDIA_ROOT, shot)))
         self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).scan_status, discovery.SUCCESS)
 
-    def test_an_unfinished_run_keeps_what_it_found_and_no_sentinel_runs_it_here(self):
+    def test_an_unfinished_run_keeps_what_it_found_and_no_scanner_leaves_the_target_due(self):
         from cveFeed import discovery
         from startScan.models import ScanActivity, Subdomain
         ScanActivity.objects.create(scan_of=self.scan, title='bbot', name='bbot_discovery', time=timezone.now(), status=1)
@@ -306,16 +307,26 @@ class DiscoveryOnSentinelTests(StreamBase):
             return {'result': None, 'consumed': 1, 'error': 'the lease expired without a report'}
         with mock.patch.object(stream, 'dispatch_stream', side_effect=unfinished), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
-            out = discovery.run_discovery(self.scan.pk, 'standard', stream=mock.Mock(side_effect=AssertionError('not here')))
+            out = discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual((out['status'], out['partial']), (discovery.SUCCESS, 'the lease expired without a report'))
         self.assertEqual(ScanActivity.objects.get(scan_of=self.scan, name='bbot_discovery').status, discovery.FAILED)
         self.assertTrue(Subdomain.objects.filter(scan_history=self.scan, name='api.a.example').exists())
-        local = mock.Mock(return_value=iter([{'type': 'DNS_NAME', 'data': 'local.a.example', 'host': 'local.a.example'}]))
-        with mock.patch.object(stream, 'dispatch_stream', return_value=None), \
-                mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
-            discovery.run_discovery(self.scan.pk, 'standard', stream=local)
-        local.assert_called_once()
-        self.assertTrue(Subdomain.objects.filter(scan_history=self.scan, name='local.a.example').exists())
+
+    def test_with_no_scanner_able_to_take_it_nothing_runs_and_the_scan_waits(self):
+        from cveFeed import discovery
+        from startScan.models import ScanHistory, Subdomain
+        from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
+        none = {'state': 'none', 'reason': 'none', 'message': 'no Sentinel is live', 'slots': 0}
+        before = Subdomain.objects.filter(scan_history=self.scan).count()
+        for fallback in ('none', 'all', 'bbot_discovery'):  # the kind has no local path, whatever the variable says
+            with self.subTest(fallback=fallback), LocalFallback(fallback), mock.patch.object(broker, 'capacity_state', return_value=none), \
+                    mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+                assert_ran_nowhere_locally(self, 'bbot_discovery')
+                out = discovery.run_discovery(self.scan.pk, 'standard')
+            self.assertEqual(out['status'], discovery.FAILED)
+            self.assertIn('waiting for a scanner', out['error'])
+        self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).error_message[:23], 'waiting for a scanner: ')
+        self.assertEqual(Subdomain.objects.filter(scan_history=self.scan).count(), before)  # nothing was stored
 
     def test_the_projects_keys_go_by_reference_to_the_builtin_scanner_only(self):
         from cveFeed import discovery
@@ -327,7 +338,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         with mock.patch.object(stream, 'dispatch_stream', side_effect=capture), \
                 mock.patch('cveFeed.api_credentials.bbot_config_args', return_value=['-c', 'modules.shodan_dns.api_key=KEY-123']), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
-            discovery.run_discovery(self.scan.pk, 'standard', stream=mock.Mock(return_value=iter([])))
+            discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual((seen['secret_ref'], seen['builtin_only'], seen['target']['api_keys']), (f'bbotkeys:{self.pa.pk}', True, True))
         self.assertNotIn('KEY-123', json.dumps(seen['target']))
 

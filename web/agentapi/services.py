@@ -1018,7 +1018,7 @@ def _start_discoveries(domains, mode, project_id, initiated_by=None):
     """Queue discovery for each domain with one summary line in the AI feed instead of one per target."""
     from cveFeed import activity
     from cveFeed.discovery import start_discoveries
-    from reNgine import bbot as bbot_lib
+    from reNgine import discovery_events as bbot_lib
     mode = mode or bbot_lib.DEFAULT_MODE
     scans = start_discoveries(domains, mode, quiet=True, initiated_by=initiated_by)
     if scans:
@@ -1667,7 +1667,7 @@ def _unverified_products(sub, others, ips):
 
 def _screenshot_fields(sub, http, ips, rows, legacy_id, network=None):
     """The screenshot part of a host record. The browser's captures (``HostScreenshot``, cveFeed.web_shot) come first; a discovery screenshot
-    (``Subdomain.screenshot_path``, bbot's gowitness) is the fallback, and it is the newest same-name row that has one, not just ``sub``: a rescan
+    (``Subdomain.screenshot_path``, the discovery's own screenshot) is the fallback, and it is the newest same-name row that has one, not just ``sub``: a rescan
     writes a new row with no screenshot, and it used to hide the older row's. ``screenshot_note`` says why there is none (or what the latest
     attempt did), never "none yet" without a reason."""
     from cveFeed import web_shot

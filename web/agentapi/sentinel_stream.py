@@ -1,11 +1,11 @@
 """Streamed Sentinel work: a task that posts partial results while it runs, then a final result that closes it (contract version 3).
 
-bbot discovery (``bbot_discovery``) is the one streamed kind. It runs for up to six hours and finds hosts, ports, technologies, findings and screenshots
+The discovery (``bbot_discovery``) is the one streamed kind. It runs for up to six hours and finds hosts, ports, technologies, findings and screenshots
 all along the way, so it does not fit "one result per task": the Sentinel posts numbered batches to ``POST sentinel/tasks/<id>/partial`` as it goes
 (``report_partial``) and the usual ``POST sentinel/tasks/<id>/result`` at the end. Each batch is typed, clipped and held to the task's own scope here
 (``clean_partial``), stored as one ``SentinelPartial`` row, and read in order by the stage that dispatched the task (``dispatch_stream``, running in the
-discovery worker), which persists it through the same code a local bbot run uses (``cveFeed.discovery``) and deletes the row. So the inventory, the live
-feed and the scan's activity lines fill in as the run goes, as they do for a local run.
+discovery worker), which persists it through ``cveFeed.discovery`` and deletes the row. So the inventory, the live
+feed and the scan's activity lines fill in as the run goes.
 
 Ordering and idempotence. ``seq`` starts at 1 and grows by one. The task keeps the last one it took (``SentinelTask.partial_seq``): a batch at or below it
 is a retry whose answer was lost, answered again as a duplicate and stored once; any other number than the next is refused (400). A final result names the
@@ -19,7 +19,7 @@ has nothing to send it asks ``GET sentinel/tasks/<id>`` and its heartbeat drops 
 Leases. A batch counts as a sign of life: it extends the task's lease like a heartbeat, within the same ceiling (``sentinel_broker.max_runtime``, which
 for a streamed task is the run's own time limit plus ``REPORT_GRACE`` and the broker's ``RUN_GRACE``), so a six hour run does not expire while it works.
 
-Credentials. The API keys a project stored for bbot's modules are never in a task: a task of a project that has some names them by reference
+Credentials. The API keys a project stored for the discovery's modules are never in a task: a task of a project that has some names them by reference
 (``secret_ref`` ``bbotkeys:<project id>``), which keeps it to the built-in scanner, and the scanner reads them once through the secure read
 (``sentinel_broker.read_secret``).
 """
@@ -53,7 +53,7 @@ SCREENSHOT_TYPES = {'image/png': b'\x89PNG\r\n\x1a\n', 'image/jpeg': b'\xff\xd8\
 EVENT_TYPES = ('DNS_NAME', 'IP_ADDRESS', 'OPEN_TCP_PORT', 'URL', 'TECHNOLOGY', 'WAF', 'FINDING', 'VULNERABILITY', 'STORAGE_BUCKET',
                'EMAIL_ADDRESS', 'ASN', 'SOCIAL', 'CODE_REPOSITORY', 'WEBSCREENSHOT', 'PROTOCOL')
 MODES = ('passive', 'standard', 'deep')
-KEYS_REF_PREFIX = 'bbotkeys:'  # ``SentinelTask.secret_ref`` of a bbot task whose project stored API keys: a reference, never a key
+KEYS_REF_PREFIX = 'bbotkeys:'  # ``SentinelTask.secret_ref`` of a discovery task whose project stored API keys: a reference, never a key
 MAX_EXCLUSIONS = 2000
 MAX_DENY_RANGES = 500
 _NAME = re.compile(r'^[a-z0-9_-]{1,63}(\.[a-z0-9_-]{1,63})*$')
@@ -281,8 +281,8 @@ def _module_reasons(value):
 
 
 def clean_bbot_result(body):
-    """The final result of a bbot discovery task (the ``done`` half; ``clean_result`` handles ``error``): how many batches were sent, the mode the run
-    finished in, why it stopped part way (empty for a whole run), bbot's own scan name, how many web events it saw, and the modules that did not
+    """The final result of a discovery task (the ``done`` half; ``clean_result`` handles ``error``): how many batches were sent, the mode the run
+    finished in, why it stopped part way (empty for a whole run), the scanner's own scan name, how many web events it saw, and the modules that did not
     start. Nothing that was found: that came in the batches."""
     partials = body.get('partials')
     if isinstance(partials, bool) or not isinstance(partials, int) or not 0 <= partials <= MAX_SEQ:
@@ -374,7 +374,7 @@ def keys_ref(project_id):
 
 
 def keys_payload(task):
-    """The project's bbot module keys as the nested config bbot reads from a preset (``{modules: {shodan_dns: {api_key: ...}}}``), or ``None`` when the
+    """The project's discovery module keys as the nested config the scanner reads from a preset (``{modules: {shodan_dns: {api_key: ...}}}``), or ``None`` when the
     project has none any more. Called only by ``sentinel_broker.read_secret`` once it has won the single use."""
     from cveFeed.api_credentials import bbot_config_args
     from dashboard.models import Project
@@ -398,9 +398,9 @@ def keys_ref_project(ref):
 # --- the stage side: build the target, dispatch it, consume the batches ---------------------------------------------------------------
 
 def mode_options(mode):
-    """The presets, required flags and ``--force`` of a bbot mode, read from the server's own table (``reNgine.bbot.MODES``), so the scanner runs the
+    """The presets, required flags and ``--force`` of a discovery mode, read from the server's own table (``reNgine.discovery_events.MODES``), so the scanner runs the
     choices the server makes for a local run."""
-    from reNgine import bbot as bbot_lib
+    from reNgine import discovery_events as bbot_lib
     cfg = bbot_lib.MODES.get(mode) or bbot_lib.MODES['passive']
     args = list(cfg['args'])
     flags = [args[i + 1] for i, a in enumerate(args[:-1]) if a == '-rf']
@@ -409,7 +409,7 @@ def mode_options(mode):
 
 
 def _bounty_out_of_scope(project_id, name):
-    """``(names, ranges)``: what the project's bug bounty programs list as out of scope that bbot could reach from ``name``: names (each with whether
+    """``(names, ranges)``: what the project's bug bounty programs list as out of scope that a discovery could reach from ``name``: names (each with whether
     the entry covers its subdomains) at or under it, and addresses and ranges."""
     from cveFeed import bounty_scope
     from cveFeed.models import BountyEngagement
@@ -450,7 +450,7 @@ def scope_policy(domain):
 
 
 def bbot_target(domain, mode, timeout, api_keys=False, trufflehog=False):
-    """The ``target`` of a ``bbot_discovery`` task for ``domain`` (``$defs/targets/bbot_discovery``): what a local run of the same mode would run (presets,
+    """The ``target`` of a ``bbot_discovery`` task for ``domain`` (``$defs/targets/bbot_discovery``): what the mode runs (presets,
     required flags, ``--force``, trufflehog excluded unless it may run, ``--strict-scope`` for a host-scoped target) and the scope it must keep to."""
     options = mode_options(mode)
     return {'domain': domain.name.strip().lower().rstrip('.'), 'mode': mode if mode in MODES else 'passive', **options,

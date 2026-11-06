@@ -15,6 +15,7 @@ from dashboard.models import Org, OrgMembership, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain
 from targetApp.models import Domain, in_target_scope_q
+from tests.discovery_fixtures import sentinel_discovery
 from tests.test_agentapi import call, tool_call
 
 NOW = timezone.now
@@ -211,7 +212,7 @@ class AddTimeScopeTests(TestCase):
 		self.assertTrue(err)
 		self.assertIn('scope_mode must be auto, host or parent', out)
 
-	def test_discovery_of_a_marked_target_runs_bbot_strict(self):
+	def test_discovery_of_a_marked_target_is_dispatched_strict(self):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
 			status, data = call(self.tok, 'POST', '/api/v1/projects/sat/targets/bulk', {'text': '=strict.example\nloose.example'})
 		self.assertEqual((status, data['discovery_started']), (201, 2))
@@ -219,12 +220,13 @@ class AddTimeScopeTests(TestCase):
 		for scan_id, _mode in (c.args for c in queued.call_args_list):
 			scan = ScanHistory.objects.get(pk=scan_id)
 
-			def stream(targets, **kwargs):
-				seen[targets[0]] = kwargs.get('strict_scope')
-				return iter([])
+			def dispatch(project, kind, target, scan, on_partial, **kwargs):
+				seen[target['domain']] = target['strict_scope']
+				return {'result': {'outcome': 'done', 'partials': 0, 'mode': 'standard'}, 'consumed': 0}
 			with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
+					mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch), \
 					mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
-				discovery.run_discovery(scan.id, stream=stream)
+				discovery.run_discovery(scan.id)
 		self.assertEqual(seen, {'strict.example': True, 'loose.example': False})
 
 
@@ -266,17 +268,11 @@ def bbot_events(root):
 	]
 
 
-class BbotIngestionTests(EnforcementBase):
-	def test_a_child_bbot_reports_anyway_is_never_kept_for_an_exact_host_target(self):
-		scan = self.scan(self.exact)
-		discovery.run_discovery(scan.id, stream=lambda targets, **k: iter(bbot_events('exact.test')))
-		self.assertEqual(self.names(self.exact), {'exact.test'})
-		self.assertFalse(DiscoveryEvent.objects.filter(scan=scan, host='www.exact.test').exists())
-		self.assertTrue(DiscoveryEvent.objects.filter(scan=scan, host='exact.test').exists())
-
+class DiscoveryIngestionTests(EnforcementBase):
 	def test_an_unmarked_target_keeps_its_subdomains_as_before(self):
 		scan = self.scan(self.wide)
-		discovery.run_discovery(scan.id, stream=lambda targets, **k: iter(bbot_events('wide.test')))
+		with sentinel_discovery(bbot_events('wide.test')):
+			discovery.run_discovery(scan.id)
 		self.assertEqual(self.names(self.wide), {'wide.test', 'www.wide.test'})
 		self.assertTrue(DiscoveryEvent.objects.filter(scan=scan, host='www.wide.test').exists())
 
@@ -290,16 +286,6 @@ class BbotIngestionTests(EnforcementBase):
 		wide = self.scan(self.wide)
 		sub, created = save_subdomain('www.wide.test', ctx={'scan_history_id': wide.id, 'domain_id': self.wide.id})
 		self.assertTrue(created and sub.name == 'www.wide.test')
-
-	def test_the_event_filter(self):
-		out = lambda e: discovery.outside_exact_host(e, self.exact)
-		self.assertFalse(out({'type': 'SCAN', 'data_json': {'name': 'x'}}))
-		self.assertFalse(out({'type': 'DNS_NAME', 'data': 'exact.test', 'host': 'exact.test'}))
-		self.assertTrue(out({'type': 'DNS_NAME', 'data': 'a.exact.test', 'host': 'a.exact.test'}))
-		self.assertTrue(out({'type': 'URL', 'data': 'https://a.exact.test/', 'host': 'exact.test'}))
-		self.assertTrue(out({'type': 'OPEN_TCP_PORT', 'data': 'a.exact.test:22'}))
-		self.assertTrue(out({'type': 'TECHNOLOGY', 'data_json': {'host': 'a.exact.test', 'technology': 'nginx'}, 'host': 'exact.test'}))
-		self.assertFalse(out({'type': 'IP_ADDRESS', 'data': '192.0.2.1', 'host': '192.0.2.1'}))  # its address is the host's own
 
 
 class CertificateTransparencyTests(EnforcementBase):

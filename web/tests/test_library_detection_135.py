@@ -10,7 +10,7 @@ from cvengine_scanner import cms, fingerprint, versions
 
 from cveFeed import correlation, js_libraries, kev_freshness, nuclei_scan, range_corrections, template_gates
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from startScan.models import ScanHistory, Subdomain, Technology, Vulnerability
 from tests.test_js_libraries_provenance import ReviewScenarioBase
 from tests.test_route_auth import RouteFixture

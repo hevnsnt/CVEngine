@@ -70,7 +70,7 @@ def bounty_blocked_projects():
     return set(BountyEngagement.objects.exclude(confirmed).values_list('project_id', flat=True))
 
 
-# The conductor starts one thing: a discovery scan per target, whose first stage (bbot) runs on this server. It has no per-kind work to hold back while a
+# The conductor starts one thing: a discovery scan per target, whose first stage (discovery) runs on a Sentinel. It has no per-kind work to hold back while a
 # scanner is offline, so ``scanner_state`` only annotates its rounds; the sweeps that dispatch one kind on their own schedule are the ones that stop
 # (testssl, UDP, the WordPress scan), and they do it themselves. Stopping discovery here would stop local work for a reason that is not local.
 def scanner_waiting():

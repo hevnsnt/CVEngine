@@ -1481,7 +1481,7 @@ DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's loc
 
 @app.task(name="run_bbot_discovery", bind=True, queue="discovery_queue", acks_late=True, reject_on_worker_lost=True)
 def run_bbot_discovery(self, scan_id, mode="standard"):
-    """Discover the scan's target with bbot, then nuclei over what was found (see cveFeed.discovery)."""
+    """Discover the scan's target (on a Sentinel), then run the scan stages over what was found (see cveFeed.discovery)."""
     from cveFeed.discovery import run_pipeline
     from startScan.models import ScanHistory
     if self.request.id:  # a stop revokes this id; a task still queued has none yet and is skipped when it starts

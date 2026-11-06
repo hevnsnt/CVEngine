@@ -181,7 +181,6 @@ class PipelineTests(AsyncBase):
             stubs[path] = mock.patch(path, return_value=value).start()
         mock.patch('cveFeed.discovery._announce').start()
         mock.patch('cveFeed.web_shot.has_work_for_scan', return_value=False).start()
-        mock.patch('cveFeed.rdp_shot.available', return_value=False).start()
         mock.patch('cveFeed.waf_scan.enabled', return_value=False).start()
         mock.patch('cveFeed.node2shell_scan.enabled', return_value=False).start()
         found = {'scan_id': self.scan.id, 'status': discovery.SUCCESS, 'error': ''}

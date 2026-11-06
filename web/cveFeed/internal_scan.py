@@ -238,7 +238,7 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
     from reNgine.tasks import persist_bbot_result
-    from reNgine import bbot as bbot_lib
+    from reNgine import discovery_events as bbot_lib
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target

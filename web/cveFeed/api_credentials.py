@@ -1,17 +1,17 @@
 """Org- and project-level API keys for external OSINT services (Shodan, Censys, ...), and turning them
-into the bbot module config that actually uses them. A project's own key for a service overrides its
-organization's; with neither set, bbot just runs that module unauthenticated (most soft-fail cleanly,
-per the "Setup soft-failed: No API key set" lines bbot already logs).
+into the discovery module config that actually uses them. A project's own key for a service overrides its
+organization's; with neither set, the scanner just runs that module unauthenticated (most soft-fail cleanly,
+per the "Setup soft-failed: No API key set" lines the scanner already logs).
 """
 
-# service slug -> (label, [(field, description, is_secret)], [(bbot config path, field)])
-# The bbot config paths are what bbot_config_args turns into `-c path=value` flags. They must name real bbot modules and
-# options (checked against bbot 3.x: an unknown module or option makes bbot print a preset error). A field given as a
-# tuple is joined with ':' into one value, which is how bbot's Censys modules take "id:secret".
+# service slug -> (label, [(field, description, is_secret)], [(module config path, field)])
+# The module config paths are what bbot_config_args turns into `-c path=value` flags. They must name real discovery modules and
+# options (an unknown module or option makes the scanner print a preset error). A field given as a
+# tuple is joined with ':' into one value, which is how the Censys modules take "id:secret".
 SERVICES = {
     'shodan': ('Shodan', [('api_key', 'API key', True)],
                [('modules.shodan_dns.api_key', 'api_key')]),  # shodan_idb is the free InternetDB: it has no key option
-    # bbot's Censys module talks to the legacy Search API (search.censys.io) with the API ID and secret. censys_ip is not mapped:
+    # the Censys module talks to the legacy Search API (search.censys.io) with the API ID and secret. censys_ip is not mapped:
     # none of the scan modes enables it, so a key for it would be stored and never used.
     'censys': ('Censys (legacy Search API: API ID and secret; Censys is retiring that API)', [('api_id', 'API ID', False), ('api_secret', 'API secret', True)],
                [('modules.censys_dns.api_key', ('api_id', 'api_secret'))]),
@@ -28,12 +28,12 @@ SERVICES = {
     'bevigil': ('BeVigil', [('api_key', 'API key', True)], [('modules.bevigil.api_key', 'api_key')]),
     'builtwith': ('BuiltWith', [('api_key', 'API key', True)], [('modules.builtwith.api_key', 'api_key')]),
     'bufferoverrun': ('BufferOver.run', [('api_key', 'API key', True)], [('modules.bufferoverrun.api_key', 'api_key')]),
-    # Used by the WordPress scan a Sentinel runs on sites this server found (see cveFeed.wpscan_scan), not through bbot.
+    # Used by the WordPress scan a Sentinel runs on sites this server found (see cveFeed.wpscan_scan), not through the discovery.
     'wpscan': ('WordPress vulnerability data', [('api_key', 'API token for the WordPress vulnerability data service', True)], []),
     # Retired, see RETIRED: kept only so a key someone already saved stays visible and removable.
     'binaryedge': ('BinaryEdge', [('api_key', 'API key', True)], []),
-    # runZero is an asset-inventory platform, not a bbot module: its key is used by cveFeed.runzero_sync, which reads the
-    # inventory on a schedule (see SYNC_SERVICES), so it has no bbot mapping.
+    # runZero is an asset-inventory platform, not a discovery module: its key is used by cveFeed.runzero_sync, which reads the
+    # inventory on a schedule (see SYNC_SERVICES), so it has no module mapping.
     'runzero': ('runZero', [('api_key', 'Export API token', True)], []),
 }
 
@@ -73,7 +73,7 @@ def _global_chaos_key():
 
 
 def service_for_module(module):
-    """The service whose key feeds a bbot module, for naming a rejected key: ``('virustotal', 'VirusTotal')`` or ``None``."""
+    """The service whose key feeds a discovery module, for naming a rejected key: ``('virustotal', 'VirusTotal')`` or ``None``."""
     for service, (label, _fields, mapping) in SERVICES.items():
         if any(path.split('.')[1] == module for path, _ in mapping):
             return service, label
@@ -81,7 +81,7 @@ def service_for_module(module):
 
 
 def bbot_config_args(project):
-    """``-c path=value`` flags for every configured service, ready to append to a bbot command line."""
+    """``-c path=value`` flags for every configured service, ready to hand to the scanner."""
     args = []
     resolved = resolve_for_project(project)
     if not any(resolved.get('chaos', {}).values()) and _global_chaos_key():
@@ -96,12 +96,12 @@ def bbot_config_args(project):
     return args
 
 
-SCAN_STAGES = frozenset({'wpscan'})  # keys a pipeline stage uses directly rather than through a bbot module
+SCAN_STAGES = frozenset({'wpscan'})  # keys a pipeline stage uses directly rather than through a discovery module
 SYNC_SERVICES = frozenset({'runzero'})  # keys a scheduled job uses to read the service (not during a scan)
 
 
 def used_in_scans(service):
-    """Whether a scan can actually use this service's key (it maps to a bbot module or a pipeline stage)."""
+    """Whether a scan can actually use this service's key (it maps to a discovery module or a pipeline stage)."""
     return service not in RETIRED and (bool(SERVICES[service][2]) or service in SCAN_STAGES)
 
 

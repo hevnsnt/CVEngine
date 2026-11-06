@@ -7,7 +7,7 @@ robin over the valid lines the caller can use.
 
 What goes through it (traffic to SCANNED TARGETS sent from this server): the in-process probes (through ``cveFeed.pinned_transport``, which
 keeps vetting and pinning the numeric destination and sends that address to the proxy, never the name), ``db_exposure``'s HTTP checks
-(``requests``), and the external tools that take a proxy: nuclei, bbot, testssl.sh and wafw00f (``for_tool``). What does not: nmap, naabu,
+(``requests``), and the external tools that take a proxy: nuclei, testssl.sh and wafw00f (``for_tool``). What does not: nmap, naabu,
 the UDP sweeps, the raw database and RDP checks and OpenVAS use raw sockets and connect directly, a Sentinel keeps its own egress, and no call to a
 third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
 
@@ -239,7 +239,6 @@ def requests_proxies(host=None):
 # tool -> (schemes it can use, how it takes the proxy as arguments). Each lambda gets the ProxySpec.
 TOOLS = {
     'nuclei': (('http', 'https', 'socks5'), lambda s: ['-proxy', s.url]),
-    'bbot': (SCHEMES, lambda s: ['-c', f'web.http_proxy={s.url}']),  # bbot's own setting; bbot.private_config moves it into a 0600 file
     'wafw00f': (('http', 'https', 'socks5'), lambda s: ['-p', s.url]),
     'testssl': (('http',), lambda s: ['--proxy', s.netloc]),  # testssl.sh speaks to a plain HTTP proxy only, and has no way to give it a login
 }
