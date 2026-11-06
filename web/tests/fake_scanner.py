@@ -384,9 +384,9 @@ class LocalRunDetected(AssertionError):
 LOCAL_RUNNERS = {
     'nmap': ('cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'naabu': ('cveFeed.naabu_scan.run_naabu',),
-    'nuclei_light': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_targeted': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_deep': ('cveFeed.nuclei_scan.stream_nuclei',),
+    'nuclei_light': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'nuclei_targeted': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'nuclei_deep': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
     'testssl': ('cveFeed.testssl_scan.run_testssl',),
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
@@ -406,7 +406,7 @@ LOCAL_RUNNERS = {
     'rdp_shot': ('cveFeed.rdp_shot.capture',),
     'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
     'path_probe': ('cveFeed.path_probe.send_probe',),
-    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
+    'nuclei_validate': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),

@@ -61,9 +61,8 @@ class RecordedReasonTests(FallbackBase):
         dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443)
         dispatch.try_nmap_udp(self.project, ADDR[0])
         dispatch.wrap_naabu_runner(self.project, self.scan)
-        dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
         dispatch.wrap_wpscan_runner(self.project)
-        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('nmap', 'testssl', 'nmap_udp', 'naabu', 'nuclei_light', 'wpscan')])
+        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('nmap', 'testssl', 'nmap_udp', 'naabu', 'wpscan')])  # the nuclei kinds have no local path: they wait, and record nothing
 
     def test_a_task_nobody_claims_in_time(self):
         self.make_sentinel(['nmap'])

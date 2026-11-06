@@ -12,6 +12,7 @@ from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, perfo
 from cveFeed.models import AgentActivity, BackgroundCursor, ServiceRun
 from reNgine import resources
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Technology
+from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_testssl_scan import CLEAN
@@ -154,12 +155,11 @@ class NaabuDiscoverTests(FallbackOffBase):
 
 class NucleiStageTests(FallbackOffBase):
     def test_light_pass_waits_and_runs_no_local_nuclei(self):
-        local = mock.Mock(return_value=iter(()))
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
+        assert_ran_nowhere_locally(self, 'nuclei_light')  # no local path at all: the guard fails the test if anything here runs the tool
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             self.make_sentinel(['nuclei_light'])
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
             result = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
-        local.assert_not_called()
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (nuclei_light)', result['skipped'])
         self.assertEqual((result['technologies'], result['hosts']), (0, 0))
@@ -167,16 +167,15 @@ class NucleiStageTests(FallbackOffBase):
         self.assertNamesTheScanner('nuclei_light')
 
     def test_targeted_pass_waits_and_runs_no_local_nuclei(self):
-        local = mock.Mock(return_value=iter(()))
+        assert_ran_nowhere_locally(self, 'nuclei_targeted')
         cve_runner = mock.Mock()
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         sub.technologies.add(Technology.objects.create(name='WordPress'))
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             self.make_sentinel(['nuclei_targeted'])
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_targeted', timeout=5)
             result = nuclei_scan.run_targeted_nuclei(self.scan.id, stream=stream, provider=None, cve_runner=cve_runner,
                                                      light_techs={'www.example.test': ['WordPress']})
-        local.assert_not_called()
         self.assertGreaterEqual(result['groups'], 1, 'the fixture must form a group, or this proves nothing')
         self.assertNotIn('error', result)
         self.assertIn('no scanner could take this work (nuclei_targeted)', result['skipped'])
@@ -212,13 +211,11 @@ class NucleiStageTests(FallbackOffBase):
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=2)  # weekly_deep_nuclei reads finished scans only
         Subdomain.objects.filter(pk=sub.pk).update(target_domain=self.domain)
-        local = mock.Mock(return_value=iter(()))
+        assert_ran_nowhere_locally(self, 'nuclei_deep')
         with mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names), \
-                mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({sub.name}, set(), set())), \
-                mock.patch('cveFeed.nuclei_scan.stream_nuclei', local):
+                mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({sub.name}, set(), set())):
             result = weekly_deep_nuclei()
-        local.assert_not_called()
         self.assertEqual((result['status'], result['host']), ('skipped', sub.name))
         self.assertIn('no scanner could take this work (nuclei_deep)', result['skipped'])
         self.assertNothingRecorded('nuclei-deep')
@@ -231,18 +228,19 @@ class PipelineStageTests(FallbackOffBase):
 
     def test_the_nmap_nuclei_and_wpscan_stages_are_not_marked_failed(self):
         nmap_runner, naabu, wpscan = mock.Mock(), mock.Mock(), mock.Mock()
-        local_nuclei = mock.Mock(return_value=iter(()))
+        assert_ran_nowhere_locally(self, 'nuclei_light')
+        assert_ran_nowhere_locally(self, 'nuclei_targeted')
         scan = self.scan
         Subdomain.objects.filter(scan_history=scan).update(target_domain=self.domain)
         Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name='WordPress'))  # a site for WPScan to wait on
         with mock.patch('cveFeed.discovery.stopped', return_value=False), mock.patch('cveFeed.naabu_scan.run_naabu', naabu), \
-                mock.patch('cveFeed.wpscan_scan.run_wpscan_process', wpscan), mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_nuclei):
+                mock.patch('cveFeed.wpscan_scan.run_wpscan_process', wpscan):
             out = discovery._run_stages(
                 scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, nmap_runner=nmap_runner, db_exposure_checks={}, provider=None,
                 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})
-        for tool in (nmap_runner, naabu, wpscan, local_nuclei):
+        for tool in (nmap_runner, naabu, wpscan):
             tool.assert_not_called()
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=scan)}
         for name in ('nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan'):

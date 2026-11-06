@@ -138,7 +138,7 @@ A task that needs a stored sign-in carries only a reference to it (`secret_ref`,
 - Every call, granted or refused, is written to the audit log as `sentinel.secret.read` with the task, the Sentinel, the credential reference and the outcome. The value is never in the audit log, a task row, an activity line or a log. It is limited to 6 calls a minute per token.
 - A task with a `secret_ref` is never offered to any Sentinel but the built-in one, and only to a built-in scanner image that reads stored sign-ins (its heartbeat's `info.features` has `secret_read`): next task, queue counts and capacity all leave it out for the others. The task a Sentinel receives says `signed_in: true` and nothing more.
 
-The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei_*` task per credential and chunk of up to 64 origins (`agentapi.sentinel_dispatch.signed_in_stream`). The built-in scanner reads the credential once for the task, runs Nuclei with it from a 0600 file on a memory file system, and wipes it afterwards. Without a built-in scanner that can, the pass runs on the server with a private secrets file as before when `CVENGINE_LOCAL_FALLBACK` lets nuclei run there, and waits for one otherwise.
+The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei_*` task per credential and chunk of up to 64 origins (`agentapi.sentinel_dispatch.signed_in_stream`). The built-in scanner reads the credential once for the task, runs Nuclei with it from a 0600 file on a memory file system, and wipes it afterwards. Without a built-in scanner that can, the pass waits for one: it never runs on the server.
 
 ## The result contract
 

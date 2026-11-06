@@ -840,11 +840,8 @@ class NucleiLedgerTests(TestCase):
 		def stream(path, **kwargs):
 			seen.append(open(path).read().split())
 			return iter(self._lines('shared.example.test'))
-		# stands in for the real scanner, so the approved-template snapshot is stubbed too (no template library on disk here)
-		with mock.patch('cveFeed.nuclei_scan.stream_nuclei', stream), \
-				mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved-templates', 'test-rev', 1)):
-			nuclei_scan.run_nuclei(first.id, stream=stream)
-			out = nuclei_scan.run_nuclei(second.id, stream=stream)
+		nuclei_scan.run_nuclei(first.id, stream=stream)
+		out = nuclei_scan.run_nuclei(second.id, stream=stream)
 		self.assertEqual(seen, [['shared.example.test']])  # the second run had nothing left to scan
 		self.assertEqual(out['reused'], 1)
 		copied = Vulnerability.objects.get(scan_history=second)

@@ -82,7 +82,6 @@ ALLOWED = {
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): reads the stored nmap service name of a port (echo), runs nothing
-        'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/os_detection.py',
         'cveFeed/path_probe.py',
@@ -118,14 +117,13 @@ ALLOWED = {
         'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
-        'agentapi/sentinel_dispatch.py',
         'agentapi/services.py',
         'agentapi/system_status.py',
         'agentapi/template_bundle.py',
         'celery-entrypoint.sh',
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
-        'cveFeed/auth_nuclei.py',
+        'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
@@ -137,14 +135,12 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
@@ -154,7 +150,7 @@ ALLOWED = {
         'cveFeed/nmap_scan.py',
         'cveFeed/notify.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
-        'cveFeed/nuclei_scan.py',
+        'cveFeed/nuclei_scan.py',  # T8 nuclei: ledger service keys (nuclei-light, nuclei-cve) and the finding source/module value, stored data, plus activity text naming the pass; runs nothing
         'cveFeed/nuclei_templates.py',
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
@@ -168,13 +164,12 @@ ALLOWED = {
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
-        'cveFeed/template_fixtures.py',
         'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): holds back a nuclei template's hit on a patched version, runs nothing
-        'cveFeed/templategen.py',
+        'cveFeed/templategen.py',  # T8 nuclei: the AI prompt that asks for a nuclei template, the template library path and the nuclei-cve finding source; runs nothing
         'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/triage.py',
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
-        'cveFeed/validation.py',
+        'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
         'cveFeed/waf_scan.py',
         'reNgine/ai_providers.py',
@@ -305,7 +300,6 @@ ALLOWED = {
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
         'cveFeed/models.py',
         'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
@@ -356,11 +350,8 @@ ALLOWED = {
         'cveFeed/heavy_process.py',
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
-        'cveFeed/template_fixtures.py',
-        'cveFeed/templategen.py',
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/waf_scan.py',
@@ -379,10 +370,7 @@ ALLOWED = {
     '_BIN': [
         'cveFeed/naabu_scan.py',
         'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
         'cveFeed/probes.py',
-        'cveFeed/template_fixtures.py',
-        'cveFeed/templategen.py',
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/wpscan_scan.py',

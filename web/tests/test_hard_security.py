@@ -106,7 +106,7 @@ class ScannerTargetFilterTests(TestCase):
 	def test_a_cve_test_run_directly_still_filters_its_hosts(self):
 		seen = []
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/x.yaml', '')), \
-				mock.patch.object(templategen, '_run_template_with_retry', side_effect=lambda path, chunk, project=None: seen.append(chunk) or
+				mock.patch.object(templategen, '_test_chunk', side_effect=lambda path, chunk, project=None: seen.append(chunk) or
 					[{'host': h, 'vulnerable': False, 'output': ''} for h in chunk]):
 			out = templategen.run_cve_tests(self._cve(), ['good.sec.test', 'bad.sec.test', '169.254.169.254', 'ok.sec.test:8443'])
 		self.assertEqual(seen, [['good.sec.test', 'ok.sec.test:8443']])

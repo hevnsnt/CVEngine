@@ -17,7 +17,7 @@ from unittest import mock
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
+from cveFeed import db_exposure, egress_proxy, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
 from reNgine import bbot, crypto_fields
 from scanEngine.models import Proxy
 
@@ -183,12 +183,11 @@ class ToolFragmentTests(ProxyOn, TestCase):
         for tool in egress_proxy.TOOLS:
             self.assertEqual(egress_proxy.for_tool(tool), [])
         self.turn_on(HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'http://localhost:9']), [])
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'www.example.com']), ['-proxy', HTTP_PROXY])
+        self.assertEqual(egress_proxy.for_tool('wafw00f', ['127.0.0.1:8080', 'http://localhost:9']), [])
+        self.assertEqual(egress_proxy.for_tool('wafw00f', ['127.0.0.1:8080', 'www.example.com']), ['-p', HTTP_PROXY])
 
     def test_each_tool_gets_its_own_arguments(self):
         self.turn_on(LOGIN_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['www.example.com']), ['-proxy', LOGIN_PROXY])
         self.assertEqual(egress_proxy.for_tool('wafw00f', ['www.example.com']), ['-p', LOGIN_PROXY])
         self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
         self.assertEqual(egress_proxy.for_tool('bbot'), ['-c', f'web.http_proxy={LOGIN_PROXY}'])
@@ -203,7 +202,7 @@ class ToolFragmentTests(ProxyOn, TestCase):
     def test_a_tool_that_cannot_use_any_proxy_fails_closed(self):
         self.turn_on('socks5h://203.0.113.5:1080')
         with self.assertRaises(egress_proxy.ProxyUnavailable) as raised:
-            egress_proxy.for_tool('nuclei', ['www.example.com'])
+            egress_proxy.for_tool('wafw00f', ['www.example.com'])
         self.assertNotIn('203.0.113.5', str(raised.exception))
         self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com'])[0], '--proxy')
 
@@ -215,40 +214,6 @@ class IntegrationTests(ProxyOn, TestCase):
         self.assertNotIn('--proxy', testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x'))
         args = testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x', ['--proxy', '203.0.113.50:3128'])
         self.assertEqual((args[args.index('--proxy') + 1], args[-1]), ('203.0.113.50:3128', 'a.example.com:443'))
-
-    def run_nuclei(self, hosts):
-        path = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        self.addCleanup(os.unlink, path.name)
-        path.write('\n'.join(hosts) + '\n')
-        path.close()
-        captured = {}
-
-        class Stop(Exception):
-            pass
-
-        def popen(argv, **kwargs):
-            captured['argv'] = argv
-            raise Stop
-
-        with mock.patch.object(nuclei_scan.subprocess, 'Popen', popen), \
-                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/templates', None, None)):
-            try:
-                list(nuclei_scan.stream_nuclei(path.name))
-            except Stop:
-                pass
-        return captured.get('argv')
-
-    def test_nuclei_runs_through_the_proxy_when_on_and_directly_when_off(self):
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY, use=False)
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY)
-        argv = self.run_nuclei(['www.example.com', '203.0.113.9:8443'])
-        self.assertEqual(argv[argv.index('-proxy') + 1], HTTP_PROXY)
-        self.assertNotIn('-proxy', self.run_nuclei(['127.0.0.1:8080']))  # a loopback fixture stays local
-        self.turn_on('socks5h://203.0.113.5:1080')
-        with self.assertRaises(egress_proxy.ProxyUnavailable):  # never a direct run behind the administrator's back
-            self.run_nuclei(['www.example.com'])
 
     def test_wafw00f_wpscan_and_testssl_runs(self):
         from cveFeed import heavy_process

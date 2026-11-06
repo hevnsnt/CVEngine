@@ -341,7 +341,7 @@ class NucleiValidateTests(StageBase):
     def test_a_new_template_is_checked_on_the_scanner(self):
         self.arm('nuclei_validate')
         with FakeScanner(kinds=['nuclei_validate']) as fake:
-            valid, output = templategen.validate_anywhere(self.TEMPLATE, '/nonexistent.yaml', self.project)
+            valid, output = templategen.validate_anywhere(self.TEMPLATE, self.project)
         self.assertEqual(fake.served[0]['target'], {'mode': 'validate', 'template': self.TEMPLATE})
         self.assertTrue(valid)
         self.assertIn('no match on benign local fixture', output)
@@ -350,7 +350,7 @@ class NucleiValidateTests(StageBase):
         self.arm('nuclei_validate')
         answer = {**fixture('nuclei_validate'), 'fixture_ok': False, 'fixture_note': 'matched a benign local fixture (possible false positive)'}
         with FakeScanner(kinds=['nuclei_validate'], responders={'nuclei_validate': answer}):
-            valid, output = templategen.validate_anywhere(self.TEMPLATE, '/nonexistent.yaml', self.project)
+            valid, output = templategen.validate_anywhere(self.TEMPLATE, self.project)
         self.assertFalse(valid)
         self.assertIn('possible false positive', output)
 
@@ -397,8 +397,19 @@ class NucleiValidateTests(StageBase):
         self.assertEqual(outcomes[0]['hit']['matched-at'], 'https://www.rt.test/x')
         self.assertEqual(outcomes[1]['error'], dispatch.NOT_REPORTED)  # left out by the scanner: not tested, never a clean "no match"
 
-    def test_without_a_project_the_template_test_never_leaves_this_server(self):
-        with mock.patch.object(dispatch, 'try_template_test') as remote, mock.patch.object(templategen, '_run_template', return_value=['local']):
-            self.assertEqual(templategen._run_anywhere('/t.yaml', ['https://www.rt.test']), ['local'])
-            self.assertEqual(templategen._run_anywhere('/t.yaml', ['https://www.rt.test'], secret_file='/s', project=self.project.id), ['local'])
-        remote.assert_not_called()  # a signed-in run is never dispatched either
+    def test_without_a_project_the_template_test_asks_no_scanner_and_runs_nowhere(self):
+        self.arm('nuclei_validate')
+        with mock.patch.object(dispatch, 'try_template_test') as remote:
+            out = templategen._run_on_scanner('/t.yaml', ['https://www.rt.test'], None)
+        remote.assert_not_called()
+        self.assertEqual([(o['host'], o['vulnerable']) for o in out], [('https://www.rt.test', False)])
+        self.assertIn('not tested', out[0]['error'])  # never a clean "no match"
+
+    def test_with_every_kind_allowed_here_the_template_check_still_waits_for_a_scanner(self):
+        with LocalFallback('all'):  # nuclei_validate is in NEVER_LOCAL: the variable cannot let it run here
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch.nuclei_validate_ready(self.project)
+            with self.assertRaises(resources.ScannerUnavailable):
+                templategen.validate_anywhere(self.TEMPLATE, self.project)
+            outcomes = dispatch.try_template_test(self.TEMPLATE, ['https://www.rt.test'], self.project.id)
+        self.assertIn('not tested', outcomes[0]['error'])

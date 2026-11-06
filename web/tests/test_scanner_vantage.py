@@ -82,7 +82,7 @@ class VantageWarningTests(VantageBase):
         os.environ.pop(ENV, None)
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan to the built-in scanner', out[0])
+        self.assertIn('moves nmap, naabu, testssl, nmap_udp, wpscan to the built-in scanner', out[0])
 
     def test_an_image_that_applies_them_or_no_builtin_scanner_is_quiet(self):
         os.environ[ENV] = 'none'
@@ -109,15 +109,15 @@ class VantageWarningTests(VantageBase):
         self.proxy_on()
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, wpscan, waf, bbot_discovery, http_probe, "
-                                 "bucket_check, vhost_probe, subdir_probe, alive_check, nuclei_validate to the built-in scanner, whose image "
+        self.assertEqual(out[0], "CVENGINE_LOCAL_FALLBACK moves testssl, wpscan, waf, bbot_discovery, http_probe, "
+                                 "bucket_check, vhost_probe, subdir_probe, alive_check to the built-in scanner, whose image "
                                  "does not use this server's egress proxy; update it (the server's updater pulls the image this release pins).")
 
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
         # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
         # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
-        # probes (http_probe), the bucket checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check) and nuclei (nuclei_validate's test) do
-        os.environ[ENV] = 'nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,nuclei_validate'
+        # probes (http_probe), the bucket checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check) do
+        os.environ[ENV] = 'testssl,wpscan,waf,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -135,8 +135,8 @@ class VantageWarningTests(VantageBase):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
-                      'bucket_check, vhost_probe, subdir_probe, alive_check, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe, nuclei_validate to the built-in scanner, whose image does not use '
+        self.assertIn('moves testssl, nmap_udp, wpscan, openvas, waf, bbot_discovery, http_probe, dns_resolve, '
+                      'bucket_check, vhost_probe, subdir_probe, alive_check, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])
         self.assertTrue(out[0].startswith('CVENGINE_LOCAL_FALLBACK moves '))
 

@@ -208,15 +208,14 @@ class WrapperPolicyTests(DispatchBase):
                     runner(many)
         local.assert_not_called()
 
-    def test_nuclei_does_not_run_unresolvable_targets_locally(self):
+    def test_nuclei_does_not_send_unresolvable_targets_anywhere(self):
         self.make_sentinel(['nuclei_light'])
-        local = mock.Mock(return_value=iter(()))
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', return_value=[]), \
-                mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True):
+        with mock.patch('agentapi.sentinel_dispatch.resolvable_targets', return_value=[]), \
+                mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
             import tempfile
             with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
                 handle.write('nothing.invalid\n')
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
             self.assertEqual(list(stream(handle.name)), [])
-        local.assert_not_called()
+        sent.assert_not_called()

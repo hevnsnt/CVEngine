@@ -16,6 +16,7 @@ from agentapi.models import Agent, SentinelTask
 from cveFeed import nmap_scan, nuclei_scan
 from cveFeed.wpscan_scan import Blocked, NotWordPress, run_wpscan_process
 from dashboard.models import Org, Project
+from reNgine.resources import ScannerUnavailable
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain
 from targetApp.models import Domain
@@ -92,9 +93,10 @@ class ZeroSentinelRegressionTests(DispatchBase):
         self.assertIsNone(local_ports)
         self.assertFalse(SentinelTask.objects.exists())  # not even a row was created
 
-    def test_wrap_nuclei_stream_returns_the_literal_unwrapped_function(self):
-        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
-        self.assertIs(stream, nuclei_scan.stream_nuclei)  # identity, not just equal: _run_nuclei checks `stream is stream_nuclei`
+    def test_wrap_nuclei_stream_with_no_scanner_waits_and_never_runs_here(self):
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            with self.assertRaises(ScannerUnavailable):  # no local path at all (NEVER_LOCAL), whatever CVENGINE_LOCAL_FALLBACK says
+                dispatch.wrap_nuclei_stream(self.scan, kind)
 
     def test_dispatch_or_none_is_a_no_op(self):
         self.assertIsNone(dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}))
@@ -448,7 +450,6 @@ class NucleiDispatchTests(DispatchBase):
                    'host': 'www.example.test', 'matched_at': 'https://www.example.test/', 'description': '', 'tags': [],
                    'extracted_results': []}]}
         stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
-        self.assertIsNot(stream, nuclei_scan.stream_nuclei)
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             light_result = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
         self.assertEqual(light_result['hosts'], 1)
@@ -457,30 +458,27 @@ class NucleiDispatchTests(DispatchBase):
         self.assertIn('jQuery', [t.name for t in sub.technologies.all()])
 
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop, one dispatch_or_none per chunk; test_stage_parallel covers the fan-out
-    def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_runs_here(self):
-        """A stage marks its whole list scanned once the stream returns, so the targets past the first chunk must not be dropped."""
+    def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_waits(self):
+        """A stage marks its whole list scanned once the stream returns, so the targets past the first chunk must not be dropped, and a chunk no
+        scanner took is never read as scanned: the stream raises ScannerUnavailable and nothing runs here."""
         self.make_sentinel(['nuclei_light'])
         targets = [f'h{i}.example.test' for i in range(dispatch.MAX_ADDRESSES * 2 + 5)]
         path = os.path.join(tempfile.mkdtemp(), 'targets.txt')
         with open(path, 'w') as handle:
             handle.write('\n'.join(targets))
-        sent, local = [], []
+        sent = []
 
         def fake_dispatch(project, kind, target, **kw):
             sent.append(list(target['targets']))
-            return {'outcome': 'done', 'findings': []} if len(sent) < 3 else None  # the third chunk is not taken by a Sentinel
+            if len(sent) < 3:
+                return {'outcome': 'done', 'findings': []}
+            raise ScannerUnavailable(kind, 'the third chunk is not taken by a Sentinel')
 
-        def fake_local(targets_file, **kw):
-            with open(targets_file) as handle:
-                local.append(handle.read().split())
-            return iter(())
-
-        with mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch), mock.patch.object(dispatch, 'resolvable_targets', lambda t: list(t)), \
-                mock.patch('cveFeed.nuclei_scan.stream_nuclei', fake_local):
-            list(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)(path))
-        self.assertEqual(sent[0] + sent[1] + local[0], targets)
+        with mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch), mock.patch.object(dispatch, 'resolvable_targets', lambda t: list(t)):
+            with self.assertRaises(ScannerUnavailable):
+                list(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)(path))
+        self.assertEqual(sent[0] + sent[1] + sent[2], targets)
         self.assertEqual([len(c) for c in sent[:2]], [dispatch.MAX_ADDRESSES] * 2)
-        self.assertEqual(len(local[0]), 5)
 
     def test_light_pass_a_finding_with_no_name_links_nothing(self):
         # cveFeed.nuclei_scan.tech_name_from names a technology from info.name (or, for the real tech-detect template,
@@ -523,7 +521,6 @@ class NucleiDispatchTests(DispatchBase):
                    'host': 'www.example.test', 'matched_at': 'https://www.example.test/admin', 'description': 'found it',
                    'extracted_results': ['panel'], 'tags': ['panel']}]}
         stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_targeted', timeout=5)
-        self.assertIsNot(stream, nuclei_scan.stream_nuclei)
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             targeted = nuclei_scan._run_nuclei(self.scan.id, stream=stream, targets=['www.example.test'])
         self.assertEqual(targeted['findings'], 1)
@@ -532,36 +529,23 @@ class NucleiDispatchTests(DispatchBase):
         self.assertEqual(vuln.template_id, 'exposed-panel')
         self.assertEqual(vuln.severity, 3)  # NUCLEI_SEVERITY_MAP['high']
 
-    def test_a_signed_in_pass_runs_locally_and_is_never_dispatched(self):
-        """A nuclei pass with a secrets file must not be handed to a Sentinel: it would run signed out while auth_nuclei labelled its
-        findings as seen while signed in, and the stored credential never leaves this server."""
-        self.make_sentinel(['nuclei_light', 'nuclei_targeted'])
-        seen = []
-
-        def local_stream(path, **kwargs):
-            seen.append(kwargs)
-            return iter([{'host': 'ran-here'}])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream), \
-                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as dispatched:
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_targeted', timeout=5)
-            self.assertIsNot(stream, local_stream)  # a Sentinel is eligible, so the wrapper is in play
-            lines = list(stream('/tmp/does-not-exist-targets.txt', secret_file='/tmp/secrets.yaml', tags=['cve']))
-        dispatched.assert_not_called()
-        self.assertEqual(lines, [{'host': 'ran-here'}])
-        self.assertEqual(seen, [{'secret_file': '/tmp/secrets.yaml', 'tags': ['cve']}])
-
-    def test_timeout_falls_back_to_the_real_local_stream(self):
+    def test_a_sentinel_that_never_answers_makes_the_stage_wait_and_nothing_runs_here(self):
         self.make_sentinel(['nuclei_light'])
-        calls = []
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=0.2)
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+            f.write('www.example.test\n')
+        with self.assertRaises(ScannerUnavailable):
+            list(stream(f.name))
+        self.assertEqual(SentinelTask.objects.get().status, 'expired')
 
-        def local_stream(path, **kwargs):
-            calls.append(path)
-            return iter([{'host': 'local-fallback-ran'}])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream):
+    def test_a_chunk_nobody_finished_is_never_read_as_scanned(self):
+        self.make_sentinel(['nuclei_light'])
+        with mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', return_value=None):
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=0.2)
-            lines = list(stream('/tmp/does-not-exist-targets.txt'))
-        self.assertTrue(calls)  # the real local stream ran once the dispatch wait timed out
-        self.assertEqual(lines, [{'host': 'local-fallback-ran'}])
+            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                f.write('www.example.test\n')
+            with self.assertRaises(ScannerUnavailable):
+                list(stream(f.name))
 
     def test_deep_pass_sentinel_findings_land_in_vulnerability_rows_via_the_unchanged_local_loop(self):
         """The weekly deep pass shares wrap_nuclei_stream with light/targeted (agentapi.sentinel_dispatch is fully generic
@@ -571,7 +555,6 @@ class NucleiDispatchTests(DispatchBase):
                    'host': 'www.example.test', 'matched_at': 'https://www.example.test/', 'description': 'found it',
                    'extracted_results': [], 'tags': []}]}
         stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_deep', timeout=5)
-        self.assertIsNot(stream, nuclei_scan.stream_nuclei)
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             deep = nuclei_scan._run_nuclei(self.scan.id, stream=stream, targets=['www.example.test'])
         self.assertEqual(deep['findings'], 1)
@@ -635,24 +618,17 @@ class ResolvableTargetsTests(DispatchBase):
             list(stream(path))
         self.assertEqual(sent.call_args.args[2]['targets'], ['www.example.test'])
 
-    def test_a_chunk_that_resolves_nowhere_falls_back_to_the_real_local_stream_not_a_pointless_dispatch(self):
+    def test_a_chunk_that_resolves_nowhere_is_not_dispatched_and_runs_nowhere(self):
         self.make_sentinel(['nuclei_light'])
-        calls = []
-
-        def local_stream(path, **kwargs):
-            calls.append(path)
-            return iter([])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream):
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
-            with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=False), \
-                    mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
-                import tempfile
-                with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
-                    f.write('gone.example.test\n')
-                    path = f.name
-                list(stream(path))
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=False), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
+            import tempfile
+            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                f.write('gone.example.test\n')
+                path = f.name
+            self.assertEqual(list(stream(path)), [])
         sent.assert_not_called()
-        self.assertEqual(calls, [path])
 
 
 class WpscanDispatchTests(DispatchBase):
@@ -743,7 +719,7 @@ class CompletionCeilingTests(DispatchBase):
             self.assertEqual(dispatch._dispatch_timeout('nmap'), dispatch.COMPLETION_CEILING['nmap'])
 
     def test_a_task_still_running_past_ninety_seconds_is_not_given_up_on(self):
-        agent = self.make_sentinel(['nuclei_light'])
+        agent = self.make_sentinel(['nmap'])
         result = {'outcome': 'done', 'findings': []}
         clock = {'t': 1000.0}
         real_sleep = time.sleep
@@ -756,12 +732,12 @@ class CompletionCeilingTests(DispatchBase):
             real_sleep(0.001)
         with mock.patch('agentapi.sentinel_dispatch.time.monotonic', side_effect=lambda: clock['t']), \
                 mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=jump), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
-            out = dispatch.dispatch_or_none(self.project, 'nuclei_light', {'targets': ['10.0.0.1'], 'tags': [], 'severities': []}, host='x')
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['10.0.0.1']}, host='x')
         self.assertEqual(out, result)
         self.assertEqual(SentinelTask.objects.get().status, 'done')  # never expired, so never also run locally
 
     def test_a_sentinel_that_stopped_heartbeating_is_let_go_when_its_lease_lapses_not_at_the_ceiling(self):
-        agent = self.make_sentinel(['nuclei_light'])
+        agent = self.make_sentinel(['nmap'])
         real_sleep = time.sleep
         state = {'n': 0}
 
@@ -773,7 +749,7 @@ class CompletionCeilingTests(DispatchBase):
         with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
                 mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
             start = time.monotonic()
-            out = dispatch.dispatch_or_none(self.project, 'nuclei_light', {'targets': ['10.0.0.1'], 'tags': [], 'severities': []}, host='x')
+            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['10.0.0.1']}, host='x')
         self.assertIsNone(out)
         self.assertLess(time.monotonic() - start, 5)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')

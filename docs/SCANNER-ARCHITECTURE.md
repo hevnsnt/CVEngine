@@ -106,9 +106,10 @@ which send nothing to the target and need no vantage point.
 
 ### Open items from the inventory
 
-- `cveFeed/templategen.py` runs nuclei to validate AI-written templates and to test approved ones: decided, the `nuclei_validate` kind (contract
-  version 3, built-in scanner only). Still on the server: the maintainer's approval of a reviewed draft (`approve_reviewed_template`, a loopback
-  fixture), the signed-in template run (`auth_nuclei`, which needs the secure read), and `nuclei -update-templates` in `cveFeed/tasks.py`.
+- `cveFeed/templategen.py` ran nuclei to validate AI-written templates and to test approved ones: done, the `nuclei_validate` kind (contract
+  version 3, built-in scanner only, in `NEVER_LOCAL`); the local runners, the maintainer's loopback-fixture approval of a draft
+  (`approve_reviewed_template`) and the signed-in template run were deleted with the local nuclei paths (T8). Still on the server:
+  `nuclei -update-templates` in `cveFeed/tasks.py`, which keeps the template library the Sentinel bundle is packed from fresh.
 - `reNgine/resources.py` and `reNgine/tasks.py` still start subprocesses (legacy `run_command`); check what remains of them.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
@@ -263,7 +264,7 @@ the card of the built-in scanner shows a Built-in chip and no Update now button.
 
 ## `CVENGINE_LOCAL_FALLBACK`
 
-Unset, every kind except the built-in scanner's (`sentinel_dispatch.BUILTIN_SCANNER_KINDS`: nmap, naabu, the three nuclei passes, testssl, the UDP sweep and WPScan) may still run on this server once the built-in scanner has enrolled, and every kind before that or with the scanner turned off (`default_fallback_kinds`). `all` is every kind, as in 1.3. `none` or a comma list of kinds
+Kinds in `sentinel_dispatch.NEVER_LOCAL` (`secrets_scan` and the nuclei kinds: the three passes and `nuclei_validate`) never run on this server, whatever this variable says; a name of one in it is ignored. Unset, every other kind except the built-in scanner's (`sentinel_dispatch.BUILTIN_SCANNER_KINDS`: nmap, naabu, the three nuclei passes, testssl, the UDP sweep and WPScan) may still run on this server once the built-in scanner has enrolled, and every kind before that or with the scanner turned off (`default_fallback_kinds`). `all` is every kind, as in 1.3. `none` or a comma list of kinds
 (`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
 `resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
 nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released; the one exception is the nmap fast scan,

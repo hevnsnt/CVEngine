@@ -1,4 +1,6 @@
-"""Dispatch-or-local: the one branch the scan pipeline takes before it runs nmap, naabu, nuclei or testssl.sh itself.
+"""Dispatch-or-local: the one branch the scan pipeline takes before it runs nmap, naabu, or testssl.sh itself, and the way every template pass
+(``nuclei_light``, ``nuclei_targeted``, ``nuclei_deep``, ``nuclei_validate``) reaches a scanner: those kinds have no local path at all
+(``NEVER_LOCAL``), so with no Sentinel able to take the work the stage waits (``ScannerUnavailable``) and its targets stay due.
 
 For each of the stages this phase covers, the pipeline asks here first: is there a live, eligible Sentinel for this
 project with free capacity and the right capability? If not (the common case today: a project with no Sentinels
@@ -14,21 +16,19 @@ created) to actually run it. **A Sentinel at its concurrency limit is not a miss
 is busy the task waits in the queue for a slot, under its own wait budget (``_queue_timeout``) separate from both, and the stage
 falls back only when that runs out or the last live Sentinel goes away. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
 takes and handed to the *same persistence function* local execution uses (``cveFeed.nmap_scan.persist_inventory``,
-``cveFeed.naabu_scan.persist_open_ports``, or - for nuclei - a reconstructed result line fed through the untouched
+``cveFeed.naabu_scan.persist_open_ports``, or - for the template passes - a reconstructed result line fed through the
 ``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel, the caller falls
-back to running the tool locally, exactly as today; the subprocess-running code itself (``nmap_scan.run_nmap_xml``,
-``naabu_scan.run_naabu``, ``nuclei_scan.stream_nuclei``) is never touched by this module.
+back to running the tool locally where the kind may (``CVENGINE_LOCAL_FALLBACK``), and otherwise waits.
 
-A stage that splits into several chunk tasks (nmap and naabu: 64 addresses each, nuclei: 64 targets each) sends them side by side
+A stage that splits into several chunk tasks (nmap and naabu: 64 addresses each, the template passes: 64 targets each) sends them side by side
 through ``dispatch_many``: a bounded window of chunk tasks, created up front and waited for in one poll loop, refilled as chunks finish
 (``CVENGINE_STAGE_PARALLEL``, default 4; ``1`` is the serial loop of before). Each chunk is still one task for one Sentinel, with the
-single-task wait above and its own fallback to local execution.
+single-task wait above and its own fallback to local execution where the kind may.
 """
 import contextlib
 import ipaddress
 import logging
 import os
-import tempfile
 import time
 
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
@@ -38,7 +38,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 
 
 # The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
-# doing the work, and a slow tool (nuclei over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
+# doing the work, and a slow tool (a template pass over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
@@ -48,7 +48,7 @@ COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_ta
                       'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
-# Added to a kind's ceiling for each target beyond the first (an address of a chunk, a nuclei target): a chunk of 64 addresses takes longer than one.
+# Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
 PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15}
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
@@ -58,7 +58,13 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
-NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+NEVER_LOCAL = (
+    'secrets_scan',  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+    'nuclei_light',
+    'nuclei_targeted',
+    'nuclei_deep',
+    'nuclei_validate',
+)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
 # here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
@@ -1026,7 +1032,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
 def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None):
     """A Sentinel's testssl.sh report items for ``host:port`` (raw, in the exact shape ``cveFeed.testssl_scan.evaluate``
     already reads from a local run), or ``None`` when no Sentinel is eligible, on timeout, or on failure - in which case
-    the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
+    the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu and the template passes this is never chunked: a testssl
     run is already one host:port per call, locally or dispatched."""
     if not any_scanner_for(project, 'testssl'):
         _no_scanner('testssl', project)
@@ -1111,10 +1117,10 @@ def wrap_naabu_runner(project, scan, timeout=None):
     return runner
 
 
-# --- nuclei (light and targeted): an injectable stream matching cveFeed.nuclei_scan.stream_nuclei's own seam -----------
+# --- template passes (light, targeted, deep): an injectable ``stream(targets_file, **kwargs)`` that hands the targets to a Sentinel -----------
 
 def _bare_host(target):
-    """The hostname or address inside a nuclei target string built by ``nuclei_scan.build_targets`` (a bare host, a bare
+    """The hostname or address inside a target string built by ``nuclei_scan.build_targets`` (a bare host, a bare
     IP, or ``host:port`` for a non-default port)."""
     return target.rsplit(':', 1)[0].strip() if target.count(':') == 1 else target.strip()
 
@@ -1160,13 +1166,13 @@ def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT
     return [t for t in targets if live.get(hosts[t])]
 
 def _finding_to_nuclei_line(finding):
-    """One Sentinel-reported nuclei finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
-    ``cveFeed.nuclei_scan.host_of`` already read from nuclei's own ``-jsonl`` output. Fields nuclei's full output carries
+    """One Sentinel-reported template finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
+    ``cveFeed.nuclei_scan.host_of`` read from the scanner's own ``-jsonl`` output. Fields the full output carries
     that a Sentinel's typed, clipped result does not carry (a curl command; the request/response transcript, ``type`` from a client that
-    does not send these optional fields) are left out, not guessed: the untyped nuclei line already tolerates them being absent, and a
+    does not send these optional fields) are left out, not guessed: the untyped result line already tolerates them being absent, and a
     finding without ``type`` reads as ``http`` as before. ``matcher-name`` is carried through from
-    the Sentinel's own ``matcher_name`` field so a tech-detect template hit names a technology the same way
-    ``cveFeed.nuclei_scan.tech_name_from`` already reads it from a locally-run nuclei line."""
+    the Sentinel's own ``matcher_name`` field so a tech-detect template hit names a technology
+    (``cveFeed.nuclei_scan.tech_name_from``)."""
     return {'host': finding.get('host') or finding.get('matched_at') or '', 'matched-at': finding.get('matched_at') or '',
             'type': finding.get('type') or 'http', 'template': finding.get('template_id') or '', 'template-id': finding.get('template_id') or '',
             'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': finding.get('request'),
@@ -1177,10 +1183,9 @@ def _finding_to_nuclei_line(finding):
 
 
 def _nuclei_target(kind, targets, kwargs):
-    """The target of a dispatched nuclei task: the targets, the tags and severities this pass would run with locally, and the template policy the
-    local run applies. The light pass is nuclei's technology fingerprint (``-tags tech -severity info``): ``run_light_nuclei`` asks for it with a
-    ``tech`` flag only the unwrapped local stream takes, so the Sentinel is told the same here, or it would run the whole template library at
-    every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
+    """The target of a dispatched template task: the targets, the tags and severities the pass runs with, and the template policy it applies. The
+    light pass is the technology fingerprint (tags ``tech``, severity ``info``), so the Sentinel is told that here, or it would run the whole
+    template library at every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
     ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
     nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
     ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
@@ -1189,21 +1194,15 @@ def _nuclei_target(kind, targets, kwargs):
 
     from agentapi import template_bundle
     from cveFeed import nuclei_scan
-    # no severities given: the local run's own default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
-    # would run every severity, ``unknown`` included, and the two runs of one pass would not agree
+    # no severities given: the default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
+    # would run every severity, ``unknown`` included
     tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
-    if kind == 'nuclei_light' or kwargs.get('tech'):
+    if kind == 'nuclei_light':
         tags, severities = ['tech'], ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
     rev = nuclei_scan.policy_rev()
     return {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
             'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()}}
-
-
-def _local_kwargs(kind, kwargs):
-    """The keyword arguments the local stream gets when a dispatched stage falls back to it: the light pass keeps its ``tech`` flag, which the
-    wrapper in place of ``stream_nuclei`` hid from the caller, so the fallback is the quick fingerprint and not the whole template library."""
-    return {**kwargs, 'tech': True} if kind == 'nuclei_light' else kwargs
 
 
 def _targets_label(chunk):
@@ -1214,32 +1213,14 @@ def _chunks(targets):
     return [targets[i:i + MAX_ADDRESSES] for i in range(0, len(targets), MAX_ADDRESSES)]
 
 
-@contextlib.contextmanager
-def _targets_file(targets):
-    """A temporary file with one target per line, for a local nuclei run over one chunk."""
-    handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False, encoding='utf-8')
-    try:
-        with handle:
-            handle.write('\n'.join(targets) + '\n')
-        yield handle.name
-    finally:
-        try:
-            os.unlink(handle.name)
-        except OSError:
-            pass
-
-
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
-    """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` matching ``nuclei_scan.stream_nuclei``'s own
-    signature, for ``run_light_nuclei``/``run_targeted_nuclei``'s ``stream`` parameter. Returns the literal, unwrapped
-    ``stream_nuclei`` function (not a wrapper around it) when no Sentinel is eligible, so ``_run_nuclei``'s own
-    ``stream is stream_nuclei`` identity check, and every other local behaviour, is unaffected."""
-    from cveFeed.nuclei_scan import stream_nuclei
+    """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` for ``run_light_nuclei``/``run_targeted_nuclei``/``run_nuclei``'s
+    ``stream`` parameter: it hands the targets to a Sentinel in chunk tasks and yields the findings they report. The kind never runs on this
+    server (``NEVER_LOCAL``): with no live scanner able to take it, ``ScannerUnavailable`` is raised here, and from the stream when a chunk could
+    not be done, so the stage waits and the targets stay due. A chunk none of whose names resolves is not sent and not reported (nothing to run)."""
     project = scan.domain.project
-    if internal:  # the target is inside a private network: only a Sentinel there can run it, and there is never a local fallback
+    if internal:  # the target is inside a private network: only a Sentinel there can run it
         def internal_stream(targets_file, **kwargs):
-            if kwargs.get('secret_file'):  # a signed-in pass: a Sentinel is never sent a stored credential, and it must not run signed out and be reported as signed in
-                raise RuntimeError('a signed-in nuclei pass cannot run on a Sentinel: the stored sign-in stays on this server')
             try:
                 with open(targets_file, encoding='utf-8') as handle:
                     targets = [line.strip() for line in handle if line.strip()]
@@ -1256,26 +1237,15 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
-        _no_scanner(kind, project)
-        offline_fallback(project, kind)
-        return stream_nuclei
+        _no_scanner(kind, project)  # raises ScannerUnavailable: the kind has no local path
 
     def stream(targets_file, **kwargs):
-        if kwargs.get('secret_file'):
-            # a caller that wrote its own secrets file: it never goes to a Sentinel (a dispatched run would be signed out while its findings were
-            # labelled as seen while signed in), so it runs here, when the kind may. cveFeed.auth_nuclei uses ``stream.signed_in`` instead.
-            if not fallback_allowed(kind):
-                _no_local(kind, 'a signed-in run that names its own secrets file runs only on this server', project=project)
-            yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
-            return
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
         except OSError:
             targets = []
-        if not targets:  # nothing readable to send: the local run decides what an empty or missing list means
-            if fallback_allowed(kind):
-                yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
+        if not targets:  # nothing readable to send
             return
         chunks = _chunks(targets)  # one task per chunk of MAX_ADDRESSES, several at once: the caller marks the whole list scanned, so none may be dropped
 
@@ -1284,59 +1254,47 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         def prepare(chunk):
             live = resolvable_targets(chunk)
             if not live:
-                # nothing in the chunk resolves (a Sentinel would be asked to do nothing, and nuclei cannot reach what cannot be looked up either: run
-                # it anyway, when the kind may run here, so the existing "ran, found nothing" accounting is unchanged): this chunk runs here
                 unresolved.add(tuple(chunk))
-                return None
+                return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
             return _nuclei_target(kind, live, kwargs), []
-        unserved = []
         with contextlib.closing(dispatch_many(project, kind, chunks, prepare=prepare, scan=scan, timeout=timeout, labeler=_targets_label)) as results:
             for index, result in results:
                 if result is None:
-                    unserved.append(index)  # no Sentinel took it: it runs here once the Sentinels' chunks are in, so they never wait on it
-                    continue
+                    if tuple(chunks[index]) in unresolved:
+                        continue
+                    # the dispatcher raises ScannerUnavailable for a chunk no Sentinel finished; one that comes back empty anyway is never read as scanned
+                    from reNgine.resources import ScannerUnavailable
+                    raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
-        for index in sorted(unserved):
-            if tuple(chunks[index]) in unresolved and not fallback_allowed(kind):
-                continue  # nothing in the chunk resolves: there is nothing for a scanner to run, and nothing may run here
-            if len(targets) <= MAX_ADDRESSES:  # the whole list is this chunk: the caller's own file
-                yield from stream_nuclei(targets_file, **_local_kwargs(kind, kwargs))
-                continue
-            with _targets_file(chunks[index]) as path:
-                yield from stream_nuclei(path, **_local_kwargs(kind, kwargs))
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream
 
 
 def signed_in_stream(scan, kind, timeout=None):
-    """``run(items, **kwargs) -> iterable of result-line dicts``: a signed-in nuclei pass (``cveFeed.auth_nuclei``) over ``items`` (``auth_checks.PlanItem``:
+    """``run(items, **kwargs) -> iterable of result-line dicts``: a signed-in pass (``cveFeed.auth_nuclei``) over ``items`` (``auth_checks.PlanItem``:
     an origin URL and the stored credential that covers it) through the built-in scanner. One task per credential and chunk of origins, carrying
     ``secret_ref`` (a reference to the credential, never its value): only the built-in scanner takes it, and reads the credential once through
-    ``POST sentinel/tasks/<id>/secret``. An external Sentinel is never offered it (``sentinel_broker.SentinelEff.refusal``). When no built-in
-    scanner that reads stored sign-ins is live, the pass runs here with a private secrets file as before if nuclei may run here, and waits
-    (``ScannerUnavailable``) when it may not. The lines are redacted by the caller like a local run's."""
+    ``POST sentinel/tasks/<id>/secret``. An external Sentinel is never offered it (``sentinel_broker.SentinelEff.refusal``). With no built-in
+    scanner that reads stored sign-ins live, the pass waits (``ScannerUnavailable``): nothing is recorded and the targets stay due. The lines are
+    redacted by the caller."""
     project = scan.domain.project
 
     def run(items, **kwargs):
         from agentapi import sentinel_broker
         from cveFeed import auth_checks
-        from cveFeed.nuclei_scan import stream_nuclei
         kwargs = {k: v for k, v in kwargs.items() if k != 'secret_file'}
         for credential, _domains in auth_checks.entries_for(items):
             urls = [item.url for item in items if item.credential.pk == credential.pk]
             for chunk in _chunks(urls):
                 result = dispatch_or_none(project, kind, _nuclei_target(kind, chunk, kwargs), scan=scan, timeout=timeout,
                                           secret_ref=sentinel_broker.secret_ref_for(credential.pk))
-                if result is not None:
-                    for finding in result.get('findings', []):
-                        yield _finding_to_nuclei_line(finding)
-                    continue
-                # no built-in scanner took it and nuclei may run here (dispatch_or_none raised otherwise): the pass of before, for this chunk
-                chunk_items = [item for item in items if item.url in set(chunk)]
-                with auth_checks.secrets_file(auth_checks.entries_for(chunk_items)) as secret_path, _targets_file(chunk) as path:
-                    yield from stream_nuclei(path, secret_file=secret_path, **_local_kwargs(kind, kwargs))
+                if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is only a task that ended without a result
+                    from reNgine.resources import ScannerUnavailable
+                    raise ScannerUnavailable(kind, 'the built-in scanner returned no result for a signed-in pass')
+                for finding in result.get('findings', []):
+                    yield _finding_to_nuclei_line(finding)
     return run
 
 
@@ -1568,10 +1526,8 @@ def _carrier_project(project):
 
 
 def nuclei_validate_ready(project=None):
-    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live built-in scanner, and nuclei may not run here), so the
+    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live built-in scanner: the kind never runs here), so the
     AI is not asked for one first. Records nothing."""
-    if fallback_allowed('nuclei_validate'):
-        return
     carrier = _carrier_project(project)
     if carrier is None or not any_scanner_for(carrier, 'nuclei_validate'):
         from reNgine.resources import ScannerUnavailable
@@ -1579,14 +1535,14 @@ def nuclei_validate_ready(project=None):
 
 
 def try_nuclei_validate(text, project=None):
-    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on the built-in scanner, or ``None`` to run
-    them here. Raises ``ScannerUnavailable`` when the scanner cannot take it and nuclei may not run here."""
+    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on the built-in scanner. Raises
+    ``ScannerUnavailable`` when the scanner cannot take it: the check never runs on this server."""
     carrier = _carrier_project(project)
-    if not _scanner_first(carrier, 'nuclei_validate'):
-        return None
+    scanner_or_local(carrier, 'nuclei_validate')  # raises when no scanner is live
     result = dispatch_or_none(carrier, 'nuclei_validate', {'mode': 'validate', 'template': text})
     if result is None:
-        return None
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable('nuclei_validate', 'the built-in scanner returned no result for the template check')
     return result.get('valid') is True, result.get('output') or '', result.get('fixture_ok'), result.get('fixture_note') or ''
 
 
@@ -1594,23 +1550,24 @@ NOT_REPORTED = 'not tested: the scanner reported no result for this host'
 
 
 def try_template_test(text, hosts, project):
-    """The outcomes (``cveFeed.templategen._run_template``'s shape, one per host in order) of the approved template ``text`` run on the built-in
-    scanner against ``hosts`` of ``project`` (the project the hosts belong to), in tasks of at most ``MAX_ADDRESSES``; ``None`` to run them all
-    here. An entry is ``None`` for a host whose chunk no Sentinel finished and that may run here. A host a finished chunk left out, or one that
-    may not run here while no scanner can take it, is reported as not tested (an error outcome), so it stays due."""
+    """The outcomes (one ``{host, vulnerable, output, ...}`` per host, in order) of the approved template ``text`` run on the built-in
+    scanner against ``hosts`` of ``project`` (the project the hosts belong to), in tasks of at most ``MAX_ADDRESSES``. A host a finished chunk
+    left out, or one no scanner could take (the kind never runs here), is reported as not tested (an error outcome), so it stays due."""
     from reNgine.resources import ScannerUnavailable
     project = _project_of(project) if isinstance(project, int) else project
-    if not _scanner_first(project, 'nuclei_validate'):
-        return None
     hosts = list(hosts)
     chunks = _chunks(hosts)
-    by_host, local, waiting = {}, set(), None
+    by_host, waiting = {}, None
+    try:
+        scanner_or_local(project, 'nuclei_validate')  # raises ScannerUnavailable when no scanner is live
+    except ScannerUnavailable as exc:
+        waiting = exc
+        chunks = []
     try:
         with contextlib.closing(dispatch_many(project, 'nuclei_validate', chunks, labeler=_targets_label,
                                               prepare=lambda chunk: ({'mode': 'test', 'template': text, 'targets': list(chunk)}, []))) as results:
-            for index, result in results:
+            for _index, result in results:
                 if result is None:
-                    local.update(chunks[index])  # through _no_local already: it may run here
                     continue
                 for outcome in result.get('outcomes') or []:
                     by_host.setdefault(outcome['host'], outcome)
@@ -1620,8 +1577,6 @@ def try_template_test(text, hosts, project):
     for host in hosts:
         if host in by_host:
             out.append(by_host[host])
-        elif host in local and waiting is None:
-            out.append(None)
         else:
             error = f'not tested: no scanner could take this work ({waiting.kind})' if waiting else NOT_REPORTED
             out.append({'host': host, 'vulnerable': False, 'output': '', 'error': error})

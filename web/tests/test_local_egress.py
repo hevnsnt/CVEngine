@@ -949,50 +949,6 @@ R2 = {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:400/ho
 
 
 @mock.patch.dict(os.environ, R2)
-class NucleiGovernedTests(Clean, TestCase):
-    """nuclei gets host:25 for every host with port 25 open: each such target is asked of the governor (NUCLEI_TARGET_CONNECTIONS, all or
-    nothing); one not granted is left out of this run, logged paced, and the rest of the run goes ahead."""
-
-    def run_nuclei(self, targets):
-        import tempfile
-
-        from cveFeed import nuclei_scan
-        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        handle.write('\n'.join(targets) + '\n')
-        handle.close()
-        self.addCleanup(os.unlink, handle.name)
-        seen = []
-
-        def fake(path, *a, on_start=None, **k):
-            if on_start:
-                path = on_start()  # the real one calls it once nuclei is let start (after the memory wait): the targets to run, or None
-            if path:
-                seen.extend(open(path).read().split())
-            return iter(())
-        with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake):
-            list(nuclei_scan.stream_nuclei(handle.name))
-        return seen
-
-    def test_a_drained_budget_holds_host_25_targets_back_and_the_rest_runs(self):
-        self.assertEqual(local_egress.take(25, 400), 100)  # this 15 minutes' share is used up
-        targets = [f'198.51.100.{i}:25' for i in range(1, 51)] + ['www.example.test', '198.51.100.1:8443']
-        seen = self.run_nuclei(targets)
-        self.assertEqual(seen, ['www.example.test', '198.51.100.1:8443'])
-        self.assertEqual(local_egress.used_this_hour(25), 100)
-        records = local_egress.connection_log(port=25, limit=1000)['records']
-        self.assertEqual({r['outcome'] for r in records}, {'paced'})
-        self.assertEqual(len(records), 50)
-
-    def test_each_granted_target_is_charged_its_weight_whole(self):
-        self.assertGreater(local_egress.NUCLEI_TARGET_CONNECTIONS, 1)
-        n = 100 // local_egress.NUCLEI_TARGET_CONNECTIONS
-        seen = self.run_nuclei([f'198.51.100.{i}:25' for i in range(1, n + 3)])
-        self.assertEqual(len(seen), n)  # the 15-minute share holds this many whole targets
-        self.assertEqual(local_egress.used_this_hour(25), n * local_egress.NUCLEI_TARGET_CONNECTIONS)
-        self.assertEqual(sorted({r['outcome'] for r in local_egress.connection_log(port=25)['records']}), ['paced', 'sent'])
-
-
-@mock.patch.dict(os.environ, R2)
 class MemoryKillRetryTests(Clean, _ScanFixture, TestCase):
     """scan_in_chunks halves and re-runs a chunk nmap was stopped on for memory: the re-run must not probe port 25 again uncharged."""
     ADDRESSES = [f'192.0.2.{i}' for i in range(10, 20)]
@@ -1266,7 +1222,7 @@ def _grant_log(port=25):
 
 @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:800/hour'})
 class StatedLimitsInvariantTests(Clean, TestCase):
-    """Randomised over eight hours of asks from many callers (nmap chunks, single probes, nuclei targets, testssl.sh runs) at random times:
+    """Randomised over eight hours of asks from many callers (nmap chunks, single probes, weighted targets, testssl.sh runs) at random times:
     every 61 consecutive minute buckets (any 60 minutes) hold at most the hourly budget, and every 16 (any 15 minutes) hold at most a quarter
     of it, or one testssl.sh run and nothing else."""
 
@@ -1282,7 +1238,7 @@ class StatedLimitsInvariantTests(Clean, TestCase):
                 if r < (0.05 if at < T0 + 2 * 3600 else 0.4):
                     local_egress.admit_one(25, 'testssl', '198.51.100.1', weight=local_egress.TESTSSL_CONNECTIONS, now=at, burst=False)
                 elif r < 0.25:
-                    local_egress.admit_one(25, 'nuclei', '198.51.100.2', weight=local_egress.NUCLEI_TARGET_CONNECTIONS, now=at)
+                    local_egress.admit_one(25, 'nmap', '198.51.100.2', weight=25, now=at)
                 elif r < 0.6:
                     local_egress.take(25, rng.randint(1, 64), now=at)
                 else:
@@ -1325,47 +1281,6 @@ class StatedLimitsInvariantTests(Clean, TestCase):
 class SentOnlyOnceStartedTests(Clean, TestCase):
     """A run refused at its memory wait sent nothing: no 'sent' record and no ledger count (its grant stays spent: over-charging is the
     safe side of the cap)."""
-
-    def test_nuclei_refused_for_memory_logs_nothing_sent(self):
-        import tempfile
-
-        from cveFeed import nuclei_scan
-        from reNgine.resources import MemoryBusy
-        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        handle.write('198.51.100.1:25\nwww.example.test\n')
-        handle.close()
-        self.addCleanup(os.unlink, handle.name)
-        with mock.patch('reNgine.resources.heavy_job', side_effect=MemoryBusy('no memory')), mock.patch('targetApp.target_types.refuse_local'), \
-                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
-                mock.patch.object(nuclei_scan, 'nuclei_flags', return_value=[]):
-            with self.assertRaises(MemoryBusy):
-                list(nuclei_scan.stream_nuclei(handle.name))
-        self.assertFalse([r for r in local_egress.connection_log()['records'] if r['outcome'] == 'sent'])
-        self.assertEqual((local_egress.snapshot() or {}).get('hour', {}).get('p25', 0), 0)
-        self.assertFalse(local_egress.used_this_hour(25))  # charged only when nuclei starts
-
-    def test_nuclei_that_starts_logs_its_host_25_target_sent(self):
-        import tempfile
-
-        from cveFeed import nuclei_scan
-        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        handle.write('198.51.100.1:25\n')
-        handle.close()
-        self.addCleanup(os.unlink, handle.name)
-        popen = mock.Mock()
-        popen.return_value.stdout = iter(())
-        popen.return_value.wait.return_value = 0
-        popen.return_value.poll.return_value = 0
-        popen.return_value.returncode = 0
-        with mock.patch('reNgine.resources.heavy_job', return_value=_Job()), mock.patch('targetApp.target_types.refuse_local'), \
-                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/nonexistent', 0, 0)), \
-                mock.patch.object(nuclei_scan, 'nuclei_flags', return_value=[]), mock.patch.object(nuclei_scan.subprocess, 'Popen', popen):
-            try:
-                list(nuclei_scan.stream_nuclei(handle.name))
-            except Exception:  # noqa: BLE001 - the fake process is not a real nuclei; only the order matters here
-                pass
-        popen.assert_called_once()
-        self.assertEqual([r['outcome'] for r in local_egress.connection_log(port=25)['records']], ['sent'])
 
     def test_heavy_process_calls_on_start_only_once_admitted(self):
         from cveFeed import heavy_process
@@ -1631,49 +1546,6 @@ class ChunkHeldAtStartTests(SimpleTestCase):
 
 
 # --- round 3 of the review (#393): no in-scope port 25 is dropped for good ------------------------------------------------------------
-
-@mock.patch.dict(os.environ, R2)
-class NucleiHost25RotationTests(Clean, TestCase):
-    """Only four host:25 targets (25 each) fit in a quiet 15 minutes. They are admitted oldest-admitted first, so every target runs within
-    ceil(N / 4) runs that each start in an empty window (the round-3 probe NucleiHost25Starvation, inverted)."""
-
-    def run_nuclei(self, hosts, at):
-        import tempfile
-
-        from cveFeed import nuclei_scan
-        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        handle.write('\n'.join(nuclei_scan.build_targets([], [], [(h, 25) for h in hosts])) + '\n')
-        handle.close()
-        self.addCleanup(os.unlink, handle.name)
-        ran = []
-
-        def fake(path, *a, on_start=None, **k):
-            got = on_start()
-            ran.extend(open(got).read().split() if got else [])
-            return iter(())
-        with mock.patch.object(nuclei_scan, '_stream_nuclei', side_effect=fake), mock.patch.object(local_egress, 'launch_now', return_value=at):
-            list(nuclei_scan.stream_nuclei(handle.name))
-        return ran
-
-    def test_every_target_runs_within_ceil_n_over_4_empty_windows(self):
-        import math
-        hosts = [f'198.51.100.{i}' for i in range(10, 22)]
-        per_window = 100 // local_egress.NUCLEI_TARGET_CONNECTIONS
-        seen = {}
-        for run in range(math.ceil(len(hosts) / per_window)):
-            for target in self.run_nuclei(hosts, T0 + run * 7200):  # each run starts in an empty window
-                seen[target] = seen.get(target, 0) + 1
-        self.assertEqual(sorted(seen), sorted(f'{h}:25' for h in hosts))
-        self.assertEqual(set(seen.values()), {1})
-
-    def test_rotation_over_six_runs_is_even(self):
-        hosts = [f'198.51.100.{i}' for i in range(10, 22)]
-        seen = {}
-        for run in range(6):
-            for target in self.run_nuclei(hosts, T0 + run * 7200):
-                seen[target] = seen.get(target, 0) + 1
-        self.assertEqual(set(seen.values()), {2})  # 6 runs x 4 = 24 = 12 targets x 2
-
 
 @mock.patch.dict(os.environ, R2)
 class TestsslPriorityTests(Clean, TestCase):

@@ -426,23 +426,23 @@ class CallerTests(StageBase):
             handle.write('\n'.join(targets))
         return targets, path
 
-    def test_the_nuclei_stream_still_yields_every_line_of_every_chunk_and_runs_an_unserved_chunk_here_last(self):
+    def test_the_nuclei_stream_still_yields_every_line_of_every_chunk_and_waits_for_an_unserved_chunk(self):
+        from reNgine.resources import ScannerUnavailable
         targets, path = self._targets(dispatch.MAX_ADDRESSES * 3 + 7)
         chunks = dispatch._chunks(targets)
         fake = FakeSentinels(self.two_agents(), chunks, outcome=lambda i: 'failed' if i == 1 else 'done')
-        local = []
+        hosts = []
 
-        def local_stream(targets_file, **kw):
-            with open(targets_file) as handle:
-                local.append(handle.read().split())
-            return iter([{'host': 'local.example.test'}])
-        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True), mock.patch('cveFeed.nuclei_scan.stream_nuclei', local_stream):
+        def drain():
+            try:
+                for line in stream(path):
+                    hosts.append(line['host'])
+            except ScannerUnavailable:  # the chunk a Sentinel failed may not run here: the stage waits, after the finished chunks are in
+                return 'waiting'
+        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
-            lines = fake.run(lambda: list(stream(path)))
-        hosts = [line['host'] for line in lines]
-        self.assertEqual(sorted(h for h in hosts if h != 'local.example.test'), sorted(chunks[0] + chunks[2] + chunks[3]))
-        self.assertEqual(hosts[-1], 'local.example.test')  # the Sentinels' chunks first, the local one once they are in
-        self.assertEqual(local, [chunks[1]])
+            self.assertEqual(fake.run(drain), 'waiting')
+        self.assertEqual(sorted(hosts), sorted(chunks[0] + chunks[2] + chunks[3]))
         self.assertEqual(fake.peak_inflight, 4)
 
     def test_the_internal_nuclei_stream_fans_out_too_and_raises_for_an_unanswered_chunk(self):

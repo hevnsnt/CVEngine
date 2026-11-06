@@ -11,7 +11,7 @@ Five parts, all state in Redis (no table, no migration):
 * **The egress ledger** (``record``, ``snapshot``): new outbound TCP connection attempts from this server, per hour, kept for seven days.
   Counted per watched port (``CVENGINE_LOCAL_WATCH_PORTS``, default 25, 465, 587, 23, 3389) and in total for every port, and per source (the
   scan kind and the project) for the watched ports. In-process probes (``cveFeed.pinned_transport``, the database checks) are counted exactly,
-  one per connection attempt. nmap, naabu, testssl.sh and nuclei are black boxes: they are counted from their probe plan (one attempt per
+  one per connection attempt. nmap, naabu and testssl.sh are black boxes: they are counted from their probe plan (one attempt per
   address and port in the plan, before retries), so those numbers are an estimate, said so on every surface that shows them.
 * **The connection log** (``log_connections``, ``connection_log``, ``connection_log_csv``): one record per outbound connection this server's
   scanners open (or hold back) to a logged port (the app's own mail through Settings, Email is not a scan and is not logged) (``CVENGINE_EGRESS_LOG_PORTS``, default 25, 465, 587): time, destination address and port, sent, paced or skipped, the tool,
@@ -22,8 +22,8 @@ Five parts, all state in Redis (no table, no migration):
   default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, and
   never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
   which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
-  after it; one that has waited ALONE_PRIORITY_AFTER gets priority over ordinary grants, see ``wait_alone``). A nuclei ``host:25`` target is
-  charged NUCLEI_TARGET_CONNECTIONS, an estimate, least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared by
+  after it; one that has waited ALONE_PRIORITY_AFTER gets priority over ordinary grants, see ``wait_alone``). Single targets that share a run are
+  admitted least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared by
   every worker. A local pass asks it when it is planned (``plan``), and every process of the pass asks again when it starts, after its memory
   wait (``launch``: the planned grant is given back and the tokens taken in the minute the process starts; no room, and that process runs
   without the port, which is owed): the window counts what STARTED. Addresses it grants are scanned as before.
@@ -69,9 +69,6 @@ BURST_SHARE = 4  # at most a quarter of an hour's budget in any 15 minutes: an h
 # 231 against a legacy one (testssl.sh 3.2.4, counted at the server): charged 240, rounded up, all or nothing; being more than a quarter of the
 # default budget, a run goes alone in its 15 minutes (see _TAKE).
 TESTSSL_CONNECTIONS = 240
-# A nuclei target host:25: an estimate, not a measurement. nuclei's HTTP probe of a host:port (http and https), plus the ssl and tcp templates
-# that run against the port the input names, about ten here, each retried at most once (-retries 1): about 24, rounded up to 25.
-NUCLEI_TARGET_CONNECTIONS = 25
 # A testssl.sh run on port 25 (more than the 15-minute quarter) needs 15 minutes with no other port-25 start. One that has waited this long
 # for them gets priority: ordinary port-25 grants are held (paced: owed or due) until it starts, which the window then allows within another
 # 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked (it asks every ALONE_ASK_EVERY while it waits).
@@ -745,8 +742,8 @@ ROTATION_DAYS = 30
 
 
 def last_admitted(kind, targets):
-    """``{target: time it was last admitted}`` for ``targets`` of ``kind`` (absent: never). Single targets that share a run (nuclei's
-    ``host:25`` targets) are admitted oldest first by it, so none waits behind the same others run after run."""
+    """``{target: time it was last admitted}`` for ``targets`` of ``kind`` (absent: never). Single targets that share a run
+    are admitted oldest first by it, so none waits behind the same others run after run."""
     client = _client()
     targets = list(targets or ())
     if client is None or not targets:
@@ -1225,7 +1222,7 @@ def status(problems=None, now=None):
     fallbacks = fallbacks_last_hour(now)
     if problems is not None and fallbacks >= FALLBACK_WARN_AT:
         problems.append(f'egress: {fallback_warning(fallbacks)}')
-    return {'estimate_note': 'nmap, naabu, testssl.sh and nuclei are counted from their probe plan (addresses x ports, before retries): an '
+    return {'estimate_note': 'nmap, naabu and testssl.sh are counted from their probe plan (addresses x ports, before retries): an '
                              'estimate; in-process probes are counted exactly',
             'all_ports': {'last_hour': snap['hour'].get('all', 0), 'last_24h': snap['day'].get('all', 0), 'last_7d': snap['week'].get('all', 0)},
             'watched': ports, 'skip_ports': sorted(skipped_ports()),

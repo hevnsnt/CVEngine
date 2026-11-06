@@ -1736,7 +1736,7 @@ def _stored_credential(credential_id, task, now):
 
 
 def _credential_payload(credential_id, project_id, now):
-    """The decrypted credential of one task, in the shape the authenticated nuclei pass consumes (``cveFeed.auth_checks.secrets_document``): the header
+    """The decrypted credential of one task, in the shape the authenticated scanner pass consumes: the header
     pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
     from cveFeed import auth_checks
     from cveFeed.models import AuthCredential
@@ -2218,7 +2218,7 @@ MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most 
 
 
 def _clean_hit(hit):
-    """The first nuclei result line of a host, as ``cveFeed.templategen._trim_hit`` keeps it, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    """The first result line of a host, cut to the fields ``reNgine.tasks.parse_nuclei_result``
     and the validation record read. Anything else is dropped."""
     if not isinstance(hit, dict):
         return None
@@ -2241,7 +2241,7 @@ def _clean_hit(hit):
 
 def _clean_nuclei_validate_result(body):
     """An AI-written or approved template's check on the built-in scanner. Mode ``validate``: whether ``nuclei -validate`` accepted it, its output, and
-    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``cveFeed.templategen._run_template``'s shape), a
+    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``{host, vulnerable, output, hit?}``), a
     hit counted only with its result line. Which mode it was is the task's, so both halves are cleaned and the caller reads its own."""
     out = {}
     if 'valid' in body:

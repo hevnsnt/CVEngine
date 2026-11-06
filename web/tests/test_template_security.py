@@ -92,7 +92,7 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
 
     def test_autofire_refuses_installed_write_template_before_dispatch(self):
         self.write(self.installed, GOOD.replace('method: GET', 'method: POST'))
-        with mock.patch('cveFeed.activity.step'), mock.patch.object(templategen, '_run_template_with_retry') as run:
+        with mock.patch('cveFeed.activity.step'), mock.patch.object(templategen, '_test_chunk') as run:
             result = templategen.run_cve_tests(self.cve, ['dummy.example.test'])
         run.assert_not_called()
         self.assertEqual(result['source'], 'none')
@@ -100,9 +100,9 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
 
     def test_direct_execution_cannot_bypass_policy(self):
         path = self.write(self.installed, GOOD.replace('method: GET', 'method: POST'))
-        with mock.patch.object(templategen.subprocess, 'Popen') as process:
-            result = templategen.run_template(path, ['dummy.example.test'])
-        process.assert_not_called()
+        with mock.patch('agentapi.sentinel_dispatch.try_template_test') as sent:
+            result = templategen.run_template(path, ['dummy.example.test'], project=1)
+        sent.assert_not_called()  # a template the policy refuses is never handed to a scanner
         self.assertIn('POST', result[0]['error'])
 
     def test_generated_file_requires_current_approval_and_exact_content(self):
@@ -145,15 +145,12 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
         path = self.write(self.installed, GOOD)
         captured = {}
 
-        def process(argv, **kwargs):
-            copied = argv[argv.index('-t') + 1]
-            Path(path).write_text(GOOD.replace('method: GET', 'method: POST'))
-            captured.update(path=copied, text=Path(copied).read_text())
-            return SimpleNamespace(communicate=lambda **kw: ('', ''), returncode=0)
+        def scanner(text, hosts, project):
+            Path(path).write_text(GOOD.replace('method: GET', 'method: POST'))  # the original changes after the policy read it
+            captured.update(text=text, hosts=list(hosts), project=project)
+            return [{'host': host, 'vulnerable': False, 'output': ''} for host in hosts]
 
-        with mock.patch('reNgine.resources.heavy_job') as job, \
-                mock.patch.object(templategen.subprocess, 'Popen', side_effect=process):
-            templategen.run_template(path, ['dummy.example.test'])
-        self.assertNotEqual(captured['path'], path)
-        self.assertEqual(captured['text'], GOOD)
-        self.assertFalse(os.path.exists(captured['path']))
+        with mock.patch('agentapi.sentinel_dispatch.try_template_test', side_effect=scanner):
+            templategen.run_template(path, ['dummy.example.test'], project=1)
+        self.assertEqual(captured['text'], GOOD)  # the scanner is sent exactly the bytes the policy inspected
+        self.assertEqual((captured['hosts'], captured['project']), (['dummy.example.test'], 1))

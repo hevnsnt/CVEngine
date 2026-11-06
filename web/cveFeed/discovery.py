@@ -878,9 +878,9 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                        fallback={'checked': 0, 'exposed': 0})
     if stopped(scan_id):
         return gone
-    # A test that injects its own light_stream is never second-guessed; otherwise a registered Sentinel gets first refusal
-    # at the stage (agentapi.sentinel_dispatch), and wrap_nuclei_stream returns the real stream_nuclei, unwrapped, when
-    # none is eligible, so a project with no Sentinels runs exactly as before this existed.
+    # A test that injects its own light_stream is never second-guessed; otherwise the stream is a Sentinel's
+    # (agentapi.sentinel_dispatch.wrap_nuclei_stream), which raises ScannerUnavailable when none can take it: the stage
+    # waits and its targets stay due, nothing runs on this server.
     from agentapi import sentinel_dispatch
 
     def run_light():
