@@ -48,7 +48,7 @@ BASE_COSTS_MB = {
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
     'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
     'testssl': 150,         # a TLS audit of one port
-    'screenshot': 450,      # one headless Chromium and its driver, one page at a time (cveFeed.web_shot); a batch of pages is one job
+    'screenshot': 450,      # the drain of the screenshot queue (cveFeed.web_shot); the browser itself runs on a Sentinel
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.

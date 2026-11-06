@@ -43,12 +43,6 @@ services:
     init: true
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
-    # Chromium's sandbox for the web screenshots (cveFeed/web_shot.py) needs user namespaces, which Docker's default seccomp profile refuses. This is
-    # Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and unshare), vendored unchanged
-    # from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). Without it the sandbox cannot start and screenshots stay off, with the reason shown
-    # (docs/PIPELINE.md, "Web screenshots"); `make up` and the update scripts recreate this container, so an upgrade applies it with no manual step.
-    security_opt:
-      - seccomp=./config/seccomp/playwright-chromium.json
     volumes:
       - ./web:/usr/src/app
       - github_repos:/usr/src/github
@@ -280,6 +274,13 @@ services:
       - NET_RAW
       - NET_ADMIN
     # (no `no-new-privileges`: it would stop the kernel granting those file capabilities)
+    # Chromium's sandbox for the web screenshots (kind web_screenshot, docs/PIPELINE.md, "Web screenshots") needs user namespaces, which Docker's default
+    # seccomp profile refuses. This is Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and
+    # unshare), vendored unchanged from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). The browser runs in this container and nowhere else; without
+    # the profile the scanner's sandbox proof fails and it takes no picture, with the reason shown. `make up` and the update scripts recreate this
+    # container, so an upgrade applies it with no manual step.
+    security_opt:
+      - seccomp=./config/seccomp/playwright-chromium.json
     healthcheck:
       # Healthy while its heartbeats reach the server (python3 -m client.control health); it also restarts itself after three minutes without one.
       test: ["CMD", "python3", "-m", "client.control", "health"]

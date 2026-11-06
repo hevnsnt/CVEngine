@@ -395,6 +395,7 @@ LOCAL_RUNNERS = {
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
+    'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
@@ -425,6 +426,7 @@ HEAVY_KINDS = {
     'dns_resolve': (),
     'alive_check': (),
     'route_probe': (),
+    'web_screenshot': (),
     'bucket_check': (),
     'vhost_probe': (),
     'subdir_probe': (),

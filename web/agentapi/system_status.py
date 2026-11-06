@@ -142,26 +142,17 @@ def _screenshots_of(project):
 
 
 def _screenshots(problems, notes):
-    """The screenshot browser of this server: switched on, installed (the Chromium the pinned Playwright drives), the last time the browser itself failed
-    to run, and what waits (cveFeed.web_shot). A missing browser or a failing one is a problem worth seeing: no host will get a picture."""
-    from django.core.cache import cache
+    """The web screenshots: switched on, what waits (cveFeed.web_shot) and what the last scanner result said of the browser sandbox on the Sentinel that
+    took the pictures. This server runs no browser. A sandbox that did not engage is a problem worth seeing: that scanner takes no picture."""
     from cveFeed import web_shot
     from cveFeed.models import HostScreenshot
-    pinned = web_shot.pinned_browser()
-    try:
-        last = cache.get('screenshots:last_browser_error')
-    except Exception:  # noqa: BLE001
-        last = None
     sandbox = web_shot.sandbox_status()
-    out = {'enabled': web_shot.enabled(), 'chromium_installed': web_shot.browser_installed(), 'chromium_version': pinned.get('version') or None,
-           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last, 'sandbox': sandbox}
+    out = {'enabled': web_shot.enabled(), 'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'sandbox': sandbox}
     reason = web_shot.unavailable_reason()
-    if web_shot.enabled() and sandbox['state'] in ('failed', 'off'):
-        problems.append(f"screenshots: {sandbox['reason']}")  # off until the celery container can give Chromium its sandbox, or running without it
-    elif reason and web_shot.enabled():
-        notes.append(f'screenshots: {reason}')  # a note, not a problem: an image that predates the feature runs everything else fine
-    elif last:
-        problems.append(f"screenshots: the browser last failed to run at {last.get('at')}: {last.get('error')}")
+    if web_shot.enabled() and sandbox['state'] == 'failed':
+        problems.append(f"screenshots: {sandbox['reason']}")  # a scanner whose browser could not be sandboxed opened no page
+    elif reason:
+        notes.append(f'screenshots: {reason}')
     return out
 
 
@@ -396,11 +387,6 @@ def _tool_version(argv):
     return value
 
 
-def _chromium_version():
-    from cveFeed import web_shot
-    return web_shot.pinned_browser().get('version') if web_shot.browser_installed() else None
-
-
 def _template_refresh():
     """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
     from django.core.cache import cache
@@ -451,9 +437,7 @@ def _tools():
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
             'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
-                         # the screenshot browser: the Chromium the pinned Playwright drives, when it is on disk (looked up, never launched)
-                         'chromium': _chromium_version()}}
+                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
 
 
 def _runzero(problems):

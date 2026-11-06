@@ -32,7 +32,7 @@ LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF de
           'dns_resolve': 'name resolution', 'nmap_full': 'full port sweep',
           'nmap_verify': 'service version probe', 'rdp_shot': 'RDP screenshot', 'db_probe': 'database exposure probe', 'path_probe': 'scan path check',
           'nuclei_validate': 'template check', 'alive_check': 'retired host checks', 'bucket_check': 'cloud storage checks',
-          'vhost_probe': 'virtual host checks', 'subdir_probe': 'subdirectory application checks', 'supplier_check': 'supplier posture checks', 'hygiene_check': 'TLS and email checks', 'dangling_dns_check': 'dangling DNS checks', 'route_probe': 'web route checks'}
+          'vhost_probe': 'virtual host checks', 'subdir_probe': 'subdirectory application checks', 'supplier_check': 'supplier posture checks', 'hygiene_check': 'TLS and email checks', 'dangling_dns_check': 'dangling DNS checks', 'route_probe': 'web route checks', 'web_screenshot': 'web screenshots'}
 SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'default')
 
 
