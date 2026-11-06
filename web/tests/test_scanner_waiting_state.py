@@ -15,14 +15,14 @@ from django.utils import timezone
 from agentapi import scanner_state, sentinel_broker, sentinel_contract, sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
-from cveFeed import conductor, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import conductor, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import AgentActivity, ProbeObservation, ScanControl, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from targetApp.models import Domain
 from tests.test_route_auth import RouteFixture
 from tests.test_system_status import call, patched
-from tests.test_testssl_scan import CLEAN
+from tests.test_tls_audit import CLEAN
 from tests.test_udp_scan import UdpBase, udp_xml
 from tests.test_wpscan_quick import WP
 from tests.test_wordpress import WordPressFixture
@@ -474,44 +474,37 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
     def setUp(self):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
-        self.calls = []
         mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
 
-    def runner(self, args, env, timeout):
-        self.calls.append(args)
-        with open(args[args.index('--jsonfile') + 1], 'w') as out:
-            json.dump(CLEAN, out)
-
     def sweep(self):
-        return testssl_scan.sweep(self.project.id, runner=self.runner, resolve=lambda host, port, project: '203.0.113.5')
-
-    def test_unset_it_runs_exactly_as_before(self):
-        out = self.sweep()
-        self.assertEqual(out['tested'], 1)
-        self.assertEqual(len(self.calls), 1)
-        self.assertTrue(AgentActivity.objects.exists())
+        return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
 
     def test_waiting_for_a_scanner_it_does_not_run_log_or_raise(self):
         self.policy('none')
-        out = self.sweep()
+        with mock.patch('agentapi.sentinel_dispatch.try_testssl') as dispatched:
+            out = self.sweep()
         self.assertEqual(out['skipped'], 'no scanner is online for testssl; the targets stay due')
         self.assertEqual((out['tested'], out['failed']), (0, 0))
-        self.assertEqual(self.calls, [])
+        dispatched.assert_not_called()
         self.assertQuiet()
         self.assertFalse(ServiceRun.objects.exists())  # the target is still due: nothing was recorded, so nothing is fresh
+
+    def test_it_never_runs_here_whatever_the_policy_says(self):
+        for value in (None, 'all', 'testssl'):
+            with self.subTest(policy=value):
+                self.policy(value)
+                out = self.sweep()  # with other kinds still local the stage itself finds no scanner and waits (NEVER_LOCAL)
+                self.assertRegex(out['skipped'], r'no scanner (is online for|could take this work \() ?testssl')
+                self.assertEqual((out['tested'], out['failed']), (0, 0))
+                self.assertFalse(ServiceRun.objects.exists())
 
     def test_the_daily_sweep_over_all_projects_returns_before_taking_its_claim(self):
         self.policy('none')
         with mock.patch('cveFeed.ledger.sweep_claim') as claim:
-            out = testssl_scan.sweep_all(runner=self.runner)
+            out = tls_audit.sweep_all()
         self.assertEqual(out, {'skipped': 'no scanner is online for testssl; the targets stay due'})
         claim.assert_not_called()
-        self.assertEqual(self.calls, [])
         self.assertQuiet()
-
-    def test_only_its_own_kind_stops_it(self):
-        self.policy('testssl')  # may run here: unaffected, however many other kinds wait
-        self.assertEqual(self.sweep()['tested'], 1)
 
     def test_a_live_scanner_for_it_lets_it_through(self):
         self.policy('none')
@@ -520,8 +513,8 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
         Agent.objects.create(token=token, name='tls', kind='scanner', status='active', capabilities=['testssl'], last_seen=timezone.now(),
                              scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []})
         self.assertIsNone(scanner_state.skip_note('testssl'))
-        with mock.patch('agentapi.sentinel_dispatch.try_testssl', return_value=None):
-            self.assertEqual(self.sweep()['tested'], 1)  # the sweep goes on (here the runner stands in for the Sentinel's answer)
+        with mock.patch('agentapi.sentinel_dispatch.try_testssl', return_value=CLEAN):
+            self.assertEqual(self.sweep()['tested'], 1)  # the sweep goes on with the Sentinel's report
 
 
 class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):

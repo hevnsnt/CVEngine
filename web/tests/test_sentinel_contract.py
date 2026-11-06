@@ -184,12 +184,12 @@ class WafContractTests(SimpleTestCase):
         self.assertTrue(list(validator('waf').iter_errors({'outcome': 'done', 'generic': False})))
 
     def test_shapes_outside_the_contract_are_rejected(self):
-        from cveFeed import waf_scan
+        from cveFeed import waf_fingerprint
         for body in (
-                self.bad(products=[{'name': f'W{i}'} for i in range(waf_scan.MAX_PRODUCTS + 1)]),  # too many
-                self.bad(products=[{'name': 'x' * (waf_scan.NAME_LEN + 1)}]),  # name too long
+                self.bad(products=[{'name': f'W{i}'} for i in range(waf_fingerprint.MAX_PRODUCTS + 1)]),  # too many
+                self.bad(products=[{'name': 'x' * (waf_fingerprint.NAME_LEN + 1)}]),  # name too long
                 self.bad(products=[{'name': ''}]),
-                self.bad(products=[{'name': 'x', 'manufacturer': 'y' * (waf_scan.NAME_LEN + 1)}]),
+                self.bad(products=[{'name': 'x', 'manufacturer': 'y' * (waf_fingerprint.NAME_LEN + 1)}]),
                 self.bad(products=[{'name': 'x', 'version': '1.0'}]),  # unknown field of a product
                 self.bad(products=[{'manufacturer': 'only a maker'}]),
                 self.bad(products='FortiWeb'), self.bad(generic='yes'),
@@ -198,9 +198,9 @@ class WafContractTests(SimpleTestCase):
             self.assertTrue(list(validator('waf').iter_errors(body)), body)
 
     def test_the_server_refuses_what_it_cannot_shape_and_clips_the_rest(self):
-        from cveFeed import waf_scan
+        from cveFeed import waf_fingerprint
         with self.assertRaises(ApiError):
-            broker.clean_result('waf', self.bad(products=[{'name': f'W{i}'} for i in range(waf_scan.MAX_PRODUCTS + 1)]))
+            broker.clean_result('waf', self.bad(products=[{'name': f'W{i}'} for i in range(waf_fingerprint.MAX_PRODUCTS + 1)]))
         with self.assertRaises(ApiError):
             broker.clean_result('waf', self.bad(products='FortiWeb'))
         with self.assertRaises(ApiError):
@@ -208,7 +208,7 @@ class WafContractTests(SimpleTestCase):
         clipped = broker.clean_result('waf', {'outcome': 'done', 'generic': 'yes', 'surprise': 1, 'products': [
             {'name': 'A' * 500, 'manufacturer': 'M' * 500, 'version': '9', 'url': 'http://x/'}, 'junk', {'name': '  '}, {'name': 5}, {'manufacturer': 'x'}]})
         self.assertEqual(clipped, {'outcome': 'done', 'generic': False,
-                                   'products': [{'name': 'A' * waf_scan.NAME_LEN, 'manufacturer': 'M' * waf_scan.NAME_LEN}]})
+                                   'products': [{'name': 'A' * waf_fingerprint.NAME_LEN, 'manufacturer': 'M' * waf_fingerprint.NAME_LEN}]})
         self.assertEqual(list(validator('waf').iter_errors(clipped)), [])
         self.assertEqual(broker.clean_result('waf', {'outcome': 'done', 'products': [], 'generic': True}),
                          {'outcome': 'done', 'products': [], 'generic': True})
@@ -218,12 +218,12 @@ class WafContractTests(SimpleTestCase):
                          {'outcome': 'error', 'error': 'x' * 300})
 
     def test_the_bounds_are_the_ones_the_local_scan_uses(self):
-        from cveFeed import waf_scan
+        from cveFeed import waf_fingerprint
         body = contract.load()['$defs']['results']['waf']['allOf'][1]['properties']['products']
-        self.assertEqual(body['maxItems'], waf_scan.MAX_PRODUCTS)
-        self.assertEqual(body['items']['properties']['name']['maxLength'], waf_scan.NAME_LEN)
-        self.assertEqual(body['items']['properties']['manufacturer']['maxLength'], waf_scan.NAME_LEN)
-        self.assertEqual(waf_scan.parse_output('[{"detected": true, "firewall": "%s"}]' % ('A' * 500))[0]['firewall'], 'A' * waf_scan.NAME_LEN)
+        self.assertEqual(body['maxItems'], waf_fingerprint.MAX_PRODUCTS)
+        self.assertEqual(body['items']['properties']['name']['maxLength'], waf_fingerprint.NAME_LEN)
+        self.assertEqual(body['items']['properties']['manufacturer']['maxLength'], waf_fingerprint.NAME_LEN)
+        self.assertEqual(waf_fingerprint._named([('A' * 500, '')])[0]['firewall'], 'A' * waf_fingerprint.NAME_LEN)
 
     def test_the_kind_is_new_in_version_two_and_nothing_older_changed(self):
         self.assertGreaterEqual(contract.version(), 2)

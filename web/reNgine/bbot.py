@@ -183,7 +183,7 @@ def _label(etype, payload, host):
 
 
 def waf_product(name):
-    """The product a bbot ``WAF`` event names (wafw00f's list gives "FortiWeb (Fortinet)", "BIG-IP AppSec Manager (F5 Networks)"): the part
+    """The product a bbot ``WAF`` event names (the WAF product list gives "FortiWeb (Fortinet)", "BIG-IP AppSec Manager (F5 Networks)"): the part
     before the vendor in brackets, so it reads like any other technology name. "generic detection" says a firewall answered and not which
     one, so it names nothing. Pure."""
     text = re.sub(r'\s*\([^)]*\)\s*$', '', str(name or '')).strip()[:80]

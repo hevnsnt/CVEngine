@@ -68,7 +68,7 @@ SENTINEL_GRACE_SECONDS = 25 * 60  # a Sentinel still counts for sizing until it 
 # trouble (a back-off) go lower. None: no floor.
 Setting = namedtuple('Setting', 'key kind label low high step sense optimistic default', defaults=(None, None))
 
-# CPU cores one run of a scanner kind keeps busy (nmap and nuclei probe in parallel; route probes and testssl mostly wait on the network).
+# CPU cores one run of a scanner kind keeps busy (nmap and nuclei probe in parallel; route probes and the TLS audit mostly wait on the network).
 CORES_PER_RUN = {'bbot-deep': 1, 'bbot-standard': 0.5, 'bbot-passive': 0.25, 'nuclei': 1, 'nuclei-light': 0.5, 'nmap': 0.5, 'route-probe': 0.025,
                  'wpscan': 0.25, 'testssl': 0.1, 'screenshot': 0.25}
 # The share of the CPU budget (CPU_BUDGET x cores) each scanner kind is sized for. The kinds run side by side, so they share the cores instead of

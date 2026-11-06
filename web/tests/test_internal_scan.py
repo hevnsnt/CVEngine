@@ -423,12 +423,11 @@ class StageTests(Base):
         self.assertIn('signed-in', str(caught.exception))
 
     def test_every_local_scanner_refuses_inside_an_internal_scan(self):
-        from cveFeed import naabu_scan, nmap_scan, nuclei_scan, testssl_scan, wpscan_scan
+        from cveFeed import naabu_scan, nmap_scan, nuclei_scan, wpscan_scan
         from targetApp.target_types import internal_scope
         with internal_scope():
             for call_ in (lambda: naabu_scan.run_naabu(['10.20.0.7'], binary='/bin/true'),
                           lambda: nmap_scan.run_nmap_xml(['10.20.0.7'], [], 1),
-                          lambda: testssl_scan.run_testssl('10.20.0.7', '10.20.0.7', 443),
                           lambda: wpscan_scan.run_wpscan_process('https://10.20.0.7/', 'token'),
                           lambda: list(nuclei_scan.stream_nuclei('/nonexistent'))):
                 with self.assertRaises(RuntimeError) as caught:

@@ -58,12 +58,17 @@ class RecordedReasonTests(FallbackBase):
 
     def test_every_wrapper_that_sees_no_scanner_records_its_kind(self):
         dispatch.try_nmap(self.project, self.scan, ADDR)
-        dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443)
         dispatch.try_nmap_udp(self.project, ADDR[0])
         dispatch.wrap_naabu_runner(self.project, self.scan)
         dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
         dispatch.wrap_wpscan_runner(self.project)
-        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('nmap', 'testssl', 'nmap_udp', 'naabu', 'nuclei_light', 'wpscan')])
+        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('nmap', 'nmap_udp', 'naabu', 'nuclei_light', 'wpscan')])
+
+    def test_a_kind_with_no_local_path_waits_and_records_no_fallback(self):
+        from reNgine.resources import ScannerUnavailable
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443)
+        self.assertEqual(self.rows(), [])  # nothing fell back to a local run: there is none
 
     def test_a_task_nobody_claims_in_time(self):
         self.make_sentinel(['nmap'])

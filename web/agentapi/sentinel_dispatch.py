@@ -58,7 +58,7 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 logger = logging.getLogger(__name__)
 
 LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
-NEVER_LOCAL = ('secrets_scan',)  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
+NEVER_LOCAL = ('secrets_scan', 'testssl', 'waf')  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1)
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
 # here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
@@ -1021,16 +1021,14 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None, ports_by_ip=None
     return remaining, totals, local_ports
 
 
-# --- testssl: one host:port at a time, the Sentinel's raw report items run through the same local evaluate() -----------
+# --- testssl: one host:port at a time, the Sentinel's raw report items read by cveFeed.tls_audit.evaluate() ---------------
 
 def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None):
-    """A Sentinel's testssl.sh report items for ``host:port`` (raw, in the exact shape ``cveFeed.testssl_scan.evaluate``
-    already reads from a local run), or ``None`` when no Sentinel is eligible, on timeout, or on failure - in which case
-    the caller runs ``run_testssl`` locally exactly as before. Unlike nmap/naabu/nuclei this is never chunked: a testssl
-    run is already one host:port per call, locally or dispatched."""
+    """A Sentinel's TLS audit report items for ``host:port`` (the four fields ``cveFeed.tls_audit.evaluate`` reads), or ``None`` on timeout or
+    failure after a Sentinel took the task. The kind never runs on this server (``NEVER_LOCAL``): with no Sentinel eligible this raises
+    ``ScannerUnavailable`` and the target stays due. Never chunked: one host:port per call."""
     if not any_scanner_for(project, 'testssl'):
-        _no_scanner('testssl', project)
-        offline_fallback(project, 'testssl')
+        _no_scanner('testssl', project)  # raises: the kind has no local path
         return None
     target = {'host': host, 'ip': ip, 'port': port, 'starttls': starttls or ''}
     result = dispatch_or_none(project, 'testssl', target, host=host, ips=[ip], scan=scan, timeout=timeout)
@@ -1452,9 +1450,9 @@ def waf_target(url, ip):
 
 
 def waf_outcome(result):
-    """A Sentinel's ``waf`` result in the shape ``cveFeed.waf_scan.run_wafw00f`` returns, through the same product rule (``waf_scan._named``)."""
-    from cveFeed import waf_scan
-    products = waf_scan._named((p.get('name'), p.get('manufacturer')) for p in (result.get('products') or [])[:waf_scan.MAX_PRODUCTS])
+    """A Sentinel's ``waf`` result as ``{'products', 'generic', 'error'}``, through the one product rule (``waf_fingerprint._named``)."""
+    from cveFeed import waf_fingerprint
+    products = waf_fingerprint._named((p.get('name'), p.get('manufacturer')) for p in (result.get('products') or [])[:waf_fingerprint.MAX_PRODUCTS])
     return {'products': products, 'generic': result.get('generic') is True and not products, 'error': ''}
 
 

@@ -72,7 +72,7 @@ def _compute(now):
     return out
 
 
-TOOL_OF = {'waf': 'wafw00f'}  # a kind whose tool goes by another name than the kind
+TOOL_OF = {}  # a kind whose tool goes by another name than the kind
 IN_PROCESS_PROXIED = ('http_probe', 'alive_check', 'bucket_check', 'vhost_probe', 'subdir_probe')  # the in-process requests (version probes, retired-name checks, bucket checks, virtual host and subdirectory checks) go through cveFeed.pinned_transport, which takes the egress proxy
 
 

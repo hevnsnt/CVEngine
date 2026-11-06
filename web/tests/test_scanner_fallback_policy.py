@@ -178,7 +178,6 @@ class WrapperPolicyTests(DispatchBase):
     def test_the_wrappers_still_hand_back_to_a_local_run_by_default(self):
         with mock.patch.dict('os.environ', {ENV: 'all'}):
             self.assertEqual(dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'])[0], ['192.0.2.10'])
-            self.assertIsNone(dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443))
             self.assertIsNone(dispatch.try_nmap_udp(self.project, '192.0.2.10'))
             self.assertIsNone(dispatch.wrap_naabu_runner(self.project, self.scan))
 

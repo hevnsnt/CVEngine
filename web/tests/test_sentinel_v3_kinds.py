@@ -19,7 +19,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent
 from agentapi.services import ApiError
 from agentapi.auth import create_token
-from cveFeed import db_exposure, fullscan, node2shell_scan, path_probe, probes, rdp_shot, templategen, waf_scan
+from cveFeed import db_exposure, fullscan, node2shell_scan, path_probe, probes, rdp_shot, templategen, waf_fingerprint
 from cveFeed.models import RdpScreenshot, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, Port, Subdomain, Technology, Vulnerability
@@ -163,20 +163,20 @@ class WafStageTests(StageBase):
         scan = self.web_scan()
         self.arm('waf')
         with FakeScanner(kinds=['waf']) as fake:
-            out = waf_scan.run_for_scan(scan.id)
+            out = waf_fingerprint.run_for_scan(scan.id)
         self.assertEqual(fake.served[0]['target'], {'host': 'www.rt.test', 'ip': IP, 'port': 443, 'scheme': 'https'})
         self.assertEqual((out['tested'], out['named']), (1, 2))
         self.assertEqual(sorted(t.name for t in Subdomain.objects.get(scan_history=scan).technologies.all()), ['ExampleShield', 'FortiWeb'])
-        self.assertTrue(ServiceRun.objects.filter(service=waf_scan.SERVICE, asset='www.rt.test', status='done').exists())
+        self.assertTrue(ServiceRun.objects.filter(service=waf_fingerprint.SERVICE, asset='www.rt.test', status='done').exists())
 
     def test_offline_it_waits_and_the_host_stays_due(self):
         scan = self.web_scan()
         self.arm('waf')
         with FakeScanner(kinds=['waf'], mode='offline') as fake:
-            out = waf_scan.run_for_scan(scan.id)
+            out = waf_fingerprint.run_for_scan(scan.id)
         self.assertEqual(fake.served, [])
         self.assertIn('no scanner could take this work (waf)', out['skipped'])
-        self.assertFalse(ServiceRun.objects.filter(service=waf_scan.SERVICE).exists())
+        self.assertFalse(ServiceRun.objects.filter(service=waf_fingerprint.SERVICE).exists())
 
 
 class DbProbeStageTests(StageBase):

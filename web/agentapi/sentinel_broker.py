@@ -1976,9 +1976,8 @@ _TESTSSL_SEVERITIES = ('INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'WARN', 'FAT
 
 
 def _clean_testssl_result(body):
-    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.testssl_scan.evaluate`` reads from a
-    locally-run report item (``id``, ``severity``, ``finding``, ``cve``): everything else testssl.sh's own JSON carries is
-    dropped, never stored or interpreted, so a Sentinel-reported item is no richer an attack surface than a local one."""
+    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.tls_audit.evaluate`` reads
+    (``id``, ``severity``, ``finding``, ``cve``): everything else the report's own JSON carries is dropped, never stored or interpreted."""
     items = body.get('items')
     if not isinstance(items, list) or len(items) > MAX_TESTSSL_ITEMS:
         raise ApiError(400, f'items must be a list of at most {MAX_TESTSSL_ITEMS} entries')
@@ -2110,11 +2109,11 @@ def _clean_openvas_result(body):
 
 
 def _clean_waf_result(body):
-    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
-    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
-    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
-    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
-    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    """A Sentinel's WAF fingerprint of one web host, reshaped into what ``cveFeed.waf_fingerprint.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else the tool prints is kept. The
+    bounds are ``cveFeed.waf_fingerprint``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one product rule."""
+    from cveFeed.waf_fingerprint import MAX_PRODUCTS, NAME_LEN
     products = body.get('products')
     if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
         raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')

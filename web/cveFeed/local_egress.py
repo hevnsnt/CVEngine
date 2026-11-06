@@ -11,7 +11,7 @@ Five parts, all state in Redis (no table, no migration):
 * **The egress ledger** (``record``, ``snapshot``): new outbound TCP connection attempts from this server, per hour, kept for seven days.
   Counted per watched port (``CVENGINE_LOCAL_WATCH_PORTS``, default 25, 465, 587, 23, 3389) and in total for every port, and per source (the
   scan kind and the project) for the watched ports. In-process probes (``cveFeed.pinned_transport``, the database checks) are counted exactly,
-  one per connection attempt. nmap, naabu, testssl.sh and nuclei are black boxes: they are counted from their probe plan (one attempt per
+  one per connection attempt. nmap, naabu and nuclei are black boxes: they are counted from their probe plan (one attempt per
   address and port in the plan, before retries), so those numbers are an estimate, said so on every surface that shows them.
 * **The connection log** (``log_connections``, ``connection_log``, ``connection_log_csv``): one record per outbound connection this server's
   scanners open (or hold back) to a logged port (the app's own mail through Settings, Email is not a scan and is not logged) (``CVENGINE_EGRESS_LOG_PORTS``, default 25, 465, 587): time, destination address and port, sent, paced or skipped, the tool,
@@ -20,9 +20,9 @@ Five parts, all state in Redis (no table, no migration):
   ``CVENGINE_EGRESS_LOG_MAX``), the oldest dropped first; App Admins read it over REST and MCP (``agentapi.egress``) or as CSV.
 * **The governor** (``plan``, ``take``, ``owe``, ``catch_up``): a shared sliding window per budgeted port (``CVENGINE_LOCAL_PORT_BUDGETS``,
   default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, and
-  never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
-  which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
-  after it; one that has waited ALONE_PRIORITY_AFTER gets priority over ordinary grants, see ``wait_alone``). A nuclei ``host:25`` target is
+  never more than a quarter of it in any 15, or a single whole run larger than that quarter and nothing else (such a run is granted only into 15
+  minutes that hold nothing else, and nothing else is granted in the 15 after it; one that has waited ALONE_PRIORITY_AFTER gets priority over
+  ordinary grants). A nuclei ``host:25`` target is
   charged NUCLEI_TARGET_CONNECTIONS, an estimate, least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared by
   every worker. A local pass asks it when it is planned (``plan``), and every process of the pass asks again when it starts, after its memory
   wait (``launch``: the planned grant is given back and the tokens taken in the minute the process starts; no room, and that process runs
@@ -36,7 +36,7 @@ Five parts, all state in Redis (no table, no migration):
   execution (nmap 30, naabu 10 by default; 0 is unlimited). Over the cap the addresses are not scanned here and stay due for the next run. A warning in
   the activity log and a problem in ``get_system_status`` say when tasks keep falling back, and name the Sentinels that are offline or full.
 * **The opt-in skip list** (``CVENGINE_LOCAL_SKIP_PORTS``, default empty): ports this server never connects to at all. Every local nmap and
-  naabu run excludes them, testssl.sh STARTTLS, the nmap probes and validation checks on them are not run here, and in-process connections to
+  naabu run excludes them, the nmap probes and validation checks on them are not run here, and in-process connections to
   them are refused. A Sentinel still scans them.
 
 Every function here fails open: when Redis cannot be read, the scan runs as it did before this module existed (a server whose Redis is down has
@@ -65,20 +65,14 @@ BUCKET_TTL = (KEEP_HOURS + 2) * HOUR
 OWED_DAYS = 30  # an owed port nobody could probe for this long is forgotten, entry by entry, with a log line (its host is rescanned long before)
 OWED_TTL = 2 * OWED_DAYS * 24 * HOUR  # only a backstop for the whole list; each entry ages out on its own after OWED_DAYS
 BURST_SHARE = 4  # at most a quarter of an hour's budget in any 15 minutes: an hour's allowance is never spent in one burst
-# One testssl.sh run with this app's arguments (-p -s -S -U -f, --starttls smtp) opened 159 connections against a modern TLS mail server and
-# 231 against a legacy one (testssl.sh 3.2.4, counted at the server): charged 240, rounded up, all or nothing; being more than a quarter of the
-# default budget, a run goes alone in its 15 minutes (see _TAKE).
-TESTSSL_CONNECTIONS = 240
 # A nuclei target host:25: an estimate, not a measurement. nuclei's HTTP probe of a host:port (http and https), plus the ssl and tcp templates
 # that run against the port the input names, about ten here, each retried at most once (-retries 1): about 24, rounded up to 25.
 NUCLEI_TARGET_CONNECTIONS = 25
-# A testssl.sh run on port 25 (more than the 15-minute quarter) needs 15 minutes with no other port-25 start. One that has waited this long
+# A whole run on port 25 larger than the 15-minute quarter needs 15 minutes with no other port-25 start. One that has waited this long
 # for them gets priority: ordinary port-25 grants are held (paced: owed or due) until it starts, which the window then allows within another
-# 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked (it asks every ALONE_ASK_EVERY while it waits).
+# 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked.
 ALONE_PRIORITY_AFTER = 60 * 60
 ALONE_WAIT_TTL = 10 * 60
-ALONE_ASK_EVERY = 60
-ALONE_WAIT_MAX = ALONE_PRIORITY_AFTER + 62 * 60  # the longest a run waits before it gives up for this sweep (stays due)
 ALERT_STEPS = (50, 80, 100)  # percent of a port's hourly budget at which the activity log says so, once per hour
 FALLBACK_WARN_AT = 5  # Sentinel tasks falling back to local execution in one hour before the warning and the system problem
 CATCH_UP_BATCH = 64  # owed addresses one catch-up pass takes per port (one nmap chunk)
@@ -530,8 +524,8 @@ def snapshot(now=None, hours=24):
 # A sliding window over minute buckets: what was granted in the current minute and the 60 before it may never exceed the hourly budget, and
 # what was granted in the current minute and the 15 before it never a quarter of it. Any 3600 seconds span at most 61 minute buckets (any 900
 # seconds at most 16), so "never more than N in any hour, never more than N/4 in any 15 minutes" holds exactly, not just on average, and the
-# whole budget stays usable hour after hour. ``whole`` grants all of ``want`` or nothing (one testssl.sh run is many connections, not a few).
-# ``alone`` (ARGV[7] = 0) is the one exception to the quarter: a whole run larger than the quarter (one testssl.sh run, 240 of 400) is granted
+# whole budget stays usable hour after hour. ``whole`` grants all of ``want`` or nothing (one run can be many connections, not a few).
+# ``alone`` (ARGV[7] = 0) is the one exception to the quarter: a whole run larger than the quarter (240 of 400, say) is granted
 # only when nothing was granted in the current minute and the 15 before it, and then fills that quarter by itself, so nothing else is granted
 # in the 15 minutes after it either: any 15 minutes hold at most a quarter of the budget, or that one run and nothing else.
 _TAKE = """
@@ -546,7 +540,7 @@ local cap_burst = tonumber(ARGV[4])
 local whole = tonumber(ARGV[5])
 local use_burst = tonumber(ARGV[7])
 local m = math.floor(now / 60)
-local wait_key = ARGV[9]  -- a testssl.sh run waiting for its quiet 15 minutes: the time it first asked (see ALONE_PRIORITY_AFTER)
+local wait_key = ARGV[9]  -- a whole run waiting for its quiet 15 minutes: the time it first asked (see ALONE_PRIORITY_AFTER)
 local dry = tonumber(ARGV[12])  -- 1: only say whether it would be granted (and keep the waiting mark), take nothing
 -- refunds (ARGV[13] pairs of minute, count from ARGV[14]): grants made when a pass was planned, moved now to the minute its process starts
 local nref = tonumber(ARGV[13] or '0')
@@ -617,7 +611,7 @@ def take(port, want, now=None, whole=False, burst=True):
 
 def _take(port, want, now=None, whole=False, burst=True, refund=None, dry=False):
     """Up to ``want`` new connections to ``port`` (all or none with ``whole``): never more than the port's hourly budget in any 60 minutes, and
-    never more than a quarter of it in any 15. ``burst=False`` (one testssl.sh run, with ``whole``) lets a run larger than the quarter go, but
+    never more than a quarter of it in any 15. ``burst=False`` (a whole run larger than the quarter, with ``whole``) lets a run larger than the quarter go, but
     only alone: when nothing was granted in its 15 minutes, and nothing else is then granted in the 15 after it. The window runs on the Redis
     server's clock (``now`` replaces it in tests), so workers whose clocks differ share one window. Returns how many were granted: ``want``
     for a port with no budget, and when Redis cannot be read (fail open).
@@ -775,32 +769,6 @@ def note_admitted(kind, targets):
         pass
 
 
-def _sleep(seconds):
-    time.sleep(seconds)
-
-
-def wait_alone(port, weight):
-    """Wait, without holding a memory slot, until a whole run of ``weight`` larger than the 15-minute quarter (one testssl.sh run) would be
-    granted on ``port``: asked every ALONE_ASK_EVERY seconds, with priority over ordinary grants after ALONE_PRIORITY_AFTER, for at most
-    ALONE_WAIT_MAX. True when it would be granted now (the run then takes its tokens when it starts); False when the budget cannot hold it,
-    scanning was paused, or the wait ran out (the target stays due)."""
-    per_hour = budgets().get(int(port))
-    if not per_hour or int(weight) <= bucket_size(per_hour):
-        return True
-    if int(weight) > per_hour:
-        return False
-    from reNgine import resources
-    waited = 0
-    while True:
-        granted, _minute = _take(port, weight, now=launch_now(), whole=True, burst=False, dry=True)
-        if granted:
-            return True
-        if waited >= ALONE_WAIT_MAX or resources.global_pause_requested(fail_closed=True):
-            return False
-        _sleep(ALONE_ASK_EVERY)
-        waited += ALONE_ASK_EVERY
-
-
 def launch_now():
     """The window's clock at a process start: None, the Redis server's clock (tests replace it)."""
     return None
@@ -852,7 +820,7 @@ def launch_naabu(addresses, excluded=()):
 
 
 def admit_one(port, kind=None, address=None, weight=1, now=None, burst=True):
-    """For a single connection, or one run of a tool against one host and port (a probe, a validation check, testssl.sh, which counts as
+    """For a single connection, or one run of a tool against one host and port (a probe, a validation check, a tool that counts as
     ``weight`` connections, all granted or none): ``None`` when it may go ahead, else the reason it is held (``'skipped'`` or ``'paced'``,
     logged with ``address`` when given). The caller counts what it then sends."""
     port = int(port)
@@ -1225,7 +1193,7 @@ def status(problems=None, now=None):
     fallbacks = fallbacks_last_hour(now)
     if problems is not None and fallbacks >= FALLBACK_WARN_AT:
         problems.append(f'egress: {fallback_warning(fallbacks)}')
-    return {'estimate_note': 'nmap, naabu, testssl.sh and nuclei are counted from their probe plan (addresses x ports, before retries): an '
+    return {'estimate_note': 'nmap, naabu and nuclei are counted from their probe plan (addresses x ports, before retries): an '
                              'estimate; in-process probes are counted exactly',
             'all_ports': {'last_hour': snap['hour'].get('all', 0), 'last_24h': snap['day'].get('all', 0), 'last_7d': snap['week'].get('all', 0)},
             'watched': ports, 'skip_ports': sorted(skipped_ports()),

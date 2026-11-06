@@ -65,6 +65,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Removed
 
+- **The TLS audit and the WAF fingerprint no longer run on the server.** The two kinds (`testssl` and `waf`) join `secrets_scan` in `sentinel_dispatch.NEVER_LOCAL`: whatever `CVENGINE_LOCAL_FALLBACK` says, they run on a Sentinel only, and with no scanner able to take the work the sweep or the stage waits and the targets stay due. The local runners, their proxy arguments, the port 25 whole-run wait and the `CVENGINE_TESTSSL_TIMEOUT` and `CVENGINE_WAFW00F_TIMEOUT` settings are gone; `cveFeed/testssl_scan.py` and `cveFeed/waf_scan.py` became `cveFeed/tls_audit.py` and `cveFeed/waf_fingerprint.py`, which only choose the targets and store what a Sentinel reports.
 - **The three-hourly AI assessment review is retired.** The AI reviewer's operations check ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md#operations-check-in-detail)) replaces it, and the deterministic coverage top-up and the auto-tuner already did the rest of its work. Migration `cveFeed.0148` removes its schedule and its two tables (`AssessmentReview`, `AssessmentReviewDecision`); the capacity report it kept (`performance_review.review`) and the Scheduler health panel that showed both go with it. The coverage query it shared moves to `cveFeed.coverage_topup`.
 
 ## v1.3.5 (2026-11-04)

@@ -388,7 +388,7 @@ LOCAL_RUNNERS = {
     'nuclei_targeted': ('cveFeed.nuclei_scan.stream_nuclei',),
     'nuclei_deep': ('cveFeed.nuclei_scan.stream_nuclei',),
     'nmap_udp': ('cveFeed.udp_scan._runner', 'cveFeed.nmap_scan.run_nmap_xml', 'cveFeed.nmap_scan.run_nmap_args'),
-    'testssl': ('cveFeed.testssl_scan.run_testssl',),
+    'testssl': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
     'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
@@ -398,7 +398,7 @@ LOCAL_RUNNERS = {
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'waf': ('cveFeed.waf_scan.run_wafw00f',),
+    'waf': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
     'nmap_verify': ('cveFeed.probes.run_nmap_probe', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml',
                     'cveFeed.nmap_scan.run_nmap_args'),
@@ -438,8 +438,8 @@ HEAVY_KINDS = {
 
 class LocalGuard:
     """What ``assert_ran_nowhere_locally`` returns: ``calls`` (every local run attempted, as ``(where, args)``) and ``runner``, a callable that records
-    and raises, for the stage parameters that take an injected runner (``nmap_scan.run_nmap_for_scan(runner=guard.runner)``, ``udp_scan.run(runner=...)``,
-    ``testssl_scan.sweep(runner=...)``). A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
+    and raises, for the stage parameters that take an injected runner (``nmap_scan.run_nmap_for_scan(runner=guard.runner)``, ``udp_scan.run(runner=...)``).
+    A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
     when the test ends: a swallowed local run still fails the test."""
 
     def __init__(self, kind):

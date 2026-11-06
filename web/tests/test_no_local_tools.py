@@ -97,7 +97,6 @@ ALLOWED = {
         'cveFeed/settings_api.py',  # 1.3.2 settings API (develop): setting help text, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
-        'cveFeed/testssl_scan.py',
         'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
@@ -176,7 +175,6 @@ ALLOWED = {
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/validation.py',
         'cveFeed/views.py',
-        'cveFeed/waf_scan.py',
         'reNgine/ai_providers.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
@@ -246,33 +244,19 @@ ALLOWED = {
     ],
     'testssl': [
         'Dockerfile',
-        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
-        'agentapi/system_status.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
-        'cveFeed/egress_proxy.py',
-        'cveFeed/finding_lifecycle.py',  # 1.3.5 lifecycle (develop): folds stored testssl findings of redirect aliases, runs nothing
-        'cveFeed/heavy_process.py',
-        'cveFeed/hygiene.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
-        'cveFeed/match_policy.py',  # 1.3.3 heat policy (develop): docstring naming evidence sources, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
-        'cveFeed/tasks.py',
-        'cveFeed/templategen.py',  # 1.3.3 template confirmations (develop): docstring naming evidence sources, runs nothing
-        'cveFeed/testssl_scan.py',
-        'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names testssl among the scanners whose checks confirm a flaw, runs nothing
-        'cveFeed/tunables.py',  # 1.3.4 port budget tunable (develop): help text about what one run is charged, runs nothing
-        'reNgine/input_guard.py',
+        'cveFeed/tls_audit.py',  # 1.4 TLS audit on a Sentinel: the kind name, the ledger key and the finding source are stored data values, runs nothing
         'reNgine/resources.py',
     ],
     'bbot': [
@@ -330,14 +314,10 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'wafw00f': [
-        'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
-        'agentapi/sentinel_broker.py',
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/ledger.py',
-        'cveFeed/waf_scan.py',
-        'reNgine/bbot.py',
+        'cveFeed/waf_fingerprint.py',  # 1.4 WAF fingerprint on a Sentinel: the ledger key is a stored data value, runs nothing
     ],
     'gowitness': [
         'Dockerfile',
@@ -361,9 +341,7 @@ ALLOWED = {
         'cveFeed/tasks.py',
         'cveFeed/template_fixtures.py',
         'cveFeed/templategen.py',
-        'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
-        'cveFeed/waf_scan.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
         'reNgine/bbot.py',
@@ -372,8 +350,6 @@ ALLOWED = {
         'reNgine/time_limits.py',
     ],
     'heavy_process.run': [
-        'cveFeed/testssl_scan.py',
-        'cveFeed/waf_scan.py',
         'cveFeed/wpscan_scan.py',
     ],
     '_BIN': [
@@ -383,7 +359,6 @@ ALLOWED = {
         'cveFeed/probes.py',
         'cveFeed/template_fixtures.py',
         'cveFeed/templategen.py',
-        'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/wpscan_scan.py',
         'reNgine/bbot.py',

@@ -420,9 +420,9 @@ class ScannerSelectionTests(EnforcementBase):
 		self.assertIn('192.0.2.12', addresses)
 
 	def test_testssl_audit(self):
-		from cveFeed import testssl_scan
+		from cveFeed import tls_audit
 		with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **k: list(names)):
-			hosts = {t[0] for t in testssl_scan.targets(self.project.id)}
+			hosts = {t[0] for t in tls_audit.targets(self.project.id)}
 		self.assertEqual(hosts, {'exact.test', 'www.wide.test'})
 
 	def test_openvas_never_picks_a_name_under_an_exact_host_target(self):

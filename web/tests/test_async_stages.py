@@ -182,7 +182,7 @@ class PipelineTests(AsyncBase):
         mock.patch('cveFeed.discovery._announce').start()
         mock.patch('cveFeed.web_shot.has_work_for_scan', return_value=False).start()
         mock.patch('cveFeed.rdp_shot.available', return_value=False).start()
-        mock.patch('cveFeed.waf_scan.enabled', return_value=False).start()
+        mock.patch('cveFeed.waf_fingerprint.enabled', return_value=False).start()
         mock.patch('cveFeed.node2shell_scan.enabled', return_value=False).start()
         found = {'scan_id': self.scan.id, 'status': discovery.SUCCESS, 'error': ''}
         guard = assert_ran_nowhere_locally(self, 'nmap')
@@ -429,22 +429,21 @@ class SweepTests(RouteFixture, TestCase):
         self.scan(names=('a.rt.test', 'b.rt.test'), ports=((443, 'https'),))
         LocalFallback('none').apply(self)
         for patcher in (mock.patch('reNgine.resources.global_pause_requested', return_value=False),
-                        mock.patch('cveFeed.testssl_scan.installed', return_value=True),
-                        mock.patch('cveFeed.testssl_scan._address', return_value='203.0.113.5'),
+                        mock.patch('cveFeed.tls_audit._address', return_value='203.0.113.5'),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True)):
             patcher.start()
 
     def test_each_target_waits_without_the_worker_and_none_is_audited_twice(self):
-        from cveFeed import testssl_scan
-        from tests.test_testssl_scan import CLEAN
+        from cveFeed import tls_audit
+        from tests.test_tls_audit import CLEAN
         guard = assert_ran_nowhere_locally(self, 'testssl')
         with FakeScanner(kinds=['testssl'], responders={'testssl': {'outcome': 'done', 'items': CLEAN}}, async_stages=True) as fake:
-            first = testssl_scan.sweep_all()
+            first = tls_audit.sweep_all()
             self.assertTrue(stage_runs.is_waiting(first))
-            self.assertEqual(testssl_scan.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
+            self.assertEqual(tls_audit.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
             fake.drain()
         self.assertEqual(sorted(t['target']['host'] for t in fake.served), ['a.rt.test', 'b.rt.test'])  # each once, one wait each
-        self.assertEqual(sorted(ServiceRun.objects.filter(service=testssl_scan.SERVICE).values_list('asset', 'status')),
+        self.assertEqual(sorted(ServiceRun.objects.filter(service=tls_audit.SERVICE).values_list('asset', 'status')),
                          [('a.rt.test:443', 'done'), ('b.rt.test:443', 'done')])
         self.assertEqual(StageRun.objects.get().rounds, 2)
         self.assertEqual(guard.calls, [])

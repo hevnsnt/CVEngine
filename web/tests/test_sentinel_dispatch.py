@@ -391,12 +391,13 @@ class ClaimTimeoutTests(DispatchBase):
 
 
 class TestsslDispatchTests(DispatchBase):
-    """``try_testssl``: one host:port at a time, never chunked - a Sentinel's raw report items, or ``None`` to fall back
-    to a local ``run_testssl`` call, exactly as every other dispatch point does."""
+    """``try_testssl``: one host:port at a time, never chunked - a Sentinel's raw report items. The kind has no local path
+    (``NEVER_LOCAL``): when no Sentinel takes it the work is unavailable, never run here."""
 
-    def test_no_eligible_sentinel_is_a_no_op(self):
-        out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
-        self.assertIsNone(out)
+    def test_no_eligible_sentinel_is_unavailable_and_creates_no_task(self):
+        from reNgine.resources import ScannerUnavailable
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
         self.assertFalse(SentinelTask.objects.exists())
 
     def test_a_successful_report_returns_the_raw_items_unparsed(self):
@@ -416,18 +417,20 @@ class TestsslDispatchTests(DispatchBase):
             dispatch.try_testssl(self.project, 'mail.example.test', '192.0.2.20', 25, starttls='smtp', timeout=5)
         self.assertEqual(SentinelTask.objects.get().target['starttls'], 'smtp')
 
-    def test_timeout_falls_back_to_none(self):
+    def test_a_timeout_is_unavailable_never_a_local_run(self):
+        from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['testssl'])
-        out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=0.2)
-        self.assertIsNone(out)
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=0.2)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')
 
-    def test_a_sentinel_reported_failure_returns_none(self):
+    def test_a_sentinel_reported_failure_is_unavailable_never_a_local_run(self):
+        from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['testssl'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep',
-                        side_effect=_answer_queued_task({'outcome': 'error', 'error': 'testssl.sh not installed'}, status='failed')):
-            out = dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
-        self.assertIsNone(out)
+                        side_effect=_answer_queued_task({'outcome': 'error', 'error': 'the audit is not installed'}, status='failed')):
+            with self.assertRaises(ScannerUnavailable):
+                dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
 
 
 class NucleiDispatchTests(DispatchBase):
