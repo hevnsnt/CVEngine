@@ -131,58 +131,6 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 				finally:
 					shutil.rmtree(approved, ignore_errors=True)
 
-	def test_broad_nuclei_process_failure_is_not_a_clean_scan(self):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			stdout = io.StringIO('')
-			returncode = 2
-			def poll(self): return self.returncode
-			def wait(self): return self.returncode
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', return_value=Process()):
-				with self.assertRaisesRegex(RuntimeError, 'exited with status 2'):
-					list(nuclei_scan.stream_nuclei(targets.name, timeout=1))
-
-	def run_stream(self, returncode, stderr_text, stdout=''):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			def __init__(self, stderr):
-				stderr.write(stderr_text)
-				self.stdout, self.returncode = io.StringIO(stdout), returncode
-			def poll(self): return self.returncode
-			def wait(self): return self.returncode
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', side_effect=lambda *a, **kw: Process(kw['stderr'])):
-				return list(nuclei_scan.stream_nuclei(targets.name, timeout=1, tags=['wordpress']))
-
-	def test_a_failed_nuclei_run_says_why(self):
-		with self.assertLogs('cveFeed.nuclei_scan', 'ERROR'), \
-				self.assertRaisesRegex(RuntimeError, r'status 1: \[FTL\] Could not create runner: bad flag'):
-			self.run_stream(1, '\x1b[31m[FTL]\x1b[0m Could not create runner: bad flag\n')
-
-	def test_no_approved_template_for_the_tags_is_an_empty_run_not_a_failure(self):
-		self.assertEqual(self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n'), [])
-		with self.assertRaises(RuntimeError):  # results then a fatal exit is still a failure
-			self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n', stdout='{"host": "x"}\n')
-
 	def test_policy_report_logs_an_excluded_essential_template_as_failed_once_per_revision(self):
 		from django.core.cache import cache
 		cache.delete('cvengine:nuclei-policy-logged:rev-a')
@@ -200,26 +148,6 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 			nuclei_scan._report_policy('rev-b', 10, {'x': 1}, {})
 		self.assertEqual(log.call_args.kwargs['status'], 'done')
 
-	def test_broad_nuclei_malformed_output_is_not_clean(self):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			returncode = 0
-			def __init__(self): self.stdout = io.StringIO('{broken\n')
-			def poll(self): return 0
-			def wait(self): return 0
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', return_value=Process()):
-				with self.assertRaisesRegex(RuntimeError, 'malformed JSON'):
-					list(nuclei_scan.stream_nuclei(targets.name, timeout=1))
 	def test_template_revision_changes_coverage_keys(self):
 		with tempfile.TemporaryDirectory() as directory:
 			path = os.path.join(directory, 'cve.yaml')
@@ -299,8 +227,8 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(nmap['argv'], ['nmap', '-sV', '--version-intensity', '5', '-Pn', '-p', '443', '--host-timeout', '60s', '-oX', '-', '203.0.113.7'])
 		self.assertEqual(nmap['display'], 'nmap -sV --version-intensity 5 -Pn -p 443 --host-timeout 60s -oX - 203.0.113.7')
 		self.assertTrue(nmap['service'].startswith(f'validate:nmap_sv:{"a" * 16}:'))
-		self.assertIn('-ni', checks[0]['argv'])
-		self.assertIn('-retries', checks[0]['argv'])
+		self.assertEqual(checks[0]['argv'], [])  # the template check runs on the built-in scanner: there is no command of this server's to show
+		self.assertEqual(checks[0]['display'], 'template check cve-2099-1.yaml against www.v.test')
 
 	def test_only_the_four_kinds_with_allowlisted_argv_exist(self):
 		subjects = [{'kind': 'cve_match', 'host': 'www.v.test', 'cve_id': 'CVE-1', 'source': 'port', 'ip': '203.0.113.7', 'port': 80},
@@ -966,7 +894,7 @@ class TemplateOutcomeFeedTests(ValidationBase):
 		(row,) = self.rows()
 		outcomes = [{'host': 'www.v.test', 'vulnerable': True, 'output': '{}', 'hit': hit()}]
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/cve-2099-1.yaml', '')), \
-				mock.patch.object(templategen, '_run_template_with_retry', return_value=outcomes):
+				mock.patch.object(templategen, '_test_chunk', return_value=outcomes):
 			templategen.run_cve_tests(self.cve, ['www.v.test'], project=self.project.id)
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.validation_status), ('confirmed', 'hit'))

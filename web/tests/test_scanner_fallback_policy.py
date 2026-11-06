@@ -29,7 +29,7 @@ class PolicyParsingTests(SimpleTestCase):
         self.assertEqual(self.kinds('none'), set())
 
     def test_a_list_allows_exactly_its_kinds_and_ignores_unknown_ones(self):
-        self.assertEqual(self.kinds('openvas, testssl'), {'openvas', 'testssl'})
+        self.assertEqual(self.kinds('openvas, wpscan'), {'openvas', 'wpscan'})
         self.assertEqual(self.kinds('openvas,telnet,'), {'openvas'})
         self.assertEqual(self.kinds('nmap, naabu, nmap_udp, nmap_full, nmap_verify, path_probe, secrets_scan'), set())  # these never run here, whatever the list says
 
@@ -178,8 +178,8 @@ class WrapperPolicyTests(DispatchBase):
 
     def test_the_wrappers_still_hand_back_to_a_local_run_by_default(self):
         with mock.patch.dict('os.environ', {ENV: 'all'}):
-            self.assertIsNone(dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443))
-            for kind, call in (('nmap', lambda: dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'])),  # these kinds have no local path at all
+            for kind, call in (('testssl', lambda: dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443)),
+                               ('nmap', lambda: dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'])),  # these kinds have no local path at all
                                ('nmap_udp', lambda: dispatch.try_nmap_udp(self.project, '192.0.2.10')),
                                ('naabu', lambda: dispatch.wrap_naabu_runner(self.project, self.scan))):
                 with self.assertRaises(resources.ScannerUnavailable) as caught:
@@ -208,15 +208,14 @@ class WrapperPolicyTests(DispatchBase):
                 with self.assertRaises(resources.ScannerUnavailable):
                     runner(many)
 
-    def test_nuclei_does_not_run_unresolvable_targets_locally(self):
+    def test_nuclei_does_not_send_unresolvable_targets_anywhere(self):
         self.make_sentinel(['nuclei_light'])
-        local = mock.Mock(return_value=iter(()))
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', return_value=[]), \
-                mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True):
+        with mock.patch('agentapi.sentinel_dispatch.resolvable_targets', return_value=[]), \
+                mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
+                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
             import tempfile
             with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
                 handle.write('nothing.invalid\n')
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
             self.assertEqual(list(stream(handle.name)), [])
-        local.assert_not_called()
+        sent.assert_not_called()

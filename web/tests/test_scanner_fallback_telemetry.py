@@ -57,13 +57,12 @@ class RecordedReasonTests(FallbackBase):
         self.assertNotIn('example.test', text)
 
     def test_every_wrapper_that_sees_no_scanner_records_its_kind(self):
-        dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443)
-        dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
         dispatch.wrap_wpscan_runner(self.project)
-        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('testssl', 'nuclei_light', 'wpscan')])
+        self.assertEqual(self.rows(), [('wpscan', 'no_scanner')])
 
     def test_the_kinds_with_no_local_path_wait_and_record_nothing(self):
-        for attempt in (lambda: dispatch.try_nmap(self.project, self.scan, ADDR), lambda: dispatch.try_nmap_udp(self.project, ADDR[0]),
+        for attempt in (lambda: dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443),
+                        lambda: dispatch.try_nmap(self.project, self.scan, ADDR), lambda: dispatch.try_nmap_udp(self.project, ADDR[0]),
                         lambda: dispatch.wrap_naabu_runner(self.project, self.scan)):
             with self.assertRaises(resources.ScannerUnavailable):
                 attempt()

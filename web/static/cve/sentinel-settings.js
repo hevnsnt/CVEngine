@@ -43,6 +43,8 @@ export const SENTINEL_KINDS = [
   "bucket_check",
   "vhost_probe",
   "subdir_probe",
+  "supplier_check",
+  "route_probe",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -70,6 +72,8 @@ const KIND_WORDS = {
   bucket_check: "cloud storage checks",
   vhost_probe: "virtual host checks",
   subdir_probe: "subdirectory application checks",
+  supplier_check: "supplier posture checks",
+  route_probe: "web route checks",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {

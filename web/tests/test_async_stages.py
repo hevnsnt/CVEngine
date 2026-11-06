@@ -90,25 +90,25 @@ class ExpiryTests(AsyncBase):
 
     def one(self, ips=('192.0.2.10',)):
         def body(ctx=None):
-            return dispatch.dispatch_or_none(self.project, 'testssl', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
+            return dispatch.dispatch_or_none(self.project, 'wpscan', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
         name = adapter('test.one', lambda ctx: body())
         return stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
 
     def test_unclaimed_where_local_is_allowed_returns_none_with_one_fallback_row(self):
         LocalFallback('all').apply(self)
-        with FakeScanner(kinds=['testssl'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results, [None])  # the caller runs it here, as before
         task = SentinelTask.objects.get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('testssl', 'not_claimed_in_time')])
-        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up testssl work').values_list('status', flat=True)),
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('wpscan', 'not_claimed_in_time')])
+        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up wpscan work').values_list('status', flat=True)),
                          ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
 
     def test_unclaimed_where_local_is_not_allowed_raises_scanner_unavailable_in_the_callback(self):
-        with FakeScanner(kinds=['testssl'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results[0]['status'], 'failed')
@@ -181,8 +181,7 @@ class PipelineTests(AsyncBase):
             stubs[path] = mock.patch(path, return_value=value).start()
         mock.patch('cveFeed.discovery._announce').start()
         mock.patch('cveFeed.web_shot.has_work_for_scan', return_value=False).start()
-        mock.patch('cveFeed.rdp_shot.available', return_value=False).start()
-        mock.patch('cveFeed.waf_scan.enabled', return_value=False).start()
+        mock.patch('cveFeed.waf_fingerprint.enabled', return_value=False).start()
         mock.patch('cveFeed.node2shell_scan.enabled', return_value=False).start()
         found = {'scan_id': self.scan.id, 'status': discovery.SUCCESS, 'error': ''}
         assert_ran_nowhere_locally(self, 'nmap')
@@ -429,22 +428,21 @@ class SweepTests(RouteFixture, TestCase):
         self.scan(names=('a.rt.test', 'b.rt.test'), ports=((443, 'https'),))
         LocalFallback('none').apply(self)
         for patcher in (mock.patch('reNgine.resources.global_pause_requested', return_value=False),
-                        mock.patch('cveFeed.testssl_scan.installed', return_value=True),
-                        mock.patch('cveFeed.testssl_scan._address', return_value='203.0.113.5'),
+                        mock.patch('cveFeed.tls_audit._address', return_value='203.0.113.5'),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True)):
             patcher.start()
 
     def test_each_target_waits_without_the_worker_and_none_is_audited_twice(self):
-        from cveFeed import testssl_scan
-        from tests.test_testssl_scan import CLEAN
+        from cveFeed import tls_audit
+        from tests.test_tls_audit import CLEAN
         guard = assert_ran_nowhere_locally(self, 'testssl')
         with FakeScanner(kinds=['testssl'], responders={'testssl': {'outcome': 'done', 'items': CLEAN}}, async_stages=True) as fake:
-            first = testssl_scan.sweep_all()
+            first = tls_audit.sweep_all()
             self.assertTrue(stage_runs.is_waiting(first))
-            self.assertEqual(testssl_scan.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
+            self.assertEqual(tls_audit.sweep_all(), {'skipped': 'another sweep is running (it waits on a Sentinel)'})
             fake.drain()
         self.assertEqual(sorted(t['target']['host'] for t in fake.served), ['a.rt.test', 'b.rt.test'])  # each once, one wait each
-        self.assertEqual(sorted(ServiceRun.objects.filter(service=testssl_scan.SERVICE).values_list('asset', 'status')),
+        self.assertEqual(sorted(ServiceRun.objects.filter(service=tls_audit.SERVICE).values_list('asset', 'status')),
                          [('a.rt.test:443', 'done'), ('b.rt.test:443', 'done')])
         self.assertEqual(StageRun.objects.get().rounds, 2)
         self.assertEqual(guard.calls, [])

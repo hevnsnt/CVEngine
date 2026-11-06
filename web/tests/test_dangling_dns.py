@@ -14,7 +14,7 @@ from django.utils import timezone
 from cveFeed import dangling_dns as dd
 from cveFeed import domain_ownership as own
 from dashboard.models import Org, Project
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -276,9 +276,8 @@ class Stored(TestCase):
 
     def persist(self, *events):
         from reNgine.tasks import persist_bbot_result
-        result = bbot_lib.BbotResult()
-        for event in events:
-            bbot_lib.parse_event(event, result, {})
+        from tests.discovery_fixtures import fold_findings
+        result = fold_findings(events)
         with mock.patch('cveFeed.dangling_dns.Net', return_value=self.net):
             persist_bbot_result(result, ctx=self.ctx)
 

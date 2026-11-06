@@ -4,7 +4,7 @@ from django.apps import apps
 from django.test import TestCase
 
 from cveFeed import port_inventory
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from reNgine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Port
 

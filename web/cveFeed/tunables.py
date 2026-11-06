@@ -148,7 +148,7 @@ TUNABLES = [
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
     Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
             'New connection attempts to port 25 this server\'s own scans may start: at most this many in any 60 minutes, and at most a quarter of it '
-            'in any 15, or one testssl.sh run (charged 240, as measured) alone; charged when each process starts, shared by every worker. '
+            'in any 15, or one whole run larger than that quarter alone; charged when each process starts, shared by every worker. '
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),

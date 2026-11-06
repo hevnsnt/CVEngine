@@ -384,28 +384,30 @@ class LocalRunDetected(AssertionError):
 LOCAL_RUNNERS = {
     'nmap': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'naabu': (),  # likewise
-    'nuclei_light': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_targeted': ('cveFeed.nuclei_scan.stream_nuclei',),
-    'nuclei_deep': ('cveFeed.nuclei_scan.stream_nuclei',),
+    'nuclei_light': (),  # likewise
+    'nuclei_targeted': (),  # likewise
+    'nuclei_deep': (),  # likewise
     'nmap_udp': (),  # likewise
-    'testssl': ('cveFeed.testssl_scan.run_testssl',),
+    'testssl': (),  # likewise
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
-    'bbot_discovery': ('reNgine.bbot.stream_events', 'reNgine.bbot.run_bbot'),  # run_discovery's default stream is bound early: the gate below catches it
+    'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
+    'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
+    'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'waf': ('cveFeed.waf_scan.run_wafw00f',),
+    'waf': (),  # likewise
     'nmap_full': (),  # likewise
     'nmap_verify': (),  # likewise
     'node2shell': ('cveFeed.node2shell_scan.run_check',),
-    'rdp_shot': ('cveFeed.rdp_shot.capture',),
+    'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
     'path_probe': (),  # likewise
-    'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
+    'nuclei_validate': (),  # likewise
 }
 HEAVY_KINDS = {
     'nmap': ('nmap', 'nmap-full-bg'),
@@ -416,13 +418,15 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
-    'bbot_discovery': ('bbot-standard', 'bbot-deep', 'bbot-passive'),
+    'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
     'alive_check': (),
+    'route_probe': (),
     'bucket_check': (),
     'vhost_probe': (),
     'subdir_probe': (),
+    'supplier_check': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
     'waf': ('route-probe',),
     'nmap_full': ('nmap-full-bg',),
@@ -437,7 +441,7 @@ HEAVY_KINDS = {
 
 class LocalGuard:
     """What ``assert_ran_nowhere_locally`` returns: ``calls`` (every local run attempted, as ``(where, args)``) and ``runner``, a callable that records
-    and raises, for the stage parameters that take an injected runner (``testssl_scan.sweep(runner=...)``). A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
+    and raises, for the stage parameters that take an injected runner (``wpscan_scan.run_wpscan(runner=...)``). A stage's own ``except Exception`` can swallow the ``LocalRunDetected`` it raises, so ``calls`` is checked again
     when the test ends: a swallowed local run still fails the test."""
 
     def __init__(self, kind):

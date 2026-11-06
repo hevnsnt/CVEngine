@@ -42,7 +42,7 @@ class HostPipelineTests(TestCase):
 
 	def test_new_hosts_are_resolved_recorded_and_taken_through_the_stages_without_bbot(self):
 		nmap, kwargs = _stages()
-		with mock.patch('reNgine.bbot.stream_events', side_effect=AssertionError('bbot must not run')):
+		with mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run')):
 			out = discovery.run_host_pipeline(self.domain.id, ['WWW.hp.test', 'api.hp.test', 'evil.example.com', 'hp.test.evil.com'], **kwargs)
 		scan = ScanHistory.objects.get(pk=out['scan_id'])
 		self.assertEqual(scan.scan_status, discovery.SUCCESS)

@@ -84,18 +84,6 @@ class LightNucleiPolicyTests(DispatchBase):
             target = dispatch._nuclei_target('nuclei_targeted', ['www.example.test'], {})
         self.assertEqual(target['template_policy'], {'rev': nuclei_scan.ALL_TEMPLATES_REV, 'read_only': False, 'bundle_sha256': None})
 
-    def test_the_light_pass_falls_back_to_the_quick_local_pass_not_the_whole_library(self):
-        self.make_sentinel(['nuclei_light'])
-        seen = []
-
-        def local(path, **kwargs):
-            seen.append(kwargs)
-            return iter([])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local):
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=0.2)
-            list(stream(_targets_file('www.example.test')))  # nobody claims it: the stage runs locally
-        self.assertEqual(seen, [{'tech': True}])
-
     def test_the_internal_light_pass_is_the_quick_one_too(self):
         self.make_sentinel(['nuclei_light'])
         with mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', return_value={'outcome': 'done', 'findings': []}) as sent:

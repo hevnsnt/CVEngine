@@ -1116,7 +1116,7 @@ class SeparationTests(Fixture, TestCase):
         from cveFeed import supplier_checks, supplier_scan, supplier_search
         for module in (supplier_scan, supplier_checks, supplier_search):
             source = inspect.getsource(module)
-            for forbidden in ('nmap_scan', 'naabu', 'bbot', 'nuclei', 'discovery', 'fullscan', 'host_assessment', 'testssl_scan', 'start_scan', 'remediation'):
+            for forbidden in ('nmap_scan', 'naabu', 'bbot', 'nuclei', 'discovery', 'fullscan', 'host_assessment', 'tls_audit', 'start_scan', 'remediation'):
                 self.assertNotIn(f'import {forbidden}', source, (module.__name__, forbidden))
                 self.assertNotIn(f'{forbidden}.', source.replace('``', ''), (module.__name__, forbidden))
 

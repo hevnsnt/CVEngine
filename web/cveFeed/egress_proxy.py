@@ -7,7 +7,7 @@ robin over the valid lines the caller can use.
 
 What goes through it (traffic to SCANNED TARGETS sent from this server): the in-process probes (through ``cveFeed.pinned_transport``, which
 keeps vetting and pinning the numeric destination and sends that address to the proxy, never the name), ``db_exposure``'s HTTP checks
-(``requests``), and the external tools that take a proxy: nuclei, bbot, WPScan, testssl.sh and wafw00f (``for_tool``). What does not: nmap, naabu,
+(``requests``), and the external tool that takes a proxy: WPScan (``for_tool``). What does not: nmap, naabu,
 the UDP sweeps, the raw database and RDP checks and OpenVAS use raw sockets and connect directly, a Sentinel keeps its own egress, and no call to a
 third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
 
@@ -242,11 +242,7 @@ def _wpscan_args(spec):
 
 
 TOOLS = {
-    'nuclei': (('http', 'https', 'socks5'), lambda s: ['-proxy', s.url]),
-    'bbot': (SCHEMES, lambda s: ['-c', f'web.http_proxy={s.url}']),  # bbot's own setting; bbot.private_config moves it into a 0600 file
     'wpscan': (SCHEMES, _wpscan_args),
-    'wafw00f': (('http', 'https', 'socks5'), lambda s: ['-p', s.url]),
-    'testssl': (('http',), lambda s: ['--proxy', s.netloc]),  # testssl.sh speaks to a plain HTTP proxy only, and has no way to give it a login
 }
 
 
@@ -263,15 +259,14 @@ def hostname(target):
 def for_tool(tool, hosts=None):
     """The command line arguments (a list, empty for a direct run) that send ``tool`` through the picked proxy. ``hosts`` are the destinations
     of the run: when every one never goes through a proxy (loopback), the run stays direct. Raises ``ProxyUnavailable`` when the setting is on
-    and no configured proxy suits the tool, or (testssl.sh) every suitable one needs a login the tool cannot send."""
+    and no configured proxy suits the tool."""
     schemes, build = TOOLS[tool]
     everything = configured()
     if not everything or (hosts is not None and all(bypass(hostname(h)) for h in hosts)):
         return []
-    specs = [s for s in everything if s.scheme in schemes and (tool != 'testssl' or not s.credentials)]
+    specs = [s for s in everything if s.scheme in schemes]
     if not specs:
-        raise ProxyUnavailable(f'Settings > Proxy is on, but {tool} cannot use any of its proxies (it takes ' + ', '.join(schemes) +
-                               (' without a login' if tool == 'testssl' else '') + ')')
+        raise ProxyUnavailable(f'Settings > Proxy is on, but {tool} cannot use any of its proxies (it takes ' + ', '.join(schemes) + ')')
     return build(specs[next(_turn) % len(specs)])
 
 
