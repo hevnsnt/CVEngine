@@ -20,6 +20,8 @@ What a policy lists:
 ``domains`` and ``excluded_trees`` are part of the contract for kinds that need a whole tree (none of the probe kinds does: every name is listed).
 """
 MAX_HOSTS = 5000  # the contract's bound
+MAX_EXCLUDED = 5000  # the contract's bound for ``excluded``
+MAX_EXCLUDED_TREES = 1000  # and for ``excluded_trees``
 MAX_SAME_SITE = 1000  # other hosts of one site a page's scripts may be read from, per task
 
 
@@ -214,3 +216,24 @@ def for_names(project_id, domain, names, unattended=False):
             hosts.append(name)
     return {'hosts': hosts, 'domains': [], 'excluded': excluded[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
+
+
+def for_screenshots(project_id, hosts):
+    """``(policy, open_web)`` of a web_screenshot task: ``hosts`` are the names of its pages (``web_shot`` already judged each: still in the inventory, not
+    excluded or archived, inside the bug bounty program's scope; an exclusion made since is applied again here). The policy lists those names and
+    this server's address rules. ``open_web`` tells the scanner what a page may load besides its own host: for a project that works no bug bounty
+    program, anything on the public web the organization has not excluded (a page's fonts, scripts and redirects, as the browser would load them for a
+    person), with the exclusions and archived names carried in the policy so the scanner refuses them at every hop; for a bounty project, nothing but
+    the listed hosts (a program refuses a report, and may ban a researcher, for traffic to what its scope does not name). A project whose exclusions
+    do not fit the policy's bounds is held to the listed hosts too: never an open web with a list cut short."""
+    from cveFeed.archive_rediscovery import archived_names
+    from cveFeed.exclusions import excluded_names
+    from cveFeed.models import BountyEngagement
+    names = sorted({(h or '').strip().lower().rstrip('.') for h in hosts} - {''})
+    excluded = excluded_names(project_id, strict=True)
+    listed = [n for n in names if n not in excluded][:MAX_HOSTS]
+    exact = sorted(set(excluded) | set(archived_names(project_id)))
+    trees = sorted(excluded.subtrees)
+    open_web = (not BountyEngagement._base_manager.filter(project_id=project_id).exists()) and len(exact) <= MAX_EXCLUDED and len(trees) <= MAX_EXCLUDED_TREES
+    policy = {'hosts': listed, 'domains': [], 'excluded': exact[:MAX_EXCLUDED], 'excluded_trees': trees[:MAX_EXCLUDED_TREES], **address_rules(project_id)}
+    return policy, open_web

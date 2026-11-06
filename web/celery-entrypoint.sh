@@ -36,8 +36,8 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
-# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: the
-# screenshot browser runs as nobody in this container and has no business with scan output, PDF reports or log archives. Applied at every start.
+# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: no other
+# account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
 chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
 # test the scanners the pipeline runs, required for configuration
@@ -90,11 +90,6 @@ generate_worker_command() {
 # (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
 python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
 
-# Chromium's sandbox for the web screenshots (cveFeed/web_shot.py): started once here as the screenshot worker starts it. While it cannot engage
-# (a container without config/seccomp/playwright-chromium.json, a kernel without unprivileged user namespaces) screenshots stay off and the host
-# page, get_system_status and this log say why. It never stops the workers from starting.
-python3 manage.py check_screenshot_sandbox || echo "Web screenshots stay off until Chromium's sandbox can start (see above)."
-
 echo "Starting Celery Workers..."
 
 # Three gevent workers instead of one process per queue: every worker process loads all of Django (150-250 MB), so
@@ -116,7 +111,7 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # hours; the slots here are greenlets (10, CLASSIC_CONCURRENCY; a certificate lookup may sleep up to 30 s in one waiting for crt.sh's pacing), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
 # tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
-# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+# screenshot_queue: the web screenshot drain and the hourly sweep (they hand pages to Sentinels and wait for them, one drain at a time: a second task returns at once; no browser runs here)
 classic_queues+=",screenshot_queue"
 
 commands=""

@@ -103,7 +103,6 @@ ALLOWED = {
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',
@@ -204,7 +203,6 @@ ALLOWED = {
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/resources.py',
     ],
     'wpscan': [
@@ -340,7 +338,6 @@ ALLOWED = {
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/waf_scan.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',

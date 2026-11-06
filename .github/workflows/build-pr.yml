@@ -182,21 +182,6 @@ jobs:
           cache-from: type=gha,scope=image-${{ matrix.arch }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=image-{0}', matrix.arch) || '' }}
 
-      # Chromium's sandbox for the web screenshots cannot be proven by the build (build steps run under the builder's default seccomp profile, which
-      # refuses user namespaces). Run the image the way the celery container runs the browser: as nobody with Playwright's seccomp profile the sandbox
-      # must engage (shot_worker.py --probe: the renderer in its own user and PID namespace, under its own seccomp filter); with Docker's default
-      # profile it must fail closed (engaged false, exit status 1), never fall back to running without it.
-      - name: 🧪 Screenshot browser sandbox
-        env:
-          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-        run: |
-          probe() { docker run --rm --user nobody -e HOME=/tmp "$@" --entrypoint python3 "$IMAGE" /usr/src/app/cveFeed/shot_worker.py --probe; }
-          probe --security-opt seccomp=config/seccomp/playwright-chromium.json | tee "$RUNNER_TEMP/sandbox-on.json"
-          grep -q '"engaged":true' "$RUNNER_TEMP/sandbox-on.json" || { echo "::error::Chromium's sandbox did not engage with the seccomp profile"; exit 1; }
-          status=0; probe > "$RUNNER_TEMP/sandbox-off.json" || status=$?  # no pipe: the probe's own exit status is what counts
-          cat "$RUNNER_TEMP/sandbox-off.json"
-          [ "$status" = 1 ] && grep -q '"engaged":false' "$RUNNER_TEMP/sandbox-off.json" || { echo "::error::without the profile the browser did not fail closed (status $status)"; exit 1; }
-
   reviewer-image:
     # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no
     # capabilities, import every module (the Anthropic SDK included) with the network off, and pass its unit tests there.

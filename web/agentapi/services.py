@@ -932,7 +932,7 @@ def _screenshot_host_row(ctx, slug, host_id, write):
 
 
 def request_host_screenshot(ctx, slug, host_id):
-    """Take screenshot: queue a fresh browser capture of every web page of one inventoried host (cveFeed.web_shot). It goes through the same
+    """Take screenshot: queue a fresh browser capture of every web page of one inventoried host (cveFeed.web_shot; a Sentinel takes it, and the pages wait while none can). It goes through the same
     gates as a host assessment (scope, exclusions, archive, the bug bounty program's scope) and is allowed for a person even where the program has
     not confirmed automated testing. The pictures arrive within a minute or so; ``GET .../screenshots`` shows how it went."""
     from cveFeed import web_shot
@@ -948,7 +948,7 @@ def request_host_screenshot(ctx, slug, host_id):
     summary = web_shot.queue_host(project, sub, by_person=True)
     rows = host_screenshots(ctx, slug, host_id)
     if summary['blocked'] and not summary['queued']:
-        raise ApiError(409, rows['note'] or 'this host cannot be photographed from this server', screenshots=rows['screenshots'])
+        raise ApiError(409, rows['note'] or 'this host cannot be photographed', screenshots=rows['screenshots'])
     return {**rows, 'status': 'queued' if summary['queued'] or summary['kept'] else 'nothing_to_capture', 'queued': summary['queued'],
             'pages': summary['targets']}
 

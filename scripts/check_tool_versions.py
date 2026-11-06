@@ -5,15 +5,14 @@
 
 Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml and the nuclei version the CI smoke
 test downloads). This compares each pin with the newest release: nmap, WPScan, nuclei (the image and the CI smoke test), naabu, bbot, tzdata,
-wafw00f, python-gvm, Playwright (the screenshot browser: the Chromium build in web/Dockerfile follows its release), the Go toolchain and, when the Tailscale profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no
+wafw00f, python-gvm, the Go toolchain and, when the Tailscale profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no
 version tags to compare (only the moving tags stable and community, pinned by digest in docker-compose.yml); docs/OPENVAS.md says how to update them. Nuclei's templates are not pinned: they refresh at runtime.
 Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
 version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
 runs without the flag, shows such a row as "?" and never calls it behind). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind.
 
-Advisory rows are shown and never gate: the Chromium build Playwright bundles (web/Dockerfile, PLAYWRIGHT_CHROMIUM_VERSION) next to the current Chrome
-stable for Linux. Chromium lags Chrome stable between Playwright releases and only a Playwright bump (and an image rebuild) moves it, so a newer
-stable is a warning ("newer: warning only", and ``ahead`` in --json), not "behind"."""
+Advisory rows are shown and never gate (``ahead`` in --json, "newer: warning only", never "behind"). There are none now: the screenshot browser, Playwright
+and the Chromium build it drives, moved to the Sentinel image (the cvENGINE-sentinel repository pins and checks them), so this server pins no browser."""
 import json
 import os
 import re
@@ -129,8 +128,6 @@ TOOLS = [
     ('testssl.sh', 'web/Dockerfile', r'ARG TESTSSL_VERSION=([0-9.]+)', 'https://api.github.com/repos/testssl/testssl.sh/tags?per_page=30',
      latest_github_tag, True, False),
     ('go (toolchain)', 'web/Dockerfile', r'ARG GOVERSION=([0-9.]+)', 'https://go.dev/dl/?mode=json', latest_go_toolchain, True, False),
-    ('playwright (screenshot browser; its Chromium build is pinned by it)', 'web/requirements.txt', r'(?m)^playwright==([0-9.]+)', 'https://pypi.org/pypi/playwright/json',
-     latest_pypi, True, False),
     ('python-gvm (OpenVAS add-on client)', 'web/requirements.txt', r'(?m)^python-gvm==([0-9.]+)', 'https://pypi.org/pypi/python-gvm/json', latest_pypi, True, False),
     ('tailscale (sidecar image)', 'docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)',
      'https://hub.docker.com/v2/repositories/tailscale/tailscale/tags/?page_size=50&ordering=last_updated', latest_docker_tag, True, True),
@@ -138,10 +135,7 @@ TOOLS = [
 
 
 # Shown beside the tools, never a gate (see the module docstring): same fields as TOOLS.
-ADVISORY = [
-    ('chromium (Playwright\'s build) vs Chrome stable', 'web/Dockerfile', r'ARG PLAYWRIGHT_CHROMIUM_VERSION=([0-9.]+)',
-     'https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions?pageSize=5', latest_chrome_stable, True, False),
-]
+ADVISORY = []
 
 
 def collect(get=fetch):

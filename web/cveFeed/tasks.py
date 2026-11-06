@@ -100,8 +100,9 @@ def subdir_apps_sweep():
 
 @app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
 def drain_screenshots():
-    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
-    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    """Hand the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``) to Sentinels (kind ``web_screenshot``) and store the
+    pictures they send back, one drain at a time: see ``cveFeed.web_shot``. No browser runs here. Kicked by a scan stage, the Take screenshot button and the hourly
+    sweep; a second call while one runs returns at once, and with no scanner able to take the kind the pages stay queued."""
     from cveFeed import web_shot
     return web_shot.drain()
 

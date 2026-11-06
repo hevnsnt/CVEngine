@@ -875,7 +875,7 @@ EXCLUDED = {
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
-        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for the screenshot worker (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
+        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for a Sentinel to photograph (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
         'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
         'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
         'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',

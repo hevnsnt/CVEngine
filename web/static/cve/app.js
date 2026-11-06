@@ -1095,8 +1095,8 @@ const subdirectoryCard = (h) => {
 // title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
 const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
 const OUTCOME_TEXT = {
-  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
-  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+  ok: "Captured", queued: "Waiting for a scanner", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Scanner could not take it", too_big: "Page too heavy", error: "Failed",
 };
 function screenshotsSection(h, project, isCurrent) {
   const box = el("div", "shots-box");
