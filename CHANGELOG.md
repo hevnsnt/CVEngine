@@ -19,6 +19,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **Supplier posture checks on the scanner** (`supplier_check`, contract version 3). Each due supplier's names go to a Sentinel as one task that carries
+  the pacing, the request budget still left and a scope policy naming only those names (and their `mta-sts.` hosts, never a private address). The
+  Sentinel does the DNS, the certificate read, the page requests and the MTA-STS file, and reports a row per name; the server keeps the schedule, the
+  budget, the CVE match against the catalog (the scanner only reports what the page announces), the text of what to ask the supplier and what is
+  stored, and a category the scanner claims to have decided resolves nothing the card does not show it read. With no scanner able to take the work
+  and the kind off `CVENGINE_LOCAL_FALLBACK`, the suppliers stay due and nothing is recorded as checked.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.

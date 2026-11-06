@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "alive_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -1362,6 +1362,418 @@
             "then": {
               "required": [
                 "checks",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "supplier_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "domains": {
+                "type": "array",
+                "maxItems": 25,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "domain": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "minLength": 1
+                    },
+                    "postures": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "check": {
+                            "type": "string",
+                            "maxLength": 60,
+                            "minLength": 1
+                          },
+                          "severity": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 300
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 4000
+                          },
+                          "category": {
+                            "enum": [
+                              "tls",
+                              "email",
+                              "web",
+                              "exposed"
+                            ]
+                          },
+                          "evidence": {
+                            "type": "object",
+                            "description": "what the finding rests on; the server clips it before anything is stored"
+                          }
+                        },
+                        "required": [
+                          "check",
+                          "severity",
+                          "title",
+                          "detail",
+                          "category",
+                          "evidence"
+                        ]
+                      }
+                    },
+                    "resolvable": {
+                      "type": "object",
+                      "maxProperties": 8,
+                      "description": "category -> check-name prefixes this run could decide (what it no longer finds resolves)",
+                      "additionalProperties": {
+                        "type": "array",
+                        "maxItems": 40,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 60
+                        }
+                      }
+                    },
+                    "summary": {
+                      "type": "object",
+                      "maxProperties": 8,
+                      "additionalProperties": {
+                        "type": [
+                          "string",
+                          "integer",
+                          "boolean",
+                          "null"
+                        ],
+                        "maxLength": 200
+                      }
+                    },
+                    "card": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "ok",
+                            "unreachable",
+                            "no_address",
+                            "blocked",
+                            "challenged"
+                          ]
+                        },
+                        "addresses": {
+                          "type": "array",
+                          "maxItems": 6,
+                          "items": {
+                            "type": "string",
+                            "maxLength": 45
+                          }
+                        },
+                        "evidence": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "address": {
+                              "enum": [
+                                "ok",
+                                "none",
+                                "blocked",
+                                "unknown"
+                              ]
+                            },
+                            "dns": {
+                              "enum": [
+                                "ok",
+                                "nxdomain",
+                                "unknown"
+                              ]
+                            },
+                            "note": {
+                              "type": "string",
+                              "maxLength": 300
+                            },
+                            "challenged": {
+                              "type": "string",
+                              "maxLength": 60
+                            }
+                          }
+                        },
+                        "tls": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "subject": {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            "issuer": {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            "sans": {
+                              "type": "array",
+                              "maxItems": 50,
+                              "items": {
+                                "type": "string",
+                                "maxLength": 255
+                              }
+                            },
+                            "not_before": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "maxLength": 40
+                            },
+                            "not_after": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "maxLength": 40
+                            },
+                            "days_left": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "key": {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            "signature": {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            "protocol": {
+                              "type": "string",
+                              "maxLength": 20
+                            },
+                            "cipher": {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            "chain_error": {
+                              "type": "string",
+                              "maxLength": 300
+                            },
+                            "legacy_tls": {
+                              "type": "boolean"
+                            }
+                          }
+                        },
+                        "mail": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "handles_mail": {
+                              "type": "boolean"
+                            },
+                            "mx": {
+                              "type": "boolean"
+                            }
+                          }
+                        },
+                        "http": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "https_status": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ]
+                                },
+                                "http_status": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ]
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "maxLength": 300
+                                },
+                                "status": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ]
+                                },
+                                "title": {
+                                  "type": "string",
+                                  "maxLength": 200
+                                },
+                                "content_type": {
+                                  "type": "string",
+                                  "maxLength": 100
+                                },
+                                "server": {
+                                  "type": "string",
+                                  "maxLength": 200
+                                },
+                                "powered_by": {
+                                  "type": "string",
+                                  "maxLength": 200
+                                },
+                                "location": {
+                                  "type": "string",
+                                  "maxLength": 300
+                                },
+                                "cookies": {
+                                  "type": "array",
+                                  "maxItems": 20,
+                                  "items": {
+                                    "type": "string",
+                                    "maxLength": 100
+                                  }
+                                },
+                                "bytes": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ]
+                                },
+                                "headers": {
+                                  "type": "object",
+                                  "maxProperties": 60,
+                                  "additionalProperties": {
+                                    "type": "string",
+                                    "maxLength": 200
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "addresses",
+                        "evidence"
+                      ]
+                    },
+                    "fingerprints": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "source": {
+                            "type": "string",
+                            "maxLength": 40
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "source"
+                        ]
+                      }
+                    },
+                    "edges": {
+                      "type": "array",
+                      "maxItems": 10,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 60
+                      }
+                    },
+                    "distro": {
+                      "type": "string",
+                      "maxLength": 60
+                    },
+                    "answered": {
+                      "type": "boolean"
+                    },
+                    "stopped": {
+                      "type": "boolean"
+                    },
+                    "partial": {
+                      "type": "boolean"
+                    },
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 5000
+                    }
+                  },
+                  "required": [
+                    "domain",
+                    "postures",
+                    "resolvable",
+                    "summary",
+                    "card",
+                    "fingerprints",
+                    "edges",
+                    "distro",
+                    "answered",
+                    "stopped",
+                    "partial",
+                    "requests"
+                  ]
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "domains",
                 "touched"
               ]
             }
@@ -2785,6 +3197,59 @@
                 }
               }
             }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "supplier_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "domains",
+          "pace",
+          "max_requests",
+          "scope"
+        ],
+        "properties": {
+          "domains": {
+            "type": "array",
+            "maxItems": 25,
+            "items": {
+              "type": "string",
+              "maxLength": 253,
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "pace": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "gap": {
+                "type": "number",
+                "minimum": 0.25,
+                "maximum": 60,
+                "description": "seconds between any two requests of the task"
+              },
+              "host_gap": {
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 60,
+                "description": "seconds between two requests to one name"
+              }
+            },
+            "required": [
+              "gap",
+              "host_gap"
+            ]
+          },
+          "max_requests": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000,
+            "description": "the requests the task may make in all (a certificate read counts as three); a name that does not fit is reported partial"
           },
           "scope": {
             "$ref": "#/$defs/probe_scope"

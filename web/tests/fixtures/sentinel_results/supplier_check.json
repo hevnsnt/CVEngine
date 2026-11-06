@@ -1,0 +1,30 @@
+{
+  "outcome": "done",
+  "domains": [
+    {"domain": "www.example.com",
+     "postures": [
+       {"check": "hsts_missing", "severity": 2, "title": "www.example.com does not send Strict-Transport-Security",
+        "detail": "Without HSTS a browser can be tricked into using plain HTTP on first contact or after a downgrade.", "category": "web", "evidence": {"header": ""}},
+       {"check": "tls_expiring", "severity": 2, "title": "Certificate for www.example.com:443 expires within 30 days (12 days left)",
+        "detail": "Valid until 2026-12-01.", "category": "tls", "evidence": {"days_left": 12, "not_after": "2026-12-01T00:00:00+00:00", "where": "www.example.com:443"}}
+     ],
+     "resolvable": {"email": [""], "tls": ["tls_"], "web": ["hsts_", "http_no_redirect", "no_https", "security_headers_missing"], "cve": ["cve_"], "exposed": ["exposed_login"]},
+     "summary": {"address": "ok"},
+     "card": {"state": "ok", "addresses": ["198.51.100.10"], "evidence": {"address": "ok", "dns": "ok"},
+              "tls": {"subject": "www.example.com", "issuer": "Example CA", "sans": ["www.example.com"], "not_before": "2026-09-01T00:00:00+00:00",
+                      "not_after": "2026-12-01T00:00:00+00:00", "days_left": 12, "key": "RSA 2048", "signature": "sha256 (sha256WithRSAEncryption)",
+                      "protocol": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384", "chain_error": "", "legacy_tls": false},
+              "mail": {"handles_mail": false, "mx": false},
+              "http": {"https_status": 200, "http_status": 301, "url": "https://www.example.com/", "status": 200, "title": "Example", "content_type": "text/html",
+                       "server": "nginx/1.18.0 (Ubuntu)", "powered_by": "PHP/7.4.3", "location": "", "cookies": [], "bytes": 1256,
+                       "headers": {"server": "nginx/1.18.0 (Ubuntu)", "x-powered-by": "PHP/7.4.3"}}},
+     "fingerprints": [{"name": "nginx:1.18.0", "source": "header:server"}, {"name": "PHP:7.4.3", "source": "header:x-powered-by"}],
+     "edges": [], "distro": "Ubuntu", "answered": true, "stopped": false, "partial": false, "requests": 17},
+    {"domain": "mail.example.org", "postures": [], "resolvable": {},
+     "summary": {"address": "none"},
+     "card": {"state": "no_address", "addresses": [], "evidence": {"address": "none", "dns": "ok"}},
+     "fingerprints": [], "edges": [], "distro": "", "answered": false, "stopped": false, "partial": false, "requests": 0}
+  ],
+  "touched": ["www.example.com"],
+  "refused": []
+}

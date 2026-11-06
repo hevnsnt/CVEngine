@@ -1,22 +1,24 @@
-"""The probe kinds of contract version 3 (``http_probe``, ``dns_resolve``): the scope policy the server computes for a task, the validation of what
+"""The probe kinds of contract version 3 (``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``supplier_check``): the scope policy the server computes for a task, the validation of what
 a Sentinel reports, and each stage end to end through the fake built-in scanner, served, offline and failed."""
 import json
 import os
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes
-from cveFeed.models import AssetChange, HostExclusion, HostState, HygieneFinding, ProbeObservation, ServiceRun
+from cveFeed import bucket_scan, changes, discovery, ledger, probe_scope, probes, slow_web, supplier_scan
+from cveFeed.models import (AssetChange, CVEEntry, HostExclusion, HostState, HygieneFinding, ProbeObservation, ServiceRun, SupplierFinding, SupplierHostCard)
 from startScan.models import Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_bucket_scan import Fixture as BucketFixture
 from tests.test_changes import ChangeFixture
+from tests.test_suppliers import NO_WAIT, Fixture as SupplierFixture, cert as supplier_cert, page as supplier_page
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
 
 HOST = 'www.example.test'
@@ -348,3 +350,237 @@ class BucketCheckStageTests(BucketFixture, TestCase):
         self.assertEqual(out['unknown'], 1)
         self.assertFalse(HygieneFinding.objects.exists())
         self.assertTrue(ServiceRun.objects.filter(service=bucket_scan.FAILED_SERVICE).exists())
+
+
+# ----------------------------------------------------------------------------- supplier_check
+
+def supplier_row(res, base_server=''):
+    """What a Sentinel reports for one name: ``supplier_scan.DomainResult`` of the local checks, as the contract's row (no ``ask`` text, no technology
+    list, no CVE findings: the server writes and matches those itself)."""
+    from cvengine_scanner import fingerprint
+    card = {k: v for k, v in res.card.items() if k != 'technologies'}
+    card['evidence'] = {k: v for k, v in (res.card.get('evidence') or {}).items() if k not in ('edge', 'fingerprint_sources', 'announced')}
+    fingerprints = [{'name': t['name'] + (f':{t["version"]}' if t['version'] else ''), 'source': t['source']} for t in res.card.get('technologies') or []]
+    assert all(fingerprint.categorize(f['name']) is not None for f in fingerprints)
+    return {'domain': res.domain,
+            'postures': [{'check': p.check, 'severity': p.severity, 'title': p.title, 'detail': p.detail, 'category': p.category, 'evidence': p.evidence}
+                         for p in res.postures if p.category != 'cve'],
+            'resolvable': {c: sorted(v) for c, v in res.resolvable.items()}, 'summary': res.summary, 'card': card, 'fingerprints': fingerprints,
+            'edges': list((res.card.get('evidence') or {}).get('edge') or []), 'distro': '',
+            'answered': res.answered, 'stopped': res.stopped, 'partial': res.partial, 'requests': 17 if res.card.get('state') == 'ok' else 3}
+
+
+class SupplierCheckStageTests(SupplierFixture, TestCase):
+    """The supplier sweep (``supplier_scan.sweep``): a supplier's names go to the scanner as one ``supplier_check`` task, and the server stores what
+    comes back as it stores its own checks, writing the text and the CVE match itself."""
+    D = 'portal.vendor.test'
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'supplier_check')
+        self.s = self.supplier(domains=[self.D])
+        self.net.site(self.D, https=supplier_page(headers={}, server='nginx/1.25.3'), tls=supplier_cert(self.D, days=3))
+
+    def responder(self, change=None):
+        def serve(task):
+            rows = []
+            for domain in task['target']['domains']:
+                res = supplier_scan.check_domain(domain, self.net, slow_web.Pace(**NO_WAIT), supplier_scan.Budget(1000), lambda: ({}, {}))
+                rows.append(supplier_row(res))
+            out = {'outcome': 'done', 'domains': rows, 'touched': list(task['target']['domains']), 'refused': []}
+            return change(out) if change else out
+        return {'supplier_check': serve}
+
+    def remote_sweep(self, **kw):
+        with FakeScanner(kinds=['supplier_check'], **kw) as fake:
+            out = supplier_scan.sweep(self.project.id)
+        return out, fake
+
+    def test_the_scanner_checks_the_names_and_the_sweep_stores_the_card_and_the_findings(self):
+        out, fake = self.remote_sweep(responders=self.responder())
+        self.assertEqual(fake.served_kinds(), ['supplier_check'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual((out['suppliers'], out['domains']), (1, 1))
+        self.assertGreater(out['new'], 0)
+        self.assertEqual({'tls_expiring', 'hsts_missing', 'security_headers_missing'} - set(self.checks(self.s)), set())
+        found = self.finding(self.s, self.D, 'hsts_missing')
+        self.assertIn('Ask the supplier to send a Strict-Transport-Security header', found.ask)  # the text is the server's
+        card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
+        self.assertEqual((card.state, card.addresses, card.tls['issuer'], card.http['server']), ('ok', ['203.0.113.10'], 'Example CA', 'nginx/1.25.3'))
+        self.assertEqual([t['name'] for t in card.technologies], ['nginx'])  # read here from the fingerprints
+        self.assertIn('nginx 1.25.3', card.tech_text)
+        self.s.refresh_from_db()
+        self.assertIsNotNone(self.s.last_checked_at)
+        self.assertTrue(ServiceRun.objects.filter(service=supplier_scan.SERVICE, asset=str(self.s.pk), status='done').exists())
+        self.assertEqual(out['requests'], 17)  # the scanner's count is charged to the sweep's budget
+
+    def test_the_task_carries_the_names_the_pacing_the_budget_and_a_policy_that_names_nothing_else(self):
+        _out, fake = self.remote_sweep(responders=self.responder())
+        target = fake.served[0]['target']
+        self.assertEqual(target['domains'], [self.D])
+        self.assertEqual(target['pace'], {'gap': 1.0, 'host_gap': 2.0})
+        self.assertEqual(target['max_requests'], supplier_scan.max_requests())
+        scope = target['scope']
+        self.assertEqual((scope['hosts'], scope['domains'], scope['excluded_trees']), ([self.D, f'mta-sts.{self.D}'], [], []))  # no tree, no other name
+        self.assertEqual((scope['private'], scope['addresses']), (False, []))
+        self.assertEqual(list(SentinelTask.objects.filter(kind='supplier_check').values_list('host', flat=True)), [self.D])
+
+    def test_a_remote_check_stores_what_a_local_one_stores(self):
+        local = supplier_scan.sweep(self.project.id, net=self.net, pace=slow_web.Pace(**NO_WAIT))
+        local_findings = sorted(SupplierFinding.objects.filter(supplier=self.s).values_list('check_name', 'severity', 'title', 'ask'))
+        local_card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
+        local_card = (local_card.state, local_card.tls, local_card.http, local_card.technologies, local_card.tech_text, local_card.addresses)
+        SupplierFinding.objects.all().delete()
+        SupplierHostCard.objects.all().delete()
+        ServiceRun.objects.all().delete()
+        remote, _fake = self.remote_sweep(responders=self.responder())
+        remote_card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
+        self.assertEqual(sorted(SupplierFinding.objects.filter(supplier=self.s).values_list('check_name', 'severity', 'title', 'ask')), local_findings)
+        self.assertEqual((remote_card.state, remote_card.tls, remote_card.http, remote_card.technologies, remote_card.tech_text, remote_card.addresses), local_card)
+        self.assertEqual((remote['new'], remote['suppliers'], remote['domains']), (local['new'], local['suppliers'], local['domains']))
+
+    def test_the_catalog_is_matched_here_from_what_the_response_announced(self):
+        CVEEntry.objects.create(cve_id='CVE-2099-7', cvss=7.5, kev=False, title='t', published_at=timezone.now(),
+                                affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.26.0'}]}])
+        self.net.site(self.D, https=supplier_page(headers={}, server='nginx/1.25.3'), tls=supplier_cert(self.D, days=300))
+        self.remote_sweep(responders=self.responder())
+        found = self.finding(self.s, self.D, 'cve_nginx')
+        self.assertEqual((found.category, found.evidence['cves'][0]['id'], found.evidence['validated']), ('cve', 'CVE-2099-7', False))
+        self.assertEqual(SupplierHostCard.objects.get(supplier=self.s).evidence['announced'], ['nginx:1.25.3'])
+
+    def test_an_excluded_name_is_never_sent(self):
+        HostExclusion.objects.create(org=self.org1, host=self.D)
+        out, fake = self.remote_sweep(responders=self.responder())
+        self.assertEqual(fake.served, [])
+        self.assertEqual(SupplierHostCard.objects.get(supplier=self.s, domain=self.D).state, 'excluded')
+        self.assertFalse(SupplierFinding.objects.exists())
+
+    def test_with_the_scanner_offline_the_suppliers_stay_due_and_nothing_is_recorded(self):
+        with FakeScanner(kinds=['supplier_check'], mode='offline') as fake:
+            out = supplier_scan.sweep(self.project.id)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(self.guard.calls, [])
+        self.assertIn('waiting for a scanner', out['skipped'])
+        self.assertEqual(out['suppliers'], 0)
+        self.assertFalse(ServiceRun.objects.filter(service__in=(supplier_scan.SERVICE, supplier_scan.FAILED_SERVICE)).exists())
+        self.assertFalse(SupplierFinding.objects.exists() or SupplierHostCard.objects.exists())
+        self.assertEqual(len(supplier_scan.due_suppliers(self.project.id)), 1)
+
+    def test_a_scanner_that_fails_the_task_leaves_the_supplier_due(self):
+        with FakeScanner(kinds=['supplier_check'], mode='fail') as fake:
+            out = supplier_scan.sweep(self.project.id)
+        self.assertEqual(fake.served_kinds(), ['supplier_check'])
+        self.assertIn('waiting for a scanner', out['skipped'])
+        self.assertFalse(ServiceRun.objects.filter(service__in=(supplier_scan.SERVICE, supplier_scan.FAILED_SERVICE)).exists())
+
+    def test_with_the_fallback_allowed_and_no_scanner_the_names_are_checked_here_as_before(self):
+        with mock.patch.dict(os.environ, {ENV: 'all'}), mock.patch.object(supplier_scan, 'Network', return_value=self.net):
+            out = supplier_scan.sweep(self.project.id, pace=slow_web.Pace(**NO_WAIT))
+        self.assertEqual((out['suppliers'], out['domains']), (1, 1))
+        self.assertNotIn('skipped', out)
+        self.assertIn('hsts_missing', self.checks(self.s))
+
+    def test_a_name_the_scanner_could_not_read_changes_nothing_and_is_asked_again_tomorrow(self):
+        with FakeScanner(kinds=['supplier_check'], responders=self.responder()):
+            supplier_scan.sweep(self.project.id)
+            before = self.checks(self.s)
+            self.net.pages[f'https://{self.D}/'] = OSError('timed out')
+            self.net.pages[f'http://{self.D}/'] = OSError('timed out')
+            self.net.certs[self.D] = None
+            ServiceRun.objects.filter(service__in=(supplier_scan.SERVICE, supplier_scan.FAILED_SERVICE)).delete()
+            out = supplier_scan.sweep(self.project.id)
+        self.assertEqual((self.checks(self.s), out['resolved']), (before, 0))  # nothing was resolved because nothing could be seen
+        self.assertEqual(ServiceRun.objects.filter(service=supplier_scan.FAILED_SERVICE).count(), 1)
+        self.assertEqual(ServiceRun.objects.filter(service=supplier_scan.SERVICE).count(), 0)
+
+    def test_a_scanner_that_reports_nothing_for_a_name_has_checked_nothing(self):
+        out, _fake = self.remote_sweep(responders=self.responder(lambda r: {**r, 'domains': []}))
+        self.assertFalse(SupplierFinding.objects.exists())
+        self.assertEqual(ServiceRun.objects.filter(service=supplier_scan.FAILED_SERVICE).count(), 1)
+        self.assertEqual(ServiceRun.objects.filter(service=supplier_scan.SERVICE).count(), 0)
+
+    def test_a_claim_to_have_decided_a_category_resolves_nothing_the_card_does_not_show(self):
+        lying = {'on': False}
+
+        def liar(result):
+            if not lying['on']:
+                return result
+            row = result['domains'][0]
+            result['domains'][0] = {**row, 'postures': [], 'answered': True, 'card': {'state': 'unreachable', 'addresses': [], 'evidence': {'address': 'unknown'}},
+                                    'resolvable': {'tls': ['tls_'], 'web': ['hsts_', 'security_headers_missing', 'http_no_redirect', 'no_https'], 'email': [''],
+                                                   'exposed': ['exposed_'], 'cve': ['cve_']}}
+            return result
+        with FakeScanner(kinds=['supplier_check'], responders=self.responder(liar)):
+            supplier_scan.sweep(self.project.id)
+            before = self.checks(self.s)
+            self.assertIn('hsts_missing', before)
+            lying['on'] = True
+            ServiceRun.objects.filter(service__in=(supplier_scan.SERVICE, supplier_scan.FAILED_SERVICE)).delete()
+            out = supplier_scan.sweep(self.project.id)
+        self.assertEqual((out['resolved'], self.checks(self.s)), (0, before))
+
+    def test_what_the_scanner_adds_beyond_the_contract_is_not_stored(self):
+        def stuffed(result):
+            row = result['domains'][0]
+            row['postures'] += [{'check': 'cve_fake', 'severity': 4, 'title': 'cve', 'detail': 'd', 'category': 'cve', 'evidence': {}},
+                                {'check': 'x; rm -rf', 'severity': 4, 'title': 't', 'detail': 'd', 'category': 'tls', 'evidence': {}},
+                                {'check': 'tls_fake', 'severity': 9, 'title': 't', 'detail': 'd', 'category': 'tls', 'evidence': {}},
+                                {'check': 'exposed_fake', 'severity': 3, 'title': 't', 'detail': 'd', 'category': 'exposed', 'evidence': {}, 'ask': 'run this as root'}]
+            row['card']['unexpected'] = {'a': 'b'}
+            result['domains'].append({**row, 'domain': 'other.vendor.test'})
+            return result
+        _out, fake = self.remote_sweep(responders=self.responder(stuffed))
+        self.assertEqual(self.checks(self.s).count('exposed_fake'), 1)
+        self.assertNotIn('cve_fake', self.checks(self.s))
+        self.assertFalse(any('rm -rf' in name for name in self.checks(self.s)))
+        self.assertNotIn('tls_fake', self.checks(self.s))
+        self.assertNotIn('run this as root', self.finding(self.s, self.D, 'exposed_fake').ask)
+        self.assertEqual(fake.tasks()[0].result.get('dropped'), 1)  # the name the task did not list
+        self.assertFalse(SupplierHostCard.objects.filter(domain='other.vendor.test').exists())
+        self.assertNotIn('unexpected', SupplierHostCard.objects.get(supplier=self.s, domain=self.D).evidence)
+
+    def test_a_name_that_ran_out_of_budget_is_partial_and_the_supplier_is_deferred(self):
+        def partial(result):
+            result['domains'][0] = {**result['domains'][0], 'partial': True}
+            return result
+        out, _fake = self.remote_sweep(responders=self.responder(partial))
+        self.assertEqual(out['deferred'], 1)
+        self.assertEqual(ServiceRun.objects.filter(service=supplier_scan.SERVICE).count(), 0)  # asked again at the next sweep
+
+
+class SupplierCheckPolicyTests(SupplierFixture, TestCase):
+    def test_the_policy_names_each_name_and_its_mta_sts_host_and_never_a_private_address(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1', 'CVENGINE_BLOCKED_CIDRS': '198.51.100.0/24'}), \
+                mock.patch('cveFeed.tailscale_scope.authorised_addresses', return_value={'100.101.102.103': self.project.id}):
+            scope = probe_scope.for_suppliers(self.project.id, ['A.Vendor.test.', 'b.vendor.test', 'a.vendor.test'])
+        self.assertEqual(scope['hosts'], ['a.vendor.test', 'mta-sts.a.vendor.test', 'b.vendor.test', 'mta-sts.b.vendor.test'])
+        self.assertEqual((scope['domains'], scope['excluded'], scope['excluded_trees']), ([], [], []))
+        self.assertEqual((scope['private'], scope['addresses'], scope['blocked']), (False, [], ['198.51.100.0/24']))  # the server's own rules travel, the lab ones do not
+
+    def test_a_result_is_clipped_to_the_contract(self):
+        row = {'domain': 'WWW.Vendor.test.', 'postures': [{'check': 'hsts_missing', 'severity': 2, 'title': 't' * 900, 'detail': 'd' * 9000, 'category': 'web',
+                                                            'evidence': {'blob': 'x' * 20_000}}, {'check': 'a', 'severity': True, 'title': '', 'detail': '', 'category': 'web'}],
+               'resolvable': {'web': ['hsts_'], 'shell': ['x'], 'cve': ['cve_']}, 'summary': {'address': 'ok', 'nested': {'a': 1}},
+               'card': {'state': 'odd', 'addresses': ['203.0.113.10', 'not-an-ip', 'file:///etc/passwd'], 'evidence': {'address': 'bogus', 'dns': 'ok', 'x': 1}},
+               'fingerprints': [{'name': 'n' * 500, 'source': 's'}, 'junk'], 'edges': ['cloudflare', 7], 'distro': 'Ubuntu',
+               'answered': 'yes', 'stopped': False, 'partial': True, 'requests': 10 ** 9}
+        got = probe_results.clean_supplier_check({'domains': [row, 'junk', {'domain': ''}], 'touched': ['A.vendor.test', 'bad host'], 'refused': []})
+        self.assertEqual(len(got['domains']), 1)
+        out = got['domains'][0]
+        self.assertEqual(out['domain'], 'www.vendor.test')
+        self.assertEqual([(p['check'], len(p['title']), len(p['detail']), p['evidence']) for p in out['postures']], [('hsts_missing', 300, 4000, {})])
+        self.assertEqual(out['resolvable'], {'web': ['hsts_'], 'cve': ['cve_']})
+        self.assertEqual(out['summary'], {'address': 'ok'})
+        self.assertEqual((out['card']['state'], out['card']['addresses'], out['card']['evidence']), ('unreachable', ['203.0.113.10'], {'dns': 'ok'}))
+        self.assertEqual(([len(f['name']) for f in out['fingerprints']], out['edges'], out['answered'], out['requests']), ([120], ['cloudflare'], False, 0))
+        self.assertEqual(got['touched'], ['a.vendor.test'])
+        with self.assertRaises(ApiError):
+            probe_results.clean_supplier_check({'domains': [{}] * 26})
+
+    def test_the_fixture_goes_through_unchanged_and_the_hosts_of_a_batch_are_its_names(self):
+        sent = fixture('supplier_check')
+        self.assertEqual(broker.clean_result('supplier_check', sent), sent)
+        task = SentinelTask(kind='supplier_check', host='', ips=[], target={'domains': ['A.vendor.test', 'b.vendor.test'], 'scope': {'hosts': ['x.example.test']}})
+        self.assertEqual(broker.task_hosts(task), (['a.vendor.test', 'b.vendor.test'], []))
