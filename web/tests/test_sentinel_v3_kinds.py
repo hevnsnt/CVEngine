@@ -242,7 +242,6 @@ class RdpShotStageTests(StageBase):
         self.scan_obj = self.scan(names=('win.rt.test',), ports=())
         ip = Subdomain.objects.get(scan_history=self.scan_obj).ip_addresses.get()
         ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server', extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
-        mock.patch('cveFeed.rdp_shot.available', return_value=False).start()  # no aardwolf here: the stage still runs, on the scanner
 
     def test_the_scanner_captures_and_the_reading_stays_here(self):
         self.arm('rdp_shot')

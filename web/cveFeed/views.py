@@ -235,7 +235,7 @@ def graph_payload(domain_id=None, scan_id=None):
             cve = match.cve_entry
             if node(f'cve:{cve.pk}', 'cve', cve.cve_id, tier=_tier(cve)):
                 edges.add((sid, f'cve:{cve.pk}'))
-    # bbot's own discovery relationships (which host revealed which); scoped the same as the node query above,
+    # the discovery's own relationships (which host revealed which); scoped the same as the node query above,
     # and otherwise spans every scan the caller can see so the whole project's history draws as one graph.
     events = DiscoveryEvent.objects.exclude(parent_host='')
     if scan_id:
@@ -243,7 +243,7 @@ def graph_payload(domain_id=None, scan_id=None):
     elif domain_id:
         events = events.filter(domain_id=domain_id)  # includes CT-monitor finds, which have no scan
     # only an edge between two drawn hosts is ever kept, so read only those (a name in the case the host row spells it and lower case, which
-    # is how bbot reports it), in a fixed order: an arbitrary 1500 of every pair ever stored dropped edges of drawn hosts at random
+    # is how the discovery reports it), in a fixed order: an arbitrary 1500 of every pair ever stored dropped edges of drawn hosts at random
     drawn = {n for s in sub_list for n in (s.name, s.name.lower())}
     events = events.filter(host__in=drawn, parent_host__in=drawn)
     for parent, host in events.values_list('parent_host', 'host').distinct().order_by('parent_host', 'host')[:GRAPH_NODE_CAP]:

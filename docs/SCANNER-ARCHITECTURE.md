@@ -54,11 +54,11 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/probes.py` | the nmap probe (`--version-all` and the safe scripts) | `nmap_verify` | the scripts are named in the task; a Sentinel runs only names on the reviewed list `cvengine_scanner.flags.NSE_SCRIPTS`, the one list both sides import |
 | `cveFeed/waf_fingerprint.py` | wafw00f | `waf` | one task per site at the address the server vetted; the local run is deleted (`NEVER_LOCAL`), the result goes through the product rule `_named` |
 | `cveFeed/node2shell_scan.py` | the vendored detector | `node2shell` | the detector is vendored in the client the way it is here |
-| `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | the PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
+| `cveFeed/rdp_shot.py` | the RDP pre-authentication screenshot | `rdp_shot` | deleted locally (`NEVER_LOCAL`): the capture client is gone from the server. The PNG comes back (at most 4 MB; the signature and the image size in its header are checked before anything opens it); the AI reading stays on the server |
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
 | `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | built-in scanner only (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. One task per project that holds the addresses |
 | `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | built-in scanner only. The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
-| `reNgine/bbot.py`, `cveFeed/discovery.py` | bbot, a streaming producer for up to six hours | `bbot_discovery` | a streamed task, also contract version 3 (see **bbot** under Target shape) |
+| `reNgine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
 
 ### C. In-process network probes (Python in server workers)
 
@@ -68,7 +68,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path stays behind `CVENGINE_LOCAL_FALLBACK`. The signed-in half (`auth_routes`) stays on the server, built-in only |
 | `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | move |
+| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/hygiene.py` | DNS, TLS, SPF/DKIM/DMARC | the network helpers move; the evaluators are pure and stay |
 | `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | copied into the library (`cvengine_scanner.probes.transport`, `egress_proxy`, `legacy_tls`), held to the task's scope policy; a Sentinel takes its probe proxy from its own `CVENGINE_SENTINEL_PROBE_PROXY`, never from the server; the server's copies stay for the local paths |
@@ -138,8 +138,8 @@ which send nothing to the target and need no vantage point.
     scanner may touch). `POST /api/v1/sentinel/tasks/<id>/partial` (`agentapi.sentinel_stream.report_partial`) takes numbered batches once and in
     order, holds them to the task's scope and stores them as `SentinelPartial` rows; `sentinel_stream.dispatch_stream` (the discovery stage) reads
     them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
-    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind and runs bbot here otherwise, through the same
-    `_no_local` decision as every other kind. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
+    at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind; the kind is in `NEVER_LOCAL`, so with none able to take it
+    the scan waits (`ScannerUnavailable`) and the target stays due. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
     scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
@@ -179,13 +179,13 @@ which send nothing to the target and need no vantage point.
    and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
    source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
-   **bbot** above); the local run stays as the fallback until its telemetry shows none.
+   **bbot** above); the local run is deleted (T8).
    Probes in progress: contract version 3 has the scope policy
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
-   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the anonymous web route check (`route_probe`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half, suppliers and the
+   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the supplier posture checks (`supplier_check`), the anonymous web route check (`route_probe`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half and the
    hygiene network helpers.
 8. Drop the scan tools, Go and bbot from the server image.
 
@@ -300,7 +300,7 @@ reconnects.") and, for an App Admin, the never-seen sentence, and as a strip on 
 colour and wording of its own, never the scanning pause's. The sweeps that run on their own schedules and would dispatch, raise, catch and log an
 activity line every tick (the testssl sweep, the UDP sweep, the WPScan quick pass) return `{'skipped': 'no scanner is online for <kind>; the targets stay
 due'}` before doing any of that. The WPScan quick pass asks again at the same attempt, so a returning scanner finds it and its tries are not spent.
-It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, bbot discovery (which runs here, so the work
+It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, the discovery start (the run is on a Sentinel, so the
 conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path and the thorough WPScan pass (never
 dispatched) are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
 for a cool-off and so also reads as waiting.

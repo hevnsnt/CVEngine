@@ -243,7 +243,6 @@ def _wpscan_args(spec):
 
 TOOLS = {
     'nuclei': (('http', 'https', 'socks5'), lambda s: ['-proxy', s.url]),
-    'bbot': (SCHEMES, lambda s: ['-c', f'web.http_proxy={s.url}']),  # bbot's own setting; bbot.private_config moves it into a 0600 file
     'wpscan': (SCHEMES, _wpscan_args),
 }
 

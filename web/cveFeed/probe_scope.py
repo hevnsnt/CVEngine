@@ -173,6 +173,17 @@ def for_buckets(project_id, candidates):
     return {'hosts': hosts, 'domains': domains, 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_suppliers(project_id, domains):
+    """The policy of a supplier_check task: the exact names of one supplier (``supplier_scan.clean_domain`` already refused anything but a bare
+    DNS name) and each one's ``mta-sts.`` host, which the policy file is fetched from. Never a wildcard, never a tree. A supplier is not an owned
+    host, so the policy refuses every private address whatever ``CVENGINE_ALLOW_PRIVATE_TARGETS`` says and authorises no tailnet device; the
+    server's blocked ranges still travel along. The names were already filtered by the project's exclusions and own targets."""
+    hosts = []
+    for name in dict.fromkeys(str(d).strip().lower().rstrip('.') for d in domains if str(d).strip()):
+        hosts += [name, f'mta-sts.{name}']
+    return {'hosts': hosts[:MAX_HOSTS], 'domains': [], 'excluded': [], 'excluded_trees': [], **{**address_rules(project_id), 'private': False, 'addresses': []}}
+
+
 def for_vhosts(project_id, addresses, names):
     """The policy of a vhost_probe task: the addresses it asks (each as itself, for its default request) and the names it sends as the Host
     header. The names were already filtered by the project's exclusions and archived hosts; a name's own front page is asked at the address the

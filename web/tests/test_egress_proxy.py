@@ -17,7 +17,7 @@ from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
 from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, wpscan_scan
-from reNgine import bbot, crypto_fields
+from reNgine import crypto_fields
 from scanEngine.models import Proxy
 
 HTTP_PROXY = 'http://203.0.113.50:3128'
@@ -189,7 +189,6 @@ class ToolFragmentTests(ProxyOn, TestCase):
         self.turn_on(LOGIN_PROXY)
         self.assertEqual(egress_proxy.for_tool('nuclei', ['www.example.com']), ['-proxy', LOGIN_PROXY])
         self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
-        self.assertEqual(egress_proxy.for_tool('bbot'), ['-c', f'web.http_proxy={LOGIN_PROXY}'])
 
     def test_a_tool_that_cannot_use_any_proxy_fails_closed(self):
         self.turn_on('socks5h://203.0.113.5:1080')
@@ -258,32 +257,6 @@ class IntegrationTests(ProxyOn, TestCase):
                 pass
             wp = seen[-1]
             self.assertEqual((wp[wp.index('--proxy') + 1], wp[wp.index('--proxy-auth') + 1]), ('http://203.0.113.52:3128', 'bob:hunter2'))
-
-    def test_bbot_gets_the_proxy_in_its_private_config_file_never_on_the_command_line(self):
-        seen = {}
-
-        def fake(targets, presets, mode, timeout, extra_args, **kwargs):
-            seen['args'] = list(extra_args)
-            seen['secrets'] = kwargs.get('secrets')
-            seen['file'] = None
-            if bbot.PRESET_FLAG in extra_args:
-                path = extra_args[extra_args.index(bbot.PRESET_FLAG) + 1]
-                seen['mode'] = oct(os.stat(path).st_mode & 0o777)
-                with open(path) as handle:
-                    seen['file'] = handle.read()
-            return iter(())
-
-        with mock.patch.object(bbot, '_stream_events', fake):
-            list(bbot.stream_events(['example.com']))
-            self.assertEqual((seen['args'], seen['file']), ([], None))  # off: nothing added, no preset file
-            self.turn_on(LOGIN_PROXY)
-            list(bbot.stream_events(['example.com'], extra_args=['-c', 'modules.shodan_dns.api_key=abc123']))
-        self.assertNotIn('hunter2', ' '.join(seen['args']))
-        self.assertNotIn('web.http_proxy', ' '.join(seen['args']))
-        self.assertIn('http_proxy: http://bob:hunter2@203.0.113.52:3128', seen['file'])
-        self.assertIn('api_key: abc123', seen['file'])
-        self.assertEqual(seen['mode'], '0o600')
-        self.assertIn(LOGIN_PROXY, seen['secrets'])  # redacted from bbot's error output like an API key
 
 
 # ----------------------------------------------------------------------------- a tiny forward proxy that records what it is asked
