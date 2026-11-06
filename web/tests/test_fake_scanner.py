@@ -164,7 +164,8 @@ class HarnessModeTests(NoRealSleep, DispatchBase):
         with FakeScanner(kinds=['nmap'], mode='timeout') as fake:
             with self.assertRaises(resources.ScannerUnavailable) as caught:
                 self.go()
-        self.assertLess(time.monotonic() - started, 1.0)  # the 1 second budget ran on the virtual clock
+        self.assertGreaterEqual(fake.clock.offset, 1.0)  # the 1 second budget ran, on the virtual clock
+        self.assertLess(time.monotonic() - started, 5.0)  # and the test did not wait for it (a loaded CI runner took 1.02 s of real time here against the old 1.0 s limit)
         task = SentinelTask.objects.get(kind='nmap')
         self.assertEqual(task.status, 'expired')
         self.assertEqual(task.agent_id, None)  # expiry hands the task back
