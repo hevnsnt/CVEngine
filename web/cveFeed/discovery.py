@@ -465,8 +465,6 @@ def run_pipeline(scan_id, *args, **kwargs):
     return {'scan_id': scan_id, 'status': 'skipped', 'error': message}
 
 
-IP_LOOKUP_TIMEOUT = 3  # seconds for the PTR lookup and for the certificate connection
-
 
 def identity_names(scan, ip):
     """``{'ptr': [names], 'tls-san': [names]}`` of an IP target: its reverse-DNS name and the names on the certificate it serves on 443, both read by
@@ -918,43 +916,6 @@ def _announce(scan, result, summary=True):
 
 # --- new hosts found between scans -------------------------------------------------------------------------------
 
-def _no_such_name(exc):
-    """True when a lookup error is the resolver's definitive answer that the name has no address (NXDOMAIN, or the name exists with no A or AAAA
-    record), as opposed to a resolver that could not answer (a timeout, a temporary failure, an unreachable server)."""
-    import socket
-    return isinstance(exc, socket.gaierror) and exc.errno in {code for code in (getattr(socket, 'EAI_NONAME', None), getattr(socket, 'EAI_NODATA', None))
-                                                              if code is not None}
-
-
-def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
-    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool.
-
-    A name the resolver answers "no such name" for is simply absent. A lookup that could not be answered (a timeout, a temporary resolver
-    failure) is not an answer about the name: it is put in ``errors`` (``{name: reason}``) when the caller passes one, so it is never mistaken for
-    a host that has no address, and it is counted in the log either way."""
-    import concurrent.futures
-    import socket
-    pairs = set()
-    failed = errors if errors is not None else {}
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    try:
-        futures = {pool.submit(socket.getaddrinfo, name, None, 0, socket.SOCK_STREAM): name for name in names}
-        for future, name in futures.items():
-            try:
-                pairs.update((name, info[4][0]) for info in future.result(timeout=timeout))
-            except concurrent.futures.TimeoutError:
-                failed[name] = f'no answer within {timeout} seconds'
-            except Exception as exc:  # noqa: BLE001 - one lookup failing never stops the rest
-                if not _no_such_name(exc):
-                    failed[name] = f'{type(exc).__name__}: {exc}'[:120]
-    finally:
-        pool.shutdown(wait=False)
-    if failed:
-        logger.warning('DNS lookup could not be answered for %s of %s names (for example %s: %s)', len(failed), len(list(names)),
-                       next(iter(failed)), next(iter(failed.values())))
-    return pairs
-
-
 @scanner_wait.requeues(_named_hosts)
 def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=False, source_scan_id=None,
                       force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, then=None, **stage_kwargs):
@@ -1038,7 +999,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
             lookup_errors = {}
-            if resolver is None or resolver is resolve_names:  # through a Sentinel when one can take dns_resolve (agentapi.probe_dispatch), else here
+            if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
                 from agentapi import probe_dispatch
                 try:
                     pairs = probe_dispatch.resolve_for(domain, wanted, errors=lookup_errors, scan=scan)

@@ -125,7 +125,7 @@ MAX_IDENTITY_CERTS = 50
 MAX_IDENTITY_RECORDS = 50
 MAX_IDENTITY_NAMES = 100
 IDENTITY_DNS_STATES = ('ok', 'none', 'unknown')
-IDENTITY_DNS_TYPES = ('CNAME', 'NS', 'MX', 'PTR')
+IDENTITY_DNS_TYPES = ('A', 'CNAME', 'NS', 'MX', 'PTR')
 
 
 def clean_identity_check(body):

@@ -62,6 +62,8 @@ NEVER_LOCAL = (  # kinds with no local path at all: whatever CVENGINE_LOCAL_FALL
     'secrets_scan',
     'bbot_discovery',
     'rdp_shot',
+    'dns_resolve',  # the discovery and retire-check name lookups (agentapi.probe_dispatch.try_dns_resolve): a Sentinel's resolver, never this server's
+    'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
 )
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process

@@ -392,8 +392,8 @@ LOCAL_RUNNERS = {
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
-    'dns_resolve': ('cveFeed.discovery.resolve_names',),
-    'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
+    'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'alive_check': (),  # likewise
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes

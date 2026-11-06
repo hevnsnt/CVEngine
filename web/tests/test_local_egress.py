@@ -1173,13 +1173,6 @@ class OtherInProcessGateTests(Clean, _ScanFixture, TestCase):
             db_exposure.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
         probe.assert_not_called()
 
-    def test_a_zombie_liveness_probe_on_a_held_port_is_not_sent(self):
-        from cveFeed import zombie
-        with mock.patch('socket.create_connection') as connect:
-            self.assertFalse(zombie.tcp_alive('192.0.2.41', 6379))
-        connect.assert_not_called()
-
-
 class FallbackWindowTests(Clean, TestCase):
     def test_the_fallback_count_is_a_true_60_minute_window(self):
         local_egress.note_fallback('nmap', now=T0 - 1900)  # 61 minutes before the look below: out of the window

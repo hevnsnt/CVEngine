@@ -1,5 +1,5 @@
 """The probe kinds through a Sentinel (contract version 3): ``http_probe`` (the version and identity probes, ``cveFeed.probes``) and
-``dns_resolve`` (``cveFeed.discovery.resolve_names``).
+``dns_resolve`` (the discovery pipeline's name lookups).
 
 The server keeps the choice of what to probe (the plan, the ledger, the per-scan cap), the scope policy (``cveFeed.probe_scope``), the
 validation of what comes back (``agentapi.probe_results``) and what is stored. The Sentinel runs the requests (``cvengine_scanner.probes``) under
@@ -71,15 +71,14 @@ def _allowed(sub):
 
 
 def try_dns_resolve(domain, names, scan=None):
-    """``(pairs, errors)`` as ``discovery.resolve_names`` returns them (``{(name, ip)}`` and ``{name: reason}``) from a Sentinel's lookups, or
-    ``None`` when no Sentinel can take the kind or one did not answer (the caller resolves here). A name the scope policy left out is never sent and
-    is an error, as is a name the Sentinel refused: looked up again later, never a name without an address. Raises
-    ``ScannerUnavailable`` when no Sentinel can take the work and the kind may not run here."""
+    """``(pairs, errors)`` (``{(name, ip)}`` and ``{name: reason}``) from a Sentinel's lookups. The kind has no local path
+    (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A name the scope policy left out is never sent and
+    is an error, as is a name the Sentinel refused or a task nobody finished: looked up again later, never a name without an address."""
     from cveFeed import probe_scope
     project = domain.project
     names = [n for n in dict.fromkeys((n or '').strip().lower().rstrip('.') for n in names) if n]
     if not names or not _offered(project, 'dns_resolve'):
-        return None
+        return set(), {}
     scope = probe_scope.for_names(project.pk, domain, names)
     allowed = scope['hosts']
     pairs, errors = set(), {}
@@ -90,8 +89,9 @@ def try_dns_resolve(domain, names, scan=None):
         chunk = allowed[start:start + MAX_NAMES_PER_TASK]
         result = sentinel_dispatch.dispatch_or_none(project, 'dns_resolve', {'names': chunk, 'scope': {**scope, 'hosts': chunk}},
                                                     host=_hosts_label(chunk), scan=scan)
-        if result is None:
-            return None  # the caller resolves every name here, as before
+        if result is None:  # a task nobody finished: no answer for these names, so none is read as a name without an address
+            errors.update({name: 'no answer from the scanner' for name in chunk})
+            continue
         resolved = result.get('resolved') or {}
         pairs |= {(name, ip) for name, ips in resolved.items() for ip in ips}
         failed = result.get('errors') or {}
@@ -204,21 +204,20 @@ MAX_CHECKS_PER_TASK = 600  # the contract's bound
 
 
 def try_alive(project, scan, checks):
-    """``{id: alive}`` for ``checks`` (``[{'id', 'host', 'ip', 'port', 'scheme'}]``, the zombie check's endpoints) as a Sentinel answered them, or
-    ``None`` when no Sentinel can take ``alive_check`` or one did not answer (the caller checks here, as before). A check the Sentinel reports
-    with an error, or not at all, is missing from the answer: the caller reads it as unknown, never as gone. Raises ``ScannerUnavailable`` when no
-    Sentinel can take the work and the kind may not run here."""
+    """``{id: alive}`` for ``checks`` (``[{'id', 'host', 'ip', 'port', 'scheme'}]``, the zombie check's endpoints) as a Sentinel answered them. The
+    kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A check the Sentinel reports
+    with an error, or not at all, is missing from the answer: the caller reads it as unknown, never as gone."""
     from cveFeed import probe_scope
     if not checks or not _offered(project, 'alive_check'):
-        return None
+        return {}
     answered = {}
     for start in range(0, len(checks), MAX_CHECKS_PER_TASK):
         chunk = checks[start:start + MAX_CHECKS_PER_TASK]
         target = {'checks': chunk, 'scope': probe_scope.for_addresses(project.pk, [c['ip'] for c in chunk])}
         result = sentinel_dispatch.dispatch_or_none(project, 'alive_check', target, host=_hosts_label(c['host'] for c in chunk),
                                                     ips=list(dict.fromkeys(c['ip'] for c in chunk))[:64], scan=scan)
-        if result is None:
-            return None
+        if result is None:  # a task nobody finished (dispatch_or_none raised when the kind may not run here): its checks are unknown
+            continue
         answered.update({row['id']: row['alive'] for row in result.get('checks') or [] if not row.get('error')})
     return answered
 
@@ -227,8 +226,8 @@ MAX_IDENTITY_DNS_PER_TASK = 200    # the contract's bounds (cvengine_scanner.pro
 MAX_IDENTITY_CERTS_PER_TASK = 50
 
 
-def try_identity(project, scan, dns=(), certs=(), unattended=True):
-    """``(dns_answers, cert_answers)`` for the DNS questions ``[{'id', 'name', 'type'}]`` (``CNAME``, ``NS``, ``MX``; ``PTR`` with an address) and
+def try_identity(project, scan, dns=(), certs=(), unattended=True, allow_archived=False):
+    """``(dns_answers, cert_answers)`` for the DNS questions ``[{'id', 'name', 'type'}]`` (``A``, ``CNAME``, ``NS``, ``MX``; ``PTR`` with an address) and
     the certificate reads ``[{'id', 'host', 'port'}]`` a Sentinel answered: ``{id: {'status', 'records', 'canonical'}}`` and ``{id: {'status',
     'names'}}``. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): when no Sentinel can take it ``ScannerUnavailable`` is raised and
     nothing is asked. A question the scope policy left out (an excluded or archived name) is never sent, and a question the Sentinel did not
@@ -239,7 +238,10 @@ def try_identity(project, scan, dns=(), certs=(), unattended=True):
         return {}, {}
     if not _offered(project, 'identity_check'):  # unreachable while the kind is in NEVER_LOCAL (_offered raises); never let a missing answer read as none
         return {}, {}
-    scope = probe_scope.for_identity(project.pk, [*(q['name'] for q in dns), *(c['host'] for c in certs)], unattended=unattended)
+    ungated = [q['name'] for q in dns if q.get('ungated')]  # an internal key: a name the server made up, never sent as such
+    dns = [{k: v for k, v in q.items() if k != 'ungated'} for q in dns]
+    scope = probe_scope.for_identity(project.pk, [*(q['name'] for q in dns), *(c['host'] for c in certs)], unattended=unattended,
+                                     allow_archived=allow_archived, ungated=ungated)
     allowed = set(scope['hosts'])
     dns = [q for q in dns if q['name'].strip().lower().rstrip('.') in allowed]
     certs = [c for c in certs if c['host'].strip().lower().rstrip('.') in allowed]
@@ -262,6 +264,34 @@ def try_identity(project, scan, dns=(), certs=(), unattended=True):
         dns_out.update({row['id']: row for row in result.get('dns') or []})
         cert_out.update({row['id']: row for row in result.get('certs') or []})
     return dns_out, cert_out
+
+
+def resolve_addresses(project, names, scan=None, allow_archived=False, ungated=()):
+    """``{name: (state, addresses)}`` for hostnames, read by a Sentinel (``identity_check`` ``A`` questions): ``state`` is ``resolved`` (with its addresses),
+    ``absent`` (the resolver said there is no address) or ``error`` (not asked, not answered or refused by the scope policy: never read as absent).
+    Raises ``ScannerUnavailable`` when no Sentinel can take the kind (it has no local path)."""
+    names = list(dict.fromkeys(str(n).strip().lower().rstrip('.') for n in names if str(n).strip()))
+    free = {str(n).strip().lower().rstrip('.') for n in ungated}
+    queries = [{'id': name, 'name': name, 'type': 'A', **({'ungated': True} if name in free else {})} for name in names]
+    answers, _certs = try_identity(project, scan, dns=queries, allow_archived=allow_archived)
+    out = {}
+    for name in names:
+        row = answers.get(name)
+        if row and row.get('status') == 'ok' and row.get('records'):
+            out[name] = ('resolved', {a for a in (_address_text(r) for r in row['records']) if a})
+        elif row and row.get('status') == 'none':
+            out[name] = ('absent', set())
+        else:
+            out[name] = ('error', set())
+    return out
+
+
+def _address_text(value):
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(str(value).strip().strip('[]')))
+    except ValueError:
+        return ''
 
 
 def _is_address(value):
@@ -314,13 +344,9 @@ def try_routes(project, scan, by_host):
 
 
 def resolve_for(domain, names, errors=None, scan=None):
-    """``discovery.resolve_names`` for the names of target ``domain``, through a Sentinel when one can take ``dns_resolve``: the same answer
-    (``{(name, ip)}``, and ``errors`` filled with the lookups that could not be answered)."""
-    from cveFeed import discovery
-    got = try_dns_resolve(domain, names, scan=scan)
-    if got is None:
-        return discovery.resolve_names(names, errors=errors)
-    pairs, failed = got
+    """The addresses of the names of target ``domain`` as a Sentinel resolved them (``{(name, ip)}``, and ``errors`` filled with the lookups that could
+    not be answered). ``ScannerUnavailable`` when no Sentinel can take ``dns_resolve``."""
+    pairs, failed = try_dns_resolve(domain, names, scan=scan)
     if errors is not None:
         errors.update(failed)
     return pairs

@@ -37,11 +37,11 @@ def address_rules(project_id):
 class _Gate:
     """The name-level gates of one project, each name asked once: exclusions, archived hosts and the bug bounty program's scope."""
 
-    def __init__(self, project_id, unattended=True):
+    def __init__(self, project_id, unattended=True, allow_archived=False):
         from cveFeed.archive_rediscovery import archived_names
         from cveFeed.bounty_gate import Gate
         self.project, self.unattended = project_id, unattended
-        self.archived = set(archived_names(project_id))
+        self.archived = set() if allow_archived else set(archived_names(project_id))  # the archived-host review asks about archived names on purpose
         self.bounty = Gate()
         self.memo = {}
 
@@ -216,15 +216,18 @@ def for_names(project_id, domain, names, unattended=False):
 
 
 
-def for_identity(project_id, names, unattended=True):
+def for_identity(project_id, names, unattended=True, allow_archived=False, ungated=()):
     """The policy of an identity_check task: the exact names and addresses it asks about (a DNS question about a name, a reverse question about an
     address, a certificate read at an endpoint), each once. A name that is excluded, archived or outside the bug bounty program's scope is never
     listed (and so never asked: ``probe_dispatch.try_identity`` leaves its question out, which reads as no answer). Sorted-stable, so the same task
-    is the same task on every pass of an asynchronous stage."""
-    gate = _Gate(project_id, unattended=unattended)
+    is the same task on every pass of an asynchronous stage. ``allow_archived`` is for the review of archived hosts, which asks about them on purpose."""
+    gate = _Gate(project_id, unattended=unattended, allow_archived=allow_archived)
     hosts, excluded = [], set()
+    free = {str(n).strip().lower().rstrip('.') for n in ungated}  # names the server made up (a wildcard probe label), not a project's hosts: no gate applies
     for name in dict.fromkeys(str(n).strip().lower().rstrip('.') for n in names if str(n).strip()):
-        if gate.refusal(name):
+        if name in free:
+            hosts.append(name)
+        elif gate.refusal(name):
             excluded.add(name)
         elif len(hosts) < MAX_HOSTS:
             hosts.append(name)

@@ -4784,12 +4784,13 @@
                 },
                 "type": {
                   "enum": [
+                    "A",
                     "CNAME",
                     "NS",
                     "MX",
                     "PTR"
                   ],
-                  "description": "CNAME: the canonical name of a name that has an address; NS and MX: the record texts; PTR: the reverse name of an address"
+                  "description": "A: the addresses of a name (A and AAAA records); CNAME: the canonical name of a name that has an address; NS and MX: the record texts; PTR: the reverse name of an address"
                 }
               }
             }

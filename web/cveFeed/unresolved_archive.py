@@ -86,18 +86,16 @@ def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
     archived with the rest after ``ttl()`` and the daily rediscovery of archived hosts looks again) or ``no DNS answer`` (dangling). Only DNS is asked, so this costs seconds, not a
     scan. Returns ``{'checked', 'resolved', 'private', 'no_dns'}``."""
     import ipaddress
-    from cveFeed.discovery import resolve_names
     from cveFeed.models import HostState
     from targetApp.target_types import is_scannable_ip
     now = now or timezone.now()
     rows = list(HostState.objects.filter(archived_at__isnull=True, unresolved_checks__gte=1, unresolved_last_at__lte=now - RECHECK_EVERY)
-                .order_by('unresolved_last_at')[:batch])
+                .select_related('project').order_by('unresolved_last_at')[:batch])
     out = {'checked': len(rows), 'resolved': 0, 'private': 0, 'no_dns': 0, 'dns_errors': 0}
     if not rows:
         return out
     found, errored = {}, {}
-    lookup = resolver or resolve_names
-    for name, address in (lookup({r.host for r in rows}, errors=errored) if lookup is resolve_names else lookup({r.host for r in rows})):
+    for name, address in (resolver({r.host for r in rows}) if resolver else _read_addresses(rows, errored)):
         found.setdefault(name, set()).add(address)
     for row in rows:
         if row.host in errored and row.host not in found:  # the resolver could not answer: that says nothing about the host, so its streak is left as it was
@@ -116,6 +114,29 @@ def recheck(now=None, batch=RECHECK_BATCH, resolver=None):
         out[key] += 1
         HostState.objects.filter(pk=row.pk).update(unresolved_last_at=now, resolution_note=note[:160])
     return out
+
+
+def _read_addresses(rows, errored):
+    """``{(name, address)}`` of the names of ``rows``, read by a Sentinel (``identity_check``, one task per project). A name nobody answered (no
+    Sentinel can take the kind and it never runs here, a timeout, a refusal) is put in ``errored`` and says nothing about the host."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    by_project = {}
+    for row in rows:
+        by_project.setdefault(row.project_id, (row.project, []))[1].append(row.host)
+    pairs = set()
+    for project, hosts in by_project.values():
+        try:
+            answers = probe_dispatch.resolve_addresses(project, hosts)
+        except ScannerUnavailable as exc:
+            errored.update({host: f'waiting for a scanner ({exc.why or "none is live"})'[:120] for host in hosts})
+            continue
+        for name, (state, addresses) in answers.items():
+            if state == 'resolved':
+                pairs |= {(name, address) for address in addresses}
+            elif state == 'error':
+                errored[name] = 'no answer'
+    return pairs
 
 
 def _is_global(address, ipaddress):

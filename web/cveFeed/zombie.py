@@ -3,9 +3,10 @@
 A host that disappears from DNS is normally retired. If the address CVEngine last saw it on still serves web pages, the
 asset is not gone, only unnamed: it is reported as a zombie instead (and scores higher), not retired. The check is the same
 kind of request as the route auth check, a safe GET: the old address is asked for ``/`` with the old name in the Host header,
-no credentials, no cookies, no redirects followed, at most 64 KB read, and only addresses a scanner may touch are asked.
+no credentials, no cookies, no redirects followed, 4 KB read, and only addresses a scanner may touch are asked. A Sentinel makes the
+request (the ``alive_check`` kind, ``cveFeed.changes._remote_alive``): this module only chooses the endpoints and reads the answers.
 At most ZOMBIE_PORTS_PER_HOST ports of a host and MAX_ZOMBIE_CHECKS hosts per scan are checked. ``endpoints`` and
-``check_hosts`` are pure apart from the injectable ``checker``.
+``check_hosts`` are pure: they take the ``checker`` that answers.
 """
 import logging
 
@@ -63,27 +64,10 @@ def tcp_endpoints(state, limit=ZOMBIE_PORTS_PER_HOST):
     return found[:limit]
 
 
-def tcp_alive(ip, port):
-    """Whether a TCP connection to ``ip:port`` is accepted: connect, close, nothing sent, no banner read."""
-    import socket
-
-    from cveFeed import local_egress
-    try:
-        local_egress.check_connect(port, 'zombie-check', address=ip)  # a port held on this server (skip list, egress budget) is not probed, so it is not listed
-    except local_egress.PortHeld:
-        return False
-    try:
-        with socket.create_connection((ip, port), timeout=CHECK_TIMEOUT[0]):
-            return True
-    except OSError:
-        return False
-
-
-def tcp_probe_hosts(candidates, states, prober=None):
+def tcp_probe_hosts(candidates, states, prober):
     """For hosts the HTTP check found nothing on: ``{host: ['ip:port', ...]}`` of the last non-web ports that still accept a
     connection. Evidence for a person to read on the retired row. It is never a zombie: a bare connect cannot tell the old
     asset from a recycled address that now belongs to someone else, which only the HTTP answer for the old Host name can."""
-    prober = prober or tcp_alive
     out = {}
     for host in candidates[:MAX_ZOMBIE_CHECKS]:
         answering = [f'{ip}:{port}' for ip, port in tcp_endpoints(states.get(host)) if prober(ip, port)]
@@ -92,22 +76,10 @@ def tcp_probe_hosts(candidates, states, prober=None):
     return out
 
 
-def http_alive(host, ip, port, scheme):
-    """Whether ``ip:port`` still answers a plain GET for ``/`` as ``host`` (any HTTP status counts as an answer)."""
-    from cveFeed import route_auth
-    name = f'[{ip}]' if ':' in ip else ip
-    try:
-        route_auth.probe_url(f'{scheme}://{name}:{port}/', timeout=CHECK_TIMEOUT, max_bytes=4096, headers={'Host': host})
-        return True
-    except Exception:  # noqa: BLE001 - a refused connection, a timeout or a TLS failure: nothing answers there
-        return False
-
-
-def check_hosts(candidates, states, checker=None):
+def check_hosts(candidates, states, checker):
     """Ask the last known web addresses of up to MAX_ZOMBIE_CHECKS candidates (host names that no longer resolve). Returns
     ``(alive, checked)``: ``alive`` maps a host to the ``ip:port`` strings that answered, ``checked`` is the list of hosts
     that were asked. Hosts beyond the cap are neither alive nor checked: they wait for the next scan."""
-    checker = checker or http_alive
     alive, checked = {}, []
     for host in candidates[:MAX_ZOMBIE_CHECKS]:
         checked.append(host)

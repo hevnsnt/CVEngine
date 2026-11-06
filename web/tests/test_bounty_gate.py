@@ -122,7 +122,7 @@ def host_pipeline_unattended(self, w):
 def retest_hosts_task(self, w):
     from cveFeed.tasks import retest_hosts
     with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('reNgine.tasks.persist_bbot_result'), \
-            mock.patch('cveFeed.discovery.resolve_names', side_effect=lambda names, **kw: {(n, PUBLIC_IP) for n in names}):
+            mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lambda domain, names, errors=None, scan=None: {(n, PUBLIC_IP) for n in names}):
         retest_hosts(w.domain.id, [w.host])
     return _pipeline_scans(w) > 0
 
