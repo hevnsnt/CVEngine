@@ -1755,7 +1755,7 @@ def _credential_payload(credential_id, project_id, now):
 
 def read_secret(ctx, task_id):
     """``POST sentinel/tasks/<id>/secret``: the decrypted stored credential of one signed-in task, to the built-in scanner that holds it, exactly once.
-    For a ``bbot_discovery`` task whose ``secret_ref`` is ``bbotkeys:<project id>`` it is the project's API keys for bbot's modules instead, as
+    For a ``bbot_discovery`` task whose ``secret_ref`` is ``bbotkeys:<project id>`` it is the project's API keys for the discovery's modules instead, as
     ``{bbot_config: {modules: {<module>: {<option>: <key>}}}}`` (``sentinel_stream.keys_payload``), under the same rules.
 
     Only the built-in scanner (``builtin_scanner.builtin_agent``) with its own sentinel-scope token may call it, for a task assigned to it, claimed

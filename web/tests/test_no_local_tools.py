@@ -276,58 +276,41 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'bbot': [
-        'Dockerfile',
-        'agentapi/mcp.py',
-        'agentapi/rest.py',
+        'Dockerfile',  # 1.4 T8: image slice (lead): installs the discovery tool and its browser, no code runs it
+        'agentapi/mcp.py',  # 1.4 T8: user-facing tool descriptions that name the discovery tool (share lines with other tool words), runs nothing
+        'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
         'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
-        'agentapi/sentinel_stream.py',  # 1.4 bbot on a Sentinel: hands the run to a Sentinel and takes its batches, runs nothing
-        'agentapi/services.py',
-        'celery-entrypoint.sh',
-        'cveFeed/admin_api.py',
-        'cveFeed/api_credentials.py',
+        'agentapi/services.py',  # 1.4 T8: finding kind 'bbot' (a stored data value) and text shared with other tool words, runs nothing
+        'celery-entrypoint.sh',  # 1.4 T8: image slice (lead): a comment about the discovery worker pool
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
-        'cveFeed/changes.py',
-        'cveFeed/check_coverage.py',
-        'cveFeed/conductor.py',
-        'cveFeed/ctmonitor.py',
-        'cveFeed/dangling_dns.py',  # 1.3.5 dangling DNS (develop): re-rates stored bbot/baddns findings with read-only DNS questions, runs no tool
-        'cveFeed/diagnostics.py',
-        'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
-        'cveFeed/internal_scan.py',
+        'cveFeed/check_coverage.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the check label (stored data values), runs nothing
+        'cveFeed/diagnostics.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
+        'cveFeed/discovery.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the activity title (stored data values), runs nothing
+        'cveFeed/egress_proxy.py',  # 1.4 T8: docstring line shared with other tool words, runs nothing
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
-        'cveFeed/labels.py',
-        'cveFeed/ledger.py',
+        'cveFeed/labels.py',  # 1.4 T8: host label source default 'bbot' (a stored data value), runs nothing
+        'cveFeed/ledger.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' (stored data values), runs nothing
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/management/commands/rerate_dangling_dns.py',  # 1.3.5 backfill (develop): re-rates stored bbot/baddns findings, runs no tool
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
-        'cveFeed/models.py',
-        'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
-        'cveFeed/nuclei_templates.py',
-        'cveFeed/reaper.py',
-        'cveFeed/report_data.py',
+        'cveFeed/models.py',  # 1.4 T8: finding kind and source values 'bbot' (stored data values), runs nothing
+        'cveFeed/nmap_scan.py',  # 1.4 T8: comment shared with other tool words, runs nothing
+        'cveFeed/nuclei_scan.py',  # 1.4 T8: comments shared with other tool words, runs nothing
+        'cveFeed/nuclei_templates.py',  # 1.4 T8: technology source key 'bbot' in the host profile (a data value), runs nothing
+        'cveFeed/report_data.py',  # 1.4 T8: report labels for the ledger keys 'bbot' and 'bbot-deep' (data values), runs nothing
         'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing
-        'cveFeed/route_auth.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
-        'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
         'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
-        'cveFeed/shots.py',
-        'cveFeed/supplier_scan.py',
-        'cveFeed/tasks.py',
+        'cveFeed/supplier_scan.py',  # 1.4 T8: docstring line shared with other tool words, runs nothing
+        'cveFeed/tasks.py',  # 1.4 T8: ledger key 'bbot-deep' (a stored data value), runs nothing
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
-        'cveFeed/triage.py',
+        'cveFeed/triage.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
         'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
-        'cveFeed/views.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
-        'reNgine/bbot.py',
-        'reNgine/common_func.py',
-        'reNgine/gevent_autoscale.py',  # 1.3.2 gevent autoscaler (develop): a comment about the bbot queue, runs nothing
-        'reNgine/resources.py',
-        'reNgine/tasks.py',
+        'reNgine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
+        'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
     ],
     'wafw00f': [
         'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
@@ -337,18 +320,11 @@ ALLOWED = {
         'cveFeed/egress_proxy.py',
         'cveFeed/ledger.py',
         'cveFeed/waf_scan.py',
-        'reNgine/bbot.py',
     ],
     'gowitness': [
         'Dockerfile',
-        'agentapi/services.py',
-        'cveFeed/discovery.py',
-        'cveFeed/shots.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
-        'reNgine/bbot.py',
     ],
     'aardwolf': [
-        'cveFeed/rdp_shot.py',
     ],
     'subprocess': [
         'agentapi/sentinel_dispatch.py',
@@ -366,7 +342,6 @@ ALLOWED = {
         'cveFeed/waf_scan.py',
         'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'cveFeed/wpscan_scan.py',
-        'reNgine/bbot.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',
         'reNgine/time_limits.py',
@@ -386,7 +361,6 @@ ALLOWED = {
         'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
         'cveFeed/wpscan_scan.py',
-        'reNgine/bbot.py',
     ],
 }
 

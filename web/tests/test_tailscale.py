@@ -593,7 +593,7 @@ class ScopePolicyTests(ScopeFixture, TestCase):
 
     def test_bbot_port_events_for_a_name_that_resolves_into_a_tailnet_store_nothing(self):
         """Old code: a port event whose host was the address (no subdomain) was stored with tailnet authority for any scan."""
-        from reNgine import bbot as bbot_lib
+        from reNgine import discovery_events as bbot_lib
         from reNgine.tasks import persist_bbot_result
         EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
         attacker = Domain.objects.create(name='evil.example.test', project=self.other_project, insert_date=timezone.now())
@@ -722,11 +722,12 @@ class PipelineReachTests(ScopeFixture, TestCase):
         def runner(targets, flags, timeout):
             nmap.append(list(targets))
             return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-        kwargs = dict(stream=mock.Mock(side_effect=AssertionError('no bbot for an IP')), light_stream=lambda path, **k: iter([]),
+        kwargs = dict(light_stream=lambda path, **k: iter([]),
                       targeted_stream=lambda path, **k: iter([]), nmap_runner=runner, db_exposure_checks={}, provider=None,
                       route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                       ip_lookups={'ptr': lambda ip: [], 'certificate': lambda ip: []})
-        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
+        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+                mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=AssertionError('no discovery run for an IP')):
             discovery.run_pipeline(scan.id, **kwargs)
         return scan, nmap
 

@@ -243,7 +243,6 @@ def _wpscan_args(spec):
 
 TOOLS = {
     'nuclei': (('http', 'https', 'socks5'), lambda s: ['-proxy', s.url]),
-    'bbot': (SCHEMES, lambda s: ['-c', f'web.http_proxy={s.url}']),  # bbot's own setting; bbot.private_config moves it into a 0600 file
     'wpscan': (SCHEMES, _wpscan_args),
     'wafw00f': (('http', 'https', 'socks5'), lambda s: ['-p', s.url]),
     'testssl': (('http',), lambda s: ['--proxy', s.netloc]),  # testssl.sh speaks to a plain HTTP proxy only, and has no way to give it a login

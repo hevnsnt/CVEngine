@@ -1,4 +1,3 @@
-import concurrent.futures
 import io
 import shutil
 import tempfile
@@ -9,6 +8,7 @@ from django.test import SimpleTestCase, TestCase
 from cveFeed import rdp_shot
 from cveFeed.models import HostExclusion, RdpScreenshot, ServiceRun
 from startScan.models import Port, Subdomain, Vulnerability
+from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_route_auth import RouteFixture
 from tests.test_service_intel import RDP_ENC, RDP_NLA_ONLY
 
@@ -65,48 +65,7 @@ class MeaningfulImageTests(SimpleTestCase):
 		self.assertFalse(rdp_shot.is_meaningful(b''))
 
 
-class CaptureCapTests(SimpleTestCase):
-	"""S04-7: the wall-clock cap must return control, not wait for the stuck thread it gave up on."""
-
-	def test_a_handshake_that_never_finishes_is_cut_off_at_the_connect_timeout(self):
-		import asyncio
-		import time
-
-		async def stalls(host, port, wait, connect_timeout=None):
-			await asyncio.sleep(60)
-		started = time.monotonic()
-		with mock.patch.object(rdp_shot, '_capture_async', stalls), mock.patch.object(rdp_shot, 'CAP_GRACE', 0.3):
-			with self.assertRaises((TimeoutError, asyncio.TimeoutError, concurrent.futures.TimeoutError)):
-				rdp_shot.capture('203.0.113.9', 3389, connect_timeout=0.2, wait=0)
-		self.assertLess(time.monotonic() - started, 3)
-
-	def test_a_thread_stuck_in_blocking_code_does_not_hold_the_caller(self):
-		import time
-
-		async def blocked(host, port, wait, connect_timeout=None):
-			time.sleep(2.5)  # blocks its event loop: nothing can cancel it
-		started = time.monotonic()
-		with mock.patch.object(rdp_shot, '_capture_async', blocked), mock.patch.object(rdp_shot, 'CAP_GRACE', 0.3):
-			with self.assertRaises(concurrent.futures.TimeoutError):
-				rdp_shot.capture('203.0.113.9', 3389, connect_timeout=0.2, wait=0)
-		self.assertLess(time.monotonic() - started, 1.5)  # a ``with`` pool would have waited the full 2.5 s
-
-
 class CandidatesTests(RouteFixture, TestCase):
-	def test_an_excluded_host_is_never_a_candidate_or_connected_to(self):
-		scan = self.scan(names=('win.rt.test',), ports=())
-		sub = Subdomain.objects.get(scan_history=scan)
-		ip = sub.ip_addresses.get()
-		ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server', extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
-		self.assertEqual(len(rdp_shot.rdp_candidates(scan)), 1)
-		HostExclusion.objects.create(org=scan.domain.project.org, host='win.rt.test')
-		self.assertEqual(rdp_shot.rdp_candidates(scan), [])  # S04-11
-		calls = []
-		with mock.patch('cveFeed.rdp_shot.available', return_value=True), mock.patch.object(rdp_shot, 'rdp_candidates', return_value=[(sub, ip.address, 3389)]):
-			out = rdp_shot.run_for_scan(scan.id, capturer=lambda h, p: calls.append(h), reader=lambda png: {})
-		self.assertEqual((calls, out['captured']), ([], 0))  # excluded after the list was made: still not opened
-
-
 	def test_only_a_confirmed_nla_free_rdp_port_is_a_candidate(self):
 		scan = self.scan(names=('win.rt.test',), ports=())
 		sub = Subdomain.objects.get(scan_history=scan)
@@ -133,6 +92,8 @@ class CandidatesTests(RouteFixture, TestCase):
 
 
 class RunForScanTests(RouteFixture, TestCase):
+	"""The capture runs on a Sentinel (a fake one here) and nowhere else; this side validates, stores and reads it."""
+
 	def setUp(self):
 		super().setUp()
 		self.media_root = tempfile.mkdtemp()
@@ -140,29 +101,28 @@ class RunForScanTests(RouteFixture, TestCase):
 		override = self.settings(MEDIA_ROOT=self.media_root)
 		override.enable()
 		self.addCleanup(override.disable)
+		LocalFallback('none').apply(self)
+		assert_ran_nowhere_locally(self, 'rdp_shot')
 		self.scan_obj = self.scan(names=('win.rt.test',), ports=())
 		self.sub = Subdomain.objects.get(scan_history=self.scan_obj)
 		self.ip = self.sub.ip_addresses.get()
 		self.ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server',
 											   extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
-		self.calls = []
-
-	def capturer(self, host, port):
-		self.calls.append((host, port))
-		return self.png
 
 	def reader(self, png):
 		return {'logged_in_user': 'ACME\\jsmith', 'summary': 'Locked screen for jsmith'}
 
-	def go(self, **kw):
-		with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-			return rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer, reader=self.reader, **kw)
+	def go(self, fake=None, **kw):
+		kw.setdefault('reader', self.reader)
+		if fake is not None:
+			return rdp_shot.run_for_scan(self.scan_obj.id, **kw)
+		with FakeScanner(kinds=['rdp_shot']) as fake:
+			self.served = fake.served
+			return rdp_shot.run_for_scan(self.scan_obj.id, **kw)
 
 	def test_a_real_capture_is_stored_and_read(self):
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-			out = self.go()
-		self.assertEqual(self.calls, [(self.ip.address, 3389)])
+		out = self.go()
+		self.assertEqual([entry['target'] for entry in self.served], [{'address': self.ip.address, 'port': 3389}])
 		self.assertEqual((out['attempted'], out['captured'], out['read']), (1, 1, 1))
 		shot = RdpScreenshot.objects.get(project=self.project, host='win.rt.test', port=3389)
 		self.assertEqual((shot.address, shot.logged_in_user, shot.ai_summary), (self.ip.address, 'ACME\\jsmith', 'Locked screen for jsmith'))
@@ -176,24 +136,20 @@ class RunForScanTests(RouteFixture, TestCase):
 		import base64
 		import json
 		from tests import ai_queue
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-		seen = {}
 
 		class Vision:
 			name, model = 'anthropic', 'vision-model'
 
 			def complete(self, system, user):
-				seen['system'], seen['user'] = system, user
 				return json.dumps({'signed_in': True, 'username': 'ACME\\jsmith', 'description': 'Locked screen for jsmith'})
 		ai_queue.configure()
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True), mock.patch('cveFeed.rdp_shot.available', return_value=True):
-			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer)
+		out = self.go(reader=None)
 		self.assertEqual((out['captured'], out['read']), (1, 1))  # queued
 		shot = RdpScreenshot.objects.get(project=self.project, host='win.rt.test', port=3389)
 		self.assertEqual(shot.logged_in_user, '')  # not read yet
 		from cveFeed import ai_jobs
 		taken = ai_jobs.next_jobs(1)[0]
-		self.assertEqual((taken['kind'], taken['image']['media_type'], base64.b64decode(taken['image']['data'])), ('rdp_screenshot', 'image/png', self.png))
+		self.assertEqual((taken['kind'], taken['image']['media_type'], base64.b64decode(taken['image']['data'])), ('rdp_screenshot', 'image/png', base64.b64decode(fixture('rdp_shot')['image'])))
 		ai_jobs.submit(taken['id'], ai_queue.answer(taken, Vision()))
 		ai_jobs.apply(taken['id'])
 		shot.refresh_from_db()
@@ -201,89 +157,76 @@ class RunForScanTests(RouteFixture, TestCase):
 		self.assertTrue(Vulnerability.objects.filter(name='RDP login screen shows a signed-in account').exists())
 
 	def test_a_blank_capture_is_not_stored(self):
-		self.png = b'blank'
 		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=False):
 			out = self.go()
 		self.assertEqual((out['attempted'], out['captured']), (1, 0))
 		self.assertFalse(RdpScreenshot.objects.exists())
 		self.assertEqual(ServiceRun.objects.get(service='rdp-shot').status, 'failed')
 
-	def test_no_frame_at_all_is_not_a_failure(self):
-		self.calls = []
-
-		def capturer(host, port):
-			self.calls.append((host, port))
-			return None
-		out = None
-		with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=capturer, reader=self.reader)
+	def test_no_frame_at_all_is_recorded_as_a_failed_try_and_nothing_is_stored(self):
+		with FakeScanner(kinds=['rdp_shot'], responders={'rdp_shot': fixture('rdp_shot', painted=False, image='')}) as fake:
+			out = rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
+		self.assertEqual(len(fake.served), 1)
 		self.assertEqual((out['attempted'], out['captured']), (1, 0))
 		self.assertFalse(RdpScreenshot.objects.exists())
 
-	def test_a_capture_exception_does_not_stop_the_scan_or_raise(self):
-		def boom(host, port):
-			raise ConnectionError('refused')
-		with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=boom, reader=self.reader)
-		self.assertEqual((out['attempted'], out['captured']), (1, 0))
-		self.assertEqual(ServiceRun.objects.get(service='rdp-shot').status, 'failed')
+	def test_a_scanner_that_fails_leaves_the_server_due_and_records_nothing(self):
+		with FakeScanner(kinds=['rdp_shot'], mode='fail') as fake:
+			out = rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
+		self.assertEqual(len(fake.served), 1)
+		self.assertEqual((out['attempted'], out['captured']), (0, 0))
+		self.assertIn('no scanner could take this work (rdp_shot)', out['skipped'])
+		self.assertFalse(ServiceRun.objects.filter(service='rdp-shot').exists())
+		self.assertFalse(RdpScreenshot.objects.exists())
+
+	def test_with_the_scanner_offline_it_waits_whatever_the_fallback_variable_says(self):
+		with FakeScanner(kinds=['rdp_shot'], mode='offline') as fake:
+			for fallback in ('none', 'all', 'rdp_shot'):  # the kind has no local path at all
+				with self.subTest(fallback=fallback), LocalFallback(fallback):
+					out = rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
+					self.assertIn('no scanner could take this work (rdp_shot)', out['skipped'])
+		self.assertEqual(fake.served, [])
+		self.assertFalse(RdpScreenshot.objects.exists())
+		self.assertFalse(ServiceRun.objects.filter(service='rdp-shot').exists())
 
 	def test_a_screen_with_nobody_signed_in_is_stored_without_a_finding(self):
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-
-		def reader(png):
-			return {'logged_in_user': '', 'summary': 'Just a login prompt'}
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-			with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-				rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer, reader=reader)
+		out = self.go(reader=lambda png: {'logged_in_user': '', 'summary': 'Just a login prompt'})
+		self.assertEqual(out['captured'], 1)
 		self.assertTrue(RdpScreenshot.objects.filter(port=3389).exists())
 		self.assertFalse(Vulnerability.objects.filter(name='RDP login screen shows a signed-in account').exists())
 
 	def test_an_ai_read_error_still_stores_the_screenshot(self):
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-
-		def reader(png):
-			return {'error': 'No AI model is configured'}
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-			with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-				out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer, reader=reader)
+		out = self.go(reader=lambda png: {'error': 'No AI model is configured'})
 		self.assertEqual((out['captured'], out['read']), (1, 0))
-		shot = RdpScreenshot.objects.get(port=3389)
-		self.assertEqual(shot.ai_error, 'No AI model is configured')
+		self.assertEqual(RdpScreenshot.objects.get(port=3389).ai_error, 'No AI model is configured')
 
 	def test_runs_once_per_window_then_only_on_force(self):
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-			self.go()
-			again = self.go()
-			self.assertEqual(again['attempted'], 0)
-			self.assertEqual(again['reused'], 1)
-			self.go(force=True)
-		self.assertEqual(len(self.calls), 2)
+		with FakeScanner(kinds=['rdp_shot']) as fake:
+			rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
+			again = rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
+			self.assertEqual((again['attempted'], again['reused']), (0, 1))
+			rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader, force=True)
+		self.assertEqual(len(fake.served), 2)
 
 	def test_disabled_by_the_environment_variable(self):
-		with mock.patch.dict('os.environ', {'CVENGINE_RDP_SHOT': '0'}):
-			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer, reader=self.reader)
+		with mock.patch.dict('os.environ', {'CVENGINE_RDP_SHOT': '0'}), FakeScanner(kinds=['rdp_shot']) as fake:
+			out = rdp_shot.run_for_scan(self.scan_obj.id, reader=self.reader)
 		self.assertEqual(out, {'attempted': 0, 'skipped': 'disabled'})
-		self.assertEqual(self.calls, [])
+		self.assertEqual(fake.served, [])
 
-	def test_skipped_without_aardwolf_installed(self):
-		# no capturer override here: the availability gate only applies to the real default capturer
-		with mock.patch('cveFeed.rdp_shot.available', return_value=False):
-			out = rdp_shot.run_for_scan(self.scan_obj.id)
-		self.assertEqual(out, {'attempted': 0, 'skipped': 'aardwolf is not installed'})
-
-	def test_an_injected_capturer_is_used_even_without_aardwolf_installed(self):
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
-		with mock.patch('cveFeed.rdp_shot.available', return_value=False), mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-			out = rdp_shot.run_for_scan(self.scan_obj.id, capturer=self.capturer, reader=self.reader)
-		self.assertEqual(out['captured'], 1)
+	def test_an_excluded_host_is_never_a_candidate_or_connected_to(self):
+		self.assertEqual(len(rdp_shot.rdp_candidates(self.scan_obj)), 1)
+		HostExclusion.objects.create(org=self.scan_obj.domain.project.org, host='win.rt.test')
+		self.assertEqual(rdp_shot.rdp_candidates(self.scan_obj), [])  # S04-11
+		with FakeScanner(kinds=['rdp_shot']) as fake, mock.patch.object(rdp_shot, 'rdp_candidates', return_value=[(self.sub, self.ip.address, 3389)]):
+			out = rdp_shot.run_for_scan(self.scan_obj.id, reader=lambda png: {})
+		self.assertEqual((fake.served, out['captured']), ([], 0))  # excluded after the list was made: no task is even created
 
 	def test_no_candidates_is_a_no_op(self):
 		other = self.scan(names=('plain.rt.test',), ports=((443, 'https'),), ip='203.0.113.99')
-		with mock.patch('cveFeed.rdp_shot.available', return_value=True):
-			out = rdp_shot.run_for_scan(other.id, capturer=self.capturer, reader=self.reader)
-		self.assertEqual(out, {'attempted': 0})
+		with FakeScanner(kinds=['rdp_shot']) as fake:
+			out = rdp_shot.run_for_scan(other.id, reader=self.reader)
+		self.assertEqual((out, fake.served), ({'attempted': 0}, []))
 
 	def test_bounded_per_scan(self):
 		for i in range(3):
@@ -292,10 +235,8 @@ class RunForScanTests(RouteFixture, TestCase):
 			sub.ip_addresses.add(ip)
 			ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server',
 											  extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
-		self.png = b'\x89PNG\r\nreal-enough-content-0123456789'
 		with mock.patch('cveFeed.rdp_shot.max_hosts', return_value=2):
-			with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True):
-				out = self.go()
+			out = self.go()
 		self.assertEqual(out['attempted'], 2)
 
 
@@ -307,6 +248,14 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		override = self.settings(MEDIA_ROOT=self.media_root)
 		override.enable()
 		self.addCleanup(override.disable)
+		LocalFallback('none').apply(self)
+
+	def stages(self, scan, **kw):
+		from cveFeed import discovery
+		return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
+									 nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+									 light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
+									 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kw)
 
 	def test_the_pipeline_runs_the_stage_only_when_a_candidate_exists(self):
 		from cveFeed import discovery
@@ -315,31 +264,29 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		ip = sub.ip_addresses.get()
 		ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server',
 										  extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
-		calls = []
-
-		def capturer(host, port):
-			calls.append((host, port))
-			return b'\x89PNG\r\nreal-enough-content-0123456789'
-		with mock.patch('cveFeed.rdp_shot.is_meaningful', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False):
-			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
-								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
-								  rdp_capturer=capturer, rdp_reader=lambda png: {'logged_in_user': '', 'summary': ''})
-		self.assertEqual(calls, [(ip.address, 3389)])
+		with mock.patch('cveFeed.discovery.stopped', return_value=False), FakeScanner(kinds=['rdp_shot']) as fake:
+			self.stages(scan, rdp_reader=lambda png: {'logged_in_user': '', 'summary': ''})
+		self.assertEqual([entry['target'] for entry in fake.served], [{'address': ip.address, 'port': 3389}])
 		from startScan.models import ScanActivity
 		self.assertTrue(ScanActivity.objects.filter(scan_of=scan, name='rdp_screenshot').exists())
 
 	def test_a_scan_with_no_rdp_candidate_never_starts_the_stage(self):
-		from cveFeed import discovery
 		from startScan.models import ScanActivity
 		scan = self.scan(names=('plain.rt.test',), ports=((443, 'https'),))
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
-			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-								  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
-								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+			self.stages(scan)
 		self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='rdp_screenshot').exists())
+
+	def test_with_no_scanner_the_stage_waits_and_nothing_is_captured_here(self):
+		scan = self.scan(names=('win.rt.test',), ports=())
+		ip = Subdomain.objects.get(scan_history=scan).ip_addresses.get()
+		ip.ports.add(Port.objects.create(number=3389, state='open', service_name='ms-wbt-server',
+										  extra={'scripts': {'rdp-enum-encryption': RDP_ENC}}))
+		assert_ran_nowhere_locally(self, 'rdp_shot')
+		with mock.patch('cveFeed.discovery.stopped', return_value=False):
+			self.stages(scan)
+		self.assertFalse(RdpScreenshot.objects.exists())
+		self.assertFalse(ServiceRun.objects.filter(service='rdp-shot').exists())  # still due
 
 
 class HostRecordTests(RouteFixture, TestCase):
