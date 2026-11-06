@@ -28,6 +28,7 @@ check with no answer changes nothing.
 Politeness: one global request rate (``bucket_probe.Pacer``), ``CVENGINE_BUCKETS_MAX_PER_SWEEP`` buckets per project per sweep, a weekly
 ledger window per bucket, one sweep at a time, a stop while scanning is paused, a stop for a project whose bug bounty engagement has not
 confirmed automated testing, and no name an organization excluded."""
+import functools
 import logging
 import os
 import re
@@ -379,7 +380,7 @@ def collect(project_id, owner_check=None, skipped=None):
     if guesses_enabled():
         from cveFeed import domain_ownership
         from targetApp.target_types import apex_domain
-        owner_check = owner_check or domain_ownership.foreign_owner
+        owner_check = owner_check or functools.partial(domain_ownership.foreign_owner, project=project_id)
         apexes = {apex_domain(name) or name for _id, name in domains if name not in banned}
         for label, apex in labels.items():
             reason = owner_check(apex, sorted(apexes - {apex}))

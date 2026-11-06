@@ -6,7 +6,6 @@ worker (the discovery itself runs on a Sentinel, never here), and every few seco
 IP and Port rows plus DiscoveryEvent rows, which the dashboard polls to draw the
 discovery graph and the live feed while it happens.
 """
-import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -74,7 +73,7 @@ def _active_filter():
 def running_discovery(domain):
     """A discovery of this domain that is queued or started in the last few minutes and still going, if any: a double click
     or a repeated bulk add."""
-    from startScan.models import ScanActivity, ScanHistory
+    from startScan.models import ScanHistory
     return ScanHistory.objects.filter(_active_filter(), domain=domain).order_by('-id').first()
 
 
@@ -469,37 +468,27 @@ def run_pipeline(scan_id, *args, **kwargs):
 IP_LOOKUP_TIMEOUT = 3  # seconds for the PTR lookup and for the certificate connection
 
 
-def ptr_names(ip, timeout=IP_LOOKUP_TIMEOUT):
-    """The reverse-DNS name of ``ip`` (``[]`` when it has none or the lookup is slow). gethostbyaddr has no timeout of its own."""
-    import concurrent.futures
-    import socket
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return [pool.submit(socket.gethostbyaddr, ip).result(timeout=timeout)[0].lower().rstrip('.')]
-    except Exception:  # noqa: BLE001 - no PTR record, a resolver error or a timeout: nothing to record
-        return []
-    finally:
-        pool.shutdown(wait=False)
-
-
-def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT, project=None):
-    """The hostnames on the certificate ``ip`` serves on 443: the subject name and the subject alternative names."""
-    from cveFeed import hygiene
-    info = hygiene._fetch_cert(ip, 443, timeout=timeout, project=project)
-    if not info:
-        return []
-    names = [info.get('subject') or ''] + list(info.get('sans') or [])
-    return list(dict.fromkeys(n.lower().lstrip('*.').rstrip('.') for n in names if n and '.' in n))
+def identity_names(scan, ip):
+    """``{'ptr': [names], 'tls-san': [names]}`` of an IP target: its reverse-DNS name and the names on the certificate it serves on 443, both read by
+    a Sentinel (``identity_check``; this server asks nothing of the address). The kind has no local path: ``ScannerUnavailable`` when no Sentinel can
+    take it. A read the Sentinel could not answer gives no names for that source, as a dead port always did."""
+    from agentapi import probe_dispatch
+    dns, certs = probe_dispatch.try_identity(scan.domain.project, scan, dns=[{'id': 'ptr', 'name': ip, 'type': 'PTR'}],
+                                             certs=[{'id': 'tls', 'host': ip, 'port': 443}])
+    ptr, tls = dns.get('ptr') or {}, certs.get('tls') or {}
+    ptr_found = [r.lower().rstrip('.') for r in ptr.get('records') or []] if ptr.get('status') == 'ok' else []
+    named = ([n for n in tls.get('names') or []] if tls.get('status') == 'ok' else [])
+    return {'ptr': ptr_found, 'tls-san': list(dict.fromkeys(n.lower().lstrip('*.').rstrip('.') for n in named if n and '.' in n))}
 
 
 def discover_ip(scan, ptr=None, certificate=None):
     """Stand in for the discovery on an IP target. The discovery finds subdomains, and an IP has none: all it could do here is a
-    reverse lookup and read the certificate, which is cheap to do directly. Creates the host for the IP, records the names
+    reverse lookup and read the certificate, which a Sentinel does (``identity_names``). Creates the host for the IP, records the names
     it answers to (PTR and certificate) as DNS events on it, and leaves them out of the targets: they may be out of scope.
     ``ptr`` and ``certificate`` (``ip -> [names]``) are injectable so tests need no network. Returns the discovery result."""
-    import concurrent.futures
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
+    from reNgine.resources import ScannerUnavailable
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity
     domain, ip = scan.domain, scan.domain.name
@@ -509,15 +498,21 @@ def discover_ip(scan, ptr=None, certificate=None):
     try:
         persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
                             ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
-        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or functools.partial(tls_names, project=domain.project_id))):
-            try:
-                found[module] = [n for n in lookup(ip) if n and n != ip]
-            except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
-                found[module] = []
+        if ptr is None and certificate is None:
+            found = {module: [n for n in names if n and n != ip] for module, names in identity_names(scan, ip).items()}
+        else:  # injected lookups (tests)
+            for module, lookup in (('ptr', ptr), ('tls-san', certificate)):
+                try:
+                    found[module] = [n for n in (lookup(ip) if lookup else []) if n and n != ip]
+                except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
+                    found[module] = []
         events = [DiscoveryEvent(scan=scan, domain=domain, type='DNS_NAME', label=n[:500], host=ip, parent_host=ip, module=module)
                   for module, names in found.items() for n in names]
         events.insert(0, DiscoveryEvent(scan=scan, domain=domain, type='IP_ADDRESS', label=ip, host=ip, module='target'))
         DiscoveryEvent.objects.bulk_create(events)
+    except ScannerUnavailable as exc:  # no Sentinel can take the lookup and it may not run here: nothing was read, the target stays due
+        status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
+        logger.warning('the IP lookup of scan %s is waiting for a scanner: %s', scan.id, exc)
     except Exception as exc:  # noqa: BLE001 - the scan ends in a visible state
         logger.exception('ip discovery failed for scan %s', scan.id)
         status, error = FAILED, str(exc)[:290]

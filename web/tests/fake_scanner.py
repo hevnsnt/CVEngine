@@ -408,6 +408,7 @@ LOCAL_RUNNERS = {
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
     'path_probe': ('cveFeed.path_probe.send_probe',),
+    'identity_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'nuclei_validate': ('cveFeed.templategen.validate_with_nuclei', 'cveFeed.templategen.test_benign_fixture', 'cveFeed.templategen._run_template'),
 }
 HEAVY_KINDS = {
@@ -436,6 +437,7 @@ HEAVY_KINDS = {
     'rdp_shot': (),
     'db_probe': ('route-probe',),
     'path_probe': (),
+    'identity_check': (),
     'nuclei_validate': ('template-test',),
 }
 

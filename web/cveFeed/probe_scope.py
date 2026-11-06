@@ -214,3 +214,18 @@ def for_names(project_id, domain, names, unattended=False):
             hosts.append(name)
     return {'hosts': hosts, 'domains': [], 'excluded': excluded[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
+
+
+def for_identity(project_id, names, unattended=True):
+    """The policy of an identity_check task: the exact names and addresses it asks about (a DNS question about a name, a reverse question about an
+    address, a certificate read at an endpoint), each once. A name that is excluded, archived or outside the bug bounty program's scope is never
+    listed (and so never asked: ``probe_dispatch.try_identity`` leaves its question out, which reads as no answer). Sorted-stable, so the same task
+    is the same task on every pass of an asynchronous stage."""
+    gate = _Gate(project_id, unattended=unattended)
+    hosts, excluded = [], set()
+    for name in dict.fromkeys(str(n).strip().lower().rstrip('.') for n in names if str(n).strip()):
+        if gate.refusal(name):
+            excluded.add(name)
+        elif len(hosts) < MAX_HOSTS:
+            hosts.append(name)
+    return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}

@@ -724,6 +724,8 @@ def task_hosts(task):
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
+    raw += [q.get('name') for q in target.get('dns') or [] if isinstance(q, dict)]  # an identity_check batch: the names and addresses asked about
+    raw += [q.get('host') for q in target.get('certs') or [] if isinstance(q, dict)]
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
         if isinstance(check, dict):
             raw += [v for v in (check.get('host'), check.get('ip')) if isinstance(v, str)]
@@ -2289,7 +2291,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'nuclei_validate': _clean_nuclei_validate_result,
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
-             'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe}
+             'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
+             'identity_check': probe_results.clean_identity_check}
 
 
 def _bind_to_task(kind, result, task):
@@ -2299,7 +2302,7 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
-    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'route_probe'):
+    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'route_probe', 'identity_check'):
         return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result

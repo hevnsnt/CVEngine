@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -118,6 +118,43 @@ def clean_alive_check(body):
             row['error'] = _text(item['error'], 200)
         out.append(row)
     return {'checks': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+MAX_IDENTITY_DNS = 200
+MAX_IDENTITY_CERTS = 50
+MAX_IDENTITY_RECORDS = 50
+MAX_IDENTITY_NAMES = 100
+IDENTITY_DNS_STATES = ('ok', 'none', 'unknown')
+IDENTITY_DNS_TYPES = ('CNAME', 'NS', 'MX', 'PTR')
+
+
+def clean_identity_check(body):
+    """The DNS answers and certificate names of an ``identity_check`` result, clipped. A row that is not well formed is dropped: it reads as no
+    answer (unknown), never as ``none``. Only ``status == 'ok'`` rows carry records or names; ``none`` carries nothing."""
+    dns, certs = body.get('dns'), body.get('certs')
+    if not isinstance(dns, list) or not isinstance(certs, list) or len(dns) > MAX_IDENTITY_DNS or len(certs) > MAX_IDENTITY_CERTS:
+        raise ApiError(400, 'an identity_check result lists its DNS answers (at most %d) and certificates (at most %d)' % (MAX_IDENTITY_DNS, MAX_IDENTITY_CERTS))
+    dns_out = []
+    for item in dns:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or item.get('status') not in IDENTITY_DNS_STATES:
+            continue
+        records = item.get('records') if isinstance(item.get('records'), list) and item['status'] == 'ok' else []
+        row = {'id': _text(item['id'], 200), 'status': item['status'], 'records': [_text(r, 260) for r in records[:MAX_IDENTITY_RECORDS] if isinstance(r, str)]}
+        if item['status'] == 'ok' and isinstance(item.get('canonical'), str):
+            row['canonical'] = _host(item['canonical'])
+        if item.get('error'):
+            row['error'] = _text(item['error'], 200)
+        dns_out.append(row)
+    cert_out = []
+    for item in certs:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or item.get('status') not in ('ok', 'unknown'):
+            continue
+        found = item.get('names') if isinstance(item.get('names'), list) and item['status'] == 'ok' else []
+        row = {'id': _text(item['id'], 200), 'status': item['status'], 'names': [_text(n, 260) for n in found[:MAX_IDENTITY_NAMES] if isinstance(n, str)]}
+        if item.get('error'):
+            row['error'] = _text(item['error'], 200)
+        cert_out.append(row)
+    return {'dns': dns_out, 'certs': cert_out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
 MAX_BUCKETS = 100
@@ -513,6 +550,19 @@ def bind(kind, result, task):
         kept = [p for p in result[key] if p['id'] in asked]
         dropped = len(result[key]) - len(kept)
         result = {**result, key: kept}
+    elif kind == 'identity_check':  # only the questions and endpoints the task asked, once each
+        out = {}
+        dropped = 0
+        for key in ('dns', 'certs'):
+            asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
+            seen, kept = set(), []
+            for row in result[key]:
+                if row['id'] in asked and row['id'] not in seen:
+                    seen.add(row['id'])
+                    kept.append(row)
+            dropped += len(result[key]) - len(kept)
+            out[key] = kept
+        result = {**result, **out}
     elif kind == 'supplier_check':  # only the names the task listed, once each
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
         kept, seen = [], set()

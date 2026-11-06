@@ -223,6 +223,56 @@ def try_alive(project, scan, checks):
     return answered
 
 
+MAX_IDENTITY_DNS_PER_TASK = 200    # the contract's bounds (cvengine_scanner.probes.identity)
+MAX_IDENTITY_CERTS_PER_TASK = 50
+
+
+def try_identity(project, scan, dns=(), certs=(), unattended=True):
+    """``(dns_answers, cert_answers)`` for the DNS questions ``[{'id', 'name', 'type'}]`` (``CNAME``, ``NS``, ``MX``; ``PTR`` with an address) and
+    the certificate reads ``[{'id', 'host', 'port'}]`` a Sentinel answered: ``{id: {'status', 'records', 'canonical'}}`` and ``{id: {'status',
+    'names'}}``. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): when no Sentinel can take it ``ScannerUnavailable`` is raised and
+    nothing is asked. A question the scope policy left out (an excluded or archived name) is never sent, and a question the Sentinel did not
+    answer, refused or could not answer is missing from the answer or has status ``unknown``: the caller reads that as no answer, never as ``none``."""
+    from cveFeed import probe_scope
+    dns, certs = list(dns), list(certs)
+    if not dns and not certs:
+        return {}, {}
+    if not _offered(project, 'identity_check'):  # unreachable while the kind is in NEVER_LOCAL (_offered raises); never let a missing answer read as none
+        return {}, {}
+    scope = probe_scope.for_identity(project.pk, [*(q['name'] for q in dns), *(c['host'] for c in certs)], unattended=unattended)
+    allowed = set(scope['hosts'])
+    dns = [q for q in dns if q['name'].strip().lower().rstrip('.') in allowed]
+    certs = [c for c in certs if c['host'].strip().lower().rstrip('.') in allowed]
+    dns_out, cert_out = {}, {}
+    start_dns = start_certs = 0
+    while start_dns < len(dns) or start_certs < len(certs):
+        d = dns[start_dns:start_dns + MAX_IDENTITY_DNS_PER_TASK]
+        c = certs[start_certs:start_certs + MAX_IDENTITY_CERTS_PER_TASK]
+        start_dns, start_certs = start_dns + len(d), start_certs + len(c)
+        hosts = [*(q['name'] for q in d), *(x['host'] for x in c)]
+        target = {'scope': {**scope, 'hosts': list(dict.fromkeys(h.strip().lower().rstrip('.') for h in hosts))}}
+        if d:
+            target['dns'] = d
+        if c:
+            target['certs'] = c
+        ips = [h for h in dict.fromkeys(hosts) if _is_address(h)][:64]
+        result = sentinel_dispatch.dispatch_or_none(project, 'identity_check', target, host=_hosts_label(hosts), ips=ips, scan=scan)
+        if result is None:  # not finished: dispatch_or_none raised when the kind may not run here, so this is a task that never answered: unknown
+            continue
+        dns_out.update({row['id']: row for row in result.get('dns') or []})
+        cert_out.update({row['id']: row for row in result.get('certs') or []})
+    return dns_out, cert_out
+
+
+def _is_address(value):
+    import ipaddress
+    try:
+        ipaddress.ip_address(str(value).strip('[]'))
+        return True
+    except ValueError:
+        return False
+
+
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)
 
 

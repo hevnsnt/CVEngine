@@ -110,16 +110,16 @@ def stored_cnames(project_id, names):
 
 
 def resolve_cnames(project_id, names, live=False, lookup=None):
-    """Stored CNAMEs first; with ``live`` a name with none stored is looked up once (``hosting.canonical_name``, cached)."""
+    """Stored CNAMEs first; with ``live`` a name with none stored is looked up once (``hosting.canonical_names``, read by a Sentinel, cached)."""
     found = stored_cnames(project_id, names)
     if live:
         from cveFeed import hosting
-        lookup = lookup or hosting.canonical_name
-        for name in names:
-            if name not in found and not re.fullmatch(r'[\d.]+|[0-9a-f:]+', name):
-                canon = lookup(name)
-                if canon:
-                    found[name] = [_clean(canon)]
+        missing = [name for name in names if name not in found and not re.fullmatch(r'[\d.]+|[0-9a-f:]+', name)]
+        read = {} if lookup or not missing else hosting.canonical_names(missing)  # one identity_check read by a Sentinel; no answer is no CNAME here
+        for name in missing:
+            canon = lookup(name) if lookup else read.get(hosting._host(name), '')
+            if canon:
+                found[name] = [_clean(canon)]
     return found
 
 

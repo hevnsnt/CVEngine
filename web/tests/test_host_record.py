@@ -56,30 +56,6 @@ class ClassifyTests(unittest.TestCase):
 		self.assertFalse(hosting.classify(name='\u202e\x00', cname='\n')['shared_ip'])
 
 
-class CanonicalNameTests(unittest.TestCase):
-	def setUp(self):
-		hosting._canon.clear()
-		self.addCleanup(hosting._canon.clear)
-
-	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'acme-website.netlify.app', ('1.2.3.4', 0))]) as lookup:
-			self.assertEqual(hosting.canonical_name('archive.acme-example.org'), 'acme-website.netlify.app')
-			self.assertEqual(hosting.canonical_name('ARCHIVE.acme-example.org.'), 'acme-website.netlify.app')
-		self.assertEqual(lookup.call_count, 1)
-
-	def test_a_plain_host_and_a_failed_lookup_have_no_canonical_name(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'www.example.org', ('1.2.3.4', 0))]):
-			self.assertEqual(hosting.canonical_name('www.example.org'), '')
-		with mock.patch('socket.getaddrinfo', side_effect=OSError('nope')):
-			self.assertEqual(hosting.canonical_name('gone.example.org'), '')
-
-	def test_the_cache_is_bounded(self):
-		with mock.patch('socket.getaddrinfo', return_value=[]), mock.patch.object(hosting, 'CANON_MAX', 5):
-			for i in range(40):
-				hosting.canonical_name(f'h{i}.example.org')
-		self.assertLessEqual(len(hosting._canon), 5)
-
-
 class Fixture(TestCase):
 	def setUp(self):
 		now = timezone.now()
@@ -127,6 +103,68 @@ class SharedAddressTests(Fixture):
 	def test_empty_input(self):
 		self.assertEqual(hosting.shared_by_address([]), {})
 		self.assertEqual(hosting.shared_by_address([None, '']), {})
+
+
+class CanonicalNameTests(Fixture):
+	"""``hosting.canonical_names``: the CNAME of a name is read by a Sentinel (``identity_check``); this server asks no DNS question."""
+
+	def setUp(self):
+		super().setUp()
+		hosting._canon.clear()
+		self.addCleanup(hosting._canon.clear)
+		self.host('archive.acme.test', '198.51.100.7')
+		self.asked = []
+		live = mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True)
+		live.start()
+
+	def answers(self, rows):
+		def try_identity(project, scan, dns=(), certs=(), unattended=True):
+			self.asked.append([q['name'] for q in dns])
+			return {q['id']: rows[q['name']] for q in dns if q['name'] in rows}, {}
+		return mock.patch('agentapi.probe_dispatch.try_identity', side_effect=try_identity)
+
+	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': 'acme-website.netlify.app'})
+			self.assertEqual(hosting.canonical_names(['ARCHIVE.acme.test.']), {'archive.acme.test': 'acme-website.netlify.app'})
+		self.assertEqual(self.asked, [['archive.acme.test']])  # the second and third read came from the cache
+
+	def test_a_plain_host_has_an_empty_canonical_name_that_is_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': ''}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': ''})
+		self.assertEqual(len(self.asked), 1)
+
+	def test_a_lookup_nobody_answered_is_missing_and_not_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'unknown', 'records': [], 'error': 'Timeout'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(len(self.asked), 2)  # asked again: unknown is not "not an alias"
+
+	def test_no_scanner_for_the_kind_asks_nothing(self):
+		with mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=False), self.answers({}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_a_name_no_project_holds_is_not_asked(self):
+		with self.answers({}):
+			self.assertEqual(hosting.canonical_names(['nobody.example.org']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_the_cache_is_bounded(self):
+		rows = {f'h{i}.acme.test': {'id': f'h{i}.acme.test', 'status': 'ok', 'records': [], 'canonical': ''} for i in range(40)}
+		for i in range(40):
+			self.host(f'h{i}.acme.test', f'198.51.100.{i + 10}')
+		with self.answers(rows), mock.patch.object(hosting, 'CANON_MAX', 5):
+			for name in rows:
+				hosting.canonical_names([name])
+		self.assertLessEqual(len(hosting._canon), 5)
+
+	def test_shared_by_address_reads_every_missing_cname_in_one_task(self):
+		rows = {'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}
+		with self.answers(rows):
+			found = hosting.shared_by_address(['198.51.100.7'])
+		self.assertEqual(found['198.51.100.7']['provider'], 'Netlify')
+		self.assertEqual(self.asked, [['archive.acme.test']])
 
 
 class PortScanGuardTests(Fixture):
