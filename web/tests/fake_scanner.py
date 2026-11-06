@@ -394,6 +394,7 @@ LOCAL_RUNNERS = {
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
+    'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
@@ -421,6 +422,7 @@ HEAVY_KINDS = {
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),
     'alive_check': (),
+    'route_probe': (),
     'bucket_check': (),
     'vhost_probe': (),
     'subdir_probe': (),

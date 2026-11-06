@@ -65,7 +65,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | Module | What it does | Decision |
 |---|---|---|
 | `cveFeed/probes.py` | version and identity probes | moved: the `http_probe` kind (contract 3), a batch of planned probes per task; the scanner runs them (`cvengine_scanner.probes.version_probes`), the server keeps the plan, the ledger and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/route_auth.py` (750), `auth_routes.py` | route state, anonymous and signed in | move; signed-in half built-in only |
+| `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path stays behind `CVENGINE_LOCAL_FALLBACK`. The signed-in half (`auth_routes`) stays on the server, built-in only |
 | `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/supplier_scan.py` (647) | third-party supplier posture | move |
@@ -185,8 +185,8 @@ which send nothing to the target and need no vantage point.
    for probe tasks (`$defs/probe_scope`: the names a task may ask, what is excluded, the server's address rules), computed by
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
-   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check and its signed-in half, suppliers and the
+   discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the anonymous web route check (`route_probe`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
+   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half, suppliers and the
    hygiene network helpers.
 8. Drop the scan tools, Go and bbot from the server image.
 
