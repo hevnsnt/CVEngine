@@ -7,6 +7,7 @@ the policy the task carries. Like every other kind: a project with no Sentinel f
 ``CVENGINE_LOCAL_FALLBACK`` takes the kind off its list the stage waits for a scanner instead (``reNgine.resources.ScannerUnavailable``) and the
 work stays due."""
 import logging
+import os
 
 from agentapi import sentinel_dispatch
 
@@ -220,6 +221,70 @@ def try_alive(project, scan, checks):
         if result is None:
             return None
         answered.update({row['id']: row['alive'] for row in result.get('checks') or [] if not row.get('error')})
+    return answered
+
+
+MAX_TLS_PER_TASK = 300   # the contract's bounds (cvengine_scanner.probes.hygiene)
+MAX_MAIL_PER_TASK = 101
+MAX_FINDINGS_PER_TASK = 50  # the contract's bound (cvengine_scanner.probes.dangling_dns.MAX_CHECKS)
+
+
+def _confirm_resolvers():
+    """The confirming resolvers the installation opted in to (``hygiene.confirm_resolvers``), only the ones that are IP addresses."""
+    import ipaddress
+
+    from cveFeed import hygiene
+    out = []
+    for address in hygiene.confirm_resolvers():
+        try:
+            out.append(str(ipaddress.ip_address(address)))
+        except ValueError:
+            continue
+    return out[:5]
+
+
+def try_hygiene(domain, tls, mail):
+    """The cleaned result of one ``hygiene_check`` task (``probe_results.clean_hygiene_check``) for ``domain``: ``tls`` is ``[(host, port)]`` and
+    ``mail`` is ``[(name, always)]`` (a name flagged ``always`` is reviewed whatever its records, the others only when they have an MX record of their
+    own and are not a CNAME). ``None`` when no Sentinel can take ``hygiene_check`` or the one that took it did not answer (the caller does the work here, as
+    before). Raises ``ScannerUnavailable`` when no Sentinel can take the work and the kind may not run here. Nothing in the answer says an endpoint or a
+    name was checked unless its row is there: the caller reads a missing one as unknown."""
+    from cveFeed import probe_scope
+    project = domain.project
+    if not (tls or mail) or not _offered(project, 'hygiene_check'):
+        return None
+    tls, mail = list(tls)[:MAX_TLS_PER_TASK], list(mail)[:MAX_MAIL_PER_TASK]
+    target = {'tls': [{'host': h, 'port': p} for h, p in tls], 'mail': [{'name': n, 'always': bool(a)} for n, a in mail],
+              'confirm_resolvers': _confirm_resolvers(), 'rdap': os.environ.get('CVENGINE_HYGIENE_RDAP', '1') != '0',
+              'scope': probe_scope.for_hygiene(project.pk, tls, [n for n, _a in mail])}
+    result = sentinel_dispatch.dispatch_or_none(project, 'hygiene_check', target, host=_hosts_label([domain.name] + [h for h, _p in tls]))
+    if result is None:
+        return None
+    if result.get('refused'):
+        logger.info('hygiene_check task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return result
+
+
+def try_dangling(project, checks, providers):
+    """``{id: row}`` for the baddns findings (``checks``: ``[{'id', 'host', 'kind', 'triggers'}]``) a Sentinel rated, each row ``{'state': 'rated'|'unknown',
+    'severity', 'drop', 'note', 'zone'}``; ``None`` when no Sentinel can take ``dangling_dns_check`` or one did not answer (the caller rates them here, as
+    before). A finding the Sentinel did not report is missing from the answer: the caller keeps baddns's own rating. Raises ``ScannerUnavailable``
+    when no Sentinel can take the work and the kind may not run here."""
+    from cveFeed import probe_scope
+    if not checks or not _offered(project, 'dangling_dns_check'):
+        return None
+    answered = {}
+    for start in range(0, len(checks), MAX_FINDINGS_PER_TASK):
+        chunk = checks[start:start + MAX_FINDINGS_PER_TASK]
+        scope = probe_scope.for_dangling(project.pk, [c['host'] for c in chunk])
+        chunk = [c for c in chunk if c['host'] in scope['hosts']]  # a host the policy leaves out (excluded, archived, out of the bounty scope) is never sent
+        if not chunk:
+            continue
+        target = {'checks': chunk, 'providers': providers, 'scope': scope}
+        result = sentinel_dispatch.dispatch_or_none(project, 'dangling_dns_check', target, host=_hosts_label(c['host'] for c in chunk))
+        if result is None:
+            return None
+        answered.update({row['id']: row for row in result.get('ratings') or []})
     return answered
 
 
