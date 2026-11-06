@@ -42,6 +42,7 @@ CONFIRM = 0.7  # a signature at or above this names the product; below it the pa
 BASELINE_PATH = '/.cvengine-probe/404'
 ROBOTS_PATH, SITEMAP_PATH = '/robots.txt', '/sitemap.xml'
 MAX_LEADS = 10
+MAX_TASK_LEADS = 25  # the mount directories sent with a task (the contract's bound)
 DEFAULT_MAX_REQUESTS = 60
 DEFAULT_MAX_HOSTS = 6
 BODY_SCAN = 64 * 1024
@@ -183,9 +184,9 @@ def mount_of(url_or_path):
     return f'/{segment}/'
 
 
-def lead_paths(urls_by_source, known):
-    """``{path: source}`` for at most ``MAX_LEADS`` mount directories the host's own data shows (``urls_by_source``: ``{source: [url or path]}``),
-    most often seen first, excluding the curated paths and ``known``."""
+def lead_counts(urls_by_source, known):
+    """``(counts, source_of)``: how often each mount directory the host's own data shows (``urls_by_source``: ``{source: [url or path]}``) is
+    seen, and the first source that showed it, excluding the curated paths and ``known``."""
     counts, source_of = Counter(), {}
     for source, urls in urls_by_source.items():
         for url in urls:
@@ -193,6 +194,13 @@ def lead_paths(urls_by_source, known):
             if mount and mount not in known:
                 counts[mount] += 1
                 source_of.setdefault(mount, source)
+    return counts, source_of
+
+
+def lead_paths(urls_by_source, known):
+    """``{path: source}`` for at most ``MAX_LEADS`` mount directories the host's own data shows (``urls_by_source``: ``{source: [url or path]}``),
+    most often seen first, excluding the curated paths and ``known``."""
+    counts, source_of = lead_counts(urls_by_source, known)
     return {path: source_of[path] for path, _n in counts.most_common(MAX_LEADS)}
 
 
@@ -377,34 +385,87 @@ def sweep_host(project_id, entry, fetch, pace, stop=None, budget=None):
             continue
         probed.add(path)
         fp = vhost_scan.fingerprint_of(response)
-        if fp['status'] not in THERE:
-            continue
-        summary['there'] += 1
-        if is_catch_all(fp, baselines):
-            summary['catch_all'] += 1
-            continue
-        found = identify(response, path)
-        evidence = {'status': fp['status'], 'title': fp['title'], 'server': fp['server'], 'location': fp['location'], 'lead': source,
-                    'base': base, 'indicated': (found or {}).get('indicated', path)}
-        if connect_ip:
-            evidence['ip'] = connect_ip
-        if found and found['confidence'] >= CONFIRM:
-            evidence['confirmed'] = True
-            record(project_id, domain_id, name, port, found['product'], 'found' if found['version'] else 'hidden', found['confidence'], found['source'], path,
-                   version=found['version'], evidence=evidence)
-            summary['confirmed'] += 1
-            summary['versions'] += int(bool(found['version']))
-            hits.add(path)
-        else:
-            hint = found['product'] if found else (next((e['product'] for e in catalogue() if e['path'] == path), None) or path)
-            evidence['confirmed'] = False
-            record(project_id, domain_id, name, port, hint, 'found', 0.3, 'path-only', path, variant='lead', evidence=evidence)
-            summary['leads'] += 1
+        if _settle_path(project_id, domain_id, name, port, base, connect_ip, path, source, fp, lambda: identify(response, path), baselines, summary):
             hits.add(path)
     _retire_missing(project_id, name, port, probed, hits)
     rows = _rows(project_id, name, port)
     apply_technologies(project_id, name, rows)
     summary['complete'] = not summary['paused'] and not state['busy']  # a challenged host is complete: it is asked again after the window
+    if summary['complete']:
+        ledger.record(SERVICE, [entry['asset']], project_id)
+    return summary
+
+
+def _settle_path(project_id, domain_id, name, port, base, connect_ip, path, source, fp, identify_fn, baselines, summary):
+    """What one path's answer comes to. Nothing is there unless the status says so; an answer the host gives to any path is no mount; a
+    product a signature names is confirmed (and a Technology only with a stated version, see ``apply_technologies``); anything else that
+    answered is a lead. Returns whether the path is a hit (a row was recorded for it). ``identify_fn()`` reads what the answer says it is."""
+    if fp['status'] not in THERE:
+        return False
+    summary['there'] += 1
+    if is_catch_all(fp, baselines):
+        summary['catch_all'] += 1
+        return False
+    found = identify_fn()
+    evidence = {'status': fp['status'], 'title': fp['title'], 'server': fp['server'], 'location': fp['location'], 'lead': source,
+                'base': base, 'indicated': (found or {}).get('indicated', path)}
+    if connect_ip:
+        evidence['ip'] = connect_ip
+    if found and found['confidence'] >= CONFIRM:
+        evidence['confirmed'] = True
+        record(project_id, domain_id, name, port, found['product'], 'found' if found['version'] else 'hidden', found['confidence'], found['source'], path,
+               version=found['version'], evidence=evidence)
+        summary['confirmed'] += 1
+        summary['versions'] += int(bool(found['version']))
+    else:
+        hint = found['product'] if found else (next((e['product'] for e in catalogue() if e['path'] == path), None) or path)
+        evidence['confirmed'] = False
+        record(project_id, domain_id, name, port, hint, 'found', 0.3, 'path-only', path, variant='lead', evidence=evidence)
+        summary['leads'] += 1
+    return True
+
+
+def _mount_path(path):
+    """Whether ``path`` is one this sweep may have asked: a curated path or a ``/mount/`` directory (what a lead is)."""
+    return path in set(curated_paths()) or bool(re.fullmatch(r'/[A-Za-z0-9][A-Za-z0-9_-]{1,39}/', path or ''))
+
+
+def settle_remote(project_id, entry, report):
+    """What a Sentinel's ``subdir_probe`` report of one host comes to, the counts of ``sweep_host``. The server decides what is there and what
+    is a catch-all answer from the reported fingerprints and its own stored front page; a product a signature named is kept only when it is one
+    of the curated products (the Sentinel's reading of the page, bounded the way every reported observation is). A path the Sentinel could not
+    ask is not retired on it. Returns the counts and ``complete``: False when the server asked for time (the host stays due)."""
+    from cveFeed import ledger
+    name, sub, scheme, port, connect_ip = entry['name'], entry['sub'], entry['scheme'], entry['port'], entry['connect_ip']
+    domain_id = sub.target_domain_id
+    base = f'{scheme}://{slow_web.authority(name, port, scheme)}'
+    summary = {'requests': report['requests'], 'there': 0, 'confirmed': 0, 'versions': 0, 'leads': 0, 'catch_all': 0, 'challenged': 0, 'complete': False,
+               'paused': False}
+    if report['state'] == 'challenged':
+        edge = report['challenge']['edge']
+        record(project_id, domain_id, name, port, edge, 'challenged', 0.0, 'edge-challenge', report['challenge']['path'], variant='edge',
+               evidence={'edge': edge, 'status': report['challenge']['status'], 'hint': vhost_scan.HINT.format(edge=edge).replace(
+                   'whether this address serves other sites', 'which applications this host serves under subdirectories')})
+        summary['challenged'] += 1
+    baselines = [report['baseline']] if report['baseline'] is not None else []
+    baselines.append(_root_fingerprint(project_id, name))
+    products = {e['product'] for e in catalogue()}
+    probed = {p for p in report['probed'] if _mount_path(p)}
+    hits = set()
+    for answer in report['answers']:
+        path = answer['path']
+        if not _mount_path(path) or path in hits:
+            continue
+        probed.add(path)
+        reported = answer['found']
+        found = None
+        if reported is not None and reported['product'] in products:
+            found = {**reported, 'indicated': reported['indicated'] if _mount_path(reported['indicated']) else path}
+        if _settle_path(project_id, domain_id, name, port, base, connect_ip, path, answer['source'], answer['fingerprint'], lambda: found, baselines, summary):
+            hits.add(path)
+    _retire_missing(project_id, name, port, probed, hits)
+    apply_technologies(project_id, name, _rows(project_id, name, port))
+    summary['complete'] = report['state'] != 'busy'
     if summary['complete']:
         ledger.record(SERVICE, [entry['asset']], project_id)
     return summary
@@ -435,7 +496,7 @@ def _root_fingerprint(project_id, name):
 
 # ----------------------------------------------------------------------------- the sweep
 
-def _allowed(project_id, entry, banned, vet_ip):
+def _allowed(project_id, entry, banned, vet_ip, resolve=True):
     """The gate every host passes before one request is sent: not excluded or archived, a name that does not resolve to a prohibited
     address (a DNS host), or a vetted address that is not a shared platform's (a virtual host)."""
     from targetApp.target_types import scannable_hosts
@@ -444,6 +505,8 @@ def _allowed(project_id, entry, banned, vet_ip):
         return False
     if entry['connect_ip']:
         return bool(vet_ip(entry['connect_ip']))
+    if not resolve:  # a Sentinel resolves the name itself and judges every address it gets: this server makes no lookup for it
+        return bool(scannable_hosts([name], resolver=lambda _name: False, project=project_id))
     return bool(scannable_hosts([name], project=project_id))
 
 
@@ -451,6 +514,46 @@ def _vet_address(project_id, address):
     from cveFeed import hosting
     from targetApp.target_types import is_scannable_ip
     return is_scannable_ip(address, project=project_id) and not hosting.shared_by_address([address])
+
+
+def _fp_of_root(root):
+    return None if root is None else {**root, 'location': (root.get('location') or '')[:200]}
+
+
+def _items(project_id, entries):
+    """The ``subdir_probe`` task rows of ``entries`` (``web_hosts`` rows): the host as it is asked, its stored front page (the second
+    baseline) and the mount directories its crawled and archived URLs show, which the scanner extends with those of ``robots.txt`` and
+    ``sitemap.xml``. Ids are positions: the report is read back by them."""
+    items, known = [], set(curated_paths())
+    for index, entry in enumerate(entries):
+        urls = known_urls(project_id, entry['name'])
+        counts, source_of = lead_counts({'crawled': urls['crawled'], 'archive': urls['archive']}, known)
+        item = {'id': f'h{index}', 'name': entry['name'], 'scheme': entry['scheme'], 'port': entry['port']}
+        if entry['connect_ip']:
+            item['connect_ip'] = entry['connect_ip']
+        root = _fp_of_root(_root_fingerprint(project_id, entry['name']))
+        if root is not None:
+            item['root'] = root
+        leads = [{'path': path, 'count': n, 'source': source_of[path]} for path, n in counts.most_common(MAX_TASK_LEADS)]
+        if leads:
+            item['leads'] = leads
+        items.append(item)
+    return items
+
+
+def _remote_reports(project_id, entries):
+    """``(reports, waiting)``: the reports a Sentinel's ``subdir_probe`` tasks gave (``{position: report}``; ``None`` when no Sentinel can take
+    the kind and the sweep asks here, as before), and whether the sweep must wait because none can and the kind may not run here."""
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
+    gap = min(60.0, max(0.2, slow_web.host_gap(), slow_web.global_gap()))
+    try:
+        got = probe_dispatch.try_subdirs(Project.objects.get(pk=project_id), _items(project_id, entries), curated_paths(), max_requests(), gap)
+    except ScannerUnavailable as exc:
+        logger.info('subdirectory sweep of project %s waits for a scanner: %s', project_id, exc)
+        return None, True
+    return got, False
 
 
 def sweep(project_id, fetch=None, pace=None, stop=None, vet_ip=None):
@@ -472,24 +575,37 @@ def sweep(project_id, fetch=None, pace=None, stop=None, vet_ip=None):
     with resources.redis_claim(f'cvengine:subapp:{project_id}', owner, CLAIM_TTL) as holder:
         if holder is not True:
             return {**summary, 'skipped': 'another subdirectory sweep is running for this project'}
+        injected = fetch is not None or pace is not None  # tests replace the network: the local path
         pace = pace or slow_web.Pace()
         fetch = fetch or functools.partial(slow_web.get, project=project_id)
         vet_ip = vet_ip or functools.partial(_vet_address, project_id)
         banned = exclusions.excluded_names(project_id) | archived_names(project_id)
         by_asset = {e['asset']: e for e in web_hosts(project_id)}
         due = ledger.stale_first(SERVICE, [(0, asset, project_id) for asset in by_asset], )
-        running = None
+        selected = []
         for _domain, asset, _project in due[:max_hosts()]:
             if stop():
                 summary['skipped'] = 'scanning is paused: the hosts stay due'
                 break
-            entry = by_asset[asset]
-            if not _allowed(project_id, entry, banned, vet_ip):
+            if _allowed(project_id, by_asset[asset], banned, vet_ip, resolve=False):  # a lookup is made here only for a host this server asks itself (below)
+                selected.append(by_asset[asset])
+        reports, waiting = (None, False) if injected or not selected else _remote_reports(project_id, selected)
+        if waiting:
+            summary['skipped'] = 'waiting for a scanner: the hosts stay due'
+            selected = []
+        running = None
+        for index, entry in enumerate(selected):
+            if reports is not None and f'h{index}' not in reports:
+                continue  # the scanner did not answer for this host: nothing is recorded, it stays due
+            if stop():
+                summary['skipped'] = 'scanning is paused: the hosts stay due'
+                break
+            if reports is None and not _allowed(project_id, entry, banned, vet_ip):
                 continue
             if running is None:
                 running = activity.log('run_check', 'Subdirectory application check of the project\'s web hosts', project=project_id, status='running')
             try:
-                part = sweep_host(project_id, entry, fetch, pace, stop=stop)
+                part = settle_remote(project_id, entry, reports[f'h{index}']) if reports is not None else sweep_host(project_id, entry, fetch, pace, stop=stop)
             except Exception as exc:  # noqa: BLE001 - one host failing never stops the rest; it stays due
                 logger.warning('subdirectory sweep of host %s failed: %s', entry['sub'].pk, type(exc).__name__)
                 continue
