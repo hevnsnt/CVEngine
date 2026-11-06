@@ -197,6 +197,9 @@ def _persist_bbot_findings(result, ctx, subdomains):
 	banned = ctx.get('_excluded_hosts')
 	if banned is None:
 		banned = excluded_names(domain.project_id)
+	from cveFeed import dangling_dns
+	pending = [f for f in result.findings if f['module'] == 'baddns' and not f.get('informational') and not (banned and normalize(f['host']) in banned)]
+	ratings = dict(zip(map(id, pending), dangling_dns.assess_all(pending, project=domain.project)))  # one batch, through a Sentinel when one can take it
 	for f in result.findings:
 		if banned and normalize(f['host']) in banned:  # nothing is recorded for a host the organization excluded for good
 			continue
@@ -208,8 +211,7 @@ def _persist_bbot_findings(result, ctx, subdomains):
 		if f['module'] == 'baddns':
 			# rated by what an outsider can claim, at the client's own zone cut (cveFeed.dangling_dns); a provider's DNS reached through a
 			# CNAME, or a "not found" page the provider shows for every host, is not a finding
-			from cveFeed import dangling_dns
-			rating = dangling_dns.assess(f)
+			rating = ratings.get(id(f))
 			if rating is not None and rating.drop:
 				logger.info(f'bbot baddns finding on {f["host"]} dropped: {rating.note}')
 				continue

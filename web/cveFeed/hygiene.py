@@ -687,24 +687,31 @@ def tls_targets(domain, hosts=None):
     return targets
 
 
+def mail_candidates(domain):
+    """``(own, extra)``: the target's own name (none for an address) and up to 100 of its discovered hosts that may have mail of their own, before
+    any DNS says so (``email_domains`` keeps the ones with an MX record that are not a CNAME)."""
+    from startScan.models import Subdomain
+    own = [] if is_ip(domain.name) else [domain.name]
+    extra = [s.name for s in Subdomain.objects.filter(target_domain=domain).exclude(name=domain.name)[:100]
+             if not is_ip(s.name) and domain.includes_host(s.name)]
+    return own, extra
+
+
 def email_domains(domain, mx=has_record, cname=None):
     """The target itself, plus discovered hosts that have their own MX record. A name that is a CNAME has none of its own: a CNAME cannot
     sit beside an MX, so the MX a lookup returns for it is its target's (www.example.com, a CNAME to example.com, answers with example.com's
     MX). Its mail is its target's, reviewed under that name, and it is left out. ``cname(name)`` says whether a name is a CNAME; with an
     injected ``mx`` (tests) it defaults to never."""
-    from startScan.models import Subdomain
     if cname is None:
         cname = (lambda name: has_record(name, 'CNAME')) if mx is has_record else (lambda name: False)
-    names = [] if is_ip(domain.name) else [domain.name]
-    extra = [s.name for s in Subdomain.objects.filter(target_domain=domain).exclude(name=domain.name)[:100]
-             if not is_ip(s.name) and domain.includes_host(s.name) and mx(s.name, 'MX') and not cname(s.name)]
-    return names + extra
+    own, extra = mail_candidates(domain)
+    return own + [name for name in extra if mx(name, 'MX') and not cname(name)]
 
 
 PENDING = 'pending'  # HygieneFinding.status of a DNS absence seen once and not agreed by two resolvers: evidence, not an open finding
 
 
-def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnames=False, across_targets=False):
+def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnames=False, across_targets=False, unanswered=None):
     """Upsert ``found`` (Finding objects) as the HygieneFinding rows of ``domain``, and resolve the open rows whose check this run
     owns (``owns(check_name)``) that it did not find again (limited to ``hosts`` when given). Returns the rows resolved. The
     Tailscale checks (cveFeed.tailscale_checks) and the UDP exposure checks (cveFeed.udp_scan) store through here too, and the TLS and email sweep leaves their rows alone.
@@ -716,7 +723,10 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
 
     ``across_targets`` (the TLS and email sweep, ``run_hygiene``): a finding another target of the same project already filed for the same host
     and check is that row, updated, not a second one. The other callers place their rows under a target of their own choosing (the tailnet's
-    anchor) and keep filing them there."""
+    anchor) and keep filing them there.
+
+    ``unanswered(host, check)``: whether this run could not check that host for that check (a scanner did not report it): an open row it names is
+    left as it is, never resolved for want of an answer."""
     from django.utils import timezone
 
     from cveFeed import hygiene_rating
@@ -766,7 +776,7 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
                 domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
     stale = [x for x in HygieneFinding.objects.filter(domain=domain, status__in=('open', PENDING))
              if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
-             and (x.host, x.check_name) not in keep]  # a certificate finding's host is 'name:port', a host-only run is given the names
+             and (x.host, x.check_name) not in keep and not (unanswered and unanswered(x.host, x.check_name))]  # a certificate finding's host is 'name:port', a host-only run is given the names
     for x in stale:
         x.status, x.resolved_at = 'resolved', timezone.now()
         x.save(update_fields=['status', 'resolved_at'])
@@ -778,24 +788,91 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
     return stale
 
 
+REAL_NETWORK = (probe_tls, email_findings, has_record)  # the helpers run_hygiene's defaults are; a caller that injects any of them (tests) keeps the sweep here
+
+
+def _norm(name):
+    return str(name or '').strip().lower().rstrip('.')
+
+
+def _cert_info(host, port, cert):
+    """A cleaned ``hygiene_check`` certificate row (``probe_results._certificate``) as ``probe_tls`` returns it: the dates as datetimes."""
+    info = {**cert, 'host': host, 'port': port}
+    for key in ('not_before', 'not_after'):
+        info[key] = datetime.datetime.fromisoformat(cert[key]) if cert.get(key) else None
+    return info
+
+
+def _remote_review(domain, targets, hosts):
+    """``(review, waiting)``: what a Sentinel's ``hygiene_check`` answered for the TLS endpoints ``targets`` and the mail names of ``domain`` (``hosts``
+    limits the run to those names), or ``(None, False)`` when no Sentinel can take the kind or one did not answer (the sweep checks here, as before), or
+    ``(None, True)`` when none can and the kind may not run here: nothing is recorded and the target stays due.
+
+    ``review['infos']`` maps ``(host, port)`` to the certificate read, ``review['unknown_tls']`` holds the ``host:port`` of every endpoint the scanner
+    did not answer for (not reported, refused by the policy or failed: never read as "nothing there"), ``review['mail']`` maps each reviewed name to
+    ``(findings, has_mx)``, ``review['mail_hosts']`` lists them in order and ``review['unknown_mail']`` the names that had to be reviewed and were not."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    own, extra = mail_candidates(domain)
+    if hosts is not None:
+        own, extra = ([domain.name] if domain.name in hosts and not is_ip(domain.name) else []), []
+    mail = [(name, True) for name in own] + [(name, False) for name in extra]
+    try:
+        result = probe_dispatch.try_hygiene(domain, targets, mail)
+    except ScannerUnavailable as exc:
+        logger.info('hygiene check of %s waits for a scanner: %s', domain.name, exc)
+        return None, True
+    if result is None:
+        return None, False
+    rows = {(_norm(c['host']), c['port']): c for c in result.get('certs') or []}
+    review = {'infos': {}, 'unknown_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set()}
+    for host, port in targets:
+        row = rows.get((_norm(host), port))
+        if row is None or row.get('error'):
+            review['unknown_tls'].add(f'{host}:{port}')
+        elif row.get('found'):
+            review['infos'][(host, port)] = _cert_info(host, port, row['cert'])
+    reviews = {_norm(m['name']): m for m in result.get('mail') or []}
+    for name, always in mail:
+        row = reviews.get(_norm(name))
+        if row is not None:
+            review['mail_hosts'].append(name)
+            review['mail'][name] = ([Finding(f['check'], f['severity'], f['title'], f['detail'], f['host'], f['evidence']) for f in row['findings']],
+                                    row['has_mx'])
+        elif always:
+            review['unknown_mail'].add(name)
+    return review, False
+
+
 def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
-    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings."""
+    """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings.
+
+    With the real network helpers (no injected ``probe``, ``emailer`` or ``mx``) the endpoints and mail names go to a Sentinel as one ``hygiene_check``
+    task when one can take it (``agentapi.probe_dispatch.try_hygiene``), and the server evaluates and stores what comes back exactly as it does its own
+    reads. An endpoint or a mail domain the scanner did not answer for is unknown: its open findings stay open. With no scanner able to take the work and
+    the kind off ``CVENGINE_LOCAL_FALLBACK`` nothing is recorded and the target stays due."""
     from cveFeed import activity, changes
     from cveFeed.models import TlsCertificate
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
+    real_network = (probe, emailer, mx) == REAL_NETWORK  # compared with the helpers as defined, not the module names a test may have replaced
     if probe is probe_tls:  # the project may authorise the tailnet devices of its own
         probe = functools.partial(probe_tls, project=project)
     running = activity.log('hygiene', f'Checking TLS and email authentication for {domain.name}', project=project, status='running')
     found = []
 
     targets = tls_targets(domain, hosts=hosts)
+    review, waiting = _remote_review(domain, targets, hosts) if real_network else (None, False)
+    if waiting:
+        activity.settle(running, 'done', message=f'Hygiene check of {domain.name}: waiting for a scanner, the target stays due', skipped=True)
+        return {'tls_hosts': 0, 'mail_domains': 0, 'findings': 0, 'resolved': 0, 'cert_changes': 0, 'cleartext': 0,
+                'skipped': 'waiting for a scanner: the target stays due'}
     probed = 0
     cert_changes = 0
     existing = {(c.host, c.port): c for c in TlsCertificate.objects.filter(domain=domain)}  # one query; bounded by MAX_TLS_TARGETS
     with concurrent.futures.ThreadPoolExecutor(max_workers=TLS_WORKERS) as pool:
-        for info in pool.map(lambda t: probe(*t), targets):
+        for info in (review['infos'].values() if review is not None else pool.map(lambda t: probe(*t), targets)):
             if not info:
                 continue
             probed += 1
@@ -810,7 +887,10 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
             if changes.record_cert_change(domain, info['host'], info['port'], before=prev, after=info, project_id=project):
                 cert_changes += 1
             found += evaluate_cert(info, now=now)
-    mail_hosts = email_domains(domain, mx) if hosts is None else ([domain.name] if domain.name in hosts and not is_ip(domain.name) else [])
+    if review is not None:
+        mail_hosts, emailer = review['mail_hosts'], (lambda name: review['mail'][name])
+    else:
+        mail_hosts = email_domains(domain, mx) if hosts is None else ([domain.name] if domain.name in hosts and not is_ip(domain.name) else [])
     if mail_hosts:  # the email review includes the checks adapted from MailFail: credit it where people watch the work
         from cveFeed.mailfail import CREDIT
         shown = ', '.join(mail_hosts[:3]) + (f' and {len(mail_hosts) - 3} more' if len(mail_hosts) > 3 else '')
@@ -836,8 +916,14 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
         logger.exception('cleartext service check failed for %s', domain.name)
     found += cleartext_found
 
+    unanswered = None
+    if review is not None and (review['unknown_tls'] or review['unknown_mail']):
+        def unanswered(host, check):  # a certificate finding's host is 'name:port'; a mail finding's is the name or a record name under it
+            if check.startswith('tls_'):
+                return host in review['unknown_tls']
+            return any(host == name or host.endswith('.' + name) for name in review['unknown_mail'])
     stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_', 'src_'))  # the tailnet, the TLS audit, cloud storage, UDP and secrets-scan checks keep their own
-                           and (cleartext_ok or not check.startswith('cleartext_')), live_cnames=True, across_targets=True)
+                           and (cleartext_ok or not check.startswith('cleartext_')), live_cnames=True, across_targets=True, unanswered=unanswered)
     if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
         from cveFeed import finding_lifecycle
         names = {finding_lifecycle.host_name(f.host or domain.name) for f in found} | {host for host, _port in targets}

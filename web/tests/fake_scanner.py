@@ -399,6 +399,8 @@ LOCAL_RUNNERS = {
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
     'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
+    'hygiene_check': ('cveFeed.hygiene._fetch_cert', 'cveFeed.hygiene._resolver'),  # the certificate read and every DNS lookup of the sweep
+    'dangling_dns_check': ('cveFeed.dangling_dns.Net.ns', 'cveFeed.dangling_dns.Net.ask', 'cveFeed.dangling_dns.Net.registered', 'cveFeed.dangling_dns.Net.http_control'),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'waf': (),  # likewise
     'nmap_full': (),  # likewise
@@ -427,6 +429,8 @@ HEAVY_KINDS = {
     'vhost_probe': (),
     'subdir_probe': (),
     'supplier_check': (),
+    'hygiene_check': (),
+    'dangling_dns_check': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
     'waf': ('route-probe',),
     'nmap_full': ('nmap-full-bg',),

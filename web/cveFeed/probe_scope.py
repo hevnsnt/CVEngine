@@ -173,6 +173,43 @@ def for_buckets(project_id, candidates):
     return {'hosts': hosts, 'domains': domains, 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_hygiene(project_id, tls, mail_names, unattended=True):
+    """The policy of a hygiene_check task: the TLS endpoints' hosts (``tls`` is ``[(host, port)]``, already the names a scanner may touch now) and, for
+    each mail name, its ``mta-sts.<name>`` host (the one HTTPS request the mail review makes of a target's own). A name that is excluded, archived or
+    outside the bug bounty program's scope is never listed and goes in ``excluded``, so the Sentinel names the reason. DNS lookups (the mail
+    records) ask the Sentinel's resolver, never a host, so they are not what this lists; the registries the mail review asks (RDAP) are public
+    services the Sentinel reaches only through its floor."""
+    gate = _Gate(project_id, unattended=unattended)
+    hosts, excluded = [], set()
+    wanted = [h for h, _port in tls] + [f'mta-sts.{n}' for n in mail_names]
+    for name in wanted:
+        name = (name or '').strip().lower().rstrip('.')
+        if not name or name in hosts:
+            continue
+        if gate.refusal(name):
+            excluded.add(name)
+        elif len(hosts) < MAX_HOSTS:
+            hosts.append(name)
+    return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
+
+
+def for_dangling(project_id, hosts, unattended=True):
+    """The policy of a dangling_dns_check task: the hosts of the findings it rates (the HTTP control request goes to a host's own addresses). The
+    name servers it asks are learnt from the delegation chain, so they are public addresses the Sentinel judges itself (its floor and these address
+    rules); a host that is excluded, archived or outside the bug bounty program's scope is never listed."""
+    gate = _Gate(project_id, unattended=unattended)
+    listed, excluded = [], set()
+    for name in hosts:
+        name = (name or '').strip().lower().rstrip('.')
+        if not name or name in listed:
+            continue
+        if gate.refusal(name):
+            excluded.add(name)
+        elif len(listed) < MAX_HOSTS:
+            listed.append(name)
+    return {'hosts': listed, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_suppliers(project_id, domains):
     """The policy of a supplier_check task: the exact names of one supplier (``supplier_scan.clean_domain`` already refused anything but a bare
     DNS name) and each one's ``mta-sts.`` host, which the policy file is fetched from. Never a wildcard, never a tree. A supplier is not an owned
