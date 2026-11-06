@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -149,6 +149,108 @@ def clean_bucket_check(body):
         if verdict is not None:
             out.append({'id': _text(item['id'], 300), 'verdict': verdict})
     return {'buckets': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+MAX_CERTS = 300
+MAX_MAIL = 101
+MAX_MAIL_FINDINGS = 200
+# The check families the email review raises (``hygiene.evaluate_*``, ``mailfail``). A Sentinel can report only these: a finding named like another
+# stage's (tls_*, ts_*, bkt_*, udp_*, src_*, cleartext_*) is dropped, so it can neither file nor resolve a row that belongs to that stage.
+MAIL_CHECK_PREFIXES = ('spf_', 'dmarc_', 'dkim_', 'caa_', 'mx_', 'mta_sts_', 'smtp_tlsrpt_', 'dane_', 'dnssec_', 'bimi_', 'arc_', 'adsp_', 'mailchannels_')
+_CHECK_NAME = re.compile(r'[a-z0-9_]{1,64}')
+_HOST_NAME = re.compile(r'[A-Za-z0-9_.\-]{1,300}')
+
+
+def _timestamp(value):
+    """An ISO 8601 timestamp as the same text with a zone (a certificate's date), or None when it does not read as one."""
+    import datetime
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return (stamp if stamp.tzinfo else stamp.replace(tzinfo=datetime.timezone.utc)).isoformat()
+
+
+def _certificate(raw):
+    """A certificate clipped to the columns it is stored in (``hygiene.clip_certificate`` limits), or None when it has no readable expiry."""
+    if not isinstance(raw, dict):
+        return None
+    after = _timestamp(raw.get('not_after'))
+    if after is None:
+        return None
+    legacy = raw.get('legacy_handshake') if isinstance(raw.get('legacy_handshake'), dict) else {}
+    sans = raw.get('sans') if isinstance(raw.get('sans'), list) else []
+    out = {'subject': _text(raw.get('subject'), 500), 'issuer': _text(raw.get('issuer'), 500), 'sans': [_text(s, 255) for s in sans[:200] if isinstance(s, str)],
+           'not_before': _timestamp(raw.get('not_before')), 'not_after': after, 'signature_algorithm': _text(raw.get('signature_algorithm'), 100),
+           'key_description': _text(raw.get('key_description'), 100), 'protocol': _text(raw.get('protocol'), 20), 'cipher': _text(raw.get('cipher'), 100),
+           'chain_error': _text(raw.get('chain_error'), 300), 'legacy_tls': raw.get('legacy_tls') is True}
+    if legacy:
+        out['legacy_handshake'] = {'protocol': _text(legacy.get('protocol'), 20), 'cipher': _text(legacy.get('cipher'), 100)}
+    return out
+
+
+def _finding(raw):
+    """One mail finding clipped to the HygieneFinding columns, or None: an unknown check family, a severity out of range or a host that is no name."""
+    if not isinstance(raw, dict):
+        return None
+    check, severity, host = raw.get('check'), raw.get('severity'), raw.get('host')
+    if not isinstance(check, str) or not _CHECK_NAME.fullmatch(check) or not check.startswith(MAIL_CHECK_PREFIXES):
+        return None
+    if isinstance(severity, bool) or not isinstance(severity, int) or not 0 <= severity <= 4:
+        return None
+    if not isinstance(host, str) or not _HOST_NAME.fullmatch(host):
+        return None
+    return {'check': check, 'severity': severity, 'title': _text(raw.get('title'), 300), 'detail': _text(raw.get('detail'), 2000), 'host': host,
+            'evidence': _evidence(raw.get('evidence'))}
+
+
+def clean_hygiene_check(body):
+    certs, mail = body.get('certs'), body.get('mail')
+    if not isinstance(certs, list) or len(certs) > MAX_CERTS or not isinstance(mail, list) or len(mail) > MAX_MAIL:
+        raise ApiError(400, 'a hygiene_check result lists its certs (at most %d) and mail reviews (at most %d)' % (MAX_CERTS, MAX_MAIL))
+    out_certs, out_mail = [], []
+    for item in certs:
+        if not isinstance(item, dict) or not isinstance(item.get('host'), str) or not item['host'] or isinstance(item.get('port'), bool) \
+                or not isinstance(item.get('port'), int) or not 0 < item['port'] < 65536:
+            continue
+        row = {'host': _text(item['host'], 260), 'port': item['port'], 'found': False}
+        if item.get('found') is True:
+            cert = _certificate(item.get('cert'))
+            if cert is None:
+                row['error'] = 'the certificate could not be read'  # a TLS service answered but what came back is unusable: unknown
+            else:
+                row.update(found=True, cert=cert)
+        elif isinstance(item.get('error'), str) and item['error']:
+            row['error'] = _text(item['error'], 200)  # not asked or not probed: unknown, never "nothing there"
+        out_certs.append(row)
+    for item in mail:
+        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not item['name'] or not isinstance(item.get('findings'), list):
+            continue
+        findings = [f for f in (_finding(x) for x in item['findings'][:MAX_MAIL_FINDINGS]) if f is not None]
+        out_mail.append({'name': _text(item['name'], 253), 'has_mx': item.get('has_mx') is True, 'findings': findings})
+    return {'certs': out_certs, 'mail': out_mail, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+MAX_RATINGS = 50
+
+
+def clean_dangling_dns_check(body):
+    ratings = body.get('ratings')
+    if not isinstance(ratings, list) or len(ratings) > MAX_RATINGS:
+        raise ApiError(400, 'a dangling_dns_check result lists its ratings (at most %d)' % MAX_RATINGS)
+    out = []
+    for item in ratings:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or item.get('state') not in ('rated', 'unknown'):
+            continue
+        row = {'id': _text(item['id'], 200), 'state': item['state']}
+        if item['state'] == 'rated':
+            severity = item.get('severity')
+            row.update(severity=severity if isinstance(severity, int) and not isinstance(severity, bool) and 1 <= severity <= 3 else None,
+                       drop=item.get('drop') is True, note=_text(item.get('note'), 2000), zone=_text(item.get('zone'), 260))
+        out.append(row)
+    return {'ratings': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
 MAX_SUPPLIER_DOMAINS = 25
@@ -504,6 +606,20 @@ def bind(kind, result, task):
         kept = [h for h in result['hosts'] if h['id'] in asked]
         dropped = len(result['hosts']) - len(kept)
         result = {**result, 'hosts': kept}
+    elif kind == 'hygiene_check':  # only the endpoints and names the task asked about (names compared as the Sentinel writes them: lower case, no final dot)
+        def norm(name):
+            return str(name or '').strip().lower().rstrip('.')
+        tls = {(norm(p.get('host')), p.get('port')) for p in target.get('tls') or [] if isinstance(p, dict)}
+        names = {norm(p.get('name')) for p in target.get('mail') or [] if isinstance(p, dict)}
+        certs = [c for c in result['certs'] if (norm(c['host']), c['port']) in tls]
+        mail = [m for m in result['mail'] if norm(m['name']) in names]
+        dropped = len(result['certs']) - len(certs) + len(result['mail']) - len(mail)
+        result = {**result, 'certs': certs, 'mail': mail}
+    elif kind == 'dangling_dns_check':
+        asked = {c.get('id') for c in target.get('checks') or [] if isinstance(c, dict)}
+        ratings = [r for r in result['ratings'] if r['id'] in asked]
+        dropped = len(result['ratings']) - len(ratings)
+        result = {**result, 'ratings': ratings}
     elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe'):
         key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes'}[kind]
         if kind == 'route_probe':  # the routes a task asked about are the urls of its hosts

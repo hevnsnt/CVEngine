@@ -44,6 +44,8 @@ export const SENTINEL_KINDS = [
   "vhost_probe",
   "subdir_probe",
   "supplier_check",
+  "hygiene_check",
+  "dangling_dns_check",
   "route_probe",
 ];
 const KIND_WORDS = {
@@ -73,6 +75,8 @@ const KIND_WORDS = {
   vhost_probe: "virtual host checks",
   subdir_probe: "subdirectory application checks",
   supplier_check: "supplier posture checks",
+  hygiene_check: "TLS and email checks",
+  dangling_dns_check: "dangling DNS checks",
   route_probe: "web route checks",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
