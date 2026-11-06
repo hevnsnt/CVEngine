@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "alive_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -1362,6 +1362,560 @@
             "then": {
               "required": [
                 "checks",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "vhost_probe": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "addresses": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "default",
+                    "names"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "default": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "state"
+                      ],
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "answered",
+                            "no_answer",
+                            "challenged",
+                            "busy"
+                          ]
+                        },
+                        "fingerprint": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "status",
+                            "title",
+                            "length",
+                            "location",
+                            "server"
+                          ],
+                          "properties": {
+                            "status": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 999
+                            },
+                            "title": {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            "length": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "location": {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            "server": {
+                              "type": "string",
+                              "maxLength": 60
+                            }
+                          }
+                        },
+                        "challenge": {
+                          "type": "string",
+                          "maxLength": 60
+                        }
+                      }
+                    },
+                    "names": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "name",
+                          "state"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 253
+                          },
+                          "state": {
+                            "enum": [
+                              "answered",
+                              "no_answer",
+                              "challenged",
+                              "busy"
+                            ]
+                          },
+                          "fingerprint": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "status",
+                              "title",
+                              "length",
+                              "location",
+                              "server"
+                            ],
+                            "properties": {
+                              "status": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 999
+                              },
+                              "title": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "length": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "location": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "server": {
+                                "type": "string",
+                                "maxLength": 60
+                              }
+                            }
+                          },
+                          "challenge": {
+                            "type": "string",
+                            "maxLength": 60
+                          },
+                          "own": {
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "status",
+                                  "title",
+                                  "length",
+                                  "location",
+                                  "server"
+                                ],
+                                "properties": {
+                                  "status": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 999
+                                  },
+                                  "title": {
+                                    "type": "string",
+                                    "maxLength": 200
+                                  },
+                                  "length": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "location": {
+                                    "type": "string",
+                                    "maxLength": 200
+                                  },
+                                  "server": {
+                                    "type": "string",
+                                    "maxLength": 60
+                                  }
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "description": "the name's own site as the scanner asked it, when the task gave none"
+                          },
+                          "page": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "status",
+                              "title",
+                              "server",
+                              "content_type",
+                              "powered_by",
+                              "url",
+                              "body",
+                              "headers"
+                            ],
+                            "description": "what the distinct application's own page states (the server reads versions from it); only for a name the scanner judged distinct",
+                            "properties": {
+                              "status": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 999
+                              },
+                              "title": {
+                                "type": "string",
+                                "maxLength": 300
+                              },
+                              "server": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "content_type": {
+                                "type": "string",
+                                "maxLength": 100
+                              },
+                              "powered_by": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "url": {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              "body": {
+                                "type": "string",
+                                "maxLength": 65536
+                              },
+                              "headers": {
+                                "type": "object",
+                                "maxProperties": 60,
+                                "additionalProperties": {
+                                  "type": "string",
+                                  "maxLength": 200
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "addresses",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "subdir_probe": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "hosts": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "state",
+                    "requests",
+                    "baseline",
+                    "probed",
+                    "answers"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "state": {
+                      "enum": [
+                        "done",
+                        "challenged",
+                        "busy"
+                      ]
+                    },
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 150
+                    },
+                    "challenge": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "edge",
+                        "status",
+                        "path"
+                      ],
+                      "properties": {
+                        "edge": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 60
+                        },
+                        "status": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 999
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        }
+                      }
+                    },
+                    "baseline": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "status",
+                            "title",
+                            "length",
+                            "location",
+                            "server"
+                          ],
+                          "properties": {
+                            "status": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 999
+                            },
+                            "title": {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            "length": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "location": {
+                              "type": "string",
+                              "maxLength": 200
+                            },
+                            "server": {
+                              "type": "string",
+                              "maxLength": 60
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "probed": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      }
+                    },
+                    "answers": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "path",
+                          "source",
+                          "fingerprint",
+                          "found"
+                        ],
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "source": {
+                            "enum": [
+                              "curated",
+                              "crawled",
+                              "archive",
+                              "robots",
+                              "sitemap"
+                            ]
+                          },
+                          "fingerprint": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "status",
+                              "title",
+                              "length",
+                              "location",
+                              "server"
+                            ],
+                            "properties": {
+                              "status": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 999
+                              },
+                              "title": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "length": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "location": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "server": {
+                                "type": "string",
+                                "maxLength": 60
+                              }
+                            }
+                          },
+                          "found": {
+                            "oneOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "product",
+                                  "confidence",
+                                  "source",
+                                  "version",
+                                  "indicated"
+                                ],
+                                "properties": {
+                                  "product": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 120
+                                  },
+                                  "confidence": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                  },
+                                  "source": {
+                                    "type": "string",
+                                    "maxLength": 48
+                                  },
+                                  "version": {
+                                    "type": "string",
+                                    "maxLength": 100
+                                  },
+                                  "indicated": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 500
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "hosts",
                 "touched"
               ]
             }
@@ -2785,6 +3339,267 @@
                 }
               }
             }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "vhost_probe": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "addresses",
+          "gap",
+          "scope"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "address",
+                "scheme",
+                "port",
+                "names"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "address": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "scheme": {
+                  "enum": [
+                    "http",
+                    "https"
+                  ]
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "names": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
+                      },
+                      "own": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "status",
+                          "title",
+                          "length",
+                          "location",
+                          "server"
+                        ],
+                        "properties": {
+                          "status": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 999
+                          },
+                          "title": {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          "length": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "location": {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          "server": {
+                            "type": "string",
+                            "maxLength": 60
+                          }
+                        },
+                        "description": "the name's own front page as the server last stored it: asked here only when absent"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "gap": {
+            "type": "number",
+            "minimum": 0.2,
+            "maximum": 60,
+            "description": "seconds between two requests within the task (the server keeps the global pace)"
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "subdir_probe": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hosts",
+          "paths",
+          "max_requests",
+          "gap",
+          "scope"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "name",
+                "scheme",
+                "port"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "scheme": {
+                  "enum": [
+                    "http",
+                    "https"
+                  ]
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "connect_ip": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "ask this address with the name as the Host header (a virtual host)"
+                },
+                "root": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "title",
+                    "length",
+                    "location",
+                    "server"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 999
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "length": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "location": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "server": {
+                      "type": "string",
+                      "maxLength": 60
+                    }
+                  },
+                  "description": "the host's stored front page: the second baseline"
+                },
+                "leads": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "path",
+                      "count",
+                      "source"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 60
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "source": {
+                        "enum": [
+                          "crawled",
+                          "archive"
+                        ]
+                      }
+                    }
+                  },
+                  "description": "mount directories the host's crawled and archived URLs show, most often seen first; the scanner adds those of robots.txt and sitemap.xml"
+                }
+              }
+            }
+          },
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "description": "the curated mount paths"
+          },
+          "max_requests": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 150,
+            "description": "requests per host"
+          },
+          "gap": {
+            "type": "number",
+            "minimum": 0.2,
+            "maximum": 60,
+            "description": "seconds between two requests within the task (the server keeps the global pace)"
           },
           "scope": {
             "$ref": "#/$defs/probe_scope"

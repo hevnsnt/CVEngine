@@ -31,7 +31,8 @@ SHIPPED_BUILTIN = {'openvas': {'mode': 'deny', 'max_concurrent': None}}  # the b
 LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF detection', 'bbot_discovery': 'bbot discovery', 'http_probe': 'version probes',
           'dns_resolve': 'name resolution', 'nmap_full': 'full port sweep',
           'nmap_verify': 'service version probe', 'rdp_shot': 'RDP screenshot', 'db_probe': 'database exposure probe', 'path_probe': 'scan path check',
-          'nuclei_validate': 'template check', 'alive_check': 'retired host checks', 'bucket_check': 'cloud storage checks'}
+          'nuclei_validate': 'template check', 'alive_check': 'retired host checks', 'bucket_check': 'cloud storage checks',
+          'vhost_probe': 'virtual host checks', 'subdir_probe': 'subdirectory application checks'}
 SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'default')
 
 

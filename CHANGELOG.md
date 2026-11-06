@@ -19,6 +19,12 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **Cloud storage checks on the scanner** (`bucket_check`, contract version 3). The storage sweep sends its due buckets to a Sentinel as one batch,
   paced at the sweep's own rate and held to the storage platforms' documented endpoints, and evaluates what comes back as it evaluates its own
   checks. With no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the buckets stay due.
+- **Virtual host and subdirectory application checks on the scanner** (`vhost_probe` and `subdir_probe`, contract version 3). The virtual host
+  sweep sends each due address with the project's own names to a Sentinel, which asks the address its default response and then each name as the
+  Host header; the subdirectory sweep sends each due web host with the curated mount paths and the directories its own URLs show, and the Sentinel
+  asks them at the sweep's own pace and request caps. The server compares what comes back with its own rules (it does not read the Sentinel's
+  verdict), and records and adds what it found as before. A name, an address or a host the scanner did not answer is left due, never recorded as
+  clean or gone; with no scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the sweeps wait.
 
 - **The AI reviewer, in its own container** ([docs/AI-REVIEWER.md](docs/AI-REVIEWER.md)). The new `reviewer` compose service runs two jobs, each with its own model setting:
   - **Finding review** (Sonnet 5.5 by default on Anthropic). It reads every open finding once (CVE matches, scanner findings and hygiene findings) and reads it again only when the host or the evidence changes. It closes false positives with a closing note. The server closes a finding only when all of these hold: it has no hard evidence; no person has worked it; its evidence carries no text aimed at AI agents; and the verdict was given on its current state. Every other verdict is recorded as the reviewer's opinion.

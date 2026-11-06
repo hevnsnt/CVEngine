@@ -395,6 +395,8 @@ LOCAL_RUNNERS = {
     'dns_resolve': ('cveFeed.discovery.resolve_names',),
     'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
     'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
+    'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
+    'subdir_probe': ('cveFeed.slow_web.get',),
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'waf': ('cveFeed.waf_scan.run_wafw00f',),
     'nmap_full': ('cveFeed.fullscan._sweep_runner', 'cveFeed.fullscan._fingerprint_runner', 'cveFeed.nmap_scan.run_nmap_xml'),
@@ -420,6 +422,8 @@ HEAVY_KINDS = {
     'dns_resolve': (),
     'alive_check': (),
     'bucket_check': (),
+    'vhost_probe': (),
+    'subdir_probe': (),
     'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
     'waf': ('route-probe',),
     'nmap_full': ('nmap-full-bg',),

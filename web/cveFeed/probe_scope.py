@@ -141,6 +141,21 @@ def for_buckets(project_id, candidates):
     return {'hosts': hosts, 'domains': domains, 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_vhosts(project_id, addresses, names):
+    """The policy of a vhost_probe task: the addresses it asks (each as itself, for its default request) and the names it sends as the Host
+    header. The names were already filtered by the project's exclusions and archived hosts; a name's own front page is asked at the address the
+    scanner resolves it to, judged by the scanner's floor and the address rules that travel along."""
+    hosts = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in [*addresses, *names] if str(h).strip()))[:MAX_HOSTS]
+    return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
+
+
+def for_subdirs(project_id, names):
+    """The policy of a subdir_probe task: the host names it asks (a virtual host is asked at its address with its name; the address is pinned
+    by the task, never resolved)."""
+    hosts = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in names if str(h).strip()))[:MAX_HOSTS]
+    return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_names(project_id, domain, names, unattended=False):
     """The policy of a dns_resolve task for ``names`` of target ``domain``: each name the target holds that no gate refuses. A lookup asks the
     Sentinel's resolver, never the host, so this is about which names the scanner is told of at all."""
