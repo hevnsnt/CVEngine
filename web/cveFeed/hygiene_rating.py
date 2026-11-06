@@ -1,6 +1,6 @@
 """How hot a hygiene finding is once what is known about its endpoint is taken into account.
 
-``cveFeed.hygiene`` and ``cveFeed.testssl_scan`` rate a finding from the record or the handshake alone. Some of those ratings are too
+``cveFeed.hygiene`` and ``cveFeed.tls_audit`` rate a finding from the record or the handshake alone. Some of those ratings are too
 hot for where the endpoint is (1.3.5 audit):
 
 * a name the client points at a vendor's platform by CNAME (Zendesk, Squarespace, Railway, Microsoft 365, ...) is served by the

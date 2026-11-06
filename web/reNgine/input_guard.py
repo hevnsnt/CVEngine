@@ -80,7 +80,7 @@ BOUNTY_TEXT_PATH = re.compile(r'^/cve/api/bounty/(reports|engagements)(/|$)')
 # nothing in it reaches a shell, a query or a template. Its address and query string are still checked.
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/[-\w]+/inventory/?$')
 # What a Sentinel reports (the result of a scan-stage task, the partial batches of a streamed one, its heartbeat) is machine data about scanned hosts: a nuclei template's description,
-# a testssl finding, a WPScan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
+# a TLS audit finding, a WPScan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
 # and SQL fragments appear in it routinely. Counting it against the Sentinel's owner would disable an administrator's account and revoke
 # its tokens for one template with a backtick in its description (and the result would be lost). Its body is not scanned here because it is
 # not free text: ``agentapi.sentinel_broker.clean_result``, ``sentinel_stream.clean_partial`` and ``sentinel_settings.clean_info`` allow one fixed shape per kind, clip every

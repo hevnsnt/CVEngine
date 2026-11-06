@@ -9,7 +9,7 @@ target due. The stages are the ones ``tests/test_scanner_unavailable_stages.py``
 Entry points: nmap ``nmap_scan.run_nmap_for_scan`` (which dispatches naabu and nmap itself), naabu ``naabu_scan.discover`` with
 ``wrap_naabu_runner`` (the runner the nmap stage builds), nuclei light and targeted ``nuclei_scan.run_light_nuclei`` / ``run_targeted_nuclei`` with
 ``wrap_nuclei_stream`` (what ``discovery._run_stages`` passes them), nuclei deep ``tasks.weekly_deep_nuclei`` (which wraps its own stream),
-testssl ``testssl_scan.sweep``, nmap -sU ``udp_scan.run`` / ``scan_ip``, wpscan ``wpscan_scan.run_wpscan`` (which wraps its own runner)."""
+testssl ``tls_audit.sweep``, nmap -sU ``udp_scan.run`` / ``scan_ip``, wpscan ``wpscan_scan.run_wpscan`` (which wraps its own runner)."""
 import os
 import time
 from unittest import mock
@@ -19,7 +19,7 @@ from django.test import TestCase
 from agentapi import scanner_state, sentinel_broker
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
-from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import ProbeObservation, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
@@ -28,7 +28,7 @@ from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, ass
 from tests.test_route_auth import RouteFixture
 from tests.test_scanner_unavailable_stages import ENV, IP, FallbackOffBase, WaitsMixin
 from tests.test_sentinel_dispatch import UDP_XML, DispatchBase
-from tests.test_testssl_scan import CLEAN
+from tests.test_tls_audit import CLEAN
 from tests.test_udp_scan import UdpBase
 
 HOST = 'www.example.test'
@@ -258,14 +258,12 @@ class HarnessGuardTests(TestCase):
             try:
                 with self.assertRaises(LocalRunDetected):
                     heavy_process.run('testssl', ['testssl.sh', 'example.test'], 5)
-                with self.assertRaises(LocalRunDetected):
-                    testssl_scan.run_testssl('example.test', '192.0.2.1', 443, '')
                 with resources.heavy_job('route-probe', label='x'):  # another tool's job goes through the real gate
                     pass
             finally:
                 failures = self.finish(case)
         self.assertEqual(entered, ['route-probe'])
-        self.assertEqual(len(guard.calls), 2)
+        self.assertEqual(len(guard.calls), 1)
         self.assertTrue(guard.calls[0][0].startswith('heavy_process.run'), guard.calls)
         self.assertEqual(len(failures), 1)
 
@@ -499,7 +497,7 @@ class NucleiDeepServedTests(StageBase, FallbackOffBase):
 
 
 class TestsslServedTests(StageBase, RouteFixture, TestCase):
-    """The TLS audit: ``testssl_scan.sweep`` for the project."""
+    """The TLS audit: ``tls_audit.sweep`` for the project."""
 
     def setUp(self):
         super().setUp()
@@ -508,11 +506,11 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
 
     def sweep(self, guard):
-        return testssl_scan.sweep(self.project.id, runner=guard.runner, resolve=lambda host, port, project: '203.0.113.5')
+        return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
 
     def test_the_scanner_serves_a_report_and_the_sweep_records_the_audit(self):
         guard = self.arm('testssl')[0]
-        # the contract fixture is one protocol line, which testssl_scan reads as "no test ran": the scenario serves a full report (the one test_testssl_scan uses)
+        # the contract fixture is one protocol line, which tls_audit reads as "no test ran": the scenario serves a full report (the one test_tls_audit uses)
         report = {'outcome': 'done', 'items': CLEAN}
         with FakeScanner(kinds=['testssl'], responders={'testssl': report}) as fake:
             out = self.sweep(guard)
@@ -520,10 +518,10 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         self.assertEqual((out['tested'], out['failed']), (1, 0))
         self.assertNotIn('skipped', out)
         self.assertEqual(fake.served[0]['target'], {'host': 'www.rt.test', 'ip': '203.0.113.5', 'port': 443, 'starttls': ''})
-        self.assertEqual(list(ServiceRun.objects.filter(service=testssl_scan.SERVICE).values_list('asset', 'status')), [('www.rt.test:443', 'done')])
-        audit = ProbeObservation.objects.get(host='www.rt.test', probe=testssl_scan.PROBE, kind=testssl_scan.OBS_AUDIT)
+        self.assertEqual(list(ServiceRun.objects.filter(service=tls_audit.SERVICE).values_list('asset', 'status')), [('www.rt.test:443', 'done')])
+        audit = ProbeObservation.objects.get(host='www.rt.test', probe=tls_audit.PROBE, kind=tls_audit.OBS_AUDIT)
         self.assertEqual((audit.outcome, audit.evidence['protocols']['TLS1_2'], audit.evidence['ip']), ('found', 'offered', '203.0.113.5'))
-        self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', probe=testssl_scan.PROBE, product='heartbleed', outcome='absent').exists())
+        self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', probe=tls_audit.PROBE, product='heartbleed', outcome='absent').exists())
 
     def test_with_the_scanner_offline_the_sweep_waits_and_the_target_stays_due(self):
         guard = self.arm('testssl')[0]
@@ -533,7 +531,7 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         self.assertEqual((out['tested'], out['failed']), (0, 0))
         self.assertIn('no scanner is online for testssl', out['skipped'])
         self.assertFalse(ServiceRun.objects.exists())
-        self.assertEqual([(host, port) for host, port, *_ in testssl_scan.due(self.project.id)], [('www.rt.test', 443)])  # still due
+        self.assertEqual([(host, port) for host, port, *_ in tls_audit.due(self.project.id)], [('www.rt.test', 443)])  # still due
 
 
 class UdpServedTests(StageBase, UdpBase):

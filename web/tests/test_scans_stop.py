@@ -16,6 +16,7 @@ from reNgine import resources
 from scanEngine.models import EngineType
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.discovery_fixtures import sentinel_discovery
 from tests.test_agentapi import call, rpc
 
 
@@ -90,7 +91,8 @@ class ScansListAndStopTests(TestCase):
         self.assertEqual(set(ScanActivity.objects.filter(scan_of=scan).values_list('status', flat=True)), {3})
         revoke.assert_not_called()  # a queued task has no id yet; it is skipped when a worker reaches it
         ran = []
-        out = discovery.run_pipeline(ids[0], stream=lambda *a, **k: ran.append(1) or iter([]))
+        with mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=lambda *a, **k: ran.append(1)):
+            out = discovery.run_pipeline(ids[0])
         self.assertEqual((out['status'], ran), ('aborted', []))
         self.assertEqual(ScanHistory.objects.get(pk=ids[1]).scan_status, -1)  # the next one is untouched
         self.assertEqual(call(self.tok, 'POST', f'/api/v1/projects/acme/scans/{ids[0]}/stop')[0], 409)  # already stopped
@@ -160,8 +162,8 @@ class ScansListAndStopTests(TestCase):
             services._abort_scan(scan)  # a person presses Stop while nmap runs
             return ''
         with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('reNgine.celery.app.control.revoke'), \
-                mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene:
-            out = discovery.run_pipeline(scan.id, stream=lambda *a, **k: iter(events), nmap_runner=nmap_runner,
+                mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene, sentinel_discovery(events):
+            out = discovery.run_pipeline(scan.id, nmap_runner=nmap_runner,
                 light_stream=lambda path, **k: later.append('light') or iter([]), targeted_stream=lambda path, **k: later.append('t') or iter([]),
                 db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
         self.assertEqual(out['status'], 'aborted')

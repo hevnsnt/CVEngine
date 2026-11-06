@@ -156,27 +156,27 @@ def _nmap(scan, project, ip, org_id, dispatch):
 def _testssl(scan, project, domain, ip, org_id, dispatch):
     """A TLS audit of each TLS port nmap found open on ``ip``, through an internal Sentinel; findings and CVE evidence are stored by the
     same functions the external sweep uses."""
-    from cveFeed import ledger, testssl_scan
+    from cveFeed import ledger, tls_audit
     from startScan.models import IpAddress, Subdomain, open_ports
     sub = Subdomain.objects.filter(scan_history=scan, name=ip).select_related('target_domain').first()
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     ports = {p.number: p for p in open_ports(ip_obj)} if ip_obj else {}
     tested = failed = issues = 0
-    for number, starttls in testssl_scan.tls_ports(ports):
+    for number, starttls in tls_audit.tls_ports(ports):
         where = f'{ip}:{number}'
         result = dispatch(project, 'testssl', {'host': ip, 'ip': ip, 'port': number, 'starttls': starttls or ''}, host=ip, ips=[ip],
                           scan=scan, internal=True)
-        evaluated = testssl_scan.evaluate((result or {}).get('items') or [], where) if result is not None else None
+        evaluated = tls_audit.evaluate((result or {}).get('items') or [], where) if result is not None else None
         if evaluated is None or not evaluated.tested:
             if result is not None:  # a Sentinel answered and the test did not complete: a failed run; no answer at all is not a run
-                ledger.record(testssl_scan.FAILED_SERVICE, [where], project.id, scan)
+                ledger.record(tls_audit.FAILED_SERVICE, [where], project.id, scan)
             failed += 1
             continue
-        testssl_scan.record_observations(project.id, domain.id, ip, number, evaluated, ip)
-        testssl_scan.store(domain, ip, number, evaluated, where)
+        tls_audit.record_observations(project.id, domain.id, ip, number, evaluated, ip)
+        tls_audit.store(domain, ip, number, evaluated, where)
         if sub is not None:
-            testssl_scan.run_for_host(sub)
-        ledger.record(testssl_scan.SERVICE, [where], project.id, scan)
+            tls_audit.run_for_host(sub)
+        ledger.record(tls_audit.SERVICE, [where], project.id, scan)
         tested += 1
         issues += len(evaluated.findings)
     out = {'tested': tested, 'failed': failed, 'issues': issues}
@@ -238,7 +238,7 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
     from reNgine.tasks import persist_bbot_result
-    from reNgine import bbot as bbot_lib
+    from reNgine import discovery_events as bbot_lib
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target

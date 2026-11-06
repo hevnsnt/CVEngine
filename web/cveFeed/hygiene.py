@@ -836,7 +836,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
         logger.exception('cleartext service check failed for %s', domain.name)
     found += cleartext_found
 
-    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_', 'src_'))  # the tailnet, testssl.sh, cloud storage, UDP and secrets-scan checks keep their own
+    stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_', 'src_'))  # the tailnet, the TLS audit, cloud storage, UDP and secrets-scan checks keep their own
                            and (cleartext_ok or not check.startswith('cleartext_')), live_cnames=True, across_targets=True)
     if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
         from cveFeed import finding_lifecycle

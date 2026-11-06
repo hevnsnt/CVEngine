@@ -915,7 +915,7 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
     tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
     the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
-    testssl): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
+    the TLS audit): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
     one nothing is guessed.
 
     A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or

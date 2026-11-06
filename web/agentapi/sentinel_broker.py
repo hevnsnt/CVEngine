@@ -723,6 +723,7 @@ def task_hosts(task):
         raw += [h.get('host') for h in target['hosts'] if isinstance(h, dict)]
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
+    raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
         if isinstance(check, dict):
             raw += [v for v in (check.get('host'), check.get('ip')) if isinstance(v, str)]
@@ -1755,7 +1756,7 @@ def _credential_payload(credential_id, project_id, now):
 
 def read_secret(ctx, task_id):
     """``POST sentinel/tasks/<id>/secret``: the decrypted stored credential of one signed-in task, to the built-in scanner that holds it, exactly once.
-    For a ``bbot_discovery`` task whose ``secret_ref`` is ``bbotkeys:<project id>`` it is the project's API keys for bbot's modules instead, as
+    For a ``bbot_discovery`` task whose ``secret_ref`` is ``bbotkeys:<project id>`` it is the project's API keys for the discovery's modules instead, as
     ``{bbot_config: {modules: {<module>: {<option>: <key>}}}}`` (``sentinel_stream.keys_payload``), under the same rules.
 
     Only the built-in scanner (``builtin_scanner.builtin_agent``) with its own sentinel-scope token may call it, for a task assigned to it, claimed
@@ -1976,9 +1977,8 @@ _TESTSSL_SEVERITIES = ('INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'WARN', 'FAT
 
 
 def _clean_testssl_result(body):
-    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.testssl_scan.evaluate`` reads from a
-    locally-run report item (``id``, ``severity``, ``finding``, ``cve``): everything else testssl.sh's own JSON carries is
-    dropped, never stored or interpreted, so a Sentinel-reported item is no richer an attack surface than a local one."""
+    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.tls_audit.evaluate`` reads
+    (``id``, ``severity``, ``finding``, ``cve``): everything else the report's own JSON carries is dropped, never stored or interpreted."""
     items = body.get('items')
     if not isinstance(items, list) or len(items) > MAX_TESTSSL_ITEMS:
         raise ApiError(400, f'items must be a list of at most {MAX_TESTSSL_ITEMS} entries')
@@ -2110,11 +2110,11 @@ def _clean_openvas_result(body):
 
 
 def _clean_waf_result(body):
-    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
-    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
-    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
-    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
-    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    """A Sentinel's WAF fingerprint of one web host, reshaped into what ``cveFeed.waf_fingerprint.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else the tool prints is kept. The
+    bounds are ``cveFeed.waf_fingerprint``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one product rule."""
+    from cveFeed.waf_fingerprint import MAX_PRODUCTS, NAME_LEN
     products = body.get('products')
     if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
         raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')
@@ -2288,7 +2288,7 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'nuclei_validate': _clean_nuclei_validate_result,
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
-             'route_probe': probe_results.clean_route_probe}
+             'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe}
 
 
 def _bind_to_task(kind, result, task):
@@ -2298,7 +2298,7 @@ def _bind_to_task(kind, result, task):
     if task is not None and kind == 'secrets_scan':  # only URLs on the task's own hosts, and the findings and references on them
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
-    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'vhost_probe', 'subdir_probe', 'route_probe'):
+    if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'route_probe'):
         return probe_results.bind(kind, result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result

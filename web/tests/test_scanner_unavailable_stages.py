@@ -8,14 +8,13 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi import sentinel_dispatch as dispatch
-from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, performance_review, testssl_scan, udp_scan, wpscan_scan
+from cveFeed import discovery, ledger, naabu_scan, nmap_scan, nuclei_scan, performance_review, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import AgentActivity, BackgroundCursor, ServiceRun
 from reNgine import resources
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Technology
 from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_sentinel_dispatch import DispatchBase
-from tests.test_testssl_scan import CLEAN
 from tests.test_udp_scan import UdpBase
 from tests.test_wpscan import REPORT
 
@@ -263,9 +262,7 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def test_the_sweep_waits_names_the_scanner_and_records_nothing(self):
-        runner = mock.Mock()
-        out = testssl_scan.sweep(self.project.id, runner=runner, resolve=lambda host, port, project: '203.0.113.5')
-        runner.assert_not_called()
+        out = tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
         self.assertIn('no scanner could take this work (testssl)', out['skipped'])
         self.assertNotIn('memory', out['skipped'])
         self.assertEqual((out['tested'], out['failed']), (0, 0))
@@ -274,20 +271,9 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
 
     def test_a_real_memory_wait_keeps_the_memory_wording(self):
         with mock.patch('agentapi.sentinel_dispatch.try_testssl', side_effect=resources.MemoryBusy('waited too long for memory')):
-            out = testssl_scan.sweep(self.project.id, runner=mock.Mock(), resolve=lambda host, port, project: '203.0.113.5')
+            out = tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
         self.assertIn('memory was short', out['skipped'])
         self.assertNothingRecorded('testssl')
-
-    def test_by_default_the_local_runner_still_runs(self):
-        import json
-
-        def runner(args, env, timeout):
-            with open(args[args.index('--jsonfile') + 1], 'w') as handle:
-                json.dump(CLEAN, handle)
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(ENV, None)
-            out = testssl_scan.sweep(self.project.id, runner=runner, resolve=lambda host, port, project: '203.0.113.5')
-        self.assertEqual(out['tested'], 1)
 
 
 class UdpTests(WaitsMixin, UdpBase):

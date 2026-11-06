@@ -268,7 +268,7 @@ class ReportContentTests(ReportBase):
         self.assertIn('No SPF record', hygiene)
 
     def test_testssl_findings_belong_to_the_tls_section(self):
-        # testssl names its checks tlsa_<test> (cveFeed.testssl_scan)
+        # testssl names its checks tlsa_<test> (cveFeed.tls_audit)
         for check in ('tlsa_sslv3', 'tlsa_null_ciphers', 'tls_weak_key', 'cert_expired'):
             self.assertEqual(report_data._hygiene_group(check), 'TLS and certificates', check)
         self.assertEqual(report_data._hygiene_group('dmarc_missing'), 'Email')

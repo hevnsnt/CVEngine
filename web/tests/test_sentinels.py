@@ -680,7 +680,7 @@ class HeartbeatTests(SentinelBase):
 
 class TestsslResultCleanerTests(SimpleTestCase):
     """``sentinel_broker.clean_result('testssl', ...)``: a Sentinel's testssl.sh report, typed and clipped into exactly the
-    four fields ``cveFeed.testssl_scan.evaluate`` reads from a local report item."""
+    four fields ``cveFeed.tls_audit.evaluate`` reads from a local report item."""
 
     def _body(self, **over):
         item = {'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}

@@ -25,7 +25,14 @@ confirmed automated testing is skipped; an organization's excluded names are nev
 recorded and never worked around. Caps: suppliers per project, names per supplier and requests per sweep (see the ``CVENGINE_SUPPLIERS_*``
 settings).
 
-A finding resolves by itself when a later check no longer finds it; a check that got no answer changes nothing."""
+A finding resolves by itself when a later check no longer finds it; a check that got no answer changes nothing.
+
+Where the checks run: a project's suppliers are checked by a Sentinel (the ``supplier_check`` kind, contract version 3): one task per supplier carries
+its validated names, the pacing and the request budget still left, and the scope policy (``probe_scope.for_suppliers``); the Sentinel runs the
+network part (``cvengine_scanner.probes.suppliers``) and reports a row per name. This module keeps everything else: the list, the validation, the
+schedule and the budget, the ledger, the CVE match against the catalog (the Sentinel only reports what the response announces), the text of what to
+ask the supplier, and what is stored (``row_result`` reads a row; nothing in it is stored as it is). With no Sentinel for the kind the old path below
+runs here, as before, when ``CVENGINE_LOCAL_FALLBACK`` allows it; otherwise the suppliers stay due and nothing is recorded as checked."""
 import http.client
 import logging
 import os
@@ -539,16 +546,85 @@ def due_suppliers(project_id):
     return sorted(ordered, key=lambda s: TIER_RANK.get(s.tier, 2))  # stable: staleness order is kept within a tier
 
 
-def check_supplier(supplier, net, pace, budget, pool, stop, banned=frozenset(), now=None):
-    """All names of one supplier. Returns ``(results, stopped)``."""
+def _skipped(domain):
+    return DomainResult(domain, card={'state': 'excluded', 'evidence': {
+        'note': 'Not contacted: the name is excluded for the organization or is now one of the project\'s own targets.'}})
+
+
+def row_result(row, pool):
+    """A ``DomainResult`` from one row a Sentinel reported (already clipped by ``probe_results.clean_supplier_check``), finished here: the text
+    to ask the supplier is written from the check name, the technology list is read from the fingerprints, and the CVE catalog is matched against
+    what the response announced. A category the Sentinel says it could decide counts only when the card shows it read what that category needs
+    (a certificate for ``tls``, the mail records for ``email``, a front page for ``web``, ``exposed`` and ``cve``): a bare claim resolves nothing."""
+    domain = row['domain']
+    res = DomainResult(domain)
+    card = res.card = {k: v for k, v in (row.get('card') or {}).items()}
+    card['evidence'] = dict(card.get('evidence') or {})
+    res.summary = dict(row.get('summary') or {})
+    res.answered, res.partial = bool(row.get('answered')), bool(row.get('partial'))
+    res.stopped = bool(row.get('stopped')) and not res.partial
+    res.postures = [checks.Posture(p['check'], p['severity'], p['title'], p['detail'], p['category'], domain, checks.ask_for(p['check'], domain, p['title']),
+                                   p.get('evidence') or {}) for p in row.get('postures') or []]
+    front = card.get('state') == 'ok' and isinstance(card.get('http'), dict)
+    needs = {'tls': bool(card.get('tls')), 'email': bool(card.get('mail')), 'web': isinstance(card.get('http'), dict), 'exposed': front, 'cve': front}
+    res.resolvable = {category: set(prefixes) for category, prefixes in (row.get('resolvable') or {}).items() if needs.get(category)}
+    if front:
+        technologies = checks.technologies_of(row.get('fingerprints'))
+        edges = list(row.get('edges') or [])
+        card['technologies'] = technologies
+        card['evidence'].update({'edge': edges, 'fingerprint_sources': sorted({t['source'] for t in technologies})})
+        if any(t['version'] for t in technologies):
+            distro = row.get('distro') or ''
+            matched, looked_up = checks.cve_postures(domain, checks.observations_of(technologies), pool(), edge=bool(edges), distro=distro)
+            res.postures += matched
+            card['evidence']['announced'] = looked_up
+    return res
+
+
+def _remote_rows(supplier, domains, budget):
+    """``{domain: row}`` from a Sentinel's ``supplier_check`` for ``domains`` of ``supplier``, or ``None`` when no Sentinel can take the kind (or none
+    answered) and the names are checked here. Raises ``ScannerUnavailable`` when none can and the kind may not run here: the supplier stays due."""
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    return probe_dispatch.try_suppliers(Project.objects.get(pk=supplier.project_id), domains, budget.left())
+
+
+def _remote_results(domains, skipped, rows, budget, pool):
+    """``(results, stopped)`` in the order of ``domains``: a skipped name as such, a name the Sentinel reported as its row, a name it did not
+    report not at all (it was not checked, so it answers nothing). As on the local path, nothing after a name that ran out of budget or time."""
     results = []
-    for domain in (supplier.domains or [])[:max_domains()]:
+    for domain in domains:
+        if domain in skipped:
+            results.append(skipped[domain])
+            continue
+        row = rows.get(domain)
+        if row is None:
+            continue
+        res = row_result(row, pool)
+        budget.spend(row.get('requests') or 0)
+        results.append(res)
+        if res.stopped or res.partial:
+            return results, True
+    return results, False
+
+
+def check_supplier(supplier, net, pace, budget, pool, stop, banned=frozenset(), now=None, remote=False):
+    """All names of one supplier. Returns ``(results, stopped)``. With ``remote`` the names that may be contacted go to a Sentinel as one
+    ``supplier_check`` task when one can take it (``ScannerUnavailable`` propagates when none can and the kind may not run here); otherwise, and
+    for a task that gets no answer, they are checked here one by one."""
+    domains = (supplier.domains or [])[:max_domains()]
+    if remote and not stop():
+        skipped = {d: _skipped(d) for d in domains if d in banned or owned_by(supplier.project_id, d)}
+        todo = [d for d in domains if d not in skipped]
+        rows = _remote_rows(supplier, todo, budget) if todo else None
+        if rows is not None:
+            return _remote_results(domains, skipped, rows, budget, pool)
+    results = []
+    for domain in domains:
         if stop():
             return results, True
         if domain in banned or owned_by(supplier.project_id, domain):  # excluded since it was added, or since become one of the project's own targets
-            skipped = DomainResult(domain, card={'state': 'excluded', 'evidence': {
-                'note': 'Not contacted: the name is excluded for the organization or is now one of the project\'s own targets.'}})
-            results.append(skipped)
+            results.append(_skipped(domain))
             continue
         res = check_domain(domain, net, pace, budget, pool, stop=stop, now=now)
         results.append(res)
@@ -563,6 +639,7 @@ def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, no
     from cveFeed import activity, exclusions, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from reNgine import resources
+    from reNgine.resources import ScannerUnavailable
     summary = {'suppliers': 0, 'domains': 0, 'new': 0, 'reopened': 0, 'resolved': 0, 'deferred': 0, 'requests': 0}
     if not enabled():
         return {**summary, 'skipped': 'supplier checks are turned off (CVENGINE_SUPPLIERS=0)'}
@@ -578,6 +655,7 @@ def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, no
         due = due_suppliers(project_id)
         if not due:
             return summary
+        remote = net is None  # a test (or a caller) that hands in the network checks here: the local path
         net, pace = net or Network(), pace or slow_web.Pace()
         budget = budget or Budget(max_requests())
         if pool is None:
@@ -596,7 +674,12 @@ def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, no
             if budget.left() <= 0:
                 summary['deferred'] += 1
                 continue
-            results, stopped = check_supplier(supplier, net, pace, budget, pool, stop, banned=banned, now=now)
+            try:
+                results, stopped = check_supplier(supplier, net, pace, budget, pool, stop, banned=banned, now=now, remote=remote)
+            except ScannerUnavailable as exc:
+                logger.info('supplier sweep of project %s waits for a scanner: %s', project_id, exc)
+                summary['skipped'] = 'waiting for a scanner: the suppliers stay due'
+                break
             counts = store_results(supplier, results, now=now)
             answered = any(r.answered for r in results)
             if answered:
