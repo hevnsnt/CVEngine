@@ -2,6 +2,12 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+
+- **A scan no longer waits behind host assessments.** Discovery scans and host assessments share one queue, and the top-up queues assessments by the hundred: on an install with one discovery worker, 22 scans sat queued for 17 hours behind about 630 assessments. Assessments (their first queueing and the reaper's re-queueing) now go out at the lowest priority the broker has, and scans keep the highest, so a scan is the next thing the discovery worker takes. Messages already in the queue keep their place. No migration, no setting to change, nothing to run after the update.
+
 ## v1.3.7 (2026-11-05)
 
 ### Fixed
