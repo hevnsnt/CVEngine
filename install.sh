@@ -355,7 +355,7 @@ case $plan in
     printf '  %d. Add your external Sentinel (a machine with Docker and outbound HTTPS to this server):\n' "$n"; n=$((n + 1))
     printf '       a. In CVEngine open Sentinels and press Provision (pick Where it runs: external for the internet side, internal inside a private network).\n'
     printf '       b. The page then shows one command to paste on that machine: it clones the Sentinel client, enrols it with the one-time blob and starts it.\n'
-    printf '       c. The Sentinel appears on the same page as live within a minute. Guide: docs/SENTINELS.md; client: https://github.com/hevnsnt/cvengine-sentinel\n'
+    printf '       c. The Sentinel shows as live on the same page once it has reported in. Guide: docs/SENTINELS.md; client: https://github.com/hevnsnt/cvengine-sentinel\n'
     [ "$plan" != external ] || printf '     Until one is enrolled nothing is scanned: scans wait (nothing fails) and start by themselves once a Sentinel reports in.\n'
     [ "$plan" != both ] || printf '     The built-in scanner keeps running beside it; docs/BUILTIN-SCANNER.md says how the two share the work.\n' ;;
   *)
