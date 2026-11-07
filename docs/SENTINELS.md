@@ -24,6 +24,7 @@ Eleven kinds of work, each a capability the Sentinel declares (the list is `kind
 | `wpscan_thorough`                                | The thorough WPScan pass on one WordPress site: hours per site (contract version 3) |
 | `route_probe_signed`                             | The web route check signed in, built-in scanner only: reads a stored sign-in once, sends it only where it was stored for (contract version 3) |
 | `page_read`                                      | A validation re-test's HEAD of a URL or re-read of a host's front pages and scripts, the control GET of the result screen (one path no site serves, answered as a digest) and the readme titles of a WordPress site's plugins (contract version 3) |
+| `ssh_probe`                                      | A read-only inspection of the SSH services the port stage found open: banner, host key types and sizes, offered authentication methods, and the badkeys blocklist of compromised host keys (contract version 3; no login is ever attempted) |
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 | `waf`                                            | WAF fingerprinting (contract version 2; no stage dispatches it yet)          |

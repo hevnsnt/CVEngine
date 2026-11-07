@@ -272,6 +272,17 @@ class PlanAndKindsTests(WizardBase):
             self.assertNotIn('bbot_discovery', d[cls])
             self.assertNotIn('testssl', d[cls])
 
+    def test_the_ssh_family_is_offered_on_by_default_and_can_be_switched_off(self):
+        state = self.c.get('/cve/api/welcome/state').json()
+        self.assertIn('ssh', [f['id'] for f in state['families']])
+        post(self.c, 'plan', {'plan': 'both'})
+        self.assertEqual(post(self.c, 'scanners', {}).status_code, 200)
+        for cls in ('builtin_kinds', 'external_kinds'):
+            self.assertNotIn('ssh_probe', self.defaults()[cls])  # on by default, also on a small machine
+        post(self.c, 'scanners', {'kinds': {'ssh_probe': False}})
+        for cls in ('builtin_kinds', 'external_kinds'):
+            self.assertEqual(self.defaults()[cls]['ssh_probe']['mode'], 'deny')
+
     def test_unknown_kinds_and_bad_values_are_refused(self):
         self.assertEqual(post(self.c, 'scanners', {'kinds': {'rm_rf': False}}).status_code, 400)
         self.assertEqual(post(self.c, 'scanners', {'kinds': {'nmap': 'yes'}}).status_code, 400)
@@ -303,7 +314,7 @@ class PlanAndKindsTests(WizardBase):
         self.assertEqual(setup_flow.suggested_off(16.0), [])
         state = self.c.get('/cve/api/welcome/state').json()
         names = {f['id'] for f in state['families']}
-        self.assertEqual(names, {'discovery', 'web', 'network', 'tls_mail', 'secrets', 'screenshots', 'wordpress', 'nuclei'})
+        self.assertEqual(names, {'discovery', 'web', 'network', 'tls_mail', 'ssh', 'secrets', 'screenshots', 'wordpress', 'nuclei'})
 
     def test_every_family_kind_is_a_real_kind_and_none_is_listed_twice(self):
         kinds = setup_flow.family_kinds()
