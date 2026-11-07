@@ -201,7 +201,7 @@ ROUTES = [
      lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)', 'One target',
      lambda r, c, slug, target_id, **k: svc.get_target(c, slug, int(target_id))),
-    ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans (?status=running|queued|active|stalled|failed|finished|aborted; active is running and queued together)', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/scans', 'Start a scan on a target (bbot discovery, then nmap and nuclei; engine_id is optional)',
      lambda r, c, slug, **k: (svc.start_scan(c, slug, int(_need(_body(r), 'target_id')[0]),
                                              int(_body(r)['engine_id']) if _body(r).get('engine_id') not in (None, '') else None), 202)),

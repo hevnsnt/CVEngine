@@ -46,31 +46,8 @@
 <aside class="rail" id="rail" aria-label="Primary">
   <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
   <nav class="rail-nav" aria-label="Sections">
-    <p class="rail-h">Monitor</p>
-    <a data-nav="Live" href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
-    <a data-nav="Asset graph" href="{% url 'cve_graph' %}" {% if active == 'graph' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
-    {% if slug %}
-    <p class="rail-h">Exposure</p>
-    <a data-nav="Hosts" href="{% url 'cve_section' slug 'hosts' %}" {% if active == 'hosts' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>Hosts</a>
-    <a data-nav="Changes" href="{% url 'cve_section' slug 'changes' %}" {% if active == 'changes' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Changes</a>
-    <a data-nav="Activity" href="{% url 'cve_section' slug 'activity' %}" {% if active == 'activity' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
-    <a data-nav="CVE matches" href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>CVE matches</a>
-    <a data-nav="Findings" href="{% url 'cve_section' slug 'vulns' %}" {% if active == 'vulns' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
-    <a data-nav="Hygiene" href="{% url 'cve_section' slug 'hygiene' %}" {% if active == 'hygiene' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
-    <a data-nav="Secrets" href="{% url 'cve_section' slug 'secrets' %}" {% if active == 'secrets' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>Secrets</a>
-    <a data-nav="Suppliers" href="{% url 'cve_section' slug 'suppliers' %}" {% if active == 'suppliers' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
-    <p class="rail-h">Work</p>
-    <a data-nav="Targets" href="{% url 'cve_section' slug 'targets' %}" {% if active == 'targets' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
-    <a data-nav="Scans" href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
-    {% if sentinels_enabled %}<a data-nav="Project Sentinels" href="{% url 'cve_section' slug 'sentinels' %}" {% if active == 'project-sentinels' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Project Sentinels</a>{% endif %}
-    {% endif %}
-    {% if bounty_enabled %}
-    <p class="rail-h">Bug bounty</p>
-    <a data-nav="Bug bounty" href="{% url 'cve_bounty' %}{% if slug and not all_projects %}?project={{ slug }}{% endif %}" {% if active == 'bounty' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-flag"/></svg>Bug bounty</a>
-    {% endif %}
-    <p class="rail-h">Agents</p>
-    <a data-nav="API tokens and MCP" href="{% url 'cve_agents' %}" {% if active == 'agents' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens and MCP</a>
-    <a data-nav="Sentinels" href="{% url 'cve_sentinels' %}" {% if active == 'sentinels' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Sentinels</a>
+    {% for e in nav.rail %}<a data-nav="{{ e.label }}" href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>
+    {% endfor %}
   </nav>
   <details class="acct">
     <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
@@ -80,7 +57,7 @@
       {% if request.user.is_superuser %}<a data-nav="{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}" href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
       <a data-nav="Settings" href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
       <button type="button" data-keys-help><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>Keyboard shortcuts</button>
-      <a data-nav="About" href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
+      <a data-nav="Help" href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>Help</a>
       <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
     </div>
   </details>
@@ -109,41 +86,26 @@
 </div>
 {% endif %}
 <main class="wrap" id="main">
+  {% if nav.tabs %}<nav class="pagetabs" aria-label="{% for e in nav.rail %}{% if e.current %}{{ e.label }}{% endif %}{% endfor %} pages">{% for t in nav.tabs %}<a href="{{ t.href }}" {% if t.current %}aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}</nav>{% endif %}
   {% block content %}{% endblock %}
 </main>
 </div>
 </div>
 
 <nav class="tabbar" aria-label="Main">
-  <a href="{% url 'cve_dashboard' %}" {% if active == 'dashboard' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Live</a>
-  {% if slug %}
-  <a href="{% url 'cve_section' slug 'hosts' %}" {% if active == 'hosts' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>Hosts</a>
-  <a href="{% url 'cve_section' slug 'matches' %}" {% if active == 'matches' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-match"/></svg>Matches</a>
-  <a href="{% url 'cve_section' slug 'scans' %}" {% if active == 'scans' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Scans</a>
-  {% else %}
-  <a href="{% url 'cve_graph' %}" {% if active == 'graph' %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Graph</a>
-  {% endif %}
+  {% for e in nav.rail %}{% if e.key == 'overview' or e.key == 'findings' or e.key == 'assets' or e.key == 'scans' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
   <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
-  <button type="button" id="acct-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="acct-sheet" {% if active == 'account' or active == 'admin' or active == 'settings' or active == 'about' %}aria-current="page"{% endif %}><span class="tab-avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span>Account</button>
+  <button type="button" id="acct-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="acct-sheet" {% if active == 'account' or active == 'admin' or active == 'settings' or active == 'about' or active == 'setup' %}aria-current="page"{% endif %}><span class="tab-avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span>Account</button>
 </nav>
+
+<nav hidden aria-hidden="true" id="nav-index">{% for e in nav.index %}<a data-nav="{{ e.label }}" href="{{ e.href }}" tabindex="-1">{{ e.label }}</a>{% endfor %}</nav>
 
 <div class="sheet-scrim" id="sheet-scrim" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>
   <div class="sheet-grid">
-    {% if slug %}
-    <a href="{% url 'cve_section' slug 'targets' %}"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg>Targets</a>
-    <a href="{% url 'cve_section' slug 'changes' %}"><svg viewBox="0 0 24 24"><use href="#i-pulse"/></svg>Changes</a>
-    <a href="{% url 'cve_section' slug 'activity' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>Activity</a>
-    <a href="{% url 'cve_section' slug 'vulns' %}"><svg viewBox="0 0 24 24"><use href="#i-bug"/></svg>Findings</a>
-    <a href="{% url 'cve_section' slug 'hygiene' %}"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Hygiene</a>
-    <a href="{% url 'cve_section' slug 'secrets' %}"><svg viewBox="0 0 24 24"><use href="#i-key"/></svg>Secrets</a>
-    <a href="{% url 'cve_section' slug 'suppliers' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Suppliers</a>
-    {% if sentinels_enabled %}<a href="{% url 'cve_section' slug 'sentinels' %}"><svg viewBox="0 0 24 24"><use href="#i-radar"/></svg>Sentinels</a>{% endif %}
-    {% endif %}
-    <a href="{% url 'cve_graph' %}"><svg viewBox="0 0 24 24"><use href="#i-graph"/></svg>Asset graph</a>
-    {% if bounty_enabled %}<a href="{% url 'cve_bounty' %}{% if slug and not all_projects %}?project={{ slug }}{% endif %}"><svg viewBox="0 0 24 24"><use href="#i-flag"/></svg>Bug bounty</a>{% endif %}
-    <a href="{% url 'cve_agents' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>API tokens</a>
+    {% for e in nav.rail %}{% if e.key == 'scanners' or e.key == 'bounty' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
+    {% for e in nav.more %}<a href="{{ e.href }}"><svg viewBox="0 0 24 24"><use href="#i-chevron"/></svg>{{ e.label }}</a>{% endfor %}
   </div>
 </div>
 
@@ -181,7 +143,7 @@
     {% if is_admin %}<a href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
     {% if request.user.is_superuser %}<a href="{% url 'cve_onboarding' %}"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
     <a href="{% url 'cve_settings' %}"><svg viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
-    <a href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>About</a>
+    <a href="{% url 'cve_about' %}"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg>Help</a>
     <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="out" type="submit"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
   </div>
 </div>

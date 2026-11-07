@@ -366,9 +366,9 @@ SECTIONS = {
     'activity': 'Activity',
     'vulns': 'Findings',
     'matches': 'CVE matches',
-    'hygiene': 'Hygiene',
+    'hygiene': 'Config checks',
     'secrets': 'Secrets',
-    'suppliers': 'Suppliers',
+    'suppliers': 'Third parties',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
 }
@@ -428,10 +428,14 @@ def ui_context(request, active, slug=None, remember=True):
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
     from agentapi.sentinel_broker import has_sentinels
     here = next((p for p in projects if p['slug'] == current), None) if slug != ALL_PROJECTS else None
-    return {'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
+    from cveFeed import nav as navmod
+    bounty_on = _bounty_allowed(request.user)
+    sentinels_on = bool(here and has_sentinels(here['slug'], here['org_slug']))
+    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS)
+    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
-            'bounty_enabled': _bounty_allowed(request.user),
-            'sentinels_enabled': bool(here and has_sentinels(here['slug'], here['org_slug'])),
+            'bounty_enabled': bounty_on,
+            'sentinels_enabled': sentinels_on,
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -699,6 +703,12 @@ def sentinels_page(request):
     enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
     return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs,
                                                       **ui_context(request, 'sentinels')})
+
+
+def scanners_page(request):
+    """Scanners: whether the scanners are working, in one click (static/cve/scanners.js). The Sentinels, the workers and scheduler (App Admin) and the
+    scan pause are read from the endpoints they already have; the Sentinels list and Provision form stay at /cve/sentinels/."""
+    return render(request, 'cveFeed/scanners.html', ui_context(request, 'scanners'))
 
 
 def cve_explorer_page(request):
@@ -1160,12 +1170,16 @@ def api_activity(request):
 
 
 def discovery_counts():
-    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see.
+
+    One walk over the hosts, then two queries over the link tables by id: the nested ``IN (subquery)`` of the hosts' collapsed window query was
+    planned three times (hosts, addresses, ports) and made the ports count over a quarter of a second at 3000 hosts."""
     from cveFeed.counts import LIVE_HOST_Q, host_reps
-    from startScan.models import IpAddress, Port
-    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
-    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
-    return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
+    from startScan.models import IpAddress, Subdomain
+    host_ids = list(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True).distinct())
+    ip_ids = list(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=host_ids).values_list('ipaddress_id', flat=True).distinct())
+    ports = IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values('port_id').distinct().count()
+    return {'hosts': len(host_ids), 'ips': len(ip_ids), 'ports': ports}
 
 
 def cached_discovery_counts(params=()):

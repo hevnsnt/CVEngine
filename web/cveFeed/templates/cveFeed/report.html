@@ -14,7 +14,10 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   @page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
   :root { --accent: {{ r.branding.accent }}; --ink: #111827; --mute: #6b7280; --line: #d1d5db; --fire: #b91c1c; --smoke: #b45309; --ice: #1e40af; --ok: #15803d; }
   * { box-sizing: border-box; }
-  body { font: 9.5pt/1.45 "DejaVu Sans", "Liberation Sans", Helvetica, sans-serif; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+  body { font: 9.5pt/1.45 "DejaVu Sans", "Liberation Sans", Helvetica, sans-serif; color: var(--ink); margin: 0; overflow-wrap: break-word; }
+  /* `anywhere` counts every possible break in the min-content width, which WeasyPrint recomputes per box: only table cells (whose column width
+     comes from it) need it, and on the whole body it made line breaking the dearest part of a 400-page render */
+  table.grid td, table.grid th, .cover td { overflow-wrap: anywhere; }
   .foot { position: running(foot); }
   h1, h2, h3, h4 { margin: 0; line-height: 1.2; }
   h2 { font-size: 16pt; border-bottom: 2px solid var(--accent); padding-bottom: 4pt; margin-bottom: 10pt; }
@@ -63,8 +66,12 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   .finding h3 { margin: 0 0 3pt; font-size: 11.5pt; break-after: avoid; }
   .finding .meta { margin-bottom: 5pt; }
   .finding h4 { font-size: 8pt; text-transform: uppercase; letter-spacing: 1pt; color: var(--mute); margin: 7pt 0 2pt; break-after: avoid; }
-  dl.kv { margin: 0; display: grid; grid-template-columns: 30mm 1fr; gap: 1.5pt 8pt; font-size: 8.5pt; }
-  dl.kv dt { color: var(--mute); } dl.kv dd { margin: 0; }
+  /* inline blocks, not display:grid: WeasyPrint lays a grid out by measuring every cell's min/max content, which made the ~3000 key/value lists
+     of a 500-host report cost over half of its render time. A label and its value stay one line box, so the text reads in order too. */
+  dl.kv { margin: 0; font-size: 8.5pt; }
+  dl.kv dt { display: inline-block; vertical-align: top; width: 30mm; margin-right: 8mm; color: var(--mute); }
+  dl.kv dd { display: inline-block; vertical-align: top; width: calc(100% - 38.6mm); margin: 0 0 1.5pt; }
+  dl.kv.wide dt { width: 42mm; } dl.kv.wide dd { width: calc(100% - 50.6mm); }
   .cmd { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 3pt 5pt; margin: 2pt 0 4pt; font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 7.5pt; white-space: pre-wrap; }
   .proof { margin: 0 0 4pt; font-size: 8.5pt; }
   .track { background: #f9fafb; border: 1px solid #e5e7eb; padding: 4pt 7pt; margin-top: 4pt; }
@@ -234,7 +241,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
 <section class="page">
   <h2>Method and validity</h2>
   <h3>What was scanned, and when</h3>
-  <dl class="kv" style="grid-template-columns: 42mm 1fr">
+  <dl class="kv wide">
     <dt>Completed scans</dt><dd>{{ r.method.scans }}{% if r.method.first_scan %} (first {{ r.method.first_scan }}, latest {{ r.method.last_scan }}){% endif %}</dd>
     <dt>Report generated</dt><dd>{{ r.generated }}</dd>
     <dt>Inventory</dt><dd>{{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory{% if not r.host %}, {{ r.scope.targets }} target{{ r.scope.targets|pluralize }}{% endif %}</dd>
