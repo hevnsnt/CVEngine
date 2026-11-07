@@ -3,8 +3,10 @@
 
   python3 scripts/check_tool_versions.py [--json] [--fail-if-behind]
 
-Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml). This compares each pin with the newest release: nmap, WPScan, nuclei, naabu, bbot, tzdata,
-wafw00f, python-gvm, the Go toolchain and, when the Tailscale profile is present, its sidecar image. The Greenbone images of the OpenVAS add-on have no
+Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml). This compares each pin with the newest release: nuclei,
+python-gvm, the Go toolchain that builds it and, when the Tailscale profile is present, its sidecar image. The scan tools (nmap, WPScan, naabu, bbot, testssl.sh, wafw00f and the rest) run on
+the Sentinels, so the server image pins none of them. The cvENGINE-sentinel repository pins them in its own Dockerfile; nothing in this repository
+watches those pins any more. The Greenbone images of the OpenVAS add-on have no
 version tags to compare (only the moving tags stable and community, pinned by digest in docker-compose.yml); docs/OPENVAS.md says how to update them. Nuclei's templates are not pinned: they refresh at runtime.
 Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
 version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
@@ -44,15 +46,6 @@ def fetch(url, as_json=True):
     return json.loads(body) if as_json else body
 
 
-def latest_nmap(html):
-    versions = re.findall(r'nmap-(\d+\.\d+(?:\.\d+)?)\.tar\.bz2', html)
-    return max(versions, key=version_key) if versions else None
-
-
-def latest_wpscan(data):
-    return str(data.get('version') or '') or None
-
-
 def latest_go_module(data):
     """proxy.golang.org/<module>/@latest answers {"Version": "v3.11.1"}: the newest release that is not a pre-release."""
     return str(data.get('Version') or '').lstrip('v') or None
@@ -68,13 +61,6 @@ def latest_go_toolchain(data):
         if release.get('stable'):
             return str(release.get('version') or '').removeprefix('go') or None
     return None
-
-
-def latest_github_tag(data):
-    """api.github.com/repos/<repo>/tags lists the newest first: the newest plain vX.Y(.Z) tag (development tags such as v3.3dev are ignored)."""
-    names = [t.get('name', '') for t in data] if isinstance(data, list) else []
-    versions = [n.lstrip('v') for n in names if re.fullmatch(r'v\d+\.\d+(?:\.\d+)?', n)]
-    return max(versions, key=version_key) if versions else None
 
 
 def latest_docker_tag(data):
@@ -113,17 +99,8 @@ def safely(get, url, as_json=True):
 GO_PROXY = 'https://proxy.golang.org/{}/@latest'
 # (label, file, regex for the pinned version, where the newest version is read from, how to read it, optional: omit when the pin is absent)
 TOOLS = [
-    ('nmap', 'web/Dockerfile', r'ARG NMAPVERSION=([0-9.]+)', 'https://nmap.org/dist/', latest_nmap, False, False),
-    ('wpscan', 'web/Dockerfile', r'ARG WPSCAN_VERSION=([0-9.]+)', 'https://rubygems.org/api/v1/gems/wpscan.json', latest_wpscan, True, False),
     ('nuclei', 'web/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'),
      latest_go_module, True, False),
-    ('naabu', 'web/Dockerfile', r'ARG NAABU_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/naabu/v2'),
-     latest_go_module, True, False),
-    ('bbot', 'web/Dockerfile', r'ARG BBOT_VERSION=([0-9.]+)', 'https://pypi.org/pypi/bbot/json', latest_pypi, True, False),
-    ('tzdata (bbot)', 'web/Dockerfile', r'ARG TZDATA_VERSION=([0-9.]+)', 'https://pypi.org/pypi/tzdata/json', latest_pypi, True, False),
-    ('wafw00f', 'web/requirements.txt', r'(?m)^wafw00f==([0-9.]+)', 'https://pypi.org/pypi/wafw00f/json', latest_pypi, True, False),
-    ('testssl.sh', 'web/Dockerfile', r'ARG TESTSSL_VERSION=([0-9.]+)', 'https://api.github.com/repos/testssl/testssl.sh/tags?per_page=30',
-     latest_github_tag, True, False),
     ('go (toolchain)', 'web/Dockerfile', r'ARG GOVERSION=([0-9.]+)', 'https://go.dev/dl/?mode=json', latest_go_toolchain, True, False),
     ('python-gvm (OpenVAS add-on client)', 'web/requirements.txt', r'(?m)^python-gvm==([0-9.]+)', 'https://pypi.org/pypi/python-gvm/json', latest_pypi, True, False),
     ('tailscale (sidecar image)', 'docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)',

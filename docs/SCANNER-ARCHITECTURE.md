@@ -8,8 +8,8 @@ built-in scanner. The phases below say what is left. How the built-in scanner wo
 
 ## Why
 
-cvENGINE and the Sentinel are two code bases that do the same scanning. The Sentinel image repeats the server's tool pins
-(its Dockerfile says "keep them equal on purpose", and `scripts/check_tool_versions.py` checks both). Command lines, output
+cvENGINE and the Sentinel are two code bases that do the same scanning. The Sentinel image used to repeat the server's tool pins
+(its Dockerfile said "keep them equal on purpose"); the server image now carries no scan tool and pins only nuclei. Command lines, output
 parsers and scan policy exist twice and have drifted more than once (the 1.3.1 client handoff, the policy parity work). A fix
 made on one side has to be carried across by hand.
 

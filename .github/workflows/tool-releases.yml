@@ -1,6 +1,6 @@
 name: 🔭 Scanner tool releases
 
-# Weekly: compare the versions of every scanner tool this repository pins (nmap, WPScan, nuclei, naabu, bbot, wafw00f, Go, the Tailscale image) with their newest releases and keep one open issue
+# Weekly: compare the versions of every tool this repository pins (nuclei, Go, python-gvm, the Tailscale image) with their newest releases and keep one open issue
 # listing the ones that are behind. It changes nothing else.
 on:
   schedule:

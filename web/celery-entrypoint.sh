@@ -40,8 +40,7 @@ fi
 # account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
 chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
-# test the scanners the pipeline runs, required for configuration
-naabu -version
+# the one tool the server runs itself (it refreshes and reads the template set); every scan runs on a Sentinel
 nuclei -version
 
 # geeknik/the-nuclei-templates produces false positives (#1521), drop copies left by older installs
@@ -98,11 +97,11 @@ echo "Starting Celery Workers..."
 # api_queue has no tasks any more (the legacy /api/ surface that used it is gone), but the classic worker keeps consuming it: the
 # status page, the update script and the admin worker panel recognise this worker by that queue name.
 classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
-# wpscan_queue: the thorough WPScan pass (hours per site, one per project at a time) must not hold a feed worker
+# wpscan_queue: a long, per-site, one-per-project-at-a-time pass must not hold a feed worker
 # testssl_queue: the daily TLS audit (a minute per port, one sweep at a time) likewise
 # bucketscan_queue: the daily cloud storage sweep (a few requests per second, one sweep at a time) likewise
 # vhost_queue: the slow, polite sweeps for other sites on an address and for applications under subdirectories (one request at a time)
-# udp_queue: the background UDP sweep (nmap -sU waits on silent ports, one IP at a time) likewise
+# udp_queue: the background UDP sweep (it waits on silent ports, one IP at a time) likewise
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
 # ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
@@ -115,7 +114,7 @@ classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,buckets
 classic_queues+=",screenshot_queue"
 
 commands=""
-# each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
+# each discovery run is memory hungry, so discovery gets a small pool of its own
 # How many discovery tasks and host assessments run at once: what an App Admin saved on Settings, configMaxxing, else DISCOVERY_CONCURRENCY, else 8.
 # (A save also resizes the running worker live, see cveFeed/scan_concurrency.py; this makes a restart or an update land on the same number.)
 discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concurrency 2>/dev/null | tail -n 1)
