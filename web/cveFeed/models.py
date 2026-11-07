@@ -768,7 +768,10 @@ class HostState(models.Model):
         indexes = [models.Index(fields=["domain", "retired_at"], name="hoststate_domain_retired_idx"),
                    models.Index(fields=["project", "zombie_since"], name="hoststate_proj_zombie_idx"),
                    models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx'),
-                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx')]
+                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx'),
+                   # the due-host query asks, per host, whether its name was tried and has no address (unresolved_checks >= 1): almost no row is, and
+                   # the planner, thinking so few hosts reach that check, scanned the whole table for each of 3000 hosts (0.4 s of a 0.45 s query)
+                   models.Index(fields=['project', 'host'], condition=models.Q(unresolved_checks__gte=1), name='hoststate_unresolved_host_idx')]
 
     def __str__(self):
         return self.host
