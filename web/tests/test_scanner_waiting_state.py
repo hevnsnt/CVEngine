@@ -1,7 +1,7 @@
-"""The derived, read-only "scanner offline" state (``agentapi.scanner_state``): which kinds may not run on this server and have no live scanner, which of
+"""The derived, read-only "scanner offline" state (``agentapi.scanner_state``): which kinds have no live scanner (no kind runs on this server), which of
 those no scanner ever registered for, how it is shown (system status, the page strip) and how the sweeps that run on their own schedules stop dispatching,
 raising, catching and logging every tick while they wait. It is a reading of the Sentinels' heartbeats, never a pause: ``ScanControl`` is untouched, nothing
-running is stopped, and with ``CVENGINE_LOCAL_FALLBACK`` unset nothing changes at all."""
+running is stopped, and until the built-in scanner has enrolled nothing is reported. ``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4 (``policy`` sets it to prove it)."""
 import json
 import os
 import uuid
@@ -20,7 +20,6 @@ from cveFeed.models import AgentActivity, ProbeObservation, ScanControl, Service
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from targetApp.models import Domain
-from tests.fake_scanner import LocalCapable
 from tests.test_route_auth import RouteFixture
 from tests.test_system_status import call, patched
 from tests.test_tls_audit import CLEAN
@@ -28,16 +27,19 @@ from tests.test_udp_scan import UdpBase, run_udp, udp_xml
 from tests.test_wpscan_quick import WP
 from tests.test_wordpress import WordPressFixture
 
-ENV = sentinel_dispatch.LOCAL_FALLBACK_ENV
-ALL_KINDS = [k for k in SentinelTask.KINDS if k not in scanner_state.NO_STAGE]
+ENV = 'CVENGINE_LOCAL_FALLBACK'  # ignored since 1.4
+ALL_KINDS = [k for k in SentinelTask.KINDS if k not in scanner_state.NO_STAGE and k not in scanner_state.INTERNAL_ONLY]  # every kind but the internal one waits: none runs here
 
 
 class FallbackEnv:
-    """Each test sets ``CVENGINE_LOCAL_FALLBACK`` for itself, and gets a cache key of its own so the answers of other tests are never read."""
+    """The built-in scanner has enrolled (the signal reads nothing before that), ``CVENGINE_LOCAL_FALLBACK`` is unset (it is ignored since 1.4: ``policy`` sets
+    it to prove that), and each test gets a cache key of its own so the answers of other tests are never read."""
 
     def setUp(self):
         super().setUp()
-        LocalCapable('openvas').apply(self)  # the policy tests use openvas as a kind that may run here; in production it has no local path (NEVER_LOCAL)
+        enrolled = mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=True)
+        enrolled.start()
+        self.addCleanup(enrolled.stop)
         patcher = mock.patch.dict(os.environ, {}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -81,51 +83,30 @@ class SentinelWorld(FallbackEnv):
 
 
 class HelperTests(SentinelWorld, TestCase):
-    def test_all_nothing_can_be_waiting_and_nothing_is_read(self):
+    def test_the_ignored_all_changes_nothing_every_kind_still_waits(self):
         for value in ('all', '*'):
             self.policy(value)
-            with self.assertNumQueries(0):
+            self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
+            self.assertEqual(scanner_state.state()['kinds'], ALL_KINDS)
+
+    def test_nothing_is_reported_until_the_builtin_scanner_has_enrolled(self):
+        for value in (None, '', 'none'):
+            self.policy(value)
+            with mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False), self.assertNumQueries(0):
                 self.assertEqual(scanner_state.waiting_kinds(), [])
                 self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
-    def test_unset_nothing_waits_until_the_builtin_scanner_has_enrolled(self):
-        for value in (None, ''):
+    def test_the_variable_is_read_nowhere_so_nothing_is_warned_about(self):
+        for value in ('nmpa, Openvas,wpscn,nmpa', 'openvas,tesssl', 'none'):
             self.policy(value)
-            with self.assertNumQueries(2):  # whether the built-in scanner has enrolled, asked by each call; nothing else
-                self.assertEqual(scanner_state.waiting_kinds(), [])
-                self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
+            with self.assertNoLogs('agentapi.sentinel_dispatch', 'WARNING'):
+                self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
 
-    def test_a_misspelt_kind_is_still_ignored_but_warned_about_once_per_distinct_value(self):
-        warned = mock.patch.object(sentinel_dispatch, '_WARNED_FALLBACK', set())
-        warned.start()
-        self.addCleanup(warned.stop)
-        self.policy('nmpa, Openvas,wpscn,nmpa')
-        with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
-            self.assertEqual(sentinel_dispatch.local_fallback_kinds(), {'openvas'})  # the semantics are unchanged: the unknown names are dropped
-            self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), ['nmpa', 'wpscn'])  # in order, each once
-            self.assertFalse(sentinel_dispatch.fallback_allowed('nmap'))
-        self.assertEqual(len(seen.records), 1)  # three reads, one warning
-        self.assertIn('nmpa, wpscn', seen.output[0])
-        self.policy('openvas,tesssl')  # another value is another warning
-        with self.assertLogs('agentapi.sentinel_dispatch', 'WARNING') as seen:
-            sentinel_dispatch.local_fallback_kinds()
-            sentinel_dispatch.local_fallback_kinds()
-        self.assertEqual(len(seen.records), 1)
-        self.assertIn('tesssl', seen.output[0])
-
-    def test_nothing_is_warned_about_when_every_name_is_a_kind(self):
-        for value in (None, '', 'all', '*', 'none', 'openvas,testssl', ' OPENVAS , wpscan '):
-            self.policy(value)
-            self.assertEqual(sentinel_dispatch.unknown_fallback_kinds(), [], value)
-        with self.assertNoLogs('agentapi.sentinel_dispatch', 'WARNING'):
-            sentinel_dispatch.local_fallback_kinds()
-
-    def test_every_kind_allowed_by_name_is_never_waiting(self):
+    def test_naming_every_kind_in_the_ignored_variable_does_not_stop_it_waiting(self):
         self.policy(','.join(ALL_KINDS))
-        self.assertEqual(scanner_state.waiting_kinds(), [])
+        self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
 
-    def test_none_with_no_sentinel_at_all_waits_for_every_kind_and_none_was_ever_seen(self):
-        self.policy('none')
+    def test_with_no_sentinel_at_all_every_kind_waits_and_none_was_ever_seen(self):
         out = scanner_state.state()
         self.assertTrue(out['offline'])
         self.assertEqual(out['kinds'], ALL_KINDS)
@@ -134,7 +115,6 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
 
     def test_a_live_sentinel_takes_its_kinds_out_of_waiting_and_out_of_never_seen(self):
-        self.policy('none')
         self.sentinel(['nmap', 'naabu', 'nuclei_light'])
         out = scanner_state.state()
         self.assertEqual(out['kinds'], [k for k in ALL_KINDS if k not in ('nmap', 'naabu', 'nuclei_light')])
@@ -143,20 +123,17 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertTrue(scanner_state.is_waiting('testssl'))
 
     def test_a_kind_only_the_built_in_scanner_takes_waits_while_only_an_external_sentinel_declares_it(self):
-        self.policy('none')
         self.sentinel(ALL_KINDS)
         self.assertEqual(scanner_state.state()['kinds'], [k for k in ALL_KINDS if k in sentinel_broker.BUILTIN_KINDS])
         self.assertTrue(scanner_state.is_waiting('path_probe'))
         self.assertFalse(scanner_state.is_waiting('waf'))
 
     def test_a_live_sentinel_for_every_kind_is_not_offline(self):
-        self.policy('none')
         self.sentinel(ALL_KINDS)
         self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)  # the kinds only the install's own scanner takes
         self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
     def test_a_registered_sentinel_that_is_not_live_waits_but_was_seen(self):
-        self.policy('none')
         agent = self.sentinel(['nmap', 'testssl'], seen='old')
         out = scanner_state.state()
         self.assertEqual(out['kinds'], ALL_KINDS)
@@ -164,7 +141,6 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(out['since'], agent.last_seen.isoformat())
 
     def test_a_pending_sentinel_that_never_heartbeated_counts_as_registered(self):
-        self.policy('none')
         self.sentinel(['wpscan'], status='pending', seen=None)
         out = scanner_state.state()
         self.assertIn('wpscan', out['kinds'])
@@ -172,13 +148,11 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertNotIn('since', out)
 
     def test_a_suspended_sentinel_is_not_live_even_when_it_heartbeats(self):
-        self.policy('none')
         self.sentinel(['nmap'], status='suspended')
         self.assertIn('nmap', scanner_state.waiting_kinds())
         self.assertNotIn('nmap', scanner_state.state()['never_seen'])
 
     def test_a_revoked_sentinel_waits_and_was_seen(self):
-        self.policy('none')
         self.sentinel(['nmap'], status='revoked')
         self.sentinel(['naabu'], token_revoked=True)  # a live-looking one whose token was revoked
         out = scanner_state.state()
@@ -188,25 +162,23 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertNotIn('naabu', out['never_seen'])
 
     def test_a_sentinel_that_is_not_a_scanner_does_not_count(self):
-        self.policy('none')
         agent = self.sentinel(['nmap'])
         Agent.objects.filter(pk=agent.pk).update(kind='validation')
         self.assertEqual(scanner_state.state()['never_seen'], ALL_KINDS)
 
-    def test_only_the_kinds_off_the_list_can_wait(self):
+    def test_a_list_in_the_ignored_variable_takes_no_kind_off_the_waiting_list(self):
         self.policy('openvas,hygiene_check')
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'hygiene_check')])
-        self.sentinel(['openvas'])  # a Sentinel for a kind that may run here anyway changes nothing about the others
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'hygiene_check')])
+        self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
+        self.sentinel(['openvas'])  # a Sentinel for one of them takes only its own kind out
+        scanner_state.CACHE_KEY = f'test:{uuid.uuid4().hex}:'
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k != 'openvas'])
 
     def test_a_kind_the_sentinel_cannot_run_yet_is_still_waiting(self):
-        self.policy('none')
         self.sentinel(['nmap'])
         with mock.patch('agentapi.sentinel_contract.can_run', side_effect=lambda reported, kind: kind != 'nmap'):
             self.assertIn('nmap', scanner_state.waiting_kinds())
 
     def test_the_answer_is_cached_so_a_second_call_makes_no_query(self):
-        self.policy('none')
         self.sentinel(['nmap'])
         first = scanner_state.state()
         with self.assertNumQueries(0):
@@ -216,7 +188,6 @@ class HelperTests(SentinelWorld, TestCase):
             self.assertIsNone(scanner_state.skip_note('nmap'))
 
     def test_the_first_call_costs_the_live_sentinels_rights_and_nothing_else(self):
-        self.policy('none')
         for _ in range(6):
             self.sentinel(['nmap'])
         from django.db import connection
@@ -232,7 +203,6 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertLess(len(large) - len(small), 2 * 8 + 2)  # two more Sentinels cost two more rights, not another sweep
 
     def test_the_cache_lasts_about_fifteen_seconds_and_a_scanner_returning_clears_it_then(self):
-        self.policy('none')
         self.assertIn('nmap', scanner_state.waiting_kinds())
         self.sentinel(['nmap'])
         self.assertIn('nmap', scanner_state.waiting_kinds())  # still the old answer inside the window
@@ -240,30 +210,25 @@ class HelperTests(SentinelWorld, TestCase):
         scanner_state.CACHE_KEY = f'test:{uuid.uuid4().hex}:'  # the window passed
         self.assertNotIn('nmap', scanner_state.waiting_kinds())
 
-    def test_a_changed_setting_is_never_answered_from_the_old_one(self):
-        self.policy('none')
+    def test_a_changed_ignored_setting_changes_nothing(self):
         self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
         self.policy(None)
-        self.assertEqual(scanner_state.waiting_kinds(), [])
+        self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
 
     def test_a_cache_that_is_down_only_means_asking_again(self):
-        self.policy('none')
         with mock.patch('django.core.cache.cache.get', side_effect=OSError('down')), mock.patch('django.core.cache.cache.set', side_effect=OSError('down')):
             self.assertEqual(scanner_state.waiting_kinds(), ALL_KINDS)
 
     def test_a_sweep_goes_on_when_the_state_cannot_be_read(self):
-        self.policy('none')
         with mock.patch.object(scanner_state, '_compute', side_effect=RuntimeError('database gone')):
             self.assertIsNone(scanner_state.skip_note('testssl'))
 
     def test_a_named_time_is_not_cached(self):
-        self.policy('none')
         scanner_state.state()
         self.sentinel(['nmap'])
         self.assertNotIn('nmap', scanner_state.waiting_kinds(now=timezone.now()))
 
     def test_reading_it_writes_nothing(self):
-        self.policy('none')
         self.sentinel(['nmap'], seen='old')
         before = (ScanControl.objects.count(), SentinelTask.objects.count(), Agent.objects.count(), AgentActivity.objects.count())
         scanner_state.state()
@@ -274,16 +239,10 @@ class HelperTests(SentinelWorld, TestCase):
 
 
 class WordingTests(SimpleTestCase):
-    def setUp(self):
-        super().setUp()
-        patcher = mock.patch.object(scanner_state, 'vantage_warnings', lambda: [])  # no database here; tests.test_scanner_vantage covers it
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_the_two_sentences(self):
         text = scanner_state.messages({'offline': True, 'kinds': ['nmap', 'testssl', 'wpscan'], 'never_seen': ['wpscan']})
         self.assertEqual(text['offline'], 'Scanner offline: nmap, testssl work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.')
-        self.assertEqual(text['never_seen'], 'CVENGINE_LOCAL_FALLBACK stops wpscan from running on this server but no scanner has ever registered for them: '
+        self.assertEqual(text['never_seen'], 'No scanner has ever registered for wpscan, and this server runs none of them: '
                                              'nothing of that kind will run until one does.')
 
     def test_nothing_waiting_says_nothing(self):
@@ -302,20 +261,13 @@ class WordingTests(SimpleTestCase):
         self.assertEqual((member['kinds'], member['never_seen'], member['never_seen_message']), (['nmap'], [], None))
         self.assertNotIn('CVENGINE_LOCAL_FALLBACK', json.dumps(member))
 
-    def test_the_status_lists_unknown_kinds_for_an_admin_only(self):
+    def test_the_status_has_no_unknown_kinds_whatever_the_ignored_variable_says(self):
         with mock.patch.dict(os.environ, {ENV: 'nmap,nmpa,wpscn'}):
-            admin = scanner_state.status(admin=True, snapshot={'offline': False, 'kinds': [], 'never_seen': []})
-            member = scanner_state.status(admin=False, snapshot={'offline': False, 'kinds': [], 'never_seen': []})
-        self.assertEqual(admin['unknown_kinds'], ['nmpa', 'wpscn'])
-        self.assertEqual(admin['unknown_kinds_message'], 'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: nmpa, wpscn; check the spelling.')
-        self.assertEqual((member['unknown_kinds'], member['unknown_kinds_message']), ([], None))
-        self.assertNotIn('CVENGINE_LOCAL_FALLBACK', json.dumps(member))
-
-    def test_unset_the_status_has_no_unknown_kinds(self):
-        with mock.patch.dict(os.environ, {}):
-            os.environ.pop(ENV, None)
-            out = scanner_state.status()
-        self.assertEqual((out['unknown_kinds'], out['unknown_kinds_message']), ([], None))
+            for admin in (True, False):
+                out = scanner_state.status(admin=admin, snapshot={'offline': False, 'kinds': [], 'never_seen': []})
+                self.assertNotIn('unknown_kinds', out)
+                self.assertNotIn('unknown_kinds_message', out)
+                self.assertNotIn('CVENGINE_LOCAL_FALLBACK', json.dumps(out))
 
     def test_a_member_with_only_never_seen_kinds_sees_nothing(self):
         member = scanner_state.status(admin=False, snapshot={'offline': True, 'kinds': ['wpscan'], 'never_seen': ['wpscan']})
@@ -343,7 +295,8 @@ class SystemStatusTests(SentinelWorld, TestCase):
         with a, b, c:
             return call(token, 'GET', '/api/v1/system/status')[1]
 
-    def test_unset_the_block_is_there_and_empty_and_nothing_else_changes(self):
+    @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
+    def test_before_the_builtin_scanner_enrolls_the_block_is_there_and_empty_and_nothing_else_changes(self, _enrolled):
         data = self.status(self.t_root)
         scanner = data['scanning']['scanner']
         self.assertEqual((scanner['offline'], scanner['kinds'], scanner['never_seen'], scanner['messages']), (False, [], [], []))
@@ -352,7 +305,6 @@ class SystemStatusTests(SentinelWorld, TestCase):
         self.assertFalse(data['scanning']['paused'])
 
     def test_a_scanner_that_was_set_up_and_is_gone_is_a_note_not_a_problem_and_not_a_pause(self):
-        self.policy('none')
         self.sentinel(ALL_KINDS, seen='old')
         data = self.status(self.t_root)
         scanner = data['scanning']['scanner']
@@ -367,47 +319,32 @@ class SystemStatusTests(SentinelWorld, TestCase):
         self.assertFalse(ScanControl.current().paused)
 
     def test_a_kind_no_scanner_ever_registered_for_is_a_problem(self):
-        self.policy('none')
         self.sentinel(['nmap'], seen='old')
         data = self.status(self.t_root)
         scanner = data['scanning']['scanner']
         never = [k for k in ALL_KINDS if k != 'nmap']
         self.assertEqual(scanner['never_seen'], never)
         self.assertEqual(scanner['never_seen_message'], scanner_state.messages(scanner)['never_seen'])
-        self.assertIn(f"CVENGINE_LOCAL_FALLBACK stops {', '.join(never)} from running on this server but no scanner has ever registered for them", scanner['never_seen_message'])
+        self.assertIn(f"No scanner has ever registered for {', '.join(never)}, and this server runs none of them", scanner['never_seen_message'])
         self.assertIn(scanner['never_seen_message'], data['problems'])
         self.assertEqual(data['overall'], 'degraded')
         self.assertEqual(scanner['message'], 'Scanner offline: nmap work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.')
 
-    def test_a_misspelt_kind_is_a_problem_for_an_admin_and_nothing_for_a_member(self):
+    def test_a_misspelt_ignored_variable_is_no_problem_for_anyone(self):
         self.policy('nmap,nmpa')
         self.sentinel(ALL_KINDS)
-        sentence = 'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: nmpa; check the spelling.'
-        admin = self.status(self.t_root)
-        self.assertEqual(admin['scanning']['scanner']['unknown_kinds'], ['nmpa'])
-        self.assertIn(sentence, admin['problems'])
-        self.assertEqual(admin['overall'], 'degraded')
-        member = self.status(self.t_member)
-        self.assertEqual(member['scanning']['scanner']['unknown_kinds'], [])
-        self.assertNotIn('nmpa', json.dumps(member))
-        self.assertFalse([p for p in member['problems'] if 'CVENGINE_LOCAL_FALLBACK' in p])
-
-    def test_unset_or_spelt_right_there_is_no_spelling_problem(self):
-        for value in (None, 'none', 'nmap,naabu'):
-            self.policy(value)
-            data = self.status(self.t_root)
-            self.assertEqual(data['scanning']['scanner']['unknown_kinds'], [], value)
-            self.assertFalse([p for p in data['problems'] if 'do not exist' in p], value)
+        for token in (self.t_root, self.t_member):
+            data = self.status(token)
+            self.assertNotIn('unknown_kinds', data['scanning']['scanner'])
+            self.assertFalse([p for p in data['problems'] if 'CVENGINE_LOCAL_FALLBACK' in p or 'do not exist' in p])
 
     def test_a_live_scanner_for_everything_is_quiet(self):
-        self.policy('none')
         self.sentinel(ALL_KINDS)
         self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)  # the kinds only the install's own scanner takes
         scanner = self.status(self.t_root)['scanning']['scanner']
         self.assertFalse(scanner['offline'])
 
     def test_a_member_sees_the_waiting_kinds_but_not_the_server_setting_and_no_problem(self):
-        self.policy('none')
         self.sentinel(['nmap'], seen='old')
         data = self.status(self.t_member)
         scanner = data['scanning']['scanner']
@@ -431,14 +368,14 @@ class StripEndpointTests(SentinelWorld, TestCase):
         self.client.force_login(user)
         return self.client.get('/cve/api/scanner')
 
-    def test_unset_it_is_empty(self):
+    @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
+    def test_before_the_builtin_scanner_enrolls_it_is_empty(self, _enrolled):
         response = self.get(self.root)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['messages'], [])
         self.assertEqual(response['Cache-Control'], 'no-store')
 
     def test_an_admin_gets_both_sentences_a_member_the_first(self):
-        self.policy('none')
         self.sentinel(['nmap'], seen='old')
         admin, member = self.get(self.root).json(), self.get(self.member).json()
         self.assertEqual(len(admin['messages']), 2)
@@ -482,7 +419,6 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
         return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
 
     def test_waiting_for_a_scanner_it_does_not_run_log_or_raise(self):
-        self.policy('none')
         with mock.patch('agentapi.sentinel_dispatch.try_testssl') as dispatched:
             out = self.sweep()
         self.assertEqual(out['skipped'], 'no scanner is online for testssl; the targets stay due')
@@ -501,7 +437,6 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
                 self.assertFalse(ServiceRun.objects.exists())
 
     def test_the_daily_sweep_over_all_projects_returns_before_taking_its_claim(self):
-        self.policy('none')
         with mock.patch('cveFeed.ledger.sweep_claim') as claim:
             out = tls_audit.sweep_all()
         self.assertEqual(out, {'skipped': 'no scanner is online for testssl; the targets stay due'})
@@ -509,7 +444,6 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
         self.assertQuiet()
 
     def test_a_live_scanner_for_it_lets_it_through(self):
-        self.policy('none')
         user = User.objects.create_user('tls-owner', password='x')
         token, _raw = create_token(user, 'tls-token')
         Agent.objects.create(token=token, name='tls', kind='scanner', status='active', capabilities=['testssl'], last_seen=timezone.now(),
@@ -531,7 +465,6 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
 
     def test_waiting_for_a_scanner_it_runs_nothing_and_logs_nothing(self):
         self.ip('192.0.2.10')
-        self.policy('none')
         runner = self.runner()
         with mock.patch('cveFeed.coverage_topup.log_deferral') as deferral:
             out = run_udp(runner=runner)
@@ -542,13 +475,13 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
         self.assertFalse(ServiceRun.objects.exists())
 
     def test_it_answers_before_the_coverage_check_and_before_any_claim(self):
-        self.policy('none')
         with mock.patch('cveFeed.coverage_topup.backlog_exists') as backlog, mock.patch('reNgine.resources.redis_claim') as claim:
             run_udp(runner=self.runner())
         backlog.assert_not_called()
         claim.assert_not_called()
 
-    def test_unset_it_runs_exactly_as_before(self):
+    @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
+    def test_before_the_builtin_scanner_enrolls_it_runs_exactly_as_before(self, _enrolled):
         self.ip('192.0.2.10')
         runner = self.runner()
         out = run_udp(runner=runner, pipeline=lambda d, n: None)
@@ -556,12 +489,10 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
         self.assertEqual(len(runner.calls), 1)
 
     def test_the_off_switch_is_still_answered_first(self):
-        self.policy('none')
         with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': '0'}):
             self.assertEqual(run_udp(runner=self.runner()), {'skipped': 'CVENGINE_UDPSCAN is off'})
 
     def test_a_scanner_for_another_kind_does_not_let_it_through(self):
-        self.policy('none')
         user = User.objects.create_user('udp-owner', password='x')
         token, _raw = create_token(user, 'udp-token')
         Agent.objects.create(token=token, name='nmap-only', kind='scanner', status='active', capabilities=['nmap'], last_seen=timezone.now(),
@@ -578,13 +509,13 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
         return wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=2, runner=kw.pop('runner', self.runner), probe_get=self.probe_get,
                                      sleep=lambda s: None)
 
-    def test_unset_it_runs_exactly_as_before(self):
+    @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
+    def test_before_the_builtin_scanner_enrolls_it_runs_exactly_as_before(self, _enrolled):
         out = self.run_quick()
         self.assertNotIn('skipped', out)
         self.assertEqual({u for u, _t in self.calls}, {'https://rt.test'})
 
     def test_waiting_for_a_scanner_it_does_not_scan_log_or_record_a_state(self):
-        self.policy('none')
         with mock.patch('cveFeed.tasks.wpscan_quick.apply_async') as again:
             out = self.run_quick()
         self.assertEqual(out, {'skipped': 'no scanner is online for wpscan; the targets stay due'})
@@ -598,13 +529,11 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
         self.assertEqual((kwargs['countdown'], kwargs['queue']), (wpscan_scan.QUICK_DELAY * 2, wpscan_scan.QUEUE))
 
     def test_a_broker_that_is_down_does_not_fail_it(self):
-        self.policy('none')
         with mock.patch('cveFeed.tasks.wpscan_quick.apply_async', side_effect=OSError('broker down')):
             out = self.run_quick()
         self.assertIn('no scanner is online', out['skipped'])
 
     def test_a_pause_is_answered_before_it(self):
-        self.policy('none')
         from reNgine import resources
         with mock.patch.object(resources, 'global_pause_requested', return_value=True), mock.patch.object(wpscan_scan, 'queue_quick') as again:
             out = self.run_quick()
@@ -632,7 +561,6 @@ class ConductorWaitingTests(FallbackEnv, TestCase):
         return run_bbot_discovery.delay
 
     def test_it_still_starts_discovery_and_records_what_waits(self):
-        self.policy('none')
         result = conductor.keep_work_queued()
         self.assertEqual(result['started'], 1)
         self.assertEqual(result['scanner_waiting'], ALL_KINDS)
@@ -640,20 +568,19 @@ class ConductorWaitingTests(FallbackEnv, TestCase):
         self.assertFalse(ScanControl.objects.exists())
         self.assertNotIn('skipped', result)
 
-    def test_unset_nothing_is_added(self):
+    @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
+    def test_before_the_builtin_scanner_enrolls_nothing_is_added(self, _enrolled):
         result = conductor.keep_work_queued()
         self.assertEqual(result['started'], 1)
         self.assertNotIn('scanner_waiting', result)
 
     def test_a_scanner_state_that_cannot_be_read_never_stops_it(self):
-        self.policy('none')
         with mock.patch.object(scanner_state, 'waiting_kinds', side_effect=RuntimeError('boom')):
             result = conductor.keep_work_queued()
         self.assertEqual(result['started'], 1)
         self.assertNotIn('scanner_waiting', result)
 
     def test_the_pause_still_holds_it(self):
-        self.policy('none')
         ScanControl.objects.create(pk=1, paused=True)
         self.assertEqual(conductor.keep_work_queued()['skipped'], 'paused')
         self.delay.assert_not_called()

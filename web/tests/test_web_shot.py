@@ -17,6 +17,7 @@ from agentapi.models import SentinelTask
 from cveFeed import web_shot
 from cveFeed.models import HostExclusion, HostScreenshot, HostState, InternalRange
 from dashboard.models import Org, Project, ProjectMembership
+from reNgine import resources
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
@@ -888,7 +889,8 @@ class WiringTests(TestCase):
 		self.assertIn('web_screenshot', sentinel_dispatch.NEVER_LOCAL)
 		self.assertIn('web_screenshot', SentinelTask.KINDS)
 		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'all'}):
-			self.assertFalse(sentinel_dispatch.fallback_allowed('web_screenshot'))
+			with self.assertRaises(resources.ScannerUnavailable):
+				sentinel_dispatch._no_local('web_screenshot', 'nothing took it')
 
 
 # ------------------------------------------------------------------------------------------------ review round: hardening

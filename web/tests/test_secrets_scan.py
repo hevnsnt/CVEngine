@@ -20,7 +20,7 @@ from cveFeed.models import (BountyEngagement, BountyProgram, HygieneFinding, Pro
 from dashboard.models import AuditLog
 from reNgine import resources
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
-from tests.test_scanner_unavailable_stages import FallbackOffBase
+from tests.test_scanner_unavailable_stages import NoScannerBase
 
 FIXTURE = Path(__file__).with_name('fixtures') / 'sentinel_results' / 'secrets_scan.json'
 TARGET = Path(__file__).with_name('fixtures') / 'sentinel_targets' / 'secrets_scan.json'
@@ -97,12 +97,13 @@ class ContractTests(SimpleTestCase):
 class NeverLocalTests(SimpleTestCase):
     def test_no_setting_lets_the_secrets_scan_run_here(self):
         for value in ('', 'all', '*', 'secrets_scan', 'nmap,secrets_scan'):
-            with mock.patch.dict(os.environ, {sentinel_dispatch.LOCAL_FALLBACK_ENV: value}):
-                self.assertFalse(sentinel_dispatch.fallback_allowed('secrets_scan'), value)
-                self.assertNotIn('secrets_scan', sentinel_dispatch.unknown_fallback_kinds())
+            with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': value}):
+                self.assertIn('secrets_scan', sentinel_dispatch.NEVER_LOCAL, value)
+                with self.assertRaises(resources.ScannerUnavailable):  # the variable is ignored since 1.4: no decision ever lets it run here
+                    sentinel_dispatch._no_local('secrets_scan', 'nothing took it')
 
 
-class StageBase(FallbackOffBase):
+class StageBase(NoScannerBase):
     def setUp(self):
         super().setUp()
         secrets_inventory.reset_key_cache()

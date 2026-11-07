@@ -1309,7 +1309,7 @@ def _scrubbed(task):
 
 def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
-    caller already fell back to running the tool locally, or, for a kind taken off ``CVENGINE_LOCAL_FALLBACK``, left the targets due, so this
+    caller left the targets due (no kind runs on this server), so this
     task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
     if reason is None:
         from agentapi import sentinel_dispatch

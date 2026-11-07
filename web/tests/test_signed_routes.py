@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 
 from agentapi import scanner_state, sentinel_broker, sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
+from reNgine import resources
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import auth_routes, probe_scope, route_auth as ra
@@ -105,9 +106,10 @@ class DispatchTests(SignedRouteStageBase):
 
     def test_the_kind_has_no_local_path_whatever_the_fallback_says(self):
         self.assertIn(KIND, dispatch.NEVER_LOCAL)
-        with mock.patch.dict('os.environ', {dispatch.LOCAL_FALLBACK_ENV: 'all'}):
-            self.assertNotIn(KIND, dispatch.local_fallback_kinds())
-            self.assertFalse(dispatch.fallback_allowed(KIND))
+        with mock.patch.dict('os.environ', {'CVENGINE_LOCAL_FALLBACK': 'all'}):  # ignored since 1.4
+            self.assertIn(KIND, dispatch.NEVER_LOCAL)
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch._no_local(KIND, 'nothing took it')
         self.guard.assert_clean()
 
 
@@ -136,7 +138,8 @@ class GateTests(SignedRouteStageBase):
 
     def test_the_waiting_state_names_the_kind_without_a_builtin_scanner(self):
         self.external()
-        offered = scanner_state.state()
+        with mock.patch.object(dispatch, 'builtin_scanner_enrolled', return_value=True):  # the signal reads nothing before the built-in scanner has enrolled
+            offered = scanner_state.state()
         self.assertTrue(offered.get('offline'))
         self.assertIn(KIND, offered['kinds'])
 

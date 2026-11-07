@@ -27,7 +27,7 @@ from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_route_auth import RouteFixture
 from tests.test_subdir_apps import BASELINE_PATH, SubdirFixture
 from tests.test_vhost_scan import VhostFixture
-from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
+from tests.test_scanner_unavailable_stages import ENV, NoScannerBase
 from tests.test_suppliers import Fixture as SupplierFixture, posture as supplier_posture, row as supplier_row, unreachable as supplier_unreachable
 
 HOST = 'www.example.test'
@@ -41,7 +41,7 @@ def nginx_found(task):
                        for p in task['target']['probes']]}
 
 
-class ProbeStageBase(FallbackOffBase):
+class ProbeStageBase(NoScannerBase):
     """``www.example.test`` serves https and is known to run nginx without a version: a lead for the error-page and nginx-variants probes."""
 
     def setUp(self):
@@ -117,7 +117,7 @@ class HttpProbeStageTests(ProbeStageBase):
         from agentapi import sentinel_dispatch
         self.assertIn('http_probe', sentinel_dispatch.NEVER_LOCAL)
         with mock.patch.dict(os.environ, {ENV: 'all'}):
-            self.assertFalse(sentinel_dispatch.fallback_allowed('http_probe'))
+            self.assertIn('http_probe', sentinel_dispatch.NEVER_LOCAL)
             stats = probes.run_for_scan(self.scan.id)
         self.assertTrue(stats['waiting'])  # no scanner: the probes wait, nothing ran here
         self.assertEqual(self.guard.calls, [])
@@ -125,7 +125,7 @@ class HttpProbeStageTests(ProbeStageBase):
         self.assertFalse(ServiceRun.objects.filter(service=probes.SERVICE).exists())
 
 
-class DnsResolveStageTests(FallbackOffBase):
+class DnsResolveStageTests(NoScannerBase):
     def setUp(self):
         super().setUp()
         mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
@@ -804,7 +804,7 @@ class RouteProbeStageTests(RouteFixture, TestCase):
         from agentapi import sentinel_dispatch
         self.assertIn('route_probe', sentinel_dispatch.NEVER_LOCAL)
         with mock.patch.dict(os.environ, {ENV: 'all'}):
-            self.assertFalse(sentinel_dispatch.fallback_allowed('route_probe'))
+            self.assertIn('route_probe', sentinel_dispatch.NEVER_LOCAL)
             out = route_auth.run_route_auth(self.scan().id)
         self.assertIn('no scanner could take this work (route_probe)', out['skipped'])
         self.assertEqual((self.guard.calls, self.local.call_count), ([], 0))  # nothing was asked here
@@ -963,7 +963,7 @@ class SupplierCheckStageTests(SupplierFixture, TestCase):
         from agentapi import sentinel_dispatch
         self.assertIn('supplier_check', sentinel_dispatch.NEVER_LOCAL)
         with mock.patch.dict(os.environ, {ENV: 'all'}):
-            self.assertFalse(sentinel_dispatch.fallback_allowed('supplier_check'))
+            self.assertIn('supplier_check', sentinel_dispatch.NEVER_LOCAL)
             out = supplier_scan.sweep(self.project.id)
         self.assertIn('waiting for a scanner', out['skipped'])
         self.assertEqual(self.guard.calls, [])
@@ -1307,7 +1307,7 @@ class HygieneCheckStageTests(TestCase):
     def test_the_kind_never_runs_here_whatever_the_fallback_setting_says(self):
         LocalFallback('all').apply(self)
         self.assertIn('hygiene_check', sentinel_dispatch.NEVER_LOCAL)
-        self.assertFalse(sentinel_dispatch.fallback_allowed('hygiene_check'))
+        self.assertIn('hygiene_check', sentinel_dispatch.NEVER_LOCAL)
         with FakeScanner(kinds=['hygiene_check'], mode='offline') as fake:
             counts = hy.run_hygiene(self.domain.id)
         self.assertEqual((fake.served, self.guard.calls), ([], []))
@@ -1437,7 +1437,7 @@ class DanglingDnsCheckTests(TestCase):
     def test_the_kind_never_runs_here_whatever_the_fallback_setting_says(self):
         LocalFallback('all').apply(self)
         self.assertIn('dangling_dns_check', sentinel_dispatch.NEVER_LOCAL)
-        self.assertFalse(sentinel_dispatch.fallback_allowed('dangling_dns_check'))
+        self.assertIn('dangling_dns_check', sentinel_dispatch.NEVER_LOCAL)
         with FakeScanner(kinds=['dangling_dns_check'], mode='offline') as fake:
             self.assertEqual(dangling_dns.assess_all(self.findings, project=self.project), [None, None, None])
         self.assertEqual((fake.served, self.guard.calls), ([], []))

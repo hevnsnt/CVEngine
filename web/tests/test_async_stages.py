@@ -1,5 +1,5 @@
 """Asynchronous stages (queue Q4, ``agentapi.stage_runs``): a stage that waits on Sentinels gives its worker back, a completion callback continues it,
-expiry and fallback end it exactly as the blocking wait did, and a restart loses nothing. Plus the Redis wake-ups (``agentapi.sentinel_notify``).
+expiry and waiting end it exactly as the blocking wait did, and a restart loses nothing. Plus the Redis wake-ups (``agentapi.sentinel_notify``).
 
 The fake scanner (``tests/fake_scanner.py``) runs with ``async_stages=True``: the stage's first call returns the ``waiting`` marker with nothing
 served yet (the worker is free), and ``fake.drain()`` does what the server's workers do afterwards (serve, wake, run the callback, drive the
@@ -14,14 +14,14 @@ from django.utils import timezone
 
 from agentapi import sentinel_broker, sentinel_notify, stage_runs
 from agentapi import sentinel_dispatch as dispatch
-from agentapi.models import ScannerFallback, SentinelTask, StageRun
+from agentapi.models import SentinelTask, StageRun
 from cveFeed import discovery, ledger, port_stage, reaper
 from cveFeed.models import AgentActivity, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanActivity, ScanHistory, Subdomain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_route_auth import RouteFixture
-from tests.test_scanner_unavailable_stages import IP, FallbackOffBase
+from tests.test_scanner_unavailable_stages import IP, NoScannerBase
 from tests.test_sentinel_dispatch import DispatchBase
 
 HOST = 'www.example.test'
@@ -33,7 +33,7 @@ def adapter(name, body):
     return name
 
 
-class AsyncBase(FallbackOffBase):
+class AsyncBase(NoScannerBase):
     def setUp(self):
         super().setUp()
         self.addCleanup(lambda: [stage_runs.ADAPTERS.pop(k, None) for k in [k for k in stage_runs.ADAPTERS if k.startswith('test.')]])
@@ -86,7 +86,7 @@ class StageFreesItsWorkerTests(AsyncBase):
 
 
 class ExpiryTests(AsyncBase):
-    """A task nobody claims (or that fails) ends the run's wait exactly as the blocking wait ended: the same fallback decision, recorded once."""
+    """A task nobody claims (or that fails) ends the run's wait exactly as the blocking wait ended: the same ScannerUnavailable decision."""
 
     def one(self, ips=('192.0.2.10',), kind='http_probe'):
         def body(ctx=None):
@@ -94,29 +94,29 @@ class ExpiryTests(AsyncBase):
         name = adapter('test.one', lambda ctx: body())
         return stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
 
-    def test_unclaimed_where_local_is_allowed_returns_none_with_one_fallback_row(self):
-        LocalFallback('all').apply(self)
+    def test_an_unclaimed_task_raises_scanner_unavailable_in_the_callback_even_with_the_ignored_variable_on_all(self):
+        LocalFallback('all').apply(self)  # CVENGINE_LOCAL_FALLBACK is ignored since 1.4: nothing returns None for the caller to run here
         with FakeScanner(kinds=['hygiene_check'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one(kind='hygiene_check')))
             results = fake.drain()
-        self.assertEqual(results, [None])  # the caller runs it here, as before
+        self.assertEqual(results[0]['status'], 'failed')
+        self.assertIn('ScannerUnavailable', StageRun.objects.get().error)
         task = SentinelTask.objects.get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('hygiene_check', 'not_claimed_in_time')])
+        self.assertIn('the targets stay due', task.error)
         self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up hygiene_check work').values_list('status', flat=True)),
                          ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
 
-    def test_unclaimed_where_local_is_not_allowed_raises_scanner_unavailable_in_the_callback(self):
+    def test_unclaimed_raises_scanner_unavailable_in_the_callback(self):
         with FakeScanner(kinds=['http_probe'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results[0]['status'], 'failed')
         self.assertIn('ScannerUnavailable', StageRun.objects.get().error)
-        self.assertFalse(ScannerFallback.objects.exists())  # a kind that may not run here records nothing
 
-    def test_a_stage_that_waits_and_falls_back_keeps_the_stage_semantics(self):
-        """The nmap stage whose nmap task fails, with the fallback off: the stage says it waits and leaves the address due (the blocking test's case)."""
+    def test_a_stage_that_waits_keeps_the_stage_semantics(self):
+        """The nmap stage whose nmap task fails, with no local path: the stage says it waits and leaves the address due (the blocking test's case)."""
         guard = assert_ran_nowhere_locally(self, 'nmap')
         name = adapter('test.nmapfail', lambda ctx: port_stage.run_for_scan(self.scan.id))
         with FakeScanner(kinds=['naabu', 'nmap'], modes={'nmap': 'fail'}, responders={'naabu': fixture('naabu', ports={IP: [22]})},
@@ -163,7 +163,6 @@ class FanOutTests(AsyncBase):
                 results = fake.drain()
         self.assertEqual(results[0]['status'], 'failed')  # ScanAborted, as the blocking loop raised it
         self.assertEqual(set(SentinelTask.objects.values_list('status', flat=True)), {'expired'})
-        self.assertFalse(ScannerFallback.objects.exists())
 
 
 class PipelineTests(AsyncBase):

@@ -17,13 +17,10 @@ MAX_NAMES_PER_TASK = 500   # the contract's bound (cvengine_scanner.probes.dns.M
 
 
 def _offered(project, kind):
-    """Whether a Sentinel may take ``kind`` work of ``project`` now. When none can: ``ScannerUnavailable`` if the kind may not run here (the
-    stage waits), else ``False`` (the caller runs it here, as before)."""
+    """True when a Sentinel may take ``kind`` work of ``project`` now. When none can: ``ScannerUnavailable`` (the kind never runs here, the stage waits)."""
     if sentinel_dispatch.any_scanner_for(project, kind):
         return True
     sentinel_dispatch._no_scanner(kind, project)
-    sentinel_dispatch.offline_fallback(project, kind)
-    return False
 
 
 def _hosts_label(names):

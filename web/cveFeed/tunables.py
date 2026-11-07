@@ -152,14 +152,6 @@ TUNABLES = [
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
-    Tunable('fallback_nmap_per_hour', 'Local nmap fallback runs per hour',
-            'How many nmap stages may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the addresses '
-            'wait and run when their target is next scanned. 0 is unlimited.',
-            'egress', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR', 30, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
-    Tunable('fallback_naabu_per_hour', 'Local naabu fallback runs per hour',
-            'How many naabu port sweeps may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the '
-            'addresses wait and run when their target is next scanned. 0 is unlimited.',
-            'egress', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR', 10, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
     Tunable('heat_policy', 'Heat policy (1 KEV rule, 0 legacy)',
             'Which rule rates CVE findings. 1, the KEV rule: on the KEV (or with a known exploit) and the version proven on the host is fire, the '
             'version only inferred is smoke, not on the KEV and no known exploit is ice. 0, legacy: KEV, exploits, CVSS 9+ and EPSS make fire, '
@@ -476,9 +468,7 @@ def usage_today():
     from cveFeed import autotune
     from cveFeed import local_egress
     for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
-                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25)),
-                      ('fallback_nmap_per_hour', lambda: local_egress.fallback_runs_this_hour('nmap')),
-                      ('fallback_naabu_per_hour', lambda: local_egress.fallback_runs_this_hour('naabu'))):
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25))):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001

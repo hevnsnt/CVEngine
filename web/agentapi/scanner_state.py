@@ -1,18 +1,18 @@
-"""The derived, read-only "scanner offline" signal of the move to one scanner (docs/SCANNER-ARCHITECTURE.md, ``CVENGINE_LOCAL_FALLBACK``).
+"""The derived, read-only "scanner offline" signal of the move to Sentinels (docs/SCANNER-ARCHITECTURE.md).
 
-When a kind may not run on this server (``sentinel_dispatch.local_fallback_kinds``) and no Sentinel is live that can run it, a stage that needs it raises
-``resources.ScannerUnavailable`` and leaves the target due: nothing fails, nothing is scanned locally, and the work resumes by itself when a scanner is
-back. This module only *reads* that situation so it can be shown and so the sweeps that run on their own schedules stop dispatching, raising, catching and
-logging every tick for nothing. It is **not** a pause: it writes nothing (``ScanControl`` is never touched), stops nothing that is running and exempts
-no work from the real pause; it is recomputed from the Sentinels' own heartbeats, so it clears by itself.
+No kind runs on this server (``sentinel_dispatch.NEVER_LOCAL``; ``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4). When no Sentinel is live that can run a kind,
+a stage that needs it raises ``resources.ScannerUnavailable`` and leaves the target due: nothing fails, nothing is scanned locally, and the work resumes by
+itself when a scanner is back. This module only *reads* that situation so it can be shown and so the sweeps that run on their own schedules stop
+dispatching, raising, catching and logging every tick for nothing. It is **not** a pause: it writes nothing (``ScanControl`` is never touched), stops
+nothing that is running and exempts no work from the real pause; it is recomputed from the Sentinels' own heartbeats, so it clears by itself.
 
-``waiting_kinds()`` is the kinds that may not run here and for which no live, active Sentinel declares the capability right now (anywhere on the
-instance: a Sentinel scoped to another project still counts, so the signal says "surely nothing can take this", never a guess). ``state()`` adds
-``never_seen``: of those, the kinds for which no Sentinel that could run them has ever registered (any status), which is the foot-gun of
-``CVENGINE_LOCAL_FALLBACK=none`` on an instance with no scanner at all, and ``disabled`` (present only when not empty): the waiting kinds that a live Sentinel has
-and its capability policy (an administrator's, an instance default, or its own machine) turns off, with no other active Sentinel that has them offline. Those are
-not "offline": the scanner is there and told not to take the work, so the interface says so and the fix is a setting, not a reconnect. The answer is kept in the Django cache for ``CACHE_SECONDS`` so a beat tick or
-a polling page costs one cache read; with the variable unset every kind may run here, the answer is empty and no query is made at all.
+``waiting_kinds()`` is the kinds for which no live, active Sentinel declares the capability right now (anywhere on the instance: a Sentinel scoped to
+another project still counts, so the signal says "surely nothing can take this", never a guess). ``state()`` adds ``never_seen``: of those, the kinds
+for which no Sentinel that could run them has ever registered (any status), and ``disabled`` (present only when not empty): the waiting kinds that a live
+Sentinel has and its capability policy (an administrator's, an instance default, or its own machine) turns off, with no other active Sentinel that has them
+offline. Those are not "offline": the scanner is there and told not to take the work, so the interface says so and the fix is a setting, not a reconnect.
+Until the built-in scanner has enrolled for the first time nothing is reported (a fresh install's scanner is expected within seconds; its stages wait all
+the same). The answer is kept in the Django cache for ``CACHE_SECONDS`` so a beat tick or a polling page costs one cache read.
 """
 import logging
 
@@ -21,9 +21,8 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 CACHE_SECONDS = 15
-CACHE_KEY = 'cvengine:scanner-state:'  # followed by the raw value of CVENGINE_LOCAL_FALLBACK, so a changed setting is never answered from the old one
-INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design: never part of a vantage-point warning
-VANTAGE_FEATURE = 'vantage'  # the built-in scanner image's ``info.features`` entry: it applies ``sentinel_settings.builtin_vantage``
+CACHE_KEY = 'cvengine:scanner-state:'
+INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design and have no stage that waits: never reported as waiting
 NO_STAGE = ()  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (empty since 1.4: every kind has a stage)
 
 
@@ -33,13 +32,9 @@ def _empty():
 
 def _compute(now):
     """The uncached answer: a few queries (the live Sentinels' rights, and one read of every Sentinel's declared capabilities)."""
-    from agentapi import sentinel_broker, sentinel_dispatch
+    from agentapi import sentinel_broker
     from agentapi.models import Agent, SentinelTask
-    allowed = sentinel_dispatch.local_fallback_kinds()
-    # A kind with no local path at all (sentinel_dispatch.NEVER_LOCAL) counts once the install has moved work off this server: while every
-    # other kind still runs here, its stage waits and says so in its own activity line, and nothing is "offline" for it.
-    local_all = not (set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL) - set(NO_STAGE) - set(allowed))
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and not (local_all and k in sentinel_dispatch.NEVER_LOCAL)]
+    off = [k for k in SentinelTask.KINDS if k not in NO_STAGE and k not in INTERNAL_ONLY]  # every kind waits for a scanner: none runs here
     if not off:
         return _empty()
     offered, denied, live_pks = set(), set(), set()
@@ -72,15 +67,6 @@ def _compute(now):
     return out
 
 
-IN_PROCESS_PROXIED = ('http_probe', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'web_screenshot', 'page_read')  # the in-process requests (version probes, retired-name checks, bucket checks, supplier checks, virtual host, subdirectory and route checks) go through cveFeed.pinned_transport, which takes the egress proxy
-
-
-def _uses_proxy(kind):
-    """Whether a run of ``kind`` takes the egress proxy: it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw
-    sockets, or only asks a resolver, never did, so the proxy is no part of its vantage point."""
-    return kind in IN_PROCESS_PROXIED
-
-
 def tailscale_enabled():
     """Whether this install runs the ``tailscale`` compose profile: it is in ``COMPOSE_PROFILES`` (``.env`` reaches every container) or the sidecar has
     published a node status file (``cveFeed.tailscale_local``, fresh or not: the install is set up for it)."""
@@ -92,63 +78,18 @@ def tailscale_enabled():
     return tailscale_local.available()
 
 
-def vantage_warnings():
-    """Sentences (one per cause, empty for none) warning that ``CVENGINE_LOCAL_FALLBACK`` moves kinds to a built-in scanner that does not scan from this
-    server's vantage point. The built-in scanner shares celery's network namespace (so the Tailscale sidecar's route and the host network or macvlan
-    overlays are its own) and is sent this server's egress proxy and private-target setting in its settings (``sentinel_settings.builtin_vantage``),
-    which an image that applies them says it does (``info.features`` has ``vantage``). Only a built-in scanner image that does not is a cause: its
-    scans would leave without this server's proxy (Settings > Proxy, only for the kinds whose tools take one) and refuse the private addresses this
-    server may scan (``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet). It is a warning, never a refusal, derived and never stored (``ScanControl`` is
-    untouched). Internal ranges are Sentinel-only already and are not a cause. When no kind moves nothing is read."""
-    from agentapi import builtin_scanner, sentinel_dispatch
-    from agentapi.models import SentinelTask
-    allowed = sentinel_dispatch.local_fallback_kinds()
-    off = [k for k in SentinelTask.KINDS if k not in allowed and k not in NO_STAGE and k not in INTERNAL_ONLY and k not in sentinel_dispatch.NEVER_LOCAL]
-    if not off:
-        return []
-    builtin = builtin_scanner.builtin_agent()
-    if builtin is None or VANTAGE_FEATURE in ((builtin.info or {}).get('features') or []):
-        return []  # no built-in scanner yet (nothing moved to it runs anywhere), or one that scans from this server's vantage point
-
-    def probe(check):
-        try:
-            return bool(check())
-        except Exception:  # noqa: BLE001 - a reading that fails is no reason to warn, nor to break the status
-            logger.debug('vantage check could not be read', exc_info=True)
-            return False
-
-    def sentence(kinds, what):
-        return (f"CVENGINE_LOCAL_FALLBACK moves {_join(kinds)} to the built-in scanner, whose image does not use {what}; "
-                "update it (the server's updater pulls the image this release pins).")
-
-    from cveFeed import egress_proxy
-    from targetApp import target_types
-    out = []
-    proxied = [k for k in off if _uses_proxy(k)]
-    if proxied and probe(egress_proxy.configured):
-        out.append(sentence(proxied, "this server's egress proxy"))
-    if probe(tailscale_enabled):
-        out.append(sentence(off, 'the private Tailscale addresses this server may scan'))
-    if probe(target_types.private_targets_allowed):
-        out.append(sentence(off, 'the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)'))
-    return out
-
-
 def state(now=None):
     """``{'offline': bool, 'kinds': [...], 'never_seen': [...], 'since'?: iso}``. ``kinds`` are the waiting kinds (see ``waiting_kinds``), ``never_seen`` the
     ones among them no Sentinel capable of them ever registered for, ``since`` when a scanner that could run one of them was last heard from (absent
     when none ever was). Cached for ``CACHE_SECONDS`` unless ``now`` is given (a caller that names a time wants that time's answer)."""
-    import os
-
     from django.core.cache import cache
 
     from agentapi import sentinel_dispatch
-    raw = os.environ.get(sentinel_dispatch.LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw in ('all', '*') or (raw == '' and not sentinel_dispatch.builtin_scanner_enrolled()):
-        return _empty()  # every kind may still run here: nothing can be waiting, and nothing is read
+    if not sentinel_dispatch.builtin_scanner_enrolled():
+        return _empty()  # no scanner has enrolled yet (a fresh install, or the built-in scanner is off): nothing is reported and nothing is read
     if now is not None:
         return _compute(now)
-    key = CACHE_KEY + (raw or 'default')
+    key = CACHE_KEY + 'default'
     try:
         cached = cache.get(key)
     except Exception:  # noqa: BLE001 - a cache that is down only means asking again
@@ -164,8 +105,8 @@ def state(now=None):
 
 
 def waiting_kinds(now=None):
-    """The kinds that may not run on this server and that no live, active Sentinel can run right now: work of these kinds waits (it stays due, nothing is
-    marked failed) until a scanner reconnects. Empty when ``CVENGINE_LOCAL_FALLBACK`` is unset."""
+    """The kinds that no live, active Sentinel can run right now: work of these kinds waits (it stays due, nothing is marked failed) until a scanner
+    reconnects. Empty until the built-in scanner has enrolled."""
     return list(state(now)['kinds'])
 
 
@@ -224,7 +165,7 @@ def messages(snapshot=None):
     out = {
         'offline': (f'Scanner offline: {_join(waiting)} work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.'
                     if waiting else None),
-        'never_seen': (f'CVENGINE_LOCAL_FALLBACK stops {_join(never)} from running on this server but no scanner has ever registered for them: '
+        'never_seen': (f'No scanner has ever registered for {_join(never)}, and this server runs none of them: '
                        'nothing of that kind will run until one does.' if never else None),
     }
     if disabled:
@@ -233,21 +174,11 @@ def messages(snapshot=None):
     return out
 
 
-def unknown_message(unknown):
-    """The sentence for names in ``CVENGINE_LOCAL_FALLBACK`` that are no kind, or None when there are none."""
-    if not unknown:
-        return None
-    return f'CVENGINE_LOCAL_FALLBACK names kinds that do not exist: {_join(unknown)}; check the spelling.'
-
-
 def status(admin=True, snapshot=None):
-    """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part and ``unknown_kinds`` (names in
-    ``CVENGINE_LOCAL_FALLBACK`` that are no kind) and ``vantage`` (``vantage_warnings``) describe a server setting, so they are for an App Admin (``admin``);
-    anyone else sees the waiting kinds and the first sentence only."""
-    from agentapi import sentinel_dispatch
+    """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part describes a server setup, so it is
+    for an App Admin (``admin``); anyone else sees the waiting kinds and the first sentence only."""
     snapshot = dict(state() if snapshot is None else snapshot)
     text = messages(snapshot)
-    unknown = sentinel_dispatch.unknown_fallback_kinds()
     if not admin:
         snapshot['kinds'] = [k for k in snapshot['kinds'] if k not in snapshot['never_seen']]
         snapshot['disabled'] = [k for k in snapshot.get('disabled', []) if k in snapshot['kinds']]
@@ -256,12 +187,8 @@ def status(admin=True, snapshot=None):
         snapshot['never_seen'] = []
         snapshot['offline'] = bool(snapshot['kinds'])
         text['never_seen'] = None
-        unknown = []
-    snapshot['unknown_kinds'] = unknown
-    snapshot['vantage'] = vantage_warnings() if admin else []  # a server setting, so for an App Admin; not in ``messages`` (the page strip)
     snapshot['messages'] = [t for t in (text['offline'], text.get('disabled'), text['never_seen']) if t]
     snapshot['message'] = text['offline']
     snapshot['disabled_message'] = text.get('disabled')
     snapshot['never_seen_message'] = text['never_seen']
-    snapshot['unknown_kinds_message'] = unknown_message(unknown)
     return snapshot

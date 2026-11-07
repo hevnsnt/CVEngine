@@ -1,4 +1,4 @@
-"""With ``CVENGINE_LOCAL_FALLBACK=none`` and no scanner that can take the work, every scan stage waits instead of failing: the local tool is never
+"""With no scanner that can take the work (no kind runs on this server; ``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4), every scan stage waits instead of failing: the local tool is never
 run, no ledger row says ``failed`` (nor ``done``: the target is still due), the stage returns without raising and its activity line names the
 scanner, not memory. nmap, naabu and nuclei had no such handler until now; testssl, UDP and the WordPress scan are asserted here so a regression is caught."""
 import os
@@ -17,7 +17,7 @@ from tests.test_route_auth import RouteFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_udp_scan import UdpBase
 
-ENV = dispatch.LOCAL_FALLBACK_ENV
+ENV = 'CVENGINE_LOCAL_FALLBACK'  # ignored since 1.4
 IP = '192.0.2.10'
 
 
@@ -49,18 +49,15 @@ class WaitsMixin:
             self.assertNotEqual(status, 'running')
 
 
-class FallbackOffBase(WaitsMixin, DispatchBase):
+class NoScannerBase(WaitsMixin, DispatchBase):
     def setUp(self):
         super().setUp()
-        patcher = mock.patch.dict(os.environ, {ENV: 'none'}, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         patcher = mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True)  # example.test never resolves in a sandbox
         patcher.start()
         self.addCleanup(patcher.stop)
 
 
-class NmapFastTests(FallbackOffBase):
+class NmapFastTests(NoScannerBase):
     def run_fast(self, **kwargs):
         return port_stage.run_for_scan(self.scan.id, **kwargs)
 
@@ -110,14 +107,14 @@ class NmapFastTests(FallbackOffBase):
         # nmap and naabu are in NEVER_LOCAL: CVENGINE_LOCAL_FALLBACK naming them (or ``all``) changes nothing
         for value in ('nmap,naabu', 'all'):
             with mock.patch.dict(os.environ, {ENV: value}):
-                self.assertFalse(dispatch.fallback_allowed('nmap'))
-                self.assertFalse(dispatch.fallback_allowed('naabu'))
+                self.assertIn('nmap', dispatch.NEVER_LOCAL)
+                self.assertIn('naabu', dispatch.NEVER_LOCAL)
                 result = self.run_fast()
                 self.assertIn('no scanner could take this work', result['skipped'])
         self.assertNothingRecorded('nmap-fast', 'naabu')
 
 
-class NaabuDiscoverTests(FallbackOffBase):
+class NaabuDiscoverTests(NoScannerBase):
     def test_a_runner_no_scanner_could_serve_returns_none_without_a_failed_row(self):
         self.make_sentinel(['naabu'])  # live, but nobody claims the task in time
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
@@ -143,7 +140,7 @@ class NaabuDiscoverTests(FallbackOffBase):
         self.assertEqual(list(ServiceRun.objects.filter(service=port_stage.SERVICE).values_list('status', flat=True)), ['failed'])
 
 
-class NucleiStageTests(FallbackOffBase):
+class NucleiStageTests(NoScannerBase):
     def test_light_pass_waits_and_runs_no_local_nuclei(self):
         assert_ran_nowhere_locally(self, 'nuclei_light')  # no local path at all: the guard fails the test if anything here runs the tool
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
@@ -213,7 +210,7 @@ class NucleiStageTests(FallbackOffBase):
         self.assertTrue(BackgroundCursor.objects.filter(lane='weekly_nuclei').exists())
 
 
-class PipelineStageTests(FallbackOffBase):
+class PipelineStageTests(NoScannerBase):
     """No Sentinel is live at all, so the wrappers themselves raise before any stage body runs: the pipeline's own stage rows are not failed."""
 
     def test_the_nmap_nuclei_and_wpscan_stages_are_not_marked_failed(self):
@@ -244,8 +241,7 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
         self.reach_the_stage_handler()
-        for patcher in (mock.patch.dict(os.environ, {ENV: 'none'}, clear=False), mock.patch('reNgine.resources.global_pause_requested', return_value=False)):
-            patcher.start()
+        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
         self.addCleanup(mock.patch.stopall)
 
     def test_the_sweep_waits_names_the_scanner_and_records_nothing(self):
@@ -267,7 +263,6 @@ class UdpTests(WaitsMixin, UdpBase):
     def setUp(self):
         super().setUp()
         self.reach_the_stage_handler()
-        mock.patch.dict(os.environ, {ENV: 'none'}, clear=False).start()
 
     def test_the_sweep_waits_names_the_scanner_and_runs_no_local_nmap(self):
         ip = self.ip(IP, name='edge.udp.test')
@@ -294,7 +289,6 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         self.scan_obj = self.scan(names=('www.rt.test', 'plain.rt.test'))
         self.wp = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
         self.wp.technologies.add(Technology.objects.create(name='WordPress'))
-        mock.patch.dict(os.environ, {ENV: 'none'}, clear=False).start()
         self.addCleanup(mock.patch.stopall)
 
     def go(self, **kw):

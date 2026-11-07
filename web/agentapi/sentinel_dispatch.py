@@ -1,30 +1,18 @@
-"""Dispatch-or-local: the one branch the scan pipeline takes before it runs nmap, naabu, or testssl.sh itself, and the way every template pass
-(``nuclei_light``, ``nuclei_targeted``, ``nuclei_deep``, ``nuclei_validate``) reaches a scanner: those kinds have no local path at all
-(``NEVER_LOCAL``), so with no Sentinel able to take the work the stage waits (``ScannerUnavailable``) and its targets stay due.
+"""Dispatch: the one branch the scan pipeline takes before a stage needs a scanner. Every kind has its work done by a Sentinel and nothing else (a kind
+never runs on this server, ``NEVER_LOCAL``; ``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4), so with no Sentinel able to take the work, or none that finished
+it, the stage waits (``resources.ScannerUnavailable``) and its targets stay due.
 
-For each of the stages this phase covers, the pipeline asks here first: is there a live, eligible Sentinel for this
-project with free capacity and the right capability? If not (the common case today: a project with no Sentinels
-registered), every function below is a no-op and returns at once, so the pipeline runs exactly as it did before this
-module existed - that is the single most important property here, and it is what the regression test in
-``tests.test_sentinel_dispatch`` proves. If there is one, a ``SentinelTask`` is created and this module waits for it to
-finish, under two different budgets: a short claim timeout (``_claim_timeout``, default 8s) for any Sentinel to even pick
-the task up, and only once one has, the much longer completion timeout (``_dispatch_timeout``, default 90s) for it to
-finish the work. A Sentinel with a free slot almost always claims it within its own poll interval, so one that is quiet or
-offline costs a scan stage single-digit seconds, not the full completion budget, before falling back locally - while a
-Sentinel that did pick the work up keeps the full budget (counted from when it claimed the task, not from when it was
-created) to actually run it. **A Sentinel at its concurrency limit is not a missing one**: when every live, eligible Sentinel
-is busy the task waits in the queue for a slot, under its own wait budget (``_queue_timeout``) separate from both, and the stage
-falls back only when that runs out or the last live Sentinel goes away. On success its typed, clipped result is parsed into the *same shape* the local tool's own output already
-takes and handed to the *same persistence function* local execution uses (``cveFeed.port_inventory.persist_inventory``,
-``cveFeed.port_stage.persist_open_ports``, or - for the template passes - a reconstructed result line fed through the
-``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel, the caller falls
-back to running the tool locally where the kind may (``CVENGINE_LOCAL_FALLBACK``), and otherwise waits. The port kinds (nmap, naabu, nmap_udp,
-nmap_full, nmap_verify, path_probe) have no local path at all (``NEVER_LOCAL``).
+For each stage the pipeline asks here: is there a live, eligible Sentinel for this project with free capacity and the right capability? If so a
+``SentinelTask`` is created and this module waits for it to finish, under three budgets: a short claim timeout (``_claim_timeout``) for any Sentinel to
+pick the task up, a queue budget (``_queue_timeout``) while every live, eligible Sentinel is at its concurrency limit (a busy Sentinel is not a missing
+one), and, once one has claimed it, the much longer completion timeout (``_dispatch_timeout``) counted from the claim. On success its typed, clipped
+result is parsed into the shape the persistence functions read (``cveFeed.port_inventory.persist_inventory``, ``cveFeed.port_stage.persist_open_ports``,
+or a reconstructed result line fed through the ``cveFeed.nuclei_scan._run_nuclei`` loop via its own ``stream`` seam). On timeout, failure or no Sentinel
+the stage raises ``ScannerUnavailable`` and the targets stay due; nothing is recorded as done.
 
 A stage that splits into several chunk tasks (nmap and naabu: 64 addresses each, the template passes: 64 targets each) sends them side by side
 through ``dispatch_many``: a bounded window of chunk tasks, created up front and waited for in one poll loop, refilled as chunks finish
-(``CVENGINE_STAGE_PARALLEL``, default 4; ``1`` is the serial loop of before). Each chunk is still one task for one Sentinel, with the
-single-task wait above and its own fallback to local execution where the kind may.
+(``CVENGINE_STAGE_PARALLEL``, default 4; ``1`` is the serial loop). Each chunk is one task for one Sentinel, with the single-task wait above.
 """
 import contextlib
 import ipaddress
@@ -39,7 +27,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 
 
 # The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
-# doing the work, and a slow tool (a template pass over ten hosts, a full TLS audit) must not be run a second time locally because a short fixed
+# doing the work, and a slow tool (a template pass over ten hosts, a full TLS audit) must not be given up on because a short fixed
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
@@ -58,8 +46,8 @@ REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out whi
 
 logger = logging.getLogger(__name__)
 
-LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
-# kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1); one entry per line
+# ``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4: every kind below runs on a Sentinel only (``discover``, the internal ranges, is Sentinel-only by design).
+# kinds with no local path at all: they wait for a scanner (docs/SECRETS-PLAN.md 6.1); one entry per line. Every contract kind but ``discover`` is here
 NEVER_LOCAL = (
     'secrets_scan',
     'wpscan',
@@ -96,14 +84,6 @@ NEVER_LOCAL = (
     'subdir_probe',  # the subdirectory application sweep (cveFeed.subdir_apps): a Sentinel's requests
     'supplier_check',  # the supplier posture checks (cveFeed.supplier_scan): a Sentinel's requests, lookups and handshakes
 )
-_WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
-# The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
-# here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
-# that no scanner runs would only wait. ``openvas`` (only a Sentinel that runs its own GVM stack takes it, and the built-in scanner has none), ``discover`` (internal
-# ranges, Sentinel-only already) and ``waf`` (no stage dispatches it yet) are not.
-BUILTIN_SCANNER_KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan')
-
-
 def builtin_scanner_enrolled():
     """Whether the built-in scanner is switched on and has enrolled at least once (one indexed query). Until it has, nothing waits for it: a host whose
     scanner image could not be pulled, or that has no App Admin yet, goes on scanning here as it always did."""
@@ -117,102 +97,37 @@ def builtin_scanner_enrolled():
         return False
 
 
-def default_fallback_kinds():
-    """The kinds that may run here when ``CVENGINE_LOCAL_FALLBACK`` is unset: every kind but the built-in scanner's (``BUILTIN_SCANNER_KINDS``) once the
-    built-in scanner is on and has enrolled, so every scan of those goes through a scanner and a scanner restart only makes the work wait; every kind
-    while it is off or has never enrolled."""
-    from agentapi.models import SentinelTask
-    if builtin_scanner_enrolled():
-        return {k for k in SentinelTask.KINDS if k not in BUILTIN_SCANNER_KINDS}
-    return set(SentinelTask.KINDS)
-
-
-def _parse_local_fallback():
-    """``(allowed, unknown)``: the kinds ``CVENGINE_LOCAL_FALLBACK`` lets run here, and the names in it that are no kind. An unknown name is ignored (a
-    typo reads as ``none`` for that kind), but never silently: it is warned about once per process and shown in the scanner status. Unset, it is
-    ``default_fallback_kinds()``; ``all`` is the escape hatch that lets every kind run here again."""
-    from agentapi.models import SentinelTask
-    raw = os.environ.get(LOCAL_FALLBACK_ENV, '').strip().lower()
-    if raw == '':
-        return default_fallback_kinds() - set(NEVER_LOCAL), []
-    if raw in ('all', '*'):
-        return set(SentinelTask.KINDS) - set(NEVER_LOCAL), []
-    if raw == 'none':
-        return set(), []
-    names = [k.strip() for k in raw.split(',') if k.strip()]
-    unknown = [k for k in dict.fromkeys(names) if k not in SentinelTask.KINDS]
-    if unknown and raw not in _WARNED_FALLBACK:
-        _WARNED_FALLBACK.add(raw)
-        logger.warning('%s names kinds that do not exist and are ignored: %s (valid: %s)', LOCAL_FALLBACK_ENV, ', '.join(unknown),
-                       ', '.join(SentinelTask.KINDS))
-    return {k for k in names if k in SentinelTask.KINDS and k not in NEVER_LOCAL}, unknown
-
-
-def local_fallback_kinds():
-    """The task kinds that may still run on this server when no Sentinel can take them: ``CVENGINE_LOCAL_FALLBACK`` is unset (every kind but the built-in
-    scanner's once it has enrolled, ``default_fallback_kinds``), ``all`` (every kind, how 1.3 worked), ``none``, or a comma list of kinds. This is the switch of the move to one scanner (docs/SCANNER-ARCHITECTURE.md): a kind
-    taken off the list is never run here again, and a stage that needs it waits for a scanner (``resources.ScannerUnavailable``) instead. A name in
-    the list that is no kind is ignored (see ``unknown_fallback_kinds``)."""
-    return _parse_local_fallback()[0]
-
-
-def unknown_fallback_kinds():
-    """The names in ``CVENGINE_LOCAL_FALLBACK`` that are not task kinds (in the order written, each once): empty when it is unset, ``all`` or ``none``."""
-    return _parse_local_fallback()[1]
-
-
-def fallback_allowed(kind):
-    return kind in local_fallback_kinds()
-
-
 STAY_DUE = 'the targets stay due until a scanner can take the work'
 
 
 def outcome_text(kind):
-    """How a task that nobody finished ends, in words that are true for the kind's policy: the stage ran it here when ``kind`` may fall back,
-    or (it never ran here) the targets stay due until a scanner can take the work."""
-    return 'the stage fell back to local execution' if fallback_allowed(kind) else STAY_DUE
+    """How a task that nobody finished ends: it never runs here, the targets stay due until a scanner can take the work."""
+    return STAY_DUE
 
 
-def _no_local(kind, why, reason='no_scanner', project=None, recorded=None):
-    """Where a stage would run ``kind`` here because no Sentinel took it: ``ScannerUnavailable`` when it may not; when it may, nothing happens to the
-    work except one row of fallback telemetry (``scanner_fallback.record``: kind, project, ``reason``; it cannot raise) and the caller runs it here.
-    This is the one place the decision "no Sentinel took it, the local run is allowed" is made.
-
-    Inside a ``StageRun`` the stage code runs again on every pass (``agentapi.stage_runs``), so a decision is recorded once: ``recorded`` is True for
-    one an earlier pass already recorded (a task's own, ``_Dispatch.no_local``), and a decision with no task is matched to the earlier passes by its
-    place in the pass (``Pass.fallback_seen``)."""
-    if not fallback_allowed(kind):
-        from cveFeed import scanner_wait
-        from reNgine.resources import ScannerUnavailable
-        scanner_wait.noted(kind)  # the scan running in this context waited for ``kind``: its hosts are queued again for when a scanner is back
-        raise ScannerUnavailable(kind, why)
-    if recorded:
-        return
-    if recorded is None:
-        from agentapi import stage_runs
-        run = stage_runs.current()
-        if run is not None and run.fallback_seen((kind, reason)):
-            return
-    from agentapi import scanner_fallback
-    scanner_fallback.record(kind, project, reason)
+def _no_local(kind, why):
+    """Where a stage found no Sentinel that took (or finished) ``kind``: ``ScannerUnavailable``, always. The kind never runs on this server, so the targets
+    stay due and nothing is recorded as done. The scan running in this context is told it waited for ``kind`` (``scanner_wait.noted``): its hosts are
+    queued again for when a scanner is back."""
+    from cveFeed import scanner_wait
+    from reNgine.resources import ScannerUnavailable
+    scanner_wait.noted(kind)
+    raise ScannerUnavailable(kind, why)
 
 
 def _no_scanner(kind, project, capacity=None):
     """``_no_local`` for a stage that found no live, eligible Sentinel for ``kind`` in ``project``, saying why: ``OpenVAS is not enabled on any live Sentinel
     (off on CVEngine Scanner; Remote-1 has it but is offline)`` rather than a bare "no Sentinel is live". ``capacity`` is the ``capacity_state(..., why=True)``
-    the caller already has. The telemetry reason is ``disabled_everywhere`` when a live Sentinel has the kind and an administrator's (or its machine's)
-    policy keeps it off every one, and ``no_scanner`` for every other reason (nothing live, nothing ever declared it)."""
+    the caller already has. Always raises ``ScannerUnavailable``."""
     from agentapi import sentinel_broker
     if capacity is None or 'reason' not in capacity:
         capacity = sentinel_broker.capacity_state(project, kind, why=True)
-    reason = 'disabled_everywhere' if capacity.get('reason') == 'disabled' else 'no_scanner'
-    _no_local(kind, capacity.get('message') or 'no Sentinel is live for this project', reason, project)
+    _no_local(kind, capacity.get('message') or 'no Sentinel is live for this project')
 
 
 def _dispatch_timeout(kind=None, targets=0):
-    """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before falling back to running
-    the tool locally: ``COMPLETION_CEILING`` for the kind, plus ``PER_TARGET_SECONDS`` for each target beyond the first (so a chunk of many
+    """Seconds a stage waits for a dispatched Sentinel task to *finish* once a Sentinel has claimed it, before giving the work up (the
+    targets stay due): ``COMPLETION_CEILING`` for the kind, plus ``PER_TARGET_SECONDS`` for each target beyond the first (so a chunk of many
     addresses is not held to the budget of one), and for OpenVAS the instance's own ``CVENGINE_OPENVAS_MAX_HOURS``.
     ``CVENGINE_SENTINEL_DISPATCH_TIMEOUT``, when set, replaces every ceiling with that one number (an operator who wants scans never to wait
     long, and the tests)."""
@@ -231,7 +146,7 @@ def _dispatch_timeout(kind=None, targets=0):
 
 def _queue_timeout(kind=None):
     """CVENGINE_SENTINEL_QUEUE_TIMEOUT: seconds a stage waits for a free slot when every live, eligible Sentinel is at its concurrency limit (default
-    300), before the work runs locally instead. It starts when the task is created and is separate from the claim budget (a Sentinel with a free
+    300), before the work is given up (the targets stay due). It starts when the task is created and is separate from the claim budget (a Sentinel with a free
     slot) and the completion budget (counted from the claim)."""
     try:
         return max(1, int(os.environ.get('CVENGINE_SENTINEL_QUEUE_TIMEOUT', str(DEFAULT_QUEUE_SECONDS))))
@@ -253,7 +168,7 @@ def _run_lease_seconds():
 
 def _claim_timeout():
     """CVENGINE_SENTINEL_CLAIM_TIMEOUT: seconds a stage waits for *any* Sentinel to even claim a dispatched task before
-    giving up on it and falling back to local execution, separate from (and much shorter than) the full completion
+    giving up on it (the targets stay due), separate from (and much shorter than) the full completion
     timeout above. A Sentinel that polls ``next_task`` at all almost always claims new work within its own poll
     interval, so a task that is still ``queued`` after this short window is one no eligible Sentinel is going to pick
     up right now (it went offline, hit its concurrency cap, or was never really eligible) - there is no reason to make
@@ -269,22 +184,6 @@ def _claim_timeout():
 def any_scanner_for(project, kind, internal=False):
     from agentapi import sentinel_broker
     return sentinel_broker.any_scanner_for(project, kind, internal)
-
-
-def offline_fallback(project, kind, internal=False):
-    """Whether a stage of ``kind`` runs here although ``project`` has a Sentinel for it, because every such Sentinel is offline (called once
-    no live one was found). Such a run is a local fallback like a task nobody claimed: it is counted for the warning
-    (``cveFeed.local_egress.note_fallback``). A project that never had a Sentinel for ``kind`` runs here as its normal mode: never
-    counted. Never raises."""
-    from agentapi import sentinel_broker
-    try:
-        configured = bool(sentinel_broker.eligible_sentinels(project, kind, internal=internal))
-    except Exception:  # noqa: BLE001 - bookkeeping never changes where a stage runs
-        return False
-    if configured:
-        from cveFeed.local_egress import note_fallback
-        note_fallback(kind, getattr(project, 'pk', project))
-    return configured
 
 
 def _label(host, ips):
@@ -419,19 +318,8 @@ class _Dispatch:
         self.siblings, self.stop_check = siblings, bool(state.get('stop_check'))
         return self
 
-    def _fell_back(self):
-        """Count one task that falls back to local execution (``cveFeed.local_egress.note_fallback``: the warning when it keeps happening). Nothing
-        is counted for internal work (it never had a local run) or for a kind ``CVENGINE_LOCAL_FALLBACK`` keeps off this server (it stays due)."""
-        if self.internal or not fallback_allowed(self.kind):
-            return
-        try:
-            from cveFeed.local_egress import note_fallback
-            note_fallback(self.kind, getattr(self.project, 'pk', self.project))
-        except Exception:  # noqa: BLE001 - bookkeeping never changes the dispatch
-            pass
-
     def step(self, now, no_sentinel_left=False):
-        """Act on the task as it was just read: start the completion clock once it is claimed, and give it up (expire it, so the stage falls back)
+        """Act on the task as it was just read: start the completion clock once it is claimed, and give it up (expire it, so the stage waits and the targets stay due)
         when the wait for a Sentinel or for its report ran out. Returns True once the task is over. ``no_sentinel_left`` is set by the loop
         after a reap that found no live, eligible Sentinel any more."""
         from agentapi import sentinel_broker
@@ -441,7 +329,6 @@ class _Dispatch:
         if no_sentinel_left and task.status == 'queued':
             self.never_claimed = self.vanished = True  # the last live Sentinel went away while the task waited: nothing will take it
             sentinel_broker.expire(task, f'no live Sentinel is left to take the task; {outcome_text(self.kind)}')
-            self._fell_back()
             return True
         if task.status in ('claimed', 'running') and self.run_deadline is None:
             self.run_deadline = now + self.timeout
@@ -454,16 +341,14 @@ class _Dispatch:
                 return False
             hold = self._sibling_hold()
             if hold:
-                self.claim_deadline = now + hold  # waiting behind its own stage's chunks, which are being worked: not a reason to run it here
+                self.claim_deadline = now + hold  # waiting behind its own stage's chunks, which are being worked: not a reason to give it up
                 return False
             self.never_claimed = True
             sentinel_broker.expire(task, (f'no Sentinel slot freed up in time; {outcome_text(self.kind)}' if self.busy
                                           else f'no Sentinel claimed the task in time; {outcome_text(self.kind)}'))
-            self._fell_back()
             return True
         if self.run_deadline is not None and now >= self.run_deadline:
             sentinel_broker.expire(task, f'the dispatch wait timed out; {outcome_text(self.kind)}')
-            self._fell_back()
             return True
         return False
 
@@ -498,7 +383,7 @@ class _Dispatch:
             activity.settle(self.entry, 'failed', message=(f'Sentinel {sentinel} reported {kind} failed for {label}: {reason}' if sentinel
                             else f'A Sentinel reported {kind} failed for {label}: {reason}'), trace_id=task.trace_id)
         else:  # no Sentinel took it, or one did and never reported back: the ending is true for the kind's policy (it ran here, or the targets stay due)
-            ending = 'it ran locally instead' if fallback_allowed(kind) else STAY_DUE
+            ending = STAY_DUE
             if self.never_claimed:
                 activity.settle(self.entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; {ending}' if busy
                                                                 else f'No Sentinel picked up {kind} work for {label} in time; {ending}'),
@@ -507,30 +392,14 @@ class _Dispatch:
                 activity.settle(self.entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; {ending}',
                                 trace_id=task.trace_id)
 
-    def fallback_reason(self):
-        """The fallback telemetry reason (``scanner_fallback.REASONS``) for a task that is over and did not come back done."""
-        if self.task.status == 'failed':
-            return 'failed_then_local'
-        if self.vanished:
-            return 'no_scanner'
-        if self.never_claimed:
-            return 'slot_busy' if self.busy else 'not_claimed_in_time'
-        return 'completion_timeout'
-
     def no_local(self):
-        """``_no_local`` for this task once it is over and did not come back done (nothing for one that did, or for internal work, which never had a
-        local run to fall back to): ``ScannerUnavailable`` when the kind may not run here, one row of fallback telemetry when it may."""
+        """What a task that is over and did not come back done means for the stage: ``ScannerUnavailable`` (nothing for one that did, or for internal work,
+        which never had a local run), and the targets stay due."""
         task = self.task
         if task.status == 'done' or self.internal:
             return
-        from agentapi import stage_runs
-        run = stage_runs.current()
-        recorded = run.counted(self) if run is not None else None
         _no_local(self.kind, f'the {"queue" if self.never_claimed else "Sentinel"} did not return a result in time' if task.status != 'failed'
-                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}', self.fallback_reason(), self.project,
-                  recorded=recorded)
-        if run is not None:
-            run.mark_counted(self)
+                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}')
 
     def cancel(self, reason):
         """Hand the task back unfinished (the stage was stopped, or its consumer went away): expired, so it is neither claimed nor left queued."""
@@ -564,7 +433,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
                      internal=False, outcome=None, secret_ref=None):
     """Create one SentinelTask for ``kind`` and wait for it, or return ``None`` at once with no side effect when no live,
     eligible Sentinel exists for ``project`` right now. Returns the task's typed ``result`` dict on success; ``None`` on
-    timeout, failure, or no Sentinel - in every one of those cases the caller runs the tool locally instead. The hand-off
+    timeout, failure, or no Sentinel: for work that is not internal ``ScannerUnavailable`` is raised instead (the kind never runs here, the targets stay
+    due); ``None`` is only for internal work, whose caller fails it. The hand-off
     and the check-in each get one ``run_check`` activity line (same kind every other scan-stage line already uses, so
     both the Live page and the Activity page show them with no changes of their own), so it is visible, in one place,
     whenever work actually left this server for a Sentinel and whether it came back.
@@ -592,7 +462,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     if capacity['state'] == 'none':
         if outcome is not None:
             outcome['no_scanner'] = True
-        if not internal:  # an internal task never had a local run to fall back to: its caller already fails it
+        if not internal:  # an internal task has no stage that waits: its caller already fails it
             _no_scanner(kind, project, capacity=capacity)
         return None
     work = _Dispatch(project, kind, target, host, ips, scan, timeout, created_by, priority, internal, capacity, secret_ref=secret_ref)
@@ -652,12 +522,10 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     does not take every slot), and ``CVENGINE_STAGE_PARALLEL`` (default 4, saved on Settings, configMaxxing: read ONCE when the stage starts, so a change applies from the next stage and a stage in flight keeps the ceiling it began with). The free slots and the other scans are read again on every refill, so
     a slot another stage took is not counted on; the instance's slot total is read once, when the stage starts. When no live Sentinel is left, or one never claims a
     task, no more chunks are sent: that chunk and every chunk not yet sent are yielded as ``None`` after the in-flight ones finish. A chunk
-    that failed or expired after a Sentinel took it falls back alone, and the rest carry on.
+    that failed or expired after a Sentinel took it stays due alone, and the rest carry on.
 
-    Every chunk yielded as ``None`` for work that is not internal has been through ``_no_local`` once, as a single ``dispatch_or_none`` does: one row
-    of fallback telemetry when the kind may run here (a chunk a Sentinel did not finish gives its own reason, a chunk never sent because the stage
-    stopped sending gives ``over_chunk``, or ``no_scanner`` when no live Sentinel was left), and ``ScannerUnavailable`` when it may not. That
-    exception is raised once the chunks in flight are in (their results are yielded first), and no more chunks are sent after it. A chunk
+    A chunk for work that is not internal that no Sentinel did (not finished, or never sent because the stage stopped sending) ends in ``_no_local``, as a
+    single ``dispatch_or_none`` does: ``ScannerUnavailable``. That exception is raised once the chunks in flight are in (their results are yielded first), and no more chunks are sent after it. A chunk
     ``prepare`` turned down was never offered to a Sentinel: the caller decides what becomes of it.
 
     With ``CVENGINE_STAGE_PARALLEL=1`` (and for a single chunk) this is the serial loop of before: one ``dispatch_or_none`` per chunk, in order;
@@ -775,8 +643,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
 def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome, secret_ref=None):
     """``dispatch_or_none`` inside a StageRun. The first pass that asks creates the task and stops the pass (``Suspend``); the worker is free while
     the Sentinel works and ``stage_runs.drive`` keeps the claim, queue and completion budgets. The pass that runs once the task is over gets here
-    again and ends it exactly as the blocking wait did: the activity line closed, the target redacted, ``no_local`` (``ScannerUnavailable`` or one
-    fallback row) and the result."""
+    again and ends it exactly as the blocking wait did: the activity line closed, the target redacted, ``no_local`` (``ScannerUnavailable``) and the result."""
     from agentapi import sentinel_broker, stage_runs
     from agentapi.models import SentinelTask
     key = stage_runs.task_key(kind, target, host, ips, internal, secret_ref=secret_ref)
@@ -814,7 +681,7 @@ def _group_id(kind, chunks):
 
 def _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none, labeler):
     """``dispatch_many`` inside a StageRun: the same window (the free slots, the stage's share, ``CVENGINE_STAGE_PARALLEL``), the same stop when a
-    chunk goes unclaimed or the last Sentinel leaves, and the same fallback decisions, but nothing is yielded until every chunk is over: each pass
+    chunk goes unclaimed or the last Sentinel leaves, and the same ``ScannerUnavailable`` decisions, but nothing is yielded until every chunk is over: each pass
     sends what the window has room for and stops, and the pass after the last chunk ended yields them all, in order. So a stage never handles a
     chunk's result twice, however many passes its chunks took. ``CVENGINE_STAGE_PARALLEL=1`` keeps one chunk in flight and, with ``stop_on_none``,
     stops at the first chunk nobody did, as the serial loop does."""
@@ -847,7 +714,7 @@ def _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, 
             run.settled(d)
         if d.never_claimed:
             halted, none_halt = True, none_halt or d.vanished
-        if d.task.status != 'done' and not internal and not fallback_allowed(kind):
+        if d.task.status != 'done' and not internal:
             halted = True  # its no_local raises: nothing more is sent
         if serial and stop_on_none and d.task.status != 'done':
             halted, none_halt = True, none_halt or d.vanished
@@ -946,12 +813,12 @@ def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
 
 
 def _unsent(project, kind, none_left):
-    """``_no_local`` for a chunk of a stage that was never sent to a Sentinel because the stage stopped sending: ``no_scanner`` (with its reason)
-    when no live, eligible Sentinel was left, ``over_chunk`` when an earlier chunk of the same stage went unclaimed."""
+    """``_no_local`` for a chunk of a stage that was never sent to a Sentinel because the stage stopped sending: the reason
+    of the scanner state when no live, eligible Sentinel was left, or that an earlier chunk of the same stage went unclaimed."""
     if none_left:
         _no_scanner(kind, project)
     else:
-        _no_local(kind, 'an earlier part of the stage found no Sentinel to take it, so this part was not sent', 'over_chunk', project)
+        _no_local(kind, 'an earlier part of the stage found no Sentinel to take it, so this part was not sent')
 
 
 def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by, priority, internal, stop_on_none):
@@ -1021,7 +888,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
     missing = [ip for ip in targets if ip not in reported]
     if missing:  # a Sentinel finished the chunk but did not report the host: it stays due
         try:
-            _no_local('nmap', f'a Sentinel finished {len(missing)} address(es) without reporting the host', 'partial_result', project)
+            _no_local('nmap', f'a Sentinel finished {len(missing)} address(es) without reporting the host')
         except ScannerUnavailable as exc:
             exc.done = [ip for ip in targets if ip in reported]
             raise
@@ -1059,7 +926,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     from cveFeed.port_inventory import parse_xml
     host = next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
     if host is None:
-        _no_local('nmap_udp', 'a Sentinel scanned the address but its report named no host for it', 'partial_result', project)
+        _no_local('nmap_udp', 'a Sentinel scanned the address but its report named no host for it')
     return host
 
 
@@ -1345,25 +1212,21 @@ def _report_grace():
 # --- the kinds of contract version 3: one task per item, several at once, through dispatch_many -----------------------------------------------
 #
 # waf, nmap_full, nmap_verify, node2shell, rdp_shot, db_probe, path_probe and nuclei_validate (docs/SCANNER-ARCHITECTURE.md, section B). Each stage
-# asks ``scanner_or_local`` first: True sends its items with ``dispatch_each``; False is the local run of before (no Sentinel was ever set up for the
-# kind, or every one is offline and the kind may run here, counted as a fallback); ``ScannerUnavailable`` when the kind may not run here, which the
-# stage turns into "waiting" with its targets left due. An item a Sentinel did not finish comes back as ``None``: the stage runs it here when the kind
-# may, and ``dispatch_each`` raises ``ScannerUnavailable`` once the others are in when it may not.
+# asks ``scanner_or_local`` first: True sends its items with ``dispatch_each``; ``ScannerUnavailable`` when no scanner can take the kind, which the
+# stage turns into "waiting" with its targets left due. An item a Sentinel did not finish stays due: ``dispatch_each`` raises ``ScannerUnavailable`` once
+# the others are in.
 
 def scanner_or_local(project, kind):
-    """Whether ``kind`` work of ``project`` goes to a Sentinel (True) or runs here (False). Raises ``ScannerUnavailable`` when no live Sentinel can take
-    it and the kind may not run here (``CVENGINE_LOCAL_FALLBACK``)."""
+    """True when a live Sentinel can take ``kind`` work of ``project``; ``ScannerUnavailable`` when none can (the kind never runs here)."""
     if any_scanner_for(project, kind):
         return True
     _no_scanner(kind, project)
-    offline_fallback(project, kind)
-    return False
 
 
 def dispatch_each(project, kind, items, target_of, scan=None, label_of=None, ips_of=None):
     """Send one ``kind`` task per entry of ``items`` (``target_of(item)`` is its target, ``None`` to keep it here) and yield ``(index, result)`` as each
-    finishes: the task's typed result, or ``None`` when no Sentinel did it (the caller runs it here: it has been through ``_no_local`` once, as for any
-    chunk). Raises ``ScannerUnavailable`` after the finished ones are yielded when one may not run here."""
+    finishes: the task's typed result, or ``None`` for an item ``target_of`` kept
+    here (no task was made). Raises ``ScannerUnavailable`` after the finished ones are yielded when a Sentinel did not finish one."""
     items = list(items)
     if not items:
         return
@@ -1417,14 +1280,11 @@ def nmap_hosts(xml, address):
 
 
 def _scanner_first(project, kind):
-    """``scanner_or_local`` for work that has a project only when its address is attached to one: no project means here when the kind may run here,
-    else ``ScannerUnavailable``."""
+    """``scanner_or_local`` for work that has a project only when its address is attached to one: no project means ``ScannerUnavailable``."""
     if project is not None:
         return scanner_or_local(project, kind)
-    if not fallback_allowed(kind):
-        from reNgine.resources import ScannerUnavailable
-        raise ScannerUnavailable(kind, 'the address is attached to no project a scanner could take it for')
-    return False
+    from reNgine.resources import ScannerUnavailable
+    raise ScannerUnavailable(kind, 'the address is attached to no project a scanner could take it for')
 
 
 def try_nmap_full(project, address, scan=None):

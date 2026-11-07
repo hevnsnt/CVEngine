@@ -625,7 +625,7 @@ def _stage(scan, title, name, run, failed=lambda result: bool(result.get('error'
 
 
 def _waiting_for_scanner(scan, what, exc, result):
-    """A stage no scanner could take, and whose kind may not run on this server (``CVENGINE_LOCAL_FALLBACK``): nothing ran, nothing is recorded in
+    """A stage no scanner could take, and whose kind never runs on this server: nothing ran, nothing is recorded in
     the ledger (the targets stay due) and the stage is not a failure. ``result`` (no ``error``) is what the stage reports, plus why it did not run."""
     from cveFeed import activity
     message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'

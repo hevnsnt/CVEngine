@@ -34,7 +34,8 @@ class EnvExampleTests(unittest.TestCase):
         for key in SCANNER_KEYS:
             self.assertNotIn(key, active(text), f'{key} must not be active in .env.example')
         self.assertTrue(commented(text, 'CVENGINE_BUILTIN_SCANNER'))
-        self.assertTrue(commented(text, 'CVENGINE_LOCAL_FALLBACK'))
+        self.assertFalse(commented(text, 'CVENGINE_LOCAL_FALLBACK'))  # ignored since 1.4: no example to copy, only a line saying so
+        self.assertIn('CVENGINE_LOCAL_FALLBACK is ignored since 1.4', text)
         self.assertTrue(commented(text, 'SCANNER_MEM_LIMIT'))
         self.assertNotIn('COMPOSE_PROFILES=builtin-scanner', text)
 

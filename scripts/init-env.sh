@@ -94,7 +94,7 @@ fill_domain() {
 }
 
 # The built-in scanner is on by default and needs nothing in .env. CVENGINE_ENABLE_BUILTIN_SCANNER=0 (install.sh --no-builtin-scanner) writes
-# CVENGINE_BUILTIN_SCANNER=0 to leave it off; an owner's own value is never changed. CVENGINE_LOCAL_FALLBACK is never written here.
+# CVENGINE_BUILTIN_SCANNER=0 to leave it off; an owner's own value is never changed.
 disable_builtin_scanner() {
   grep -qE '^CVENGINE_BUILTIN_SCANNER=' .env || { set_value CVENGINE_BUILTIN_SCANNER 0; echo "Set CVENGINE_BUILTIN_SCANNER=0: the built-in scanner stays off."; }
 }

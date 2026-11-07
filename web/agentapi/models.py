@@ -176,23 +176,6 @@ class SentinelPartial(models.Model):
         return f'partial {self.seq} of sentinel task #{self.task_id}'
 
 
-class ScannerFallback(models.Model):
-    """One time a stage that could have used a Sentinel ran (or was allowed to run) its tool on this server instead
-    (``agentapi.scanner_fallback``): the telemetry that gates deleting a local scan path (docs/SCANNER-ARCHITECTURE.md). It holds
-    the kind, the project and why, never a target name or address. Pruned after ``scanner_fallback.RETENTION_DAYS``."""
-    kind = models.CharField(max_length=20)
-    project = models.ForeignKey('dashboard.Project', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
-    reason = models.CharField(max_length=24)
-    created_at = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        ordering = ['-created_at', '-id']
-        indexes = [models.Index(fields=['kind', 'created_at'], name='scannerfallback_kind_idx')]
-
-    def __str__(self):
-        return f'{self.kind} ran locally ({self.reason})'
-
-
 class StageRun(models.Model):
     """A scan stage (or a sweep) that handed work to Sentinels and gave its Celery worker back while it waits (``agentapi.stage_runs``, docs/
     SCANNER-ARCHITECTURE.md, "Asynchronous stages"). ``kind`` is the registered adapter that continues it, ``stage`` the stage it waits in, ``context``

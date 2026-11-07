@@ -482,8 +482,8 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
 
     Returns ``{'result': <the final result>, 'consumed': n}`` when the task ended ``done``; ``{'result': None, 'consumed': n, 'error': why}`` when it ended
     otherwise after ``n`` > 0 batches (what they carried is real and was stored: the caller keeps it, as for a local run that stopped part way);
-    ``None`` when no Sentinel did any of it, after ``sentinel_dispatch``'s one decision (``_no_local``): one row of fallback telemetry when the kind may
-    run here, so the caller runs it here, and ``ScannerUnavailable`` when it may not, so the caller waits. A stop of the scan, or a global pause,
+    ``ScannerUnavailable`` when no Sentinel did any of it (``sentinel_dispatch._no_local``: the kind never runs here, so the caller waits); ``None``
+    only for internal work, which has no stage that waits. A stop of the scan, or a global pause,
     cancels the task and raises ``ScanAborted``; any error of ``on_partial`` cancels it too and is raised.
 
     The waits are ``sentinel_dispatch``'s (claim, queue), and the run's own: its target's ``timeout_seconds`` plus ``REPORT_GRACE`` from the claim.

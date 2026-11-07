@@ -24,9 +24,9 @@ from cveFeed.models import ProbeObservation, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
 from tests import fake_scanner as fs
-from tests.fake_scanner import FakeScanner, LocalCapable, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
+from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
 from tests.test_route_auth import RouteFixture
-from tests.test_scanner_unavailable_stages import ENV, IP, FallbackOffBase, WaitsMixin
+from tests.test_scanner_unavailable_stages import ENV, IP, NoScannerBase, WaitsMixin
 from tests.test_sentinel_dispatch import UDP_XML, DispatchBase
 from tests.test_tls_audit import CLEAN
 from tests.test_udp_scan import UdpBase
@@ -149,10 +149,13 @@ class HarnessModeTests(NoRealSleep, DispatchBase):
         self.assertIn('nmap exited with status 1', task.error)
         self.assertIn('the Sentinel reported it failed', str(caught.exception))
 
-    def test_fail_where_local_is_allowed_returns_none_so_the_stage_falls_back(self):
-        with LocalFallback('hygiene_check'), FakeScanner(kinds=['hygiene_check'], mode='fail'):
-            self.assertIsNone(self.go('hygiene_check'))
-        self.assertEqual(SentinelTask.objects.get(kind='hygiene_check').status, 'failed')
+    def test_fail_never_returns_none_for_a_stage_to_run_the_work_itself_whatever_the_ignored_variable_says(self):
+        for value in ('hygiene_check', 'all', 'none', None):
+            with self.subTest(value=value), LocalFallback(value), FakeScanner(kinds=['hygiene_check'], mode='fail'):
+                with self.assertRaises(resources.ScannerUnavailable) as caught:
+                    self.go('hygiene_check')
+                self.assertEqual(caught.exception.kind, 'hygiene_check')
+        self.assertEqual(set(SentinelTask.objects.filter(kind='hygiene_check').values_list('status', flat=True)), {'failed'})
 
     def test_the_kinds_with_no_local_path_wait_whatever_the_list_says(self):
         with LocalFallback('all'), FakeScanner(kinds=['nmap'], mode='fail'):
@@ -278,21 +281,31 @@ class HarnessGuardTests(TestCase):
         with self.assertRaises(ValueError):
             assert_ran_nowhere_locally(mock.Mock(), 'nope')
 
-    def test_local_fallback_sets_and_restores_the_environment_variable(self):
+    def test_local_fallback_is_ignored_since_1_4_so_it_changes_no_decision_and_only_forgets_the_cached_state(self):
         before = os.environ.get(ENV)
-        LocalCapable('openvas', 'http_probe').apply(self)  # kinds with no local path would be dropped from the list (NEVER_LOCAL)
-        with LocalFallback('none'):
-            self.assertEqual(dispatch.local_fallback_kinds(), set())
-            with LocalFallback('openvas,hygiene_check'):
-                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'hygiene_check'})
-            with LocalFallback(None):
-                self.assertIn('openvas', dispatch.local_fallback_kinds())
+        for value in ('none', 'openvas,hygiene_check', 'all', None):
+            with LocalFallback(value):
+                self.assertEqual(os.environ.get(ENV), before)  # the helper sets nothing: the variable is read nowhere
+                with self.assertRaises(resources.ScannerUnavailable):
+                    dispatch._no_local('testssl', 'nothing took it')
         self.assertEqual(os.environ.get(ENV), before)
 
         @LocalFallback('none')
         def decorated():
-            return dispatch.fallback_allowed('testssl')
-        self.assertFalse(decorated())
+            return dispatch._no_local('testssl', 'nothing took it')
+        with self.assertRaises(resources.ScannerUnavailable):
+            decorated()
+
+    def test_the_cached_scanner_state_is_dropped_on_the_way_in_and_out(self):
+        from django.core.cache import cache
+
+        from agentapi import scanner_state
+        key = scanner_state.CACHE_KEY + 'default'
+        cache.set(key, {'offline': True, 'kinds': ['nmap'], 'never_seen': []}, 60)
+        with LocalFallback('none'):
+            self.assertIsNone(cache.get(key))
+            cache.set(key, {'offline': True, 'kinds': ['nmap'], 'never_seen': []}, 60)
+        self.assertIsNone(cache.get(key))
 
 
 # ============================================================================== one stage per kind, end to end
@@ -322,7 +335,7 @@ class StageBase(NoRealSleep, WaitsMixin):
         self.assertFalse(ServiceRun.objects.filter(status='failed').exists(), list(ServiceRun.objects.values_list('service', 'asset', 'status')))
 
 
-class NmapServedTests(StageBase, FallbackOffBase):
+class NmapServedTests(StageBase, NoScannerBase):
     """The fast nmap stage: naabu finds the ports and nmap fingerprints them, each one a task for the scanner (``port_stage.run_for_scan`` dispatches both)."""
 
     def test_the_scanner_serves_naabu_and_nmap_and_the_stage_stores_what_they_found(self):
@@ -359,7 +372,7 @@ class NmapServedTests(StageBase, FallbackOffBase):
         self.assertFalse(ledger.fresh('nmap-fast', [IP], self.project.id))
 
 
-class NaabuServedTests(StageBase, FallbackOffBase):
+class NaabuServedTests(StageBase, NoScannerBase):
     """The naabu stage: ``port_stage.discover`` with the runner ``wrap_naabu_runner`` builds (the nmap stage passes the same one)."""
 
     def test_the_scanner_serves_the_fixture_and_discover_stores_the_open_ports(self):
@@ -387,7 +400,7 @@ class NaabuServedTests(StageBase, FallbackOffBase):
         self.assertNamesTheScanner('naabu')
 
 
-class NucleiLightServedTests(StageBase, FallbackOffBase):
+class NucleiLightServedTests(StageBase, NoScannerBase):
     """The technology pass: ``run_light_nuclei`` with ``wrap_nuclei_stream`` (what ``discovery._run_stages`` gives it)."""
 
     def test_the_scanner_serves_a_finding_and_the_pass_stores_the_technology(self):
@@ -418,7 +431,7 @@ class NucleiLightServedTests(StageBase, FallbackOffBase):
         self.assertNamesTheScanner('nuclei_light')
 
 
-class NucleiTargetedServedTests(StageBase, FallbackOffBase):
+class NucleiTargetedServedTests(StageBase, NoScannerBase):
     """The AI-targeted pass: ``run_targeted_nuclei`` with ``wrap_nuclei_stream``, on the fixture ``test_scanner_unavailable_stages`` uses (a WordPress host)."""
 
     def setUp(self):
@@ -458,7 +471,7 @@ class NucleiTargetedServedTests(StageBase, FallbackOffBase):
         self.assertNamesTheScanner('nuclei_targeted')
 
 
-class NucleiDeepServedTests(StageBase, FallbackOffBase):
+class NucleiDeepServedTests(StageBase, NoScannerBase):
     """The weekly deep pass: ``tasks.weekly_deep_nuclei`` wraps its own stream, so only the template library and the target scope are stubbed."""
 
     def setUp(self):
@@ -686,7 +699,7 @@ class WpscanThoroughServedTests(StageBase, RouteFixture, TestCase):
 
 # ============================================================================== the pipeline's own stage rows
 
-class PipelineServedTests(StageBase, FallbackOffBase):
+class PipelineServedTests(StageBase, NoScannerBase):
     """``discovery._run_stages`` with the scanner offline: the stages that wrap their runner before they run (nmap, nuclei, wpscan) are not failed."""
 
     def test_with_the_scanner_offline_no_stage_fails_and_no_tool_runs_here(self):

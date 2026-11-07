@@ -25,9 +25,6 @@ Four parts, all state in Redis (no table, no migration):
   minutes that hold nothing else, and nothing else is granted in the 15 after it; one that has waited ALONE_PRIORITY_AFTER gets priority over
   ordinary grants). Single targets that share a run are admitted least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared
   by every worker. A connection the window has no room for is not made.
-* **The fallback cap** (``admit_fallback``, ``note_fallback``): how many stage runs in each UTC clock hour may fall back from a Sentinel to local
-  execution. A warning in the activity log and a problem in ``get_system_status`` say when tasks keep falling back, and name the Sentinels that
-  are offline or full.
 * **The opt-in skip list** (``CVENGINE_LOCAL_SKIP_PORTS``, default empty): ports this server never connects to at all. The version probes and
   validation checks on them are not run here, and in-process connections to them are refused. A Sentinel still scans them.
 
@@ -46,8 +43,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_WATCH = '25,465,587,23,3389'
 DEFAULT_BUDGETS = '25:400/hour'
 DEFAULT_PORT25_PER_HOUR = 400  # the configMaxxing tunable's default; equal to the 25 entry of DEFAULT_BUDGETS
-DEFAULT_FALLBACK_NMAP_PER_HOUR = 30
-DEFAULT_FALLBACK_NAABU_PER_HOUR = 10
 HOUR = 3600
 KEEP_HOURS = 7 * 24  # the ledger's window
 BUCKET_TTL = (KEEP_HOURS + 2) * HOUR
@@ -58,7 +53,6 @@ BURST_SHARE = 4  # at most a quarter of an hour's budget in any 15 minutes: an h
 ALONE_PRIORITY_AFTER = 60 * 60
 ALONE_WAIT_TTL = 10 * 60
 ALERT_STEPS = (50, 80, 100)  # percent of a port's hourly budget at which the activity log says so, once per hour
-FALLBACK_WARN_AT = 5  # Sentinel tasks falling back to local execution in one hour before the warning and the system problem
 PREFIX = 'cvengine:egress'
 SKIP_REASON = 'CVENGINE_LOCAL_SKIP_PORTS'
 
@@ -146,16 +140,6 @@ def watched_ports(environ=None):
     env = environ if environ is not None else os.environ
     raw = env.get('CVENGINE_LOCAL_WATCH_PORTS')
     return tuple(sorted(parse_ports(DEFAULT_WATCH if raw is None else raw) | set(budgets(environ)) | skipped_ports(env)))
-
-
-def fallback_cap(kind):
-    """Local fallback stage runs per hour for ``kind`` (nmap 30, naabu 10 by default; Settings, configMaxxing); 0 or None: unlimited."""
-    defaults = {'nmap': ('fallback_nmap_per_hour', DEFAULT_FALLBACK_NMAP_PER_HOUR), 'naabu': ('fallback_naabu_per_hour', DEFAULT_FALLBACK_NAABU_PER_HOUR)}
-    if kind not in defaults:
-        return 0
-    from cveFeed import tunables
-    key, default = defaults[kind]
-    return int(tunables.value(key, default))
 
 
 # --- port lists on command lines --------------------------------------------------------------------------------------
@@ -609,117 +593,6 @@ def check_connect(port, kind=None, address=None):
     record_one(port, kind, address=address)
 
 
-# --- the local fallback cap and its warning --------------------------------------------------------------------------------
-
-def admit_fallback(kind, project=None, now=None):
-    """Whether one more stage run of ``kind`` may fall back to local execution this hour (``fallback_cap``; 0 is unlimited). Over the cap the
-    caller defers the work: the addresses stay due for the next run. Logs one line when it defers. Fails open."""
-    cap = fallback_cap(kind)
-    client = _client()
-    if not cap or client is None:
-        return True
-    key = f'{PREFIX}:fallback-runs:{kind}:{_hour(now)}'
-    try:
-        n = client.incr(key)
-        client.expire(key, 2 * HOUR)
-    except Exception:  # noqa: BLE001
-        return True
-    if n <= cap:
-        return True
-    try:
-        client.decr(key)
-    except Exception:  # noqa: BLE001
-        pass
-    from cveFeed import activity
-    activity.log('run_check', f'{kind} did not fall back to local execution: {cap} local fallback runs of {kind} this hour is the cap; '
-                 'the addresses stay due for the next run. Check your Sentinels', project=project)
-    return False
-
-
-def fallback_runs_this_hour(kind, now=None):
-    client = _client()
-    if client is None:
-        return None
-    try:
-        return int(client.get(f'{PREFIX}:fallback-runs:{kind}:{_hour(now)}') or 0)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def note_fallback(kind, project=None, now=None):
-    """Count one Sentinel task that fell back to local execution; at FALLBACK_WARN_AT in an hour, one warning names the Sentinels that are
-    offline or full."""
-    client = _client()
-    if client is None:
-        return
-    minute = int((time.time() if now is None else now) // 60)
-    try:
-        pipe = client.pipeline()
-        pipe.hincrby(FALLBACK_KEY, str(minute), 1)
-        pipe.expire(FALLBACK_KEY, 2 * HOUR)
-        pipe.execute()
-        total = fallbacks_last_hour(now)
-        # once per 60 minutes, however the clock hours fall
-        if total < FALLBACK_WARN_AT or not client.set(f'{PREFIX}:fallback-warned', '1', nx=True, ex=HOUR):
-            return
-    except Exception:  # noqa: BLE001
-        return
-    from cveFeed import activity
-    activity.log('run_check', fallback_warning(total), project=project, status='failed')
-
-
-FALLBACK_KEY = f'{PREFIX}:fallbacks'  # minute -> stages or tasks that fell back to local execution in it
-
-
-def fallbacks_last_hour(now=None):
-    """Stages or Sentinel tasks that fell back to local execution in the last 60 minutes (a sliding window over minute buckets)."""
-    client = _client()
-    if client is None:
-        return 0
-    minute = int((time.time() if now is None else now) // 60)
-    try:
-        rows = client.hgetall(FALLBACK_KEY) or {}
-    except Exception:  # noqa: BLE001
-        return 0
-    old = [k for k in rows if not str(k).lstrip('-').isdigit() or int(k) <= minute - 120]
-    if old:
-        try:
-            client.hdel(FALLBACK_KEY, *old)
-        except Exception:  # noqa: BLE001
-            pass
-    return sum(int(v) for k, v in rows.items() if k not in old and minute - 60 < int(k) <= minute)
-
-
-def sentinel_trouble():
-    """``{'offline': [names], 'full': [names]}``: the active Sentinels that are not heartbeating, and the live ones at their concurrency limit."""
-    from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelTask
-    from agentapi.sentinel_broker import LIVE_WINDOW
-    from django.db.models import Count
-    from django.utils import timezone
-    now = timezone.now()
-    agents = list(Agent.objects.filter(kind='scanner', status='active').values('id', 'name', 'last_seen', 'max_concurrent')[:200])
-    held = dict(SentinelTask.objects.filter(agent_id__in=[a['id'] for a in agents], status__in=SENTINEL_ACTIVE_STATUSES)
-                .values_list('agent_id').annotate(n=Count('id')))
-    offline = sorted(a['name'] for a in agents if not a['last_seen'] or a['last_seen'] < now - LIVE_WINDOW)
-    full = sorted(a['name'] for a in agents if a['name'] not in offline and held.get(a['id'], 0) >= (a['max_concurrent'] or 1))
-    return {'offline': offline, 'full': full}
-
-
-def fallback_warning(total):
-    try:
-        trouble = sentinel_trouble()
-    except Exception:  # noqa: BLE001
-        trouble = {'offline': [], 'full': []}
-    parts = []
-    if trouble['offline']:
-        parts.append('offline: ' + ', '.join(trouble['offline'][:10]))
-    if trouble['full']:
-        parts.append('at capacity: ' + ', '.join(trouble['full'][:10]))
-    if not parts:
-        parts.append('no registered Sentinel is offline or full; check their capabilities and scope')
-    return f'{total} stages fell back to local execution in the last hour: check your Sentinels ({"; ".join(parts)})'
-
-
 # --- the opt-in skip list, applied where a local tool starts ---------------------------------------------------------
 
 def note_skipped(tool, ports, addresses=()):
@@ -744,7 +617,7 @@ def coverage_note():
 
 def status(problems=None, now=None):
     """The egress section of ``get_system_status``: counts by watched port for the last hour and 24 hours, the budgets and their use this
-    hour, owed ports, local fallbacks, and the top sources. A problem is added while tasks keep falling back to local execution."""
+    hour, owed ports and the top sources."""
     snap = snapshot(now) or {'hour': {}, 'day': {}, 'week': {}, 'sources': {}}
     watch = watched_ports()
     rules = budgets()
@@ -755,14 +628,9 @@ def status(problems=None, now=None):
                       'used_this_hour': used_this_hour(port, now) if port in rules else None,
                       'skipped': port in skipped_ports()})
     sources = sorted(((k, v) for k, v in snap['sources'].items() if not k.endswith('|all')), key=lambda kv: -kv[1])[:10]
-    fallbacks = fallbacks_last_hour(now)
-    if problems is not None and fallbacks >= FALLBACK_WARN_AT:
-        problems.append(f'egress: {fallback_warning(fallbacks)}')
     return {'estimate_note': 'nmap and naabu are counted from their probe plan (addresses x ports, before retries): an '
                              'estimate; in-process probes are counted exactly',
             'all_ports': {'last_hour': snap['hour'].get('all', 0), 'last_24h': snap['day'].get('all', 0), 'last_7d': snap['week'].get('all', 0)},
             'watched': ports, 'skip_ports': sorted(skipped_ports()),
             'top_sources_24h': [{'kind': k.split('|')[0], 'project': k.split('|')[1], 'port': int(k.split('|')[2]), 'connections': v}
-                                for k, v in sources],
-            'fallbacks_last_hour': fallbacks,
-            'fallback_caps_per_hour': {kind: fallback_cap(kind) for kind in ('nmap', 'naabu')}}
+                                for k, v in sources]}

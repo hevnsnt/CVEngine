@@ -71,7 +71,7 @@ class MemoryBusy(RuntimeError):
 
 
 class ScannerUnavailable(MemoryBusy):
-    """The scan work needs a Sentinel and none could take it, and this kind may not run on this server (``CVENGINE_LOCAL_FALLBACK``). It is
+    """The scan work needs a Sentinel and none could take it, and no kind runs on this server (``sentinel_dispatch.NEVER_LOCAL``). It is
     a ``MemoryBusy`` on purpose: every stage already treats that as "not the target's failure, it stays due", which is what waiting for
     a scanner to come back must look like (nothing marked failed, nothing scanned locally). ``done`` is what a Sentinel did finish of the
     stage before it had to wait (the nmap stage's addresses a Sentinel fully covered, ``sentinel_dispatch.try_nmap``): the caller may mark
