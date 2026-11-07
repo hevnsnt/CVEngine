@@ -12,7 +12,7 @@ A project with no live Sentinel scans on the server, as it always did.
 
 ## What a Sentinel runs
 
-Eleven kinds of work, each a capability the Sentinel declares (the list is `kind_since` in the [contract](../web/agentapi/sentinel_contract.json); the code reads it from there):
+Eleven kinds of work, each a capability the Sentinel declares (the list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel); the code reads it from the installed library):
 
 | Kind                                             | Work                                                                         |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
@@ -145,7 +145,9 @@ The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei
 
 ## The result contract
 
-What a Sentinel sends back for each task kind is written down once, as a JSON Schema: [`web/agentapi/sentinel_contract.json`](../web/agentapi/sentinel_contract.json) (`contract_version` inside). The Sentinel repo copies the file at the version it targets and validates its own results against it, so a field the server needs is not a thing a client author finds out about from a rejected result. The server still clips and validates everything it receives (`clean_result`); the contract is what a correct client keeps to, so nothing a good Sentinel sends is ever clipped or dropped.
+What a Sentinel sends back for each task kind is written down once, as a JSON Schema: `cvengine_scanner/contract/sentinel_contract.json` in the scanner library of the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (`contract_version` inside). The library is the single source of truth: the server installs it, pinned by commit sha in `web/requirements.txt`, and reads the file from the install (`agentapi/sentinel_contract.py`); it keeps no copy. The Sentinel validates its own results against the same file, so a field the server needs is not a thing a client author finds out about from a rejected result. The server still clips and validates everything it receives (`clean_result`); the contract is what a correct client keeps to, so nothing a good Sentinel sends is ever clipped or dropped.
+
+**How a contract change lands.** Sentinel pull request first (the schema, its fixtures and the Sentinel's own contract tests, merged to the Sentinel `main`), then a server pull request that bumps the sha in `web/requirements.txt` to that merge commit and carries the server side (the broker's limits, the cleaners, the fixtures under `web/tests/fixtures/`). The server's `tests.test_sentinel_contract` fails until both sides agree. The pin is a commit sha, not a release tag, so landing a contract change needs no Sentinel release or version change.
 
 The tests tie the file to the server: every task kind has a schema, one fixture per kind (`web/tests/fixtures/sentinel_results/`) is valid and passes through the server unchanged, and every list bound, string length and enum in the file equals the broker's own limit, so changing one side alone fails CI. A change a client must follow bumps `contract_version` and is named in the CHANGELOG. This covers results (Sentinel to server); the targets the server hands out are the next piece.
 
