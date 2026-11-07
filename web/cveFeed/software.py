@@ -30,7 +30,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # scanner.lock.json and to the sha web/requirements.txt pins: re-pinning the Sentinel means reading its pins again, then changing this line.
-SENTINEL_PINS_COMMIT = '6697b85d7e3a1c8dabb8ac8fb0801c434c1e292e'
+SENTINEL_PINS_COMMIT = 'cf29610a513cc3135c1a81f004cd02e0b0c0e604'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
