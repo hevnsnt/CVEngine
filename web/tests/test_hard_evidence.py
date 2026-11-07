@@ -1,5 +1,3 @@
-import unittest
-from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
@@ -110,37 +108,3 @@ class DbExposureEvidenceTests(TestCase):
 		out = dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', lambda h, p: False)})
 		self.assertEqual((out, Vulnerability.objects.count()), ({'checked': 1, 'exposed': 0}, 0))
 		self.assertEqual(dbx.EVIDENCE, {})
-
-
-class CheckerReplyTests(unittest.TestCase):
-	def test_memcached_reply_is_the_version_line(self):
-		sock = mock.MagicMock()
-		sock.__enter__.return_value.recv.return_value = b'VERSION 1.6.9\r\n'
-		with mock.patch.object(dbx.socket, 'create_connection', return_value=sock):
-			self.assertTrue(dbx.check_memcached('203.0.113.9', 11211))
-		self.assertEqual(dbx.EVIDENCE.pop(('203.0.113.9', 11211)), 'VERSION 1.6.9')
-
-	def test_elasticsearch_reply_is_cluster_and_version(self):
-		resp = mock.MagicMock(status_code=200)
-		resp.__enter__.return_value = resp
-		resp.iter_content.return_value = iter([b'{"cluster_name": "prod", "version": {"number": "7.10.2"}}'])
-		with mock.patch('requests.Session.get', return_value=resp):
-			self.assertTrue(dbx.check_elasticsearch('203.0.113.9', 9200))
-		self.assertEqual(dbx.EVIDENCE.pop(('203.0.113.9', 9200)), 'cluster prod, version 7.10.2')
-
-	def test_couchdb_reply_counts_databases_and_never_names_them(self):
-		resp = mock.MagicMock(status_code=200)
-		resp.__enter__.return_value = resp
-		resp.iter_content.return_value = iter([b'["secret_customers", "_users"]'])
-		with mock.patch('requests.Session.get', return_value=resp):
-			self.assertTrue(dbx.check_couchdb('203.0.113.9', 5984))
-		text = dbx.EVIDENCE.pop(('203.0.113.9', 5984))
-		self.assertIn('2 database', text)
-		self.assertNotIn('secret_customers', text)
-
-	def test_postgres_reply_is_the_server_version(self):
-		fake = mock.Mock()
-		fake.connect.return_value = mock.Mock(server_version=140005)
-		with mock.patch.dict('sys.modules', {'psycopg2': fake}):
-			self.assertTrue(dbx.check_postgres('203.0.113.9', 5432))
-		self.assertEqual(dbx.EVIDENCE.pop(('203.0.113.9', 5432)), 'PostgreSQL 14.5')

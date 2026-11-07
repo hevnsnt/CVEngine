@@ -47,6 +47,7 @@ export const SENTINEL_KINDS = [
   "hygiene_check",
   "dangling_dns_check",
   "route_probe",
+  "identity_check",
   "web_screenshot",
 ];
 const KIND_WORDS = {
@@ -79,6 +80,7 @@ const KIND_WORDS = {
   hygiene_check: "TLS and email checks",
   dangling_dns_check: "dangling DNS checks",
   route_probe: "web route checks",
+  identity_check: "name and certificate reads",
   web_screenshot: "web screenshots",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes

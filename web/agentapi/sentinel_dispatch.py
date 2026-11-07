@@ -46,7 +46,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
-                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'web_screenshot': 900,
+                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'identity_check': 300, 'web_screenshot': 900,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
@@ -76,6 +76,12 @@ NEVER_LOCAL = (
     'nmap_full',
     'nmap_verify',
     'path_probe',
+    'db_probe',  # the credential-less database attempts: a Sentinel's, this server carries no database client
+    'bucket_check',  # the storage requests: a Sentinel's, the server carries only the readers of what comes back
+    'node2shell',  # the Brotli decoder check: the detector is vendored on the scanner only, this server carries no copy of it
+    'dns_resolve',  # the discovery and retire-check name lookups (agentapi.probe_dispatch.try_dns_resolve): a Sentinel's resolver, never this server's
+    'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
+    'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
     'web_screenshot',
 )
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
@@ -1422,10 +1428,10 @@ def try_nmap_verify(project, target, scan=None):
     return _hosts_of_task(project, 'nmap_verify', target, target['address'], scan)
 
 
-# node2shell: the vendored detector on the scanner, the verdict in run_check's shape ---------------------------------------------------------
+# node2shell: the vendored detector on the scanner, the detector's own result shape ---------------------------------------------------------
 
 def node2shell_outcome(result):
-    """A Sentinel's ``node2shell`` result in the shape ``cveFeed.node2shell_scan.run_check`` returns (the detector's own dict)."""
+    """A Sentinel's ``node2shell`` result in the detector's own result shape (the detector's own dict)."""
     return {'vulnerable': result.get('vulnerable'), 'verdict': result.get('verdict') or '', 'reason': result.get('reason') or '',
             'status_code': result.get('status_code'), 'response': result.get('evidence') or ''}
 

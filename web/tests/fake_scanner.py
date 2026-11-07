@@ -392,11 +392,11 @@ LOCAL_RUNNERS = {
     'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
-    'dns_resolve': ('cveFeed.discovery.resolve_names',),
-    'alive_check': ('cveFeed.zombie.http_alive', 'cveFeed.zombie.tcp_alive'),
+    'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'alive_check': (),  # likewise
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'bucket_check': ('cveFeed.bucket_probe.http_fetch', 'cveFeed.bucket_probe.dns_exists'),
+    'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
     'subdir_probe': ('cveFeed.slow_web.get',),
     'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
@@ -406,9 +406,10 @@ LOCAL_RUNNERS = {
     'waf': (),  # likewise
     'nmap_full': (),  # likewise
     'nmap_verify': (),  # likewise
-    'node2shell': ('cveFeed.node2shell_scan.run_check',),
+    'node2shell': (),  # likewise
+    'identity_check': (),  # likewise
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'db_probe': tuple(f'cveFeed.db_exposure.check_{name}' for name in ('redis', 'memcached', 'postgres', 'elasticsearch', 'couchdb', 'mysql', 'mongodb')),
+    'db_probe': (),  # likewise
     'path_probe': (),  # likewise
     'nuclei_validate': (),  # likewise
 }
@@ -441,6 +442,7 @@ HEAVY_KINDS = {
     'rdp_shot': (),
     'db_probe': ('route-probe',),
     'path_probe': (),
+    'identity_check': (),
     'nuclei_validate': ('template-test',),
 }
 

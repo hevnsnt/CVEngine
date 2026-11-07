@@ -1,0 +1,13 @@
+{
+  "dns": [
+    {"id": "d1", "name": "www.example.com", "type": "CNAME"},
+    {"id": "d2", "name": "example.com", "type": "NS"},
+    {"id": "d3", "name": "example.com", "type": "MX"},
+    {"id": "d4", "name": "192.0.2.10", "type": "PTR"}
+  ],
+  "certs": [
+    {"id": "c1", "host": "192.0.2.10", "port": 443}
+  ],
+  "scope": {"hosts": ["www.example.com", "example.com", "192.0.2.10"], "domains": [], "excluded": [], "excluded_trees": [], "private": false, "addresses": [],
+            "blocked": []}
+}

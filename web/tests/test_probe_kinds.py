@@ -13,9 +13,9 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, dangling_dns, discovery, ledger, probe_scope, probes, route_auth, slow_web, subdir_apps, supplier_scan, vhost_scan
+from cveFeed import bucket_scan, changes, dangling_dns, discovery, domain_ownership, hosting, ledger, probe_scope, probes, route_auth, slow_web, subdir_apps, supplier_scan, vhost_scan
 from cveFeed import hygiene as hy
-from cveFeed.models import (AgentActivity, AssetChange, CVEEntry, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding,
+from cveFeed.models import (AgentActivity, AssetChange, CVEEntry, DiscoveryEvent, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding,
                             ServiceRun, SupplierFinding, SupplierHostCard, TlsCertificate)
 from dashboard.models import Org, Project
 from startScan.models import IpAddress, Port, Subdomain, Technology
@@ -23,6 +23,7 @@ from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_bucket_scan import Fixture as BucketFixture
 from tests.test_changes import ChangeFixture
+from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_route_auth import RouteFixture
 from tests.test_subdir_apps import SubdirFixture
 from tests.test_vhost_scan import VhostFixture
@@ -1110,6 +1111,145 @@ class SupplierCheckPolicyTests(SupplierFixture, TestCase):
         self.assertEqual(broker.clean_result('supplier_check', sent), sent)
         task = SentinelTask(kind='supplier_check', host='', ips=[], target={'domains': ['A.vendor.test', 'b.vendor.test'], 'scope': {'hosts': ['x.example.test']}})
         self.assertEqual(broker.task_hosts(task), (['a.vendor.test', 'b.vendor.test'], []))
+
+
+class IdentityCheckResultTests(SimpleTestCase):
+    """The ``identity_check`` kind: what a Sentinel reports is clipped to the contract and cut down to what the task asked."""
+
+    def test_the_fixture_goes_through_unchanged_and_the_hosts_of_a_batch_are_its_names_and_addresses(self):
+        sent = fixture('identity_check')
+        self.assertEqual(broker.clean_result('identity_check', sent), sent)
+        task = SentinelTask(kind='identity_check', host='', ips=[], target={'dns': [{'id': 'a', 'name': 'WWW.example.test', 'type': 'CNAME'}, {'id': 'b', 'name': '203.0.113.9', 'type': 'PTR'}],
+                                                                           'certs': [{'id': 'c', 'host': '203.0.113.10', 'port': 443}], 'scope': {'hosts': ['x.example.test']}})
+        self.assertEqual(broker.task_hosts(task), (['www.example.test'], ['203.0.113.9', '203.0.113.10']))
+
+    def test_a_result_is_clipped_to_the_contract(self):
+        got = probe_results.clean_identity_check({
+            'dns': [{'id': 'a', 'status': 'ok', 'records': ['r' * 900, 7], 'canonical': 'App.Netlify.APP.'}, {'id': 'b', 'status': 'none', 'records': ['ignored'], 'canonical': 'x'},
+                    {'id': 'c', 'status': 'maybe'}, {'id': '', 'status': 'ok'}, 'junk', {'id': 'd', 'status': 'unknown', 'error': 'e' * 900}],
+            'certs': [{'id': 'e', 'status': 'ok', 'names': ['n' * 900, None, 'ok.example.test']}, {'id': 'f', 'status': 'unknown', 'names': ['ignored']}, {'id': 'g', 'status': 'x'}],
+            'touched': ['A.example.test', 'bad host'], 'refused': []})
+        self.assertEqual(got['dns'], [{'id': 'a', 'status': 'ok', 'records': ['r' * 260], 'canonical': 'app.netlify.app'},
+                                      {'id': 'b', 'status': 'none', 'records': []}, {'id': 'd', 'status': 'unknown', 'records': [], 'error': 'e' * 200}])
+        self.assertEqual(got['certs'], [{'id': 'e', 'status': 'ok', 'names': ['n' * 260, 'ok.example.test']}, {'id': 'f', 'status': 'unknown', 'names': []}])
+        self.assertEqual(got['touched'], ['a.example.test'])
+        with self.assertRaises(ApiError):
+            probe_results.clean_identity_check({'dns': [{}] * 201, 'certs': []})
+        with self.assertRaises(ApiError):
+            probe_results.clean_identity_check({'dns': [], 'certs': 'x'})
+
+    def test_an_answer_the_task_did_not_ask_for_is_dropped_and_an_id_counts_once(self):
+        task = SentinelTask(kind='identity_check', target={'dns': [{'id': 'a', 'name': 'x.example.test', 'type': 'NS'}], 'certs': [{'id': 'c', 'host': '203.0.113.9', 'port': 443}]})
+        result = {'outcome': 'done', 'dns': [{'id': 'a', 'status': 'none', 'records': []}, {'id': 'a', 'status': 'ok', 'records': ['ns.example.net.']}, {'id': 'zz', 'status': 'ok', 'records': []}],
+                  'certs': [{'id': 'c', 'status': 'ok', 'names': ['a.example.test']}, {'id': 'other', 'status': 'ok', 'names': []}], 'touched': [], 'refused': []}
+        got = probe_results.bind('identity_check', result, task)
+        self.assertEqual([r['id'] for r in got['dns']], ['a'])
+        self.assertEqual(got['dns'][0]['status'], 'none')  # the first answer to an id is the answer
+        self.assertEqual([r['id'] for r in got['certs']], ['c'])
+        self.assertEqual(got['dropped'], 3)
+
+
+class IdentityCheckStageTests(DispatchBase):
+    """Every read the server used to make of a name or an address, end to end through the fake built-in scanner: an IP target's reverse name and
+    certificate (``discovery.discover_ip``), the CNAME of a name that has none stored (``hosting.shared_by_address``) and the name and mail
+    servers of a domain (``domain_ownership``). The kind has no local path: with no scanner nothing is read and nothing is concluded."""
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
+        self.addCleanup(mock.patch.stopall)
+        self.guard = assert_ran_nowhere_locally(self, 'identity_check')
+        self.asked = []
+
+    def responder(self, dns=None, certs=None):
+        def answer(task):
+            self.asked.append(task['target'])
+            return {'outcome': 'done', 'dns': [dns(q) for q in task['target'].get('dns', [])] if dns else [],
+                    'certs': [certs(c) for c in task['target'].get('certs', [])] if certs else [], 'touched': [], 'refused': []}
+        return {'identity_check': answer}
+
+    def ip_scan(self, address='203.0.113.9'):
+        Domain.objects.filter(pk=self.domain.pk).update(name=address)
+        self.domain.refresh_from_db()
+        return self.scan
+
+    def test_an_ip_target_gets_its_reverse_name_and_certificate_names_from_the_scanner(self):
+        scan = self.ip_scan()
+        responders = self.responder(dns=lambda q: {'id': q['id'], 'status': 'ok', 'records': ['Host.Example.Test.']},
+                                    certs=lambda c: {'id': c['id'], 'status': 'ok', 'names': ['cn.example.test', '*.example.test', 'cn.example.test', 'localhost']})
+        with FakeScanner(kinds=['identity_check'], responders=responders) as fake:
+            found = discovery.discover_ip(scan)
+        self.assertEqual(fake.served_kinds(), ['identity_check'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertEqual((found['status'], found['names']), (discovery.SUCCESS, ['cn.example.test', 'example.test', 'host.example.test']))
+        target = fake.served[0]['target']
+        self.assertEqual(target['dns'], [{'id': 'ptr', 'name': '203.0.113.9', 'type': 'PTR'}])
+        self.assertEqual(target['certs'], [{'id': 'tls', 'host': '203.0.113.9', 'port': 443}])
+        self.assertEqual(target['scope']['hosts'], ['203.0.113.9'])
+        self.assertEqual(sorted(DiscoveryEvent.objects.filter(scan=scan, type='DNS_NAME').values_list('module', 'label')),
+                         [('ptr', 'host.example.test'), ('tls-san', 'cn.example.test'), ('tls-san', 'example.test')])
+
+    def test_a_read_the_scanner_could_not_answer_records_no_names_but_the_scan_goes_on(self):
+        scan = self.ip_scan()
+        responders = self.responder(dns=lambda q: {'id': q['id'], 'status': 'unknown', 'records': [], 'error': 'Timeout'},
+                                    certs=lambda c: {'id': c['id'], 'status': 'unknown', 'names': []})
+        with FakeScanner(kinds=['identity_check'], responders=responders):
+            found = discovery.discover_ip(scan)
+        self.assertEqual((found['status'], found['names']), (discovery.SUCCESS, []))
+
+    def test_with_no_scanner_the_ip_lookup_waits_and_nothing_is_read_here(self):
+        scan = self.ip_scan()
+        with FakeScanner(kinds=['identity_check'], mode='offline') as fake:
+            found = discovery.discover_ip(scan)
+        self.assertEqual(fake.served, [])
+        self.assertEqual(found['status'], discovery.FAILED)
+        self.assertIn('waiting for a scanner', found['error'])
+        self.assertEqual(self.guard.calls, [])
+        self.assertFalse(DiscoveryEvent.objects.filter(scan=scan, type='DNS_NAME').exists())
+
+    def test_a_platform_cname_that_was_never_stored_is_read_by_the_scanner(self):
+        Subdomain.objects.filter(name='www.example.test').update(target_domain=self.domain)
+        responders = self.responder(dns=lambda q: {'id': q['id'], 'status': 'ok', 'records': [], 'canonical': 'acme.netlify.app'})
+        hosting._canon.clear()
+        with FakeScanner(kinds=['identity_check'], responders=responders) as fake:
+            found = hosting.shared_by_address(['192.0.2.10'])
+        self.assertEqual(self.asked[0]['dns'], [{'id': 'www.example.test', 'name': 'www.example.test', 'type': 'CNAME'}])
+        self.assertEqual(fake.served_kinds(), ['identity_check'])
+        self.assertEqual(found['192.0.2.10']['provider'], 'Netlify')
+
+    def test_with_no_scanner_the_stored_data_classifies_and_nothing_waits_for_the_read(self):
+        Subdomain.objects.filter(name='www.example.test').update(target_domain=self.domain)
+        hosting._canon.clear()
+        self.assertEqual(hosting.shared_by_address(['192.0.2.10']), {})
+        self.assertEqual(hosting.canonical_names(['www.example.test']), {})  # unknown is missing, never cached as "not an alias"
+        self.assertEqual(self.guard.calls, [])
+
+    def test_the_name_and_mail_servers_of_a_domain_are_read_by_the_scanner_in_one_task(self):
+        def dns(q):
+            return {'id': q['id'], 'status': 'ok', 'records': ['ns1.dns-example.net.'] if q['type'] == 'NS' else ['10 mx.mailhost-example.net.']} if q['name'] == 'example.test' \
+                else {'id': q['id'], 'status': 'none', 'records': []}
+        lookup = domain_ownership.Lookup(self.project.id)
+        with FakeScanner(kinds=['identity_check'], responders=self.responder(dns=dns)) as fake:
+            self.assertEqual(domain_ownership.infrastructure('example.test', lookup), ({'dns-example.net'}, {'mailhost-example.net'}))
+            self.assertEqual(lookup.records('other.example.test', 'NS'), [])
+        self.assertEqual(len(fake.served), 2)  # one task for both types of the domain, one for a name asked later
+        self.assertEqual(sorted((q['type'], q['name']) for q in self.asked[0]['dns']), [('MX', 'example.test'), ('NS', 'example.test')])
+
+    def test_with_no_scanner_a_domain_has_no_records_and_is_never_read_as_having_none(self):
+        lookup = domain_ownership.Lookup(self.project.id)
+        self.assertIsNone(lookup.records('example.test', 'NS'))
+        self.assertIsNone(domain_ownership.infrastructure('example.test', lookup))
+        self.assertEqual(self.guard.calls, [])
+
+
+class IdentityScopeTests(DispatchBase):
+    def test_an_excluded_name_is_never_listed_and_its_question_is_never_sent(self):
+        HostExclusion.objects.create(org=self.org, host='secret.example.test')
+        scope = probe_scope.for_identity(self.project.id, ['www.example.test', 'Secret.example.test.', '203.0.113.9', 'www.example.test'])
+        self.assertEqual(scope['hosts'], ['www.example.test', '203.0.113.9'])
+        self.assertEqual(scope['excluded'], ['secret.example.test'])
+        self.assertEqual((scope['domains'], scope['excluded_trees']), ([], []))
 
 
 def hygiene_answer(task, expiring=('www.example.test',), findings=None, skip_mail=False, errors=()):

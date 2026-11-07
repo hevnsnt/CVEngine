@@ -1,5 +1,3 @@
-import socket
-import threading
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -23,29 +21,6 @@ class TcpEndpointTests(SimpleTestCase):
 		self.assertEqual(zombie.tcp_endpoints(self.state({'22/tcp': 'ssh'}, ip='127.0.0.1')), [])
 		self.assertEqual(zombie.tcp_endpoints(self.state({'22/tcp': 'ssh'}, ip='169.254.169.254')), [])
 		self.assertEqual(zombie.tcp_endpoints({}), [])
-
-	def test_the_probe_is_a_connect_that_sends_nothing(self):
-		received = []
-		server = socket.socket()
-		server.bind(('127.0.0.1', 0))
-		server.listen(1)
-		port = server.getsockname()[1]
-
-		def accept():
-			conn, _ = server.accept()
-			conn.settimeout(1)
-			try:
-				received.append(conn.recv(10))
-			except OSError:
-				received.append(b'')
-			conn.close()
-		thread = threading.Thread(target=accept, daemon=True)
-		thread.start()
-		self.assertTrue(zombie.tcp_alive('127.0.0.1', port))
-		thread.join(3)
-		server.close()
-		self.assertEqual(received, [b''])  # connect and close, no payload
-		self.assertFalse(zombie.tcp_alive('127.0.0.1', 1))
 
 	def test_the_number_of_hosts_probed_is_capped(self):
 		states = {f'h{i}.t': self.state({'22/tcp': 'ssh'}) for i in range(120)}

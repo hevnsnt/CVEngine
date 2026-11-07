@@ -7,7 +7,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import heavy_process, node2shell_scan, wpscan_scan
+from cveFeed import heavy_process, wpscan_scan
 from reNgine import resources
 from tests.test_route_auth import RouteFixture
 
@@ -57,29 +57,6 @@ class WpscanTests(SimpleTestCase):
 			wpscan_scan.run_wpscan_process('https://www.example.test/', 'tok')
 		self.assertEqual((seen['kind'], seen['env']['WPSCAN_API_TOKEN']), ('wpscan', 'tok'))
 		self.assertIn('wpscan', resources.BASE_COSTS_MB)
-
-
-class Node2shellTests(RouteFixture, TestCase):
-	def test_a_pause_ends_the_loop_between_hosts_and_the_hosts_stay_due(self):
-		scan = self.scan(names=('a.rt.test', 'b.rt.test'), ports=((443, 'https'),))
-		from startScan.models import Subdomain, Technology
-		for sub in Subdomain.objects.filter(scan_history=scan):
-			sub.technologies.add(Technology.objects.get_or_create(name='Express:4.18.2')[0])
-		asked = []
-
-		class Job:
-			def raise_if_killed(self):
-				if asked:
-					raise resources.ScanAborted('stopped')
-
-		from contextlib import contextmanager
-
-		@contextmanager
-		def gate(kind, label='', **kw):
-			yield Job()
-		with mock.patch.dict('os.environ', {'CVENGINE_NODE2SHELL': '1'}), mock.patch('reNgine.resources.heavy_job', gate):
-			out = node2shell_scan.run_for_scan(scan.id, checker=lambda url: asked.append(url) or {'vulnerable': False})
-		self.assertEqual((len(asked), out['skipped']), (1, 'scanning was stopped or memory was short'))
 
 
 class DbExposureTests(RouteFixture, TestCase):

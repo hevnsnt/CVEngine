@@ -725,6 +725,8 @@ def task_hosts(task):
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
+    raw += [q.get('name') for q in target.get('dns') or [] if isinstance(q, dict)]  # an identity_check batch: the names and addresses asked about
+    raw += [q.get('host') for q in target.get('certs') or [] if isinstance(q, dict)]
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
         if isinstance(check, dict):
             raw += [v for v in (check.get('host'), check.get('ip')) if isinstance(v, str)]
@@ -2143,7 +2145,7 @@ MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT
 
 
 def _clean_node2shell_result(body):
-    """The vendored node2shell detector's verdict on one URL (``cveFeed.node2shell_scan.run_check``'s shape): ``vulnerable`` is True, False or None
+    """The vendored node2shell detector's verdict on one URL (the detector's own result shape): ``vulnerable`` is True, False or None
     (inconclusive), and only the verdict, the reason, the status code and a bounded excerpt of the response are kept. A ``vulnerable`` that is not
     a boolean is read as inconclusive, never as a finding."""
     vulnerable = body.get('vulnerable')
@@ -2292,7 +2294,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
-             'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check, 'web_screenshot': web_screenshot_results.clean}
+             'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
+             'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean}
 
 
 def _bind_to_task(kind, result, task):
@@ -2303,7 +2306,7 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe'):
+                                       'dangling_dns_check', 'route_probe', 'identity_check'):
         return probe_results.bind(kind, result, task)
     if task is not None and kind == 'web_screenshot':
         return web_screenshot_results.bind(result, task)
