@@ -264,6 +264,21 @@ form.inline .field{margin:0;flex:1 1 220px}
 [role=tablist]::-webkit-scrollbar{display:none}
 [role=tab]{flex:none;background:transparent!important;border:0!important;box-shadow:none!important;transform:none!important;color:var(--muted)!important;min-height:34px!important;padding:0 14px!important;border-radius:7px!important;font-weight:650!important}@media (hover:hover) and (pointer:fine){[role=tab]:hover{color:var(--ink)!important}}
 [role=tab][aria-selected="true"]{background:var(--ink)!important;color:var(--on-ink)!important}
+/* the pages that share one rail entry: the same strip as the tabs, made of links (aria-current marks the page you are on) */
+.pagetabs{display:inline-flex;flex-wrap:nowrap;gap:2px;padding:3px;margin:0 0 14px;max-width:100%;overflow-x:auto;scrollbar-width:none;background:var(--sunk);border-radius:10px}
+.pagetabs::-webkit-scrollbar{display:none}
+.pagetabs a{flex:none;display:inline-flex;align-items:center;min-height:36px;padding:0 14px;border-radius:7px;font-weight:650;font-size:13.5px;color:var(--muted);text-decoration:none;white-space:nowrap}
+@media (hover:hover) and (pointer:fine){.pagetabs a:hover{color:var(--ink)}}
+.pagetabs a[aria-current="page"]{background:var(--ink);color:var(--on-ink)}
+/* Scanners: one row of answers (is it working?) above the Sentinel detail */
+.health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:0 0 14px}
+.health-cell{display:flex;flex-direction:column;gap:6px;padding:14px 16px}
+.health-cell b{font:700 28px/1.05 var(--font);letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.health-cell p{margin:0}
+.health-cell.warn{border-color:var(--fire-ink)}
+.health-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
+.health-cell .note{overflow-wrap:anywhere}
+.health-links{display:flex;gap:8px;flex-wrap:wrap}
 
 /* filter chips (toggle buttons with a count) */
 .picker{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}

@@ -24,7 +24,7 @@
         {% if user.is_superuser %}<option value="instance">Instance (everything)</option>{% endif %}
       </select>
     </div>
-    <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
+    <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project" data-current="{{ slug|default:'' }}"></select></div>
     <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization</label><select id="enroll-org">{% for o in enroll_orgs %}<option value="{{ o.slug }}">{{ o.name }}</option>{% endfor %}</select></div>
     <div class="field"><label for="enroll-network">Where it runs</label>
       <select id="enroll-network">
@@ -72,6 +72,9 @@
     enrollOrgField = document.getElementById('enroll-org-field'), enrollOut = document.getElementById('enroll-out');
   api('GET', '/api/v1/projects').then(function (x) {
     (x.d.results || x.d.projects || []).forEach(function (p) { var o = el('option', '', p.name || p.slug); o.value = p.slug; enrollProject.appendChild(o); });
+    // default to the project being worked in (the shell's current one), not whichever sorts first
+    var cur = enrollProject.getAttribute('data-current');
+    if (cur && Array.prototype.some.call(enrollProject.options, function (o) { return o.value === cur; })) enrollProject.value = cur;
   });
   enrollScope.addEventListener('change', function () {
     enrollProjectField.style.display = enrollScope.value === 'project' ? '' : 'none';
