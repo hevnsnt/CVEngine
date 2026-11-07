@@ -89,13 +89,19 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'activity')[0], 403)
 		self.assertEqual(api(admin, 'GET', 'activity?page_size=201')[0], 400)
 
+	def health(self):
+		"""The worker answer is kept for 30 s (cveFeed.probe_cache): each call of these tests is a fresh look."""
+		from django.core.cache import cache
+		cache.clear()
+		return api(client_for(self.root), 'GET', 'health')
+
 	def test_scheduler_health_tells_a_running_beat_from_a_silent_or_unknown_one(self):
 		import time
 		inspector = mock.Mock(active_queues=mock.Mock(return_value={}), active=mock.Mock(return_value={}))
 		def beat(value):
 			with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector), \
 					mock.patch('cveFeed.scan_control.beat_heartbeat', return_value=value):
-				return api(client_for(self.root), 'GET', 'health')[1]['beat']
+				return self.health()[1]['beat']
 		self.assertEqual(beat(time.time() - 20)['state'], 'running')
 		self.assertEqual(beat(time.time() - 900)['state'], 'silent')
 		self.assertEqual(beat(None), {'state': 'unknown', 'seconds_since_tick': None})
@@ -112,7 +118,7 @@ class AdminMatrixTests(TestCase):
 			'validation_priority_worker@local': [{'name': 'validation_priority_queue'}]}
 		inspector.active.return_value = {'cve_feed_worker@local': [{'args': 'sk-ant-secret-marker'}]}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['workers_state'], 'degraded')
 		self.assertIn('Missing or unconfirmed', data['worker_note'])
@@ -125,13 +131,13 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.admin_a), 'GET', 'health')[0], 403)
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'health')[0], 403)
 		with mock.patch('reNgine.celery.app.control.inspect', side_effect=OSError('broker down')):
-			unknown = api(client_for(self.root), 'GET', 'health')[1]
+			unknown = self.health()[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
 			self.assertIn('broker connection', unknown['worker_note'])
 			self.assertNotIn('broker down', str(unknown))
 		inspector.active_queues.return_value = None
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			unknown = api(client_for(self.root), 'GET', 'health')[1]
+			unknown = self.health()[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
 			self.assertIn('No worker replied', unknown['worker_note'])
 
@@ -142,7 +148,7 @@ class AdminMatrixTests(TestCase):
 			'classic_worker@local': [{'name': 'celery'}]}  # replied, but not consuming api_queue
 		inspector.active.return_value = {}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			data = api(client_for(self.root), 'GET', 'health')[1]
+			data = self.health()[1]
 		replies = {w['worker']: w['reply'] for w in data['workers']}
 		self.assertEqual(replies, {'discovery_worker': 'no_reply_within_5s', 'cve_feed_worker': 'consuming',
 								   'validation_priority_worker': 'no_reply_within_5s', 'classic_worker': 'replied_without_queue'})
@@ -158,7 +164,7 @@ class AdminMatrixTests(TestCase):
 			'celery@classic_worker': [{'name': 'api_queue'}]}
 		inspector.active.return_value = {'celery@cve_feed_worker': [{'args': 'private-secret-marker'}]}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['workers_state'], 'responding')
 		self.assertTrue(all(row['consuming'] for row in data['workers']))
@@ -172,7 +178,7 @@ class AdminMatrixTests(TestCase):
 		run = ArchiveRediscovery.objects.create(day=timezone.now().date(), status='queued', total=3, checked=2, deferred=1)
 		with mock.patch('reNgine.celery.app.control.inspect') as inspector:
 			inspector.return_value.active_queues.return_value = {}
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['archive_rediscovery']['run_id'], run.pk)
 		self.assertEqual((data['archive_rediscovery']['archived_hosts'], data['archive_rediscovery']['checked']), (1, 2))

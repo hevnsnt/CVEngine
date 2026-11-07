@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe`` and ``page_read``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read`` and ``ssh_probe``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -400,6 +400,53 @@ def clean_supplier_check(body):
         raise ApiError(400, 'a supplier_check result lists its domains (at most %d)' % MAX_SUPPLIER_DOMAINS)
     out = [row for row in (_supplier_row(item) for item in domains) if row is not None]
     return {'domains': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+MAX_SSH_HOSTS = 25  # the contract's bound
+MAX_SSH_OBSERVATIONS = 20
+MAX_SSH_HITS = 20
+SSH_OBSERVATION_ID = re.compile(r'^[a-z0-9][a-z0-9_.-]*$')
+SSH_CHECKS = ('badkeys-blocklist',)
+
+
+def _ssh_observation(item, reached):
+    """One observation of an ssh_probe host, or None. ``verified`` is true only when the host was reached and the Sentinel says so: a fact from a
+    host it could not read is unknown, whatever the row claims."""
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not SSH_OBSERVATION_ID.match(item['id']) or len(item['id']) > 64:
+        return None
+    return {'id': item['id'], 'title': _text(item.get('title'), 200), 'severity': _int(item.get('severity'), 0, 4), 'evidence': _text(item.get('evidence'), 300),
+            'verified': bool(reached and item.get('verified') is True)}
+
+
+def _ssh_hit(item):
+    if not isinstance(item, dict) or item.get('check') not in SSH_CHECKS or not isinstance(item.get('id'), str) or not item['id']:
+        return None
+    return {'check': item['check'], 'id': _text(item['id'], 200), 'ref': _text(item.get('ref'), 200), 'proof': _text(item.get('proof'), 300)}
+
+
+def _ssh_host(item):
+    if not isinstance(item, dict) or not isinstance(item.get('address'), str) or not item['address'].strip():
+        return None
+    port = item.get('port')
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return None
+    reached = item.get('reached') is True
+    observations = [o for o in (_ssh_observation(x, reached) for x in (item.get('observations') if isinstance(item.get('observations'), list) else [])[:MAX_SSH_OBSERVATIONS]) if o]
+    hits = [h for h in (_ssh_hit(x) for x in (item.get('check_hits') if isinstance(item.get('check_hits'), list) else [])[:MAX_SSH_HITS]) if h] if reached else []
+    row = {'address': _text(item['address'], 60).strip().lower(), 'port': port, 'reached': reached, 'observations': observations, 'check_hits': hits}
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def clean_ssh_probe(body):
+    """The hosts of an ``ssh_probe`` result, clipped. A host entry that is not well formed is dropped: it reads as no answer for that endpoint, which
+    the caller leaves due. A host that was not reached keeps no check hit and no verified observation."""
+    hosts = body.get('hosts')
+    if not isinstance(hosts, list) or len(hosts) > MAX_SSH_HOSTS:
+        raise ApiError(400, 'an ssh_probe result lists its hosts (at most %d)' % MAX_SSH_HOSTS)
+    out = [row for row in (_ssh_host(item) for item in hosts) if row is not None]
+    return {'hosts': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
@@ -846,6 +893,16 @@ def bind(kind, result, task):
             dropped += len(result[key]) - len(kept)
             out[key] = kept
         result = {**result, **out}
+    elif kind == 'ssh_probe':  # only the address and port pairs the task asked, once each
+        asked = {(str(t.get('address')).strip().lower(), t.get('port')) for t in target.get('targets') or [] if isinstance(t, dict)}
+        kept, seen = [], set()
+        for row in result['hosts']:
+            key = (row['address'], row['port'])
+            if key in asked and key not in seen:
+                seen.add(key)
+                kept.append(row)
+        dropped = len(result['hosts']) - len(kept)
+        result = {**result, 'hosts': kept}
     elif kind == 'supplier_check':  # only the names the task listed, once each
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
         kept, seen = [], set()

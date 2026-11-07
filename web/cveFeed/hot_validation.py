@@ -335,11 +335,52 @@ def _backfill_projects(limit=2):
     return len(ids)
 
 
+def _active_counts():
+    """``{project id: validations queued or running}``: the two tables ``_active_count`` reads for one project, counted for every project in two queries."""
+    from django.db.models import Count
+    counts = {}
+    for model in (OnDemandValidation, AutomaticValidation):
+        for project_id, n in model.objects.filter(status__in=('queued', 'running')).order_by().values_list('project_id').annotate(n=Count('id')):
+            counts[project_id] = counts.get(project_id, 0) + n
+    return counts
+
+
+def _latest_jobs(rows):
+    """``{row.pk: its newest validation job}`` for a page of candidate rows: one query for the CVE matches' jobs and one for the other findings', where
+    ``enqueue`` looked each one up under a row lock."""
+    out = {}
+    matches = {row.match_id: row.pk for row in rows if row.match_id}
+    if matches:
+        for job in OnDemandValidation.objects.filter(match_id__in=matches).order_by('match_id', '-id').distinct('match_id'):
+            out[matches[job.match_id]] = job
+    others = [row.pk for row in rows if not row.match_id]
+    if others:
+        for job in AutomaticValidation.objects.filter(triage_id__in=others).order_by('triage_id', '-id').distinct('triage_id'):
+            out[job.triage_id] = job
+    return out
+
+
+def _settled(row, lane, jobs, active, now):
+    """The outcome label of a candidate that ``enqueue`` would only turn away, or None when it might queue or promote a job and must be looked at under
+    its lock. Read from the page's jobs and the projects' active counts, so the many candidates a sweep turns away (a project at its cap, a finding whose
+    validation is running or finished a day ago) cost no statement each."""
+    job = jobs.get(row.pk)
+    if job is not None and job.status in ('queued', 'running'):
+        return None if job.status == 'queued' and job.priority > PRIORITY[lane] else 'inflight'
+    if job is not None and _recently_handled(job, row.signature, now):
+        return 'fresh'
+    if active.get(row.project_id, 0) >= (PROJECT_ICE_CAP if lane == ICE else PROJECT_ACTIVE_CAP):
+        return 'project_cap'
+    return None
+
+
 def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
     page = max(1, min(int(page), PAGE))
     max_jobs = max(1, min(int(max_jobs), MAX_ENQUEUE))
     stats = {'projects': _backfill_projects(), 'fire': 0, 'smoke': 0, 'ice': 0, 'promoted': 0,
              'fresh': 0, 'inflight': 0, 'project_cap': 0, 'failed': 0, 'stale': 0, 'min_gap': 0}
+    active = _active_counts()
+    now = timezone.now()
     for lane in (FIRE, SMOKE, ICE) if validate_all_matches() else (FIRE, SMOKE):
         cursor, _ = HotValidationCursor.objects.get_or_create(lane=lane)
         base = _candidate_rows(lane)
@@ -347,13 +388,18 @@ def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
         if not rows:
             cursor.last_pk = 0
             rows = list(base[:page])
+        jobs = _latest_jobs(rows)
+        last = None
         for row in rows:
             if stats[FIRE] + stats[SMOKE] + stats[ICE] >= max_jobs:
                 break  # next sweep starts with the first deferred row
-            result = enqueue(row, lane)
+            last = row
+            result = _settled(row, lane, jobs, active, now) or enqueue(row, lane)
             if result in stats:
                 stats[result] += 1
             elif result == 'queued':
                 stats[lane] += 1
-            HotValidationCursor.objects.filter(lane=lane).update(last_pk=row.pk, updated_at=timezone.now())
+                active[row.project_id] = active.get(row.project_id, 0) + 1
+        if last is not None:  # the cursor moves once per lane, to the last row looked at (it was moved after every row)
+            HotValidationCursor.objects.filter(lane=lane).update(last_pk=last.pk, updated_at=timezone.now())
     return stats

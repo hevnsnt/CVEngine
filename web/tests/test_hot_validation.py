@@ -688,7 +688,9 @@ class KevLaneTests(TestCase):
     def test_hot_cves_take_the_fire_lane_first_and_a_critical_score_alone_is_ice(self):
         result, calls = self.sweep()
         self.assertEqual((result['fire'], result['smoke'], result['ice']), (3, 1, 1))
-        self.assertEqual(result['stale'], 1)  # the high finding is a candidate of the smoke lane too (as under legacy); no CVE match is
+        # the high finding is a candidate of the smoke lane too (as under legacy), where it is turned away as not that lane's: counted as stale when the
+        # sweep looks at it under its lock, as in-flight when its job (queued a moment ago in the fire lane) is read from the page first; no CVE match is
+        self.assertEqual(result['stale'] + result['inflight'], 1)
         self.assertEqual([priority for _name, priority in calls], [0, 0, 0, 6, 9])
         self.assertEqual(self.queued(), {'CVE-2099-20': 0, 'CVE-2099-21': 0, 'CVE-2099-22': 9})
         again, calls = self.sweep()

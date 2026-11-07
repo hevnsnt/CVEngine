@@ -797,6 +797,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     secrets_result = _stage(scan, 'Secrets scan (Kingfisher)', 'secrets_scan', run_secrets, fallback={'hosts': 0})
     if stopped(scan_id):
         return gone
+    from cveFeed import ssh_scan
+
+    def run_ssh():  # a read-only look at the SSH services the port stage found, in a scanner only (cveFeed.ssh_scan)
+        try:
+            return ssh_scan.run_for_scan(scan_id, force=bool(retest or force))
+        except resources.ScannerUnavailable as exc:  # no scanner takes it, and it never runs here: the stage waits, the endpoints stay due
+            return _waiting_for_scanner(scan, 'SSH inspection', exc, {'endpoints': 0})
+    ssh_result = _stage(scan, 'SSH inspection', 'ssh_probe', run_ssh, fallback={'endpoints': 0})
+    if stopped(scan_id):
+        return gone
     from cveFeed import probes, wpscan_scan
     probe_kwargs = {}
     if retest or force:
@@ -885,7 +895,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
         run_hygiene_task.delay(scan.domain_id)  # certificates and email authentication for what was just found
     result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
               'correlation': correlation, 'nuclei_targeted': targeted_result, 'triage': triage_result,
-              'asset_changes': changes_result}
+              'asset_changes': changes_result, 'ssh_probe': ssh_result}
     if hygiene_result is not None:
         result['hygiene'] = hygiene_result
     if waf_result is not None:

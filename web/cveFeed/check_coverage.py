@@ -489,6 +489,21 @@ def plan_rdp(h, ev):
     return [Unit(f'{address}:{number}', ev.ledger_runs(('rdp-shot',), h.project_id, f'{address}:{number}')) for address, number in ports]
 
 
+def _ssh_ports(h):
+    from cveFeed import ssh_scan
+    return sorted({(a.address, p.number) for a in h.scannable() for p in a.ports if ssh_scan.is_ssh_port(p)})[:MAX_UNITS]
+
+
+def plan_ssh(h, ev):
+    from cveFeed import ssh_scan
+    if not ssh_scan.enabled():
+        return 'the SSH inspection is switched off (CVENGINE_SSH_PROBE=0)'
+    ports = _ssh_ports(h)
+    if not ports:
+        return 'no open SSH service'
+    return [Unit(f'{address}:{number}', ev.ledger_runs(('ssh-probe', 'ssh-probe-failed'), h.project_id, f'{address}:{number}')) for address, number in ports]
+
+
 def plan_db_exposure(h, ev):
     from cveFeed import db_exposure
     if not any(p.protocol in TCP and db_exposure.checker_for(p)[1] for a in h.scannable() for p in a.ports):
@@ -822,6 +837,7 @@ CHECKS = (
     Check('full-ports', 'All 65,535 TCP ports (background sweep)', plan_full_ports, kinds=('nmap-full',)),
     Check('udp', 'UDP exposure sweep', plan_udp, kinds=('udp-scan', 'udp-scan-failed'), sweeps=('udp-kick',)),
     Check('rdp-screenshot', 'RDP login screen capture', plan_rdp, kinds=('rdp-shot',), stages=('rdp_screenshot',)),
+    Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei',), stages=('nuclei_targeted_scan',)),
