@@ -44,7 +44,7 @@ BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval',
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
 OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'refresher')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'refresher')
 
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
 

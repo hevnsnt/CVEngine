@@ -93,7 +93,7 @@ rm:				## Remove all services containers.
 test:			## Run the test suite (the stack must be running).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
 
-openvas-up: check-env	## Start the optional OpenVAS (Greenbone) add-on (docs/OPENVAS.md). The first start loads the feeds for a long time and needs about 60 GB of Docker's disk; add COMPOSE_PROFILES=openvas to .env to keep it across updates.
+openvas-up: check-env	## Start the old in-stack OpenVAS (Greenbone) containers, which the application no longer uses (a Sentinel runs OpenVAS, docs/OPENVAS.md). Costs about 4 GB of RAM and 60 GB of Docker's disk; only for someone who wants them by hand.
 	@./scripts/openvas-disk-check.sh
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas up -d ${OPENVAS_SERVICES}
 

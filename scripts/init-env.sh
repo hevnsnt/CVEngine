@@ -56,7 +56,7 @@ if command -v docker >/dev/null 2>&1; then
     project=$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r') || project=''
     project=${project#[\"\']}; project=${project%[\"\']}
   fi
-  project=${project:-$(basename "$(pwd -P)" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')}
+  project=${project:-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')}
   for filter in "label=com.docker.compose.project.working_dir=$(pwd)" "label=com.docker.compose.project.working_dir=$(pwd -P)" "label=com.docker.compose.project=$project"; do
     existing_redis=$(docker ps -a --filter "$filter" --filter "label=com.docker.compose.service=redis" -q 2>/dev/null | head -n 1) || existing_redis=''
     [ -z "$existing_redis" ] || break
@@ -99,8 +99,28 @@ disable_builtin_scanner() {
   grep -qE '^CVENGINE_BUILTIN_SCANNER=' .env || { set_value CVENGINE_BUILTIN_SCANNER 0; echo "Set CVENGINE_BUILTIN_SCANNER=0: the built-in scanner stays off."; }
 }
 
+# install.sh asks which Sentinels will scan (CVENGINE_INSTALL_SENTINELS, from its question or --sentinels): internal is the built-in scanner only (the
+# default: nothing is written), both is the built-in scanner plus external Sentinels you add, external leaves the built-in scanner off. Only a choice
+# somebody made reaches here, so it is applied even over an earlier value (switching the choice on a re-run); no choice leaves .env as it is.
+apply_sentinel_plan() {
+  local plan=${CVENGINE_INSTALL_SENTINELS:-} switch
+  switch=$(grep -E '^CVENGINE_BUILTIN_SCANNER=' .env | tail -n 1 | cut -d= -f2- | tr -d '\r"'"'"' ' | tr '[:upper:]' '[:lower:]' || true)
+  case "$plan" in
+    '') return 0 ;;
+    external)
+      case "$switch" in 0|false|no|off) ;; *) set_value CVENGINE_BUILTIN_SCANNER 0; echo "Set CVENGINE_BUILTIN_SCANNER=0: the built-in scanner stays off." ;; esac
+      ! grep -q '^CVENGINE_SENTINEL_PLAN=' .env || set_value CVENGINE_SENTINEL_PLAN external ;;
+    internal|both)
+      case "$switch" in 0|false|no|off) set_value CVENGINE_BUILTIN_SCANNER 1; echo "Set CVENGINE_BUILTIN_SCANNER=1: the built-in scanner is on." ;; esac
+      if [ "$plan" = both ]; then set_value CVENGINE_SENTINEL_PLAN both
+      elif grep -q '^CVENGINE_SENTINEL_PLAN=' .env; then set_value CVENGINE_SENTINEL_PLAN internal; fi ;;
+    *) echo "CVENGINE_INSTALL_SENTINELS must be internal, both or external (got '$plan')." >&2; exit 2 ;;
+  esac
+}
+
 fill POSTGRES_PASSWORD
 fill AUTHORITY_PASSWORD
 fill_domain "${1:-}"
 [ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 0 ] || disable_builtin_scanner
+apply_sentinel_plan
 chmod 600 .env

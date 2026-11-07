@@ -1696,6 +1696,10 @@ class HostSearchTests(TestCase):
 		host(da, 'www.srch.example', ip='10.0.1.9', tech='PHP', title='Welcome to Acme Tomcat')
 		host(db, 'theirs.other.example', ip='10.0.0.7', tech='PHP', port=(3306, 'MySQL', '8.0'))
 
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()  # the whole-match counts are a shared snapshot (15 s): a test that edits hosts must not read another test's
+
 	def search(self, q, **extra):
 		from urllib.parse import urlencode
 		status, data = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?' + urlencode({'q': q, **extra}))

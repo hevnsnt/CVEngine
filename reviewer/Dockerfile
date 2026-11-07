@@ -11,6 +11,9 @@ RUN pip install --no-cache-dir -r /opt/reviewer/requirements.txt \
 
 # Into site-packages, owned by root and read-only to the reviewer: `python3 -I` (isolated mode) never puts the working directory on the path.
 COPY cvengine_reviewer /usr/local/lib/python3.13/site-packages/cvengine_reviewer
+# Readable by the reviewer user whatever the umask of the checkout was: on a host that clones with umask 027 or 077 the files arrive mode 640 or 600,
+# and the unprivileged user then cannot import its own package (the container crash-loops with PermissionError).
+RUN chmod -R a+rX /usr/local/lib/python3.13/site-packages/cvengine_reviewer
 WORKDIR /tmp
 USER 10002:10002
 ENTRYPOINT ["python3", "-I", "-m", "cvengine_reviewer"]
