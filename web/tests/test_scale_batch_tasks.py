@@ -110,3 +110,26 @@ class HotSweepCostTests(TestCase):
         AutomaticValidation.objects.update(status='completed', finished_at=timezone.now())
         fresh, _ = self.sweep()
         self.assertEqual((fresh['fire'], fresh['fresh']), (0, 6))
+
+
+class DueHostIndexTests(TestCase):
+    def test_the_due_host_query_has_the_partial_index_for_its_unresolved_check(self):
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(cursor, HostState._meta.db_table)
+        index = constraints['hoststate_unresolved_host_idx']
+        self.assertEqual(index['columns'], ['project_id', 'host'])
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'hoststate_unresolved_host_idx'")
+            self.assertIn('unresolved_checks >= 1', cursor.fetchone()[0])
+
+    def test_the_due_host_query_is_one_statement(self):
+        from cveFeed import coverage_topup
+        now = timezone.now()
+        org = Org.objects.create(name='Dh org', slug='dh-org')
+        project = Project.objects.create(name='Dh', slug='dh', org=org, insert_date=now)
+        domain = Domain.objects.create(name='dh.example.test', project=project, insert_date=now)
+        for i in range(5):
+            Subdomain.objects.create(target_domain=domain, name=f'h{i}.dh.example.test')
+        with CaptureQueriesContext(connection) as q:
+            _, due = coverage_topup.host_coverage_due(project, now, limit=10, need_count=False)
+        self.assertEqual((len(due), len(q)), (5, 1))
