@@ -271,7 +271,6 @@ class ProbeTests(SimpleTestCase):
 		connection.close.assert_called_once()
 
 	def _signed_probe(self, headers, connect_error=None, untrusted_ok=False):
-		import ssl
 		response = mock.Mock(status=200)
 		response.headers = __import__('email.message', fromlist=['Message']).Message()
 		response.getheader.side_effect = lambda name, default=None: response.headers.get(name, default)

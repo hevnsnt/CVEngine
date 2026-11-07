@@ -1,6 +1,5 @@
 import json
 import os
-import socket
 from datetime import timedelta
 from unittest import mock
 
@@ -11,14 +10,16 @@ from django.utils import timezone
 from agentapi.auth import create_token
 from cvengine_scanner import versions
 
-from cveFeed import ledger, probes, route_auth, slow_web, supplier_checks as sc, supplier_scan as ss, supplier_search
-from cveFeed.models import (BountyEngagement, BountyProgram, CVEEntry, HostExclusion, HygieneFinding, ServiceRun, Supplier, SupplierFinding,
+from cveFeed import ledger, route_auth, supplier_checks as sc, supplier_scan as ss, supplier_search
+from cveFeed.models import (CVEEntry, HostExclusion, HygieneFinding, ServiceRun, Supplier, SupplierFinding,
                             SupplierHostCard)
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from startScan.models import Subdomain
 from targetApp.models import Domain
+from tests.fake_scanner import FakeScanner, LocalFallback
 from tests.test_agentapi import call, tool_call
 from tests.test_tenancy import client_for
+from tests import hygiene_scanner
 
 PUBLIC = '203.0.113.10'
 GOOD_HEADERS = {'strict-transport-security': 'max-age=31536000', 'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
@@ -67,42 +68,65 @@ class FakeNet:
         self.records_txt[name] = ['v=spf1 include:_spf.mail.example.test -all']
         self.records_txt[f'_dmarc.{name}'] = ['v=DMARC1; p=reject; rua=mailto:dmarc@' + name]
 
-    # --- the Network interface
-    def resolve(self, name):
-        self.calls.append(('resolve', name))
-        if name in self.ips:
-            return list(self.ips[name])
-        raise socket.gaierror(socket.EAI_NONAME, 'not found')
+    # --- what a Sentinel reports for a name (the contract's row), read from this fake network
+    def row(self, domain):
+        """The row a Sentinel's ``supplier_check`` reports for ``domain`` from what ``site`` set up: the three checks these tests follow (an expiring or
+        expired certificate, a missing HSTS header, missing security headers), the card and the fingerprints. A name with no page and no certificate is
+        an unanswered one."""
+        https = self.pages.get(f'https://{domain}/')
+        tls = self.certs.get(domain)
+        if isinstance(https, Exception):
+            https = None
+        if isinstance(tls, Exception):
+            tls = None
+        answered = https is not None or tls is not None
+        postures = []
+        if tls is not None:
+            days = (tls['not_after'] - timezone.now()).days
+            if days < 0:
+                postures.append({'check': 'tls_expired', 'severity': 4, 'title': f'Certificate for {domain}:443 has expired', 'detail': 'It expired.',
+                                 'category': 'tls', 'evidence': {'days_left': days}})
+            elif days < 30:
+                postures.append({'check': 'tls_expiring', 'severity': 2, 'title': f'Certificate for {domain}:443 expires within 30 days ({days} days left)',
+                                 'detail': 'It expires soon.', 'category': 'tls', 'evidence': {'days_left': days}})
+        headers = (https or {}).get('headers') or {}
+        if https is not None:
+            if 'strict-transport-security' not in headers:
+                postures.append({'check': 'hsts_missing', 'severity': 2, 'title': f'{domain} does not send Strict-Transport-Security',
+                                 'detail': 'Without HSTS a browser can be tricked into using plain HTTP.', 'category': 'web', 'evidence': {'header': ''}})
+            if 'content-security-policy' not in headers:
+                postures.append({'check': 'security_headers_missing', 'severity': 1, 'title': f'{domain} sends no Content-Security-Policy',
+                                 'detail': 'Security headers are missing.', 'category': 'web', 'evidence': {'missing': ['content-security-policy']}})
+        card = {'state': 'ok' if https is not None else 'unreachable', 'addresses': self.ips.get(domain, []), 'evidence': {'address': 'ok', 'dns': self.dns_state(domain)}}
+        if tls is not None:
+            card['tls'] = {'subject': tls['subject'], 'issuer': tls['issuer'], 'sans': tls['sans'], 'not_before': tls['not_before'].isoformat(),
+                           'not_after': tls['not_after'].isoformat(), 'days_left': (tls['not_after'] - timezone.now()).days, 'key': tls['key_description'],
+                           'signature': tls['signature_algorithm'], 'protocol': tls['protocol'], 'cipher': tls['cipher'], 'chain_error': '', 'legacy_tls': False}
+        if https is None:
+            card['http'] = {'https_status': None, 'http_status': None}  # only the statuses over each scheme are known
+        else:
+            card['mail'] = {'handles_mail': domain in self.mx, 'mx': domain in self.mx}
+            card['http'] = {'https_status': https['status'], 'http_status': 301, 'url': f'https://{domain}/', 'status': https['status'],
+                            'title': https['title'], 'content_type': https['content_type'], 'server': https['server'], 'powered_by': https['powered_by'],
+                            'location': '', 'cookies': [], 'bytes': https['bytes'], 'headers': headers}
+        fingerprints = []
+        if https is not None and https['server']:
+            name, _slash, version = https['server'].partition('/')
+            fingerprints.append({'name': f'{name}:{version}' if version else name, 'source': 'header:server'})
+        resolvable = {'tls': ['tls_'], 'web': ['hsts_', 'http_no_redirect', 'no_https', 'security_headers_missing'], 'cve': ['cve_'], 'exposed': ['exposed_login'],
+                      'email': ['']}
+        return {'domain': domain, 'postures': postures, 'resolvable': resolvable if answered else {}, 'summary': {'address': 'ok' if answered else 'unreachable'},
+                'card': card, 'fingerprints': fingerprints, 'edges': [], 'distro': '', 'answered': answered, 'stopped': False, 'partial': False,
+                'requests': ss.DOMAIN_COST}
 
-    def fetch(self, url, ip):
-        self.calls.append(('fetch', url, ip))
-        got = self.pages.get(url, page(404, '<html><title>Not found</title></html>'))
-        if isinstance(got, Exception):
-            raise got
-        return {**got, 'url': url, 'challenge': probes.challenge_of(got)}
-
-    def tls(self, name, addresses):
-        self.calls.append(('tls', name, tuple(addresses)))
-        got = self.certs.get(name)
-        if isinstance(got, Exception):
-            raise got
-        return got
+    def served(self, task):
+        """The responder of a fake Sentinel for a ``supplier_check`` task: one row per name, read from this network."""
+        domains = task['target']['domains']
+        self.calls += [('row', domain) for domain in domains]
+        return {'outcome': 'done', 'domains': [self.row(d) for d in domains], 'touched': list(domains), 'refused': []}
 
     def dns_state(self, name):
         return 'ok' if name in self.known else 'nxdomain'
-
-    def txt(self, name):
-        return list(self.records_txt.get(name, []))
-
-    def records(self, name, rtype):
-        return []
-
-    def has_record(self, name, rtype):
-        return rtype == 'MX' and name in self.mx
-
-    def mta_sts_policy(self, domain, addresses):
-        self.calls.append(('mta-sts', domain))
-        return self.sts_policy.get(domain)
 
     @property
     def fetched(self):
@@ -137,14 +161,19 @@ class Fixture:
         self.t_auditor = create_token(self.auditor, 'u')[1]
         self.t_stranger = create_token(self.stranger, 's')[1]
         self.net = FakeNet()
+        LocalFallback('none').apply(self)
+        self.fake = None  # the fake Sentinel of ``sweep``, started with the first sweep
 
     def supplier(self, name='Acme Hosting', tier='critical', domains=('portal.vendor.test',), project=None):
         return Supplier.objects.create(project=project or self.project, name=name, tier=tier, domains=list(domains), added_by=self.admin)
 
     def sweep(self, net=None, **kw):
-        self.net = net or self.net
-        kw.setdefault('pace', slow_web.Pace(**NO_WAIT))
-        return ss.sweep(self.project.id, net=self.net, **kw)
+        """One supplier sweep, a Sentinel (the fake scanner) reading ``self.net``: this server asks nothing itself."""
+        if net is not None:
+            self.net = net
+        if self.fake is None:
+            self.fake = FakeScanner(kinds=['supplier_check'], responders={'supplier_check': lambda task: self.net.served(task)}).start_for(self)
+        return ss.sweep(self.project.id, **kw)
 
     def expire(self):
         ServiceRun.objects.filter(service__in=(ss.SERVICE, ss.FAILED_SERVICE)).delete()
@@ -373,256 +402,6 @@ class ApiTests(Fixture, TestCase):
 
 # ----------------------------------------------------------------------------- the four checks, with the network injected
 
-class CheckTests(Fixture, TestCase):
-    D = 'portal.vendor.test'
-
-    def run_domain(self, net=None, domain=None, **kw):
-        net = net or self.net
-        res = ss.check_domain(domain or self.D, net, slow_web.Pace(**NO_WAIT), ss.Budget(1000), kw.pop('pool', lambda: ({}, {})), **kw)
-        return res, {p.check: p for p in res.postures}
-
-    def test_a_healthy_supplier_has_no_findings_and_a_full_card(self):
-        self.net.site(self.D, server='nginx/1.25.3')
-        res, found = self.run_domain()
-        self.assertEqual(found, {})
-        self.assertEqual(res.card['state'], 'ok')
-        self.assertEqual(res.card['addresses'], [PUBLIC])
-        self.assertEqual(res.card['tls']['issuer'], 'Example CA')
-        self.assertEqual(res.card['http']['https_status'], 200)
-
-    # --- TLS and certificates
-    def test_an_expired_certificate_is_critical_and_one_that_expires_soon_is_not(self):
-        self.net.site(self.D, tls=cert(self.D, days=-3))
-        _, found = self.run_domain()
-        self.assertEqual(found['tls_expired'].severity, sc.CRITICAL)
-        self.assertEqual(found['tls_expired'].category, 'tls')
-        self.assertIn('renew', found['tls_expired'].ask)
-        self.net.site(self.D, tls=cert(self.D, days=20))
-        _, found = self.run_domain()
-        self.assertEqual(found['tls_expiring'].severity, sc.MEDIUM)
-
-    def test_a_certificate_for_another_name_a_weak_key_and_old_protocols_are_findings(self):
-        self.net.site(self.D, tls=cert(self.D, sans=['other.test'], subject='other.test', key_description='RSA 1024', legacy_tls=True,
-                                       signature_algorithm='sha1 (sha1WithRSAEncryption)', chain_error='self-signed certificate'))
-        _, found = self.run_domain()
-        self.assertEqual({'tls_hostname_mismatch', 'tls_weak_key', 'tls_weak_signature', 'tls_legacy_protocol', 'tls_self_signed'}, set(found))
-
-    def test_the_tls_read_goes_only_to_the_vetted_address_on_port_443(self):
-        self.net.site(self.D)
-        self.run_domain()
-        self.assertEqual([c for c in self.net.calls if c[0] == 'tls'], [('tls', self.D, (PUBLIC,))])
-        self.assertEqual(ss.numeric_addresses([PUBLIC, '2001:db8::1']), ((socket.AF_INET, (PUBLIC, 443)), (socket.AF_INET6, ('2001:db8::1', 443, 0, 0))))
-
-    def test_a_certificate_that_could_not_be_read_decides_nothing(self):
-        self.net.site(self.D, tls=None)
-        res, found = self.run_domain()
-        self.assertNotIn('tls', res.resolvable)
-        self.assertNotIn('tls', res.card)
-        self.net.site(self.D, tls=ValueError('unparseable'))
-        res, _ = self.run_domain()
-        self.assertNotIn('tls', res.resolvable)
-
-    # --- email authentication
-    def test_a_mail_domain_without_spf_dmarc_or_mta_sts_is_reported(self):
-        self.net.site(self.D)
-        self.net.mx.add(self.D)
-        res, found = self.run_domain()
-        self.assertEqual(found['spf_missing'].severity, sc.MEDIUM)
-        self.assertEqual(found['dmarc_missing'].severity, sc.HIGH)
-        self.assertEqual(found['mta_sts_missing'].severity, sc.LOW)  # an INFO for owned hosts, a finding for a supplier that receives your mail
-        self.assertTrue(all(p.category == 'email' for k, p in found.items() if k.startswith(('spf', 'dmarc', 'mta'))))
-        self.assertEqual(res.resolvable['email'], {''})
-        self.assertEqual(res.card['mail'], {'handles_mail': True, 'mx': True})
-
-    def test_weak_spf_dmarc_dkim_and_a_testing_mta_sts_policy(self):
-        self.net.site(self.D)
-        self.net.mx.add(self.D)
-        self.net.records_txt[self.D] = ['v=spf1 +all']
-        self.net.records_txt[f'_dmarc.{self.D}'] = ['v=DMARC1; p=none']
-        self.net.records_txt[f'_mta-sts.{self.D}'] = ['v=STSv1; id=1']
-        self.net.ips[f'mta-sts.{self.D}'] = [PUBLIC]
-        self.net.sts_policy[self.D] = 'version: STSv1\nmode: testing\nmx: mail.vendor.test\nmax_age: 86400'
-        _, found = self.run_domain()
-        self.assertEqual(found['spf_allow_all'].severity, sc.CRITICAL)
-        self.assertEqual(found['dmarc_none'].severity, sc.MEDIUM)
-        self.assertEqual(found['mta_sts_not_enforced'].severity, sc.MEDIUM)
-        self.assertNotIn('mta_sts_missing', found)
-        self.assertIn(('mta-sts', self.D), self.net.calls)
-
-    def test_a_clean_mail_domain_has_no_email_findings(self):
-        self.net.site(self.D, mail=True)
-        self.net.records_txt[f'_mta-sts.{self.D}'] = ['v=STSv1; id=1']
-        self.net.ips[f'mta-sts.{self.D}'] = [PUBLIC]
-        self.net.sts_policy[self.D] = 'version: STSv1\nmode: enforce\nmx: mail.vendor.test\nmax_age: 604800'
-        _, found = self.run_domain()
-        self.assertEqual([k for k, p in found.items() if p.category == 'email' and k.split('_')[0] in ('spf', 'dmarc', 'mta')], [])
-
-    def test_the_mta_sts_policy_host_is_vetted_like_every_other_connection(self):
-        self.net.site(self.D)
-        self.net.mx.add(self.D)
-        self.net.records_txt[f'_mta-sts.{self.D}'] = ['v=STSv1; id=1']
-        self.net.ips[f'mta-sts.{self.D}'] = ['10.1.2.3']
-        _, found = self.run_domain()
-        self.assertNotIn(('mta-sts', self.D), self.net.calls)
-        self.assertIn('mta_sts_policy_unreachable', found)
-
-    def test_dns_that_fails_on_the_way_makes_the_email_review_inconclusive(self):
-        self.net.site(self.D)
-        self.net.mx.add(self.D)
-        states = iter(['ok', 'unknown'])
-        with mock.patch.object(self.net, 'dns_state', side_effect=lambda name: next(states)):
-            res, found = self.run_domain()
-        self.assertNotIn('email', res.resolvable)
-        self.assertNotIn('spf_missing', found)
-
-    def test_a_name_that_handles_no_mail_gets_no_email_findings(self):
-        self.net.site(self.D)
-        res, found = self.run_domain()
-        self.assertNotIn('email', res.resolvable)
-        self.assertEqual(res.card['mail'], {'handles_mail': False, 'mx': False})
-
-    def test_a_mail_only_name_with_no_address_is_still_reviewed_and_never_contacted(self):
-        self.net.known.add('mail.vendor.test')
-        self.net.mx.add('mail.vendor.test')
-        res, found = self.run_domain(domain='mail.vendor.test')
-        self.assertIn('spf_missing', found)
-        self.assertEqual(res.card['state'], 'no_address')
-        self.assertEqual(self.net.connections, [])
-
-    # --- headers and exposed pages
-    def test_missing_security_headers_and_plain_http_are_findings(self):
-        self.net.site(self.D, https=page(headers={}), http=page(200))
-        res, found = self.run_domain()
-        self.assertEqual(found['hsts_missing'].severity, sc.MEDIUM)
-        self.assertEqual(found['security_headers_missing'].evidence['missing'], ['Content-Security-Policy', 'X-Frame-Options', 'X-Content-Type-Options'])
-        self.assertEqual(found['http_no_redirect'].severity, sc.MEDIUM)
-        self.net.site(self.D, https=page(headers={**GOOD_HEADERS, 'strict-transport-security': 'max-age=300'}))
-        _, found = self.run_domain()
-        self.assertEqual(found['hsts_weak'].severity, sc.LOW)
-        self.assertNotIn('hsts_missing', found)
-
-    def test_a_site_that_answers_only_over_plain_http_is_high(self):
-        self.net.site(self.D, https=OSError('refused'), http=page(200), tls=None)
-        _, found = self.run_domain()
-        self.assertEqual(found['no_https'].severity, sc.HIGH)
-
-    def test_a_listed_admin_page_is_reported_once_with_one_plain_get_per_path(self):
-        phpmyadmin = page(200, '<html><title>phpMyAdmin</title><body>phpMyAdmin login</body></html>')
-        self.net.site(self.D, paths={'/phpmyadmin/': phpmyadmin, '/manager/html': page(401, '', www_authenticate='Basic realm="Tomcat Manager Application"'),
-                                     '/login': page(200, '<title>Sign in [Jenkins]</title>')})
-        _, found = self.run_domain()
-        self.assertEqual(found['exposed_phpmyadmin'].severity, sc.MEDIUM)
-        self.assertEqual(found['exposed_tomcat_manager'].severity, sc.MEDIUM)
-        self.assertEqual(found['exposed_login_jenkins'].severity, sc.MEDIUM)
-        self.assertEqual(found['exposed_phpmyadmin'].category, 'exposed')
-        paths = [u for u in self.net.fetched if u.startswith(f'https://{self.D}/') and u != f'https://{self.D}/']
-        self.assertEqual(sorted(paths), sorted(f'https://{self.D}{p}' for p in sc.PATHS))  # each path asked exactly once, from the fixed list
-        self.assertEqual(len(sc.PATHS), len(set(sc.PATHS)))
-        self.assertLessEqual(len(sc.PATHS), 12)
-
-    def test_a_catch_all_that_answers_200_to_everything_is_not_a_finding(self):
-        catch_all = page(200, HTML + '<input type="password">')
-        self.net.site(self.D, https=page(200, HTML + '<input type="password">', headers=GOOD_HEADERS))
-        for path in sc.PATHS:
-            self.net.pages[f'https://{self.D}{path}'] = catch_all
-        _, found = self.run_domain()
-        self.assertEqual([k for k in found if k.startswith('exposed_')], [])
-        self.net.pages[f'https://{self.D}/admin/'] = page(200, '<html><title>Admin sign in</title><form><input type="password"></form></html>')
-        _, found = self.run_domain()
-        self.assertEqual(found['exposed_admin'].severity, sc.LOW)
-
-    def test_a_path_that_does_not_answer_decides_nothing_and_a_404_resolves(self):
-        self.net.site(self.D, paths={'/phpmyadmin/': OSError('timed out')})
-        res, found = self.run_domain()
-        self.assertNotIn('exposed_phpmyadmin', res.resolvable['exposed'])
-        self.assertIn('exposed_solr', res.resolvable['exposed'])
-
-    def test_an_edge_that_challenges_the_request_is_recorded_and_nothing_more_is_asked(self):
-        challenge = page(403, '<html><title>Just a moment...</title>cloudflare</html>', server='cloudflare', headers={'cf-mitigated': 'challenge'})
-        self.net.site(self.D, https=challenge)
-        res, found = self.run_domain()
-        self.assertEqual(res.card['state'], 'challenged')
-        self.assertEqual(res.card['evidence']['challenged'], 'Cloudflare')
-        self.assertEqual([k for k in found if k.startswith(('exposed_', 'cve_', 'security_headers'))], [])
-        self.assertEqual([u for u in self.net.fetched if u.count('/') > 3], [])  # no path was asked
-        self.assertNotIn('technologies', res.card)
-
-    # --- the card and its technologies
-    def test_the_card_carries_headers_certificate_and_the_technology_stack(self):
-        self.net.site(self.D, server='nginx/1.18.0 (Ubuntu)', powered_by='PHP/7.4.3', headers={'x-custom': 'yes'},
-                      https=page(headers={**GOOD_HEADERS, 'x-custom': 'yes'}, server='nginx/1.18.0 (Ubuntu)', powered_by='PHP/7.4.3',
-                                 body='<html><head><title>Vendor portal</title><meta name="generator" content="WordPress 6.2.1"></head><body></body></html>'))
-        res, _ = self.run_domain()
-        names = {t['name']: t for t in res.card['technologies']}
-        self.assertEqual((names['nginx']['version'], names['nginx']['category']), ('1.18.0', 'web server'))
-        self.assertEqual((names['PHP']['version'], names['PHP']['category']), ('7.4.3', 'language'))
-        self.assertEqual(names['WordPress']['version'], '6.2.1')
-        self.assertEqual(names['PHP']['source'], 'header:x-powered-by')
-        http_card = res.card['http']
-        self.assertEqual((http_card['server'], http_card['powered_by'], http_card['title']), ('nginx/1.18.0 (Ubuntu)', 'PHP/7.4.3', 'Vendor portal'))
-        self.assertEqual(http_card['headers']['x-custom'], 'yes')
-        self.assertEqual(res.card['tls']['sans'], [self.D])
-        self.assertEqual((res.card['tls']['protocol'], res.card['tls']['cipher']), ('TLSv1.3', 'TLS_AES_256_GCM_SHA384'))
-        self.assertGreater(res.card['tls']['days_left'], 190)
-
-    def test_cookies_values_never_reach_the_card(self):
-        self.net.site(self.D, https=page(headers=GOOD_HEADERS, cookies=['sid']))
-        res, _ = self.run_domain()
-        self.assertEqual(res.card['http']['cookies'], ['sid'])
-        self.assertNotIn('set-cookie', res.card['http']['headers'])
-
-    # --- known CVEs for announced versions (secondary)
-    def cve(self, cve_id='CVE-2099-7', product='nginx', ranges=None, cvss=7.5, kev=False):
-        return CVEEntry.objects.create(cve_id=cve_id, cvss=cvss, kev=kev, title='t', published_at=timezone.now(),
-                                       affected=[{'product': product, 'ranges': ranges if ranges is not None else [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
-
-    def test_an_announced_version_inside_a_bounded_range_is_an_informational_finding_that_is_never_validated(self):
-        self.cve()
-        self.net.site(self.D, server='nginx/1.18.0')
-        _, found = self.run_domain(pool=lambda: __import__('cveFeed.correlation', fromlist=['x']).cve_pool())
-        finding = found['cve_nginx']
-        self.assertEqual((finding.category, finding.severity), ('cve', sc.HIGH))
-        self.assertEqual(finding.evidence['cves'][0]['id'], 'CVE-2099-7')
-        self.assertIs(finding.evidence['validated'], False)
-        self.assertIn('Not validated', finding.detail)
-        self.assertIn('nginx 1.18.0 is announced', finding.title)
-        self.assertIn('backported', finding.ask)
-
-    def test_the_strict_version_rule_no_range_hit_no_version_no_bound(self):
-        from cveFeed import correlation
-        self.cve('CVE-2099-8', ranges=[])  # the advisory names the product and gives no bound: product-wide, no evidence
-        self.cve('CVE-2099-9', product='Apache Tomcat', kev=True, ranges=[])  # even a KEV advisory without a bound is not evidence here
-        pool = correlation.cve_pool
-        self.net.site(self.D, server='nginx/1.25.3')
-        self.assertNotIn('cve_nginx', self.run_domain(pool=pool)[1])
-        self.net.site(self.D, server='nginx')  # no version stated: a technology, never a match
-        res, found = self.run_domain(pool=pool)
-        self.assertEqual([k for k in found if k.startswith('cve_')], [])
-        self.assertEqual([(t['name'], t['version']) for t in res.card['technologies']], [('nginx', '')])
-        self.net.site(self.D, server='Apache-Coyote/1.1')
-        self.assertEqual([k for k in self.run_domain(pool=pool)[1] if k.startswith('cve_')], [])
-
-    def test_a_distribution_build_is_one_step_lower_and_an_edge_masks_the_server_header(self):
-        from cveFeed import correlation
-        self.cve(cvss=9.8)
-        self.net.site(self.D, server='nginx/1.18.0 (Ubuntu)')
-        _, found = self.run_domain(pool=correlation.cve_pool)
-        self.assertEqual(found['cve_nginx'].severity, sc.HIGH)  # critical, lowered: the distribution may have backported the fix
-        self.assertIn('ubuntu build', found['cve_nginx'].title)
-        self.net.site(self.D, server='nginx/1.18.0', headers={'cf-ray': 'abc'})
-        res, found = self.run_domain(pool=correlation.cve_pool)
-        self.assertEqual([k for k in found if k.startswith('cve_')], [])
-        self.assertNotIn('cve', res.resolvable)  # behind an edge the banner says nothing: what it was is not decided either
-
-    def test_the_catalog_is_not_read_when_the_stack_shows_no_version(self):
-        self.net.site(self.D, server='nginx')
-        pool = mock.Mock(side_effect=AssertionError('the catalog must not be loaded'))
-        self.run_domain(pool=pool)
-        pool.assert_not_called()
-
-    def test_no_check_or_finding_can_say_validated(self):
-        fields = {f.name for f in SupplierFinding._meta.get_fields()}
-        self.assertFalse({'validated', 'validation', 'ai_verdict', 'template_result', 'remediation_status', 'assignee'} & fields)
 
 
 # ----------------------------------------------------------------------------- the technology search
@@ -862,17 +641,6 @@ class SweepTests(Fixture, TestCase):
         self.assertNotIn('cve_nginx', self.checks(self.s))
         self.assertEqual(self.finding(self.s, self.D, 'cve_nginx').status, 'resolved')
 
-    def test_every_request_is_a_get_to_the_listed_name_at_its_vetted_address(self):
-        self.sweep()
-        from urllib.parse import urlsplit
-        for call_ in self.net.calls:
-            if call_[0] == 'fetch':
-                self.assertEqual(urlsplit(call_[1]).hostname, self.D)
-                self.assertIn(urlsplit(call_[1]).scheme, ('http', 'https'))
-                self.assertEqual(call_[2], PUBLIC)
-        resolved = {c[1] for c in self.net.calls if c[0] == 'resolve'}
-        self.assertEqual(resolved, {self.D})  # no other name was looked up: no subdomain, no neighbour
-        self.assertEqual({urlsplit(u).port for u in self.net.fetched}, {None})  # only the default ports 443 and 80
 
     def test_the_request_budget_caps_a_sweep_and_the_rest_waits(self):
         second = self.supplier('Second', 'normal', ['second.vendor.test'])
@@ -927,142 +695,6 @@ class SweepTests(Fixture, TestCase):
 
 # ----------------------------------------------------------------------------- safety
 
-class SafetyTests(Fixture, TestCase):
-    D = 'portal.vendor.test'
-
-    def setUp(self):
-        super().setUp()
-        self.s = self.supplier(domains=[self.D])
-
-    def assert_untouched(self):
-        self.assertEqual(self.net.connections, [])
-        self.assertEqual(SupplierFinding.objects.count(), 0)
-
-    def test_a_name_that_resolves_to_a_non_public_address_is_never_contacted(self):
-        for bad in ('10.0.0.5', '192.168.1.10', '172.16.4.4', '127.0.0.1', '169.254.169.254', '100.64.0.1', '100.100.100.200', '0.0.0.0', '::1', 'fe80::1', 'fd00::5',
-                    '::ffff:10.0.0.5', '64:ff9b::a00:5', '192.0.0.192', '224.0.0.1'):
-            net = FakeNet().site(self.D, ip=bad)
-            out = self.sweep(net)
-            self.assertEqual(net.connections, [], bad)
-            card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
-            self.assertEqual(card.state, 'blocked', bad)
-            self.assertIn('not public', card.evidence['note'])
-            ServiceRun.objects.all().delete()
-        self.assertEqual(SupplierFinding.objects.filter(category__in=('tls', 'web', 'exposed', 'cve')).count(), 0)
-
-    def test_one_private_answer_among_public_ones_refuses_the_whole_name(self):
-        net = FakeNet().site(self.D, ip=[PUBLIC, '10.0.0.5'])
-        self.sweep(net)
-        self.assertEqual(net.connections, [])
-
-    def test_the_private_target_switch_does_not_open_a_supplier_to_internal_addresses(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
-            for bad in ('10.0.0.5', '192.168.0.1'):
-                net = FakeNet().site(self.D, ip=bad)
-                self.sweep(net)
-                self.assertEqual(net.connections, [], bad)
-                ServiceRun.objects.all().delete()
-
-    def test_the_real_lookup_is_vetted_too(self):
-        answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('169.254.169.254', 443))]
-        with mock.patch('socket.getaddrinfo', return_value=answers):
-            self.assertEqual(ss.public_addresses(self.D, ss.Network()), ([], 'blocked'))
-        answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (PUBLIC, 443)), (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('2001:db8::1', 443, 0, 0))]
-        with mock.patch('socket.getaddrinfo', return_value=answers):
-            self.assertEqual(ss.public_addresses(self.D, ss.Network()), ([PUBLIC, '2001:db8::1'], 'ok'))
-        with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(socket.EAI_NONAME, 'x')):
-            self.assertEqual(ss.public_addresses(self.D, ss.Network()), ([], 'none'))
-        with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(socket.EAI_AGAIN, 'x')):
-            self.assertEqual(ss.public_addresses(self.D, ss.Network()), ([], 'unknown'))
-        with mock.patch('socket.getaddrinfo', side_effect=TimeoutError):
-            self.assertEqual(ss.public_addresses(self.D, ss.Network()), ([], 'unknown'))
-
-    def test_the_real_web_client_connects_to_the_vetted_address_only(self):
-        seen = {}
-
-        def probe(url, **kwargs):
-            seen.update(url=url, **kwargs)
-            return {'status': 200, 'headers': {}, 'body': ''}
-        with mock.patch.object(route_auth, 'probe_url', probe):
-            ss.Network().fetch(f'https://{self.D}/', PUBLIC)
-        self.assertEqual((seen['url'], seen['connect_ip']), (f'https://{self.D}/', PUBLIC))
-        self.assertEqual(seen['max_bytes'], slow_web.MAX_RESPONSE_BYTES)
-        self.assertIsNone(seen['project'])  # no tailnet authority for a third party
-
-    def test_scanning_paused_stops_the_sweep_before_anything_is_asked(self):
-        self.net.site(self.D)
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True) as paused:
-            out = self.sweep()
-            all_out = ss.sweep_all(net=self.net)
-        self.assertIn('paused', out['skipped'])
-        self.assertIn('paused', all_out['skipped'])
-        paused.assert_called_with(fail_closed=True)  # an unreadable control table is a pause, not a go-ahead
-        self.assertEqual(self.net.calls, [])
-        self.assertEqual(ServiceRun.objects.count(), 0)  # the supplier stays due
-
-    def test_a_pause_in_the_middle_stops_at_the_next_request_and_records_nothing(self):
-        self.net.site(self.D)
-        answers = iter([False, False, False, False, True])
-        with mock.patch('reNgine.resources.global_pause_requested', side_effect=lambda **kw: next(answers, True)):
-            out = self.sweep()
-        self.assertIn('paused', out['skipped'])
-        self.assertLess(len(self.net.connections), 5)
-        self.assertEqual(ServiceRun.objects.filter(service__startswith='supplier').count(), 0)
-
-    def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_is_skipped(self):
-        self.net.site(self.D)
-        program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
-        BountyEngagement.objects.create(project=self.project, program=program, status='active', automated_ok=False)
-        out = self.sweep()
-        self.assertIn('automated testing', out['skipped'])
-        self.assert_untouched()
-        BountyEngagement.objects.update(automated_ok=True, policy_ack_at=timezone.now())
-        self.assertEqual(self.sweep()['suppliers'], 1)
-
-    def test_one_sweep_runs_at_a_time(self):
-        self.net.site(self.D)
-        with mock.patch('reNgine.resources.redis_claim') as claim:
-            claim.return_value.__enter__.return_value = 'another worker'
-            self.assertIn('another supplier sweep', self.sweep()['skipped'])
-        self.assertEqual(self.net.calls, [])
-        with mock.patch('cveFeed.ledger.sweep_claim', return_value=False):
-            self.assertIn('another sweep', ss.sweep_all(net=self.net)['skipped'])
-        with mock.patch('cveFeed.ledger.sweep_claim', return_value=True) as claim_taken:
-            out = ss.sweep_all(net=self.net, pace=slow_web.Pace(**NO_WAIT))
-        claim_taken.assert_called_once_with('suppliers', 2 * 60 * 60)
-        self.assertEqual(out['suppliers'], 1)
-
-    def test_an_excluded_name_is_not_contacted_and_neither_is_one_that_became_a_target(self):
-        self.net.site(self.D)
-        HostExclusion.objects.create(org=self.org1, host=self.D)
-        self.sweep()
-        self.assertEqual(self.net.connections, [])
-        self.assertEqual(SupplierHostCard.objects.get(supplier=self.s).state, 'excluded')
-        HostExclusion.objects.all().delete()
-        self.expire()
-        Domain.objects.create(name='vendor.test', project=self.project, insert_date=timezone.now())  # now the project's own target
-        self.sweep()
-        self.assertEqual(self.net.connections, [])
-        self.assertEqual(SupplierHostCard.objects.get(supplier=self.s).state, 'excluded')
-
-    def test_the_web_client_is_the_slow_polite_one_and_the_pace_is_global(self):
-        waits = []
-        pace = slow_web.Pace(sleep=waits.append, clock=lambda: 0.0, per_host=2.0, overall=0)
-        self.net.site(self.D)
-        self.sweep(pace=pace)
-        self.assertGreater(pace.requests, 10)
-        self.assertTrue(all(w == 2.0 for w in waits))  # the per-host gap holds between this name's requests
-        import inspect
-        self.assertIn('slow_web.get', inspect.getsource(ss.Network.fetch))
-        self.assertGreaterEqual(slow_web.global_gap(), 1.0)
-
-    def test_nothing_but_the_listed_name_is_ever_resolved_or_asked(self):
-        self.net.site(self.D, mail=True)
-        self.net.site('mail.vendor.test')  # an MX host and a neighbour exist, but are not listed
-        self.sweep()
-        self.assertEqual({c[1] for c in self.net.calls if c[0] == 'resolve'}, {self.D})
-        for kind in self.net.connections:
-            self.assertNotIn('mail.vendor.test', json.dumps(kind, default=str))
 
 
 # ----------------------------------------------------------------------------- a supplier is not an owned host
@@ -1085,14 +717,14 @@ class SeparationTests(Fixture, TestCase):
         self.net.mx.add(self.D)
         self.supplier(domains=[self.D])
         out = self.sweep()
-        self.assertGreater(out['new'], 3)
+        self.assertGreater(out['new'], 2)
         self.assertGreater(SupplierFinding.objects.filter(severity=sc.CRITICAL).count(), 0)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(client_for(self.admin).get('/cve/api/stats?project=sup-a').content, before_stats)
         self.assertEqual((HygieneFinding.objects.count(), Domain.objects.filter(project=self.project).count(), Subdomain.objects.count()), (0, 1, 0))
 
     def test_a_supplier_never_becomes_a_target_a_host_or_scan_work(self):
-        from cveFeed import conductor, fullscan
+        from cveFeed import conductor
         self.net.site(self.D)
         self.supplier(domains=[self.D])
         self.sweep()
@@ -1103,10 +735,9 @@ class SeparationTests(Fixture, TestCase):
         self.assertEqual(HostState.objects.count(), 0)
 
     def test_run_hygiene_and_the_owned_stores_do_not_know_suppliers(self):
-        from cveFeed import hygiene
         supplier = self.supplier(domains=[self.D])
         SupplierFinding.objects.create(supplier=supplier, domain=self.D, check_name='tls_expired', title='t', category='tls', severity=4)
-        hygiene.run_hygiene(self.own.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
+        hygiene_scanner.run_hygiene(self.own.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
         self.assertEqual(SupplierFinding.objects.get().status, 'open')  # the owned-host sweep resolves and counts none of it
         self.assertEqual(HygieneFinding.objects.count(), 0)
 
@@ -1134,27 +765,3 @@ class PageTests(Fixture, TestCase):
         self.assertEqual(client_for(self.admin).get('/cve/sup-a/hosts/').status_code, 200)
 
 
-class PolicyBodyEncodingTests(SimpleTestCase):
-    """The MTA-STS policy of a supplier is read the way every in-process reader reads a body: a server that sends gzip despite identity is decoded."""
-    POLICY = b'version: STSv1\nmode: testing\nmx: mail.acme.example\nmax_age: 86400\n'
-
-    def fetch(self, body, encoding):
-        from tests.test_pinned_transport import FakeResponse
-        response = FakeResponse(body, encoding)
-        response.status = 200
-        with mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
-            factory.return_value.getresponse.return_value = response
-            return ss.Network().mta_sts_policy('acme.example', ['203.0.113.10'])
-
-    def test_gzip_and_deflate_policies_are_read(self):
-        import gzip
-        import zlib
-        self.assertIn('mode: testing', self.fetch(gzip.compress(self.POLICY), 'gzip'))
-        self.assertIn('mode: testing', self.fetch(zlib.compress(self.POLICY), 'deflate'))
-        self.assertIn('mode: testing', self.fetch(self.POLICY, None))
-
-    def test_a_bomb_a_bad_stream_and_an_unreadable_encoding_are_no_policy(self):
-        import gzip
-        self.assertIsNone(self.fetch(gzip.compress(b'x' * 10_000_000, compresslevel=9), 'gzip'))
-        self.assertIsNone(self.fetch(b'garbage', 'gzip'))
-        self.assertIsNone(self.fetch(self.POLICY, 'br'))

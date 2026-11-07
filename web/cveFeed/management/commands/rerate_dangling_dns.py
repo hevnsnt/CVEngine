@@ -1,8 +1,9 @@
 """Re-rate the open baddns dangling-DNS findings already stored, the way a new scan now rates them (cveFeed.dangling_dns), and give a
 finding with no host the host it was matched at.
 
-A dry run by default: it runs the same DNS and HTTP checks a scan runs (read-only questions to the name servers and the host) and reports, per
-project, how many findings would change. Nothing is written without --apply.
+A dry run by default: it has a Sentinel run the same DNS and HTTP checks a scan runs (a ``dangling_dns_check`` task: this server asks nothing itself)
+and reports, per project, how many findings would change. With no Sentinel able to take the work every finding is left as it is. Nothing is written
+without --apply.
 
     python3 manage.py rerate_dangling_dns                 # dry run, every project
     python3 manage.py rerate_dangling_dns --project acme  # dry run, one project
@@ -30,12 +31,17 @@ def candidates(project=None):
     return rows
 
 
-def plan(vuln, net=None):
-    """``(new_severity, new_description, host_name)`` for one stored finding; each part None when it does not change."""
-    from cveFeed import dangling_dns
+def finding_of(vuln):
+    """``assess_all``'s dict for one stored finding."""
     host = (vuln.subdomain.name if vuln.subdomain_id else '') or (vuln.http_url or '').strip().lower()
-    host = host if host and '/' not in host else ''
-    rating = dangling_dns.assess({'host': host, 'description': vuln.description, 'module': 'baddns'}, net=net)
+    return {'host': host if host and '/' not in host else '', 'description': vuln.description, 'module': 'baddns'}
+
+
+def plan(vuln, rating):
+    """``(new_severity, new_description, host_name)`` for one stored finding and the rating a Sentinel gave it (None: no answer); each part None when
+    it does not change."""
+    from cveFeed import dangling_dns
+    host = finding_of(vuln)['host']
     severity = description = None
     if rating is not None:
         target = 0 if rating.drop else (rating.severity if rating.severity is not None else vuln.severity)
@@ -75,18 +81,22 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         from cveFeed import dangling_dns
-        net = dangling_dns.Net()
         counts = defaultdict(lambda: defaultdict(int))
+        by_project = defaultdict(list)
         for vuln in candidates(opts.get('project')).iterator():
-            slug = vuln.target_domain.project.slug if vuln.target_domain_id and vuln.target_domain.project_id else '-'
-            counts[slug]['examined'] += 1
-            severity, description, host = plan(vuln, net=net)
-            if severity is not None:
-                counts[slug][f'{SEVERITY_NAMES.get(vuln.severity, vuln.severity)} -> {SEVERITY_NAMES.get(severity, severity)}'] += 1
-            if host:
-                counts[slug]['host filled'] += 1
-            if opts['apply'] and apply(vuln, severity, description, host):
-                counts[slug]['written'] += 1
+            by_project[vuln.target_domain.project if vuln.target_domain_id and vuln.target_domain.project_id else None].append(vuln)
+        for project, vulns in by_project.items():
+            slug = project.slug if project else '-'
+            ratings = dangling_dns.assess_all([finding_of(v) for v in vulns], project=project)
+            for vuln, rating in zip(vulns, ratings):
+                counts[slug]['examined'] += 1
+                severity, description, host = plan(vuln, rating)
+                if severity is not None:
+                    counts[slug][f'{SEVERITY_NAMES.get(vuln.severity, vuln.severity)} -> {SEVERITY_NAMES.get(severity, severity)}'] += 1
+                if host:
+                    counts[slug]['host filled'] += 1
+                if opts['apply'] and apply(vuln, severity, description, host):
+                    counts[slug]['written'] += 1
         mode = 'applied' if opts['apply'] else 'dry run (nothing written; --apply writes)'
         self.stdout.write(f'rerate_dangling_dns: {mode}')
         for slug in sorted(counts):

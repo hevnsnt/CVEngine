@@ -29,13 +29,11 @@ third-party text: it is clipped, stripped of control characters and stored as pl
 
 The GMP password lives in ``OpenvasSettings`` (encrypted), is read here and nowhere else, and is never logged, never put in activity text,
 evidence or error messages, and never on a command line."""
-import hashlib
 import ipaddress
 import logging
 import os
 import re
 import time
-from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
@@ -50,28 +48,18 @@ OBS_KIND = 'openvas'
 SOURCE = 'openvas'  # Vulnerability.source and CVEMatch.source
 QUEUE = 'openvas_queue'
 BEAT_NAME = 'cvengine-openvas-sweep'
-CONFIRMED_QOD = 95  # the lowest QoD of a hard type when a result carries no type (remote_active is 95, package and registry 97, remote_vul 99)
 HARD_QOD_TYPES = frozenset({'exploit', 'remote_vul', 'remote_app', 'remote_active', 'package', 'registry'})
+CONFIRMED_QOD = 95  # the lowest QoD of a hard type when a result carries no type (remote_active is 95, package and registry 97, remote_vul 99)
 FRESH_DAYS = 21  # an observation older than this is not carried onto a new scan's host row
 DEFAULT_MAX_HOSTS = 1  # hosts in one task: a run is slow (hours per host), so one host per task keeps what a stop or a failure costs to one host
 MAX_HOSTS_PER_TASK = 16  # the most CVENGINE_OPENVAS_MAX_HOSTS may give: the Sentinel client refuses an OpenVAS task of more hosts (client/openvas.py MAX_HOSTS)
 DEFAULT_MAX_HOURS = 24  # the time budget PER HOST: a task of n hosts gets n times this; when it runs out, what was found so far is kept
 DEFAULT_MAX_CHECKS = 4  # NVTs run at a time against a host (Greenbone's own default); CVENGINE_OPENVAS_MAX_CHECKS
-DEFAULT_MAX_INTERRUPTS = 3  # tasks in a row that gvmd reports Interrupted for a host before it waits three days; CVENGINE_OPENVAS_MAX_INTERRUPTS
 DEFAULT_MIN_AVAILABLE_MB = 3072
 DEFAULT_COST_MB = 1500
-DEFAULT_SOCKET = '/run/gvmd/gvmd.sock'
-RESULT_PAGE = 100
-MAX_RESULTS = 5000  # per task: more is a misconfigured scan, not a report
 MAX_TEXT = 4000
 RESULT_EVIDENCE = 1000  # how much of an NVT's result text a CVE match keeps (triage quotes part of it, cleaned)
-MIN_NVTS = 1000  # fewer NVTs than this in "Full and fast" means the feed has not been loaded into gvmd yet
 
-# GVM built-ins (the community feed's fixed ids; each is confirmed by name when it is looked up).
-FULL_AND_FAST = ('daba56c8-73ec-11df-a475-002264764cea', 'Full and fast')
-OPENVAS_SCANNER = ('08b69003-5fc2-4037-a479-93b440211c73', 'OpenVAS Default')
-PORT_LIST = ('33d0cd82-57c6-11e1-8ed1-406186ea4fc5', 'All IANA assigned TCP')
-CONFIG_NAME = 'cvENGINE safe scan'
 # Families left out of the scan configuration, and why. "Denial of Service": NVTs that crash or hang the service they test (the reason
 # ``safe_checks`` exists, enforced here a second time at the family level). "Brute force attacks": password guessing, which locks accounts out
 # and is a different act from checking for a known vulnerability. Every other family is "Full and fast"'s. ``safe_checks`` stays on, which makes
@@ -81,7 +69,6 @@ DEFAULT_LOGIN = ('admin', 'admin')  # what Greenbone's community containers crea
 
 ACTIVE = ('New', 'Requested', 'Queued', 'Running', 'Processing', 'Stop Requested')
 CVE_RE = re.compile(r'^CVE-\d{4}-\d{4,7}$')  # bounded: CveId.name holds 100 characters
-CERT_REF_TYPES = ('cert-bund', 'dfn-cert')  # references gvmd reads from its database through the NVT's CVEs (``parse_result``)
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _TAILNET = [ipaddress.ip_network(n) for n in ('100.64.0.0/10', 'fd7a:115c:a1e0::/48')]
 
@@ -125,11 +112,6 @@ def budget_hours(hosts):
     return max_hours() * max(1, int(hosts))
 
 
-def max_interrupts():
-    """How many Interrupted tasks in a row a host may cost before it is marked failed (asked again after three days)."""
-    return _env_int('CVENGINE_OPENVAS_MAX_INTERRUPTS', DEFAULT_MAX_INTERRUPTS)
-
-
 def task_preferences():
     """GVM task preferences: ``max_checks`` NVTs at a time (``CVENGINE_OPENVAS_MAX_CHECKS``, 1 to 10) against one host at a time. Fewer is gentler on the
     target and slower: at 2 a host took about a day, at 4 (Greenbone's default) about half that."""
@@ -142,16 +124,6 @@ def min_available_mb():
 
 def cost_mb():
     return _env_int('CVENGINE_OPENVAS_COST_MB', DEFAULT_COST_MB, 100)
-
-
-def socket_path():
-    return os.environ.get('CVENGINE_OPENVAS_SOCKET', '').strip() or DEFAULT_SOCKET
-
-
-def transport():
-    """How the sidecar is reached: ``socket:<path>`` (the default) or ``tls:<host>:<port>``."""
-    host = os.environ.get('CVENGINE_OPENVAS_HOST', '').strip()
-    return f'tls:{host}:{_env_int("CVENGINE_OPENVAS_PORT", 9390)}' if host else f'socket:{socket_path()}'
 
 
 def clean(value, limit=MAX_TEXT):
@@ -172,154 +144,6 @@ def _enabled():
 
 # ----------------------------------------------------------------------------- the GMP session
 
-@contextmanager
-def session(creds=None, connection=None):
-    """An authenticated python-gvm session (``gmp``) to gvmd. ``creds`` is ``(username, password)``, read from the settings when omitted;
-    ``connection`` replaces the unix socket or TLS link in tests. Raises ``OpenvasError`` with a message that never holds the password."""
-    from gvm.errors import GvmError
-    from gvm.protocols.gmp import GMP
-    from gvm.transforms import EtreeCheckCommandTransform
-    if creds is None:
-        from cveFeed.models import OpenvasSettings
-        row = OpenvasSettings.current()
-        creds = (row.gmp_username, row.gmp_password)
-    username, password = creds
-    if not (username and password):
-        raise OpenvasError('no GMP login is saved: run `make openvas-user` or enter one in Settings > OpenVAS')
-    stack = ExitStack()
-    try:
-        gmp = stack.enter_context(GMP(connection or _connection(), transform=EtreeCheckCommandTransform()))
-    except GvmError as exc:
-        raise OpenvasError(f'gvmd could not be reached ({clean(_redact(exc, password), 120)}): is the openvas profile running?') from None
-    except (OSError, ValueError) as exc:
-        raise OpenvasError(f'gvmd could not be reached ({type(exc).__name__}): is the openvas profile running?') from None
-    try:
-        with stack:
-            try:
-                gmp.authenticate(username, password)
-            except GvmError as exc:
-                raise OpenvasError(f'gvmd refused the GMP login ({type(exc).__name__})') from None
-            yield gmp
-    except OpenvasError:
-        raise
-    except GvmError as exc:
-        raise OpenvasError(f'gvmd answered with an error: {clean(_redact(exc, password), 160)}') from None
-    except OSError as exc:
-        raise OpenvasError(f'the connection to gvmd failed ({type(exc).__name__})') from None
-
-
-def _verified_tls(hostname, port, cafile, certfile=None, keyfile=None, server_name=None):
-    """A GMP TLS link that checks who answers. python-gvm's own ``TLSConnection`` verifies the server only when a CA, a client certificate and a
-    key are all given, and then still skips the host name check; the GMP password and every scan result travel over this link, so the server
-    certificate must chain to ``cafile`` and name ``server_name`` (the host by default). A client certificate is sent only when both halves are given."""
-    import socket
-    import ssl
-    from gvm.connections import TLSConnection
-
-    class VerifiedTLSConnection(TLSConnection):
-        def _new_socket(self):
-            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=self.cafile)  # CERT_REQUIRED and check_hostname
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
-            if self.certfile and self.keyfile:
-                context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile, password=self.password)
-            sock = context.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM), server_side=False, server_hostname=server_name or self.hostname)
-            sock.settimeout(self._timeout)
-            return sock
-
-    return VerifiedTLSConnection(hostname=hostname, port=port, timeout=120, cafile=cafile, certfile=certfile, keyfile=keyfile)
-
-
-def _connection():
-    """The unix socket the sidecar publishes (the default: a local file, no network), or, for a gvmd on another machine
-    (``CVENGINE_OPENVAS_HOST``), TLS that is always verified: without ``CVENGINE_OPENVAS_CA`` it refuses to connect rather than send the login
-    to an unverified server. ``CVENGINE_OPENVAS_TLS_NAME`` names the certificate's subject when it is not the host."""
-    from gvm.connections import UnixSocketConnection
-    host = os.environ.get('CVENGINE_OPENVAS_HOST', '').strip()
-    if host:
-        cafile = os.environ.get('CVENGINE_OPENVAS_CA', '').strip()
-        if not cafile:
-            raise OpenvasError('CVENGINE_OPENVAS_HOST is set without CVENGINE_OPENVAS_CA: cvENGINE will not send the GMP login to a server it cannot verify')
-        return _verified_tls(host, _env_int('CVENGINE_OPENVAS_PORT', 9390), cafile, os.environ.get('CVENGINE_OPENVAS_CERT') or None,
-                             os.environ.get('CVENGINE_OPENVAS_KEY') or None, os.environ.get('CVENGINE_OPENVAS_TLS_NAME', '').strip() or None)
-    return UnixSocketConnection(path=socket_path(), timeout=120)
-
-
-DEDICATED_USER = 'cvengine'  # the login cvENGINE makes for itself when gvmd will not let the default user change its own password
-
-
-def _dedicated_user(gmp, password):
-    """A login of cvENGINE's own, made over the default one: an Admin-role user with ``password``. gvmd 22.7 answers 404 "Failed to find user"
-    when the containers' ``admin`` changes its own password (``gvmd --create-user`` made it, so nobody owns it, and only an owner or a Super
-    Admin may modify a user), but an Admin may create users, and owns the ones it creates. A ``cvengine`` user left by an earlier attempt whose
-    password was never saved is given the new password instead. Returns the user name."""
-    roles = {_text(r, 'name'): r.get('id') for r in gmp.get_roles().findall('role')}
-    role_ids = [roles['Admin']] if roles.get('Admin') else None
-    existing = [u for u in gmp.get_users(filter_string=f'name={DEDICATED_USER}').findall('user') if _text(u, 'name') == DEDICATED_USER]
-    if existing:
-        gmp.modify_user(existing[0].get('id'), password=password)
-    else:
-        gmp.create_user(DEDICATED_USER, password=password, role_ids=role_ids)
-    return DEDICATED_USER
-
-
-def bootstrap(connection=None, token=None):
-    """Replace the community containers' default login (``admin`` / ``admin``) with a generated password and save it for cvENGINE. The password is
-    set over GMP, so it is never on a command line; it is checked by signing in with it before it is saved. Returns the user name. If the default
-    login no longer works the password was already changed, and the operator saves the one they chose (``manage.py openvas_credentials``).
-
-    gvmd 22.7 refuses the first way (``modify_user`` of the user signed in answers 404 "Failed to find user"): then cvENGINE creates a login of
-    its own, ``cvengine`` (Admin role), with the generated password, and uses that. The default ``admin`` / ``admin`` then still works on gvmd,
-    and nothing over GMP can change that: retire it by hand (docs/OPENVAS.md, "The default login")."""
-    import secrets
-    from gvm.errors import GvmResponseError
-    from cveFeed.models import OpenvasSettings
-    new = (token or secrets.token_urlsafe)(24)
-    username = DEFAULT_LOGIN[0]
-    try:
-        with session(creds=DEFAULT_LOGIN, connection=connection) as gmp:
-            users = [u for u in gmp.get_users(filter_string=f'name={DEFAULT_LOGIN[0]}').findall('user') if _text(u, 'name') == DEFAULT_LOGIN[0]]
-            if not users:
-                raise OpenvasError('gvmd has no user "admin" to take over')
-            try:
-                gmp.modify_user(users[0].get('id'), password=new)
-            except GvmResponseError as exc:
-                logger.warning('gvmd would not change the password of its default user (%s %s); creating the GMP user %s instead',
-                               getattr(exc, 'status', ''), type(exc).__name__, DEDICATED_USER)
-                try:
-                    username = _dedicated_user(gmp, new)
-                except GvmResponseError as second:
-                    raise OpenvasError(f'gvmd would not change the password of the default user (status {getattr(exc, "status", "?")}) nor create '
-                                       f'the user {DEDICATED_USER} (status {getattr(second, "status", "?")}): set a password inside the gvmd '
-                                       'container and save it with `manage.py openvas_credentials --username admin` (docs/OPENVAS.md)') from None
-    except OpenvasError as exc:
-        if 'refused the GMP login' in str(exc):
-            raise OpenvasError('the default login (admin / admin) no longer works, so its password was changed already: save the one in use with '
-                               '`manage.py openvas_credentials --username <user>` (the password on standard input)') from None
-        raise
-    with session(creds=(username, new), connection=connection):
-        pass  # the new password works
-    row = OpenvasSettings.current()
-    row.gmp_username, row.gmp_password = username, new
-    row.save()
-    return row.gmp_username
-
-
-def ensure_login():
-    """The saved GMP login, made when there is none: the first time the add-on runs, the community containers' default login is replaced by a
-    generated one (``bootstrap``) with nobody typing anything. Raises ``OpenvasError`` while gvmd is not up yet or when its default login was
-    changed by hand; the caller records that and tries again at the next check."""
-    from cveFeed.models import OpenvasSettings
-    row = OpenvasSettings.current()
-    if row.gmp_username and row.gmp_password:
-        return row
-    try:
-        bootstrap()
-    except OpenvasError:
-        row = OpenvasSettings.current()  # another worker may have made it a moment ago
-        if row.gmp_username and row.gmp_password:
-            return row
-        raise
-    return OpenvasSettings.current()
 
 
 def _text(element, path, default=''):
@@ -346,140 +170,12 @@ def _count(text):
     return None
 
 
-def _find(items, spec, tag):
-    """The entity (``<config>``, ``<scanner>``, ``<port_list>``) of ``spec`` = (id, name): by its id when the name agrees, else by name."""
-    by_name = None
-    for item in items.findall(tag):
-        if item.get('id') == spec[0] and _text(item, 'name') == spec[1]:
-            return item
-        if _text(item, 'name') == spec[1] and by_name is None:
-            by_name = item
-    return by_name
-
-
 # ----------------------------------------------------------------------------- feed state and the safe configuration
 
-def feed_state(gmp):
-    """Whether gvmd can scan yet, and if not why. The first synchronisation of the feeds takes a long time and a lot of disk, and until
-    the NVTs are loaded no scan is possible: ``{ready, reason, feeds: {type: {version, syncing}}, nvts, scanner}``."""
-    out = {'ready': False, 'reason': '', 'feeds': {}, 'nvts': 0, 'scanner': ''}
-    for feed in gmp.get_feeds().findall('feed'):
-        kind = _text(feed, 'type').upper() or _text(feed, 'name')
-        syncing = feed.find('currently_syncing')
-        out['feeds'][kind] = {'version': _text(feed, 'version'), 'syncing': syncing is not None}
-    missing = [k for k in ('NVT', 'SCAP', 'CERT', 'GVMD_DATA') if not (out['feeds'].get(k) or {}).get('version')]
-    syncing = [k for k, v in out['feeds'].items() if v['syncing']]
-    base = _find(gmp.get_scan_configs(), FULL_AND_FAST, 'config')
-    out['nvts'] = _int(_text(base, 'nvt_count')) if base is not None else 0
-    scanner = _find(gmp.get_scanners(), OPENVAS_SCANNER, 'scanner')
-    out['scanner'] = _text(scanner, 'name') if scanner is not None else ''
-    if syncing:
-        out['reason'] = f'the {", ".join(sorted(syncing))} feed is synchronising: no scan can start until it finishes (the first synchronisation takes a long time and needs about 60 GB of disk)'
-    elif 'NVT' in missing or base is None or out['nvts'] < MIN_NVTS:
-        out['reason'] = (f'the vulnerability tests are not loaded yet ({out["nvts"]} in "Full and fast"): the feed is still being downloaded and '
-                         'loaded, which takes a long time the first time')
-    elif missing:
-        out['reason'] = f'the {", ".join(missing)} feed data has not loaded yet'
-    elif scanner is None:
-        out['reason'] = 'gvmd does not list the OpenVAS scanner yet'
-    else:
-        out['ready'] = True
-    return out
-
-
-def config_problems(config):
-    """Why a ``<config>`` element is not the safe configuration, or ``[]``: an excluded family selected, ``safe_checks`` not on."""
-    problems = []
-    for family in config.findall('./families/family'):
-        name = _text(family, 'name')
-        if name in EXCLUDED_FAMILIES and _int(_text(family, 'nvt_count')) > 0:
-            problems.append(f'the family "{name}" still has {_text(family, "nvt_count")} NVTs selected')
-    safe = [p for p in config.findall('./preferences/preference') if _text(p, 'name') == 'safe_checks']
-    if not safe or _text(safe[0], 'value').lower() != 'yes':
-        problems.append('the scanner preference safe_checks is not "yes"')
-    return problems
-
-
-def _apply_safe_selection(gmp, config_id):
-    """Select every family except ``EXCLUDED_FAMILIES`` (each growing and including all its VTs, the only form gvmd accepts for a family that is
-    in use: "growing and all VTs, or static and empty"), leave new families out, and turn ``safe_checks`` on."""
-    families = [_text(f, 'name') for f in gmp.get_nvt_families().findall('./families/family')]
-    wanted = [(name, True, True) for name in families if name and name not in EXCLUDED_FAMILIES]  # python-gvm: (family, growing, include all)
-    gmp.modify_scan_config_set_family_selection(config_id, wanted, auto_add_new_families=False)
-    gmp.modify_scan_config_set_scanner_preference(config_id, 'safe_checks', value='yes')
-
-
-def ensure_config(gmp):
-    """The id of the safe scan configuration: found by name, or built as a copy of "Full and fast" without ``EXCLUDED_FAMILIES``. It is
-    read back and checked every time. One that does not pass (a copy an earlier failed run left half built) gets the selection applied again
-    once; one that still does not pass is an error, never used."""
-    existing = [c for c in gmp.get_scan_configs().findall('config') if _text(c, 'name') == CONFIG_NAME]
-    if existing:
-        config_id = existing[0].get('id')
-    else:
-        base = _find(gmp.get_scan_configs(), FULL_AND_FAST, 'config')
-        if base is None:
-            raise OpenvasError('the "Full and fast" scan configuration is not in gvmd yet (the feed is not loaded)')
-        created = gmp.create_scan_config(base.get('id'), CONFIG_NAME, comment='cvENGINE: Full and fast without denial of service and brute force')
-        config_id = created.get('id')
-        _apply_safe_selection(gmp, config_id)
-    problems = config_problems(gmp.get_scan_config(config_id).find('config'))
-    if problems and existing:
-        _apply_safe_selection(gmp, config_id)
-        problems = config_problems(gmp.get_scan_config(config_id).find('config'))
-    if problems:
-        raise OpenvasError(f'the scan configuration "{CONFIG_NAME}" is not safe ({"; ".join(problems)}): delete it in GVM so cvENGINE can rebuild it')
-    return config_id
 
 
 # ----------------------------------------------------------------------------- the resource guard
 
-def remote_gvmd():
-    """Whether gvmd runs on another machine (``CVENGINE_OPENVAS_HOST``): then this machine's memory says nothing about the scanner's."""
-    return bool(os.environ.get('CVENGINE_OPENVAS_HOST', '').strip())
-
-
-def sidecar_memory():
-    """The memory the OpenVAS containers draw on: the Docker host's (on Docker Desktop, its VM's), as ``/proc/meminfo`` gives it inside a
-    container. Not the celery container's cgroup: the sidecar runs in containers of its own, outside celery's ``mem_limit``, so a celery container
-    near its own 4 GB ceiling says nothing about whether the machine has room for a scan (issue #394)."""
-    from reNgine import resources
-    return resources.memory_state(host=True)
-
-
-def resource_guard(state_fn=None, store=None, now=None):
-    """``(ok, reason)``: whether a GVM scan may START now. The scanner runs in the sidecar, outside the celery container's job budget
-    (``reNgine.resources``), so this applies the same rules to the machine the sidecar runs on (``sidecar_memory``): free memory must cover the
-    add-on's floor plus the platform's headroom, the running heavy jobs plus this one must fit the job budget, nothing may be waiting for memory,
-    and no scanner may have been killed for memory in the last hour. A gvmd on another machine (``remote_gvmd``) is not measured here at all.
-    ``state_fn`` and ``store`` replace the machine's in tests."""
-    from reNgine import resources
-    if state_fn is None and remote_gvmd():
-        return True, ''
-    state = (state_fn or sidecar_memory)()
-    store = store or resources.get_store()
-    now = now or time.time()
-    need = min_available_mb() + resources.headroom_mb(state)
-    if state['available_mb'] < need:
-        return False, (f'memory is short: {state["available_mb"]} MB free on the machine the scanner runs on, a GVM scan needs {need} MB '
-                       f'(the add-on floor of {min_available_mb()} MB, CVENGINE_OPENVAS_MIN_AVAILABLE_MB, plus {resources.headroom_mb(state)} MB headroom)')
-    reserved = sum(job.get('mb', 0) for job in store.live(now))
-    if reserved + cost_mb() > resources.budget_mb(state):
-        return False, f'the scanners running now have {reserved} MB reserved, which leaves no room in the {resources.budget_mb(state)} MB job budget for a GVM scan'
-    if store.waiting(now):
-        return False, 'other scanner jobs are waiting for memory'
-    if any(now - event.get('t', 0) < 3600 for event in store.events()):
-        return False, 'a scanner was stopped for memory in the last hour'
-    return True, ''
-
-
-def memory_critical(state_fn=None):
-    """Whether a task that is running should be stopped: free memory on the machine the scanner runs on is below the platform's critical floor."""
-    from reNgine import resources
-    if state_fn is None and remote_gvmd():
-        return False
-    state = (state_fn or sidecar_memory)()
-    return state['available_mb'] < resources.critical_mb(state)
 
 
 # ----------------------------------------------------------------------------- choosing hosts
@@ -494,7 +190,6 @@ def own_addresses():
     """The addresses this cvENGINE instance answers on: ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance behind NAT or a load balancer)
     and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance scanning itself."""
     import socket
-    import time
     from django.conf import settings
     now = time.monotonic()
     if _own['at'] and now - _own['at'] < OWN_TTL:
@@ -845,54 +540,6 @@ def explain(link):
 
 # ----------------------------------------------------------------------------- targets and tasks
 
-def target_for(gmp, link, batch):
-    """The GVM target id for this project's address set: reused when the set is the one the last target was made for and gvmd still has
-    it, else created (and the superseded one removed when gvmd lets it go)."""
-    addresses = sorted({ip for _host, ip, _domain in batch})
-    key = hashlib.sha256(','.join(addresses).encode()).hexdigest()[:40]
-    if link.target_id and link.target_key == key:
-        found = [t for t in gmp.get_targets(filter_string=f'uuid={link.target_id}').findall('target') if t.get('id') == link.target_id]
-        if found:
-            return link.target_id
-    port_list = _find(gmp.get_port_lists(), PORT_LIST, 'port_list')
-    if port_list is None:
-        raise OpenvasError(f'gvmd has no "{PORT_LIST[1]}" port list yet (the feed data is not loaded)')
-    created = gmp.create_target(f'cvengine-p{link.project_id}-{key[:12]}', hosts=addresses, port_list_id=port_list.get('id'),
-                                comment='cvENGINE: a vetted host set; created and removed by cvENGINE')
-    old, link.target_id, link.target_key = link.target_id, created.get('id'), key
-    link.save(update_fields=['target_id', 'target_key'])
-    if old:
-        try:
-            gmp.delete_target(old, ultimate=True)
-        except Exception:  # noqa: BLE001 - a target a task still uses cannot be deleted: it is harmless and the next sweep tries again
-            logger.info('could not remove the superseded GVM target %s', old)
-    return link.target_id
-
-
-def start(gmp, link, batch):
-    """Create and start the GVM task for ``batch``. Returns the ``OpenvasRun``."""
-    from cveFeed.models import OpenvasRun
-    config_id = ensure_config(gmp)
-    scanner = _find(gmp.get_scanners(), OPENVAS_SCANNER, 'scanner')
-    if scanner is None:
-        raise OpenvasError('gvmd does not list the OpenVAS scanner yet')
-    target_id = target_for(gmp, link, batch)
-    try:
-        with transaction.atomic():  # the unique constraint is the "one task at a time" lock
-            run = OpenvasRun.objects.create(project=link.project, status='running', target_id=target_id,
-                                            hosts={ip: host for host, ip, _domain in batch})
-    except IntegrityError:
-        raise OpenvasError('another OpenVAS task is already running') from None
-    try:
-        task = gmp.create_task(task_name(run), config_id, target_id, scanner.get('id'), comment='cvENGINE weekly sweep',
-                               preferences=task_preferences())
-        run.task_id = task.get('id') or ''
-        run.save(update_fields=['task_id'])
-        gmp.start_task(run.task_id)
-    except Exception as exc:  # noqa: BLE001 - the scan never ran, so no host is marked failed: gvmd's trouble is not the host's
-        finish(run, 'failed', f'could not create or start the task ({type(exc).__name__})')
-        raise OpenvasError(f'could not create or start the GVM task ({type(exc).__name__})') from None
-    return run
 
 
 def finish(run, status, error='', summary=None):
@@ -936,36 +583,6 @@ def run_detail(run, **extra):
     return {**detail, **extra}
 
 
-def _progress_entry(run):
-    from cveFeed.models import AgentActivity
-    try:
-        return AgentActivity.objects.filter(status='running', detail__openvas_run=run.pk, detail__progress_line=True).order_by('-id').first()
-    except Exception:  # noqa: BLE001 - telemetry never breaks the sweep
-        return None
-
-
-def log_started(run, via='local'):
-    """The run's progress line: shown as running while GVM works (``log_progress`` keeps its status and percentage current) and settled when the
-    run ends (``finish``)."""
-    from cveFeed import activity
-    activity.log('run_check', f'{run_label(run)}: started', project=run.project_id, status='running',
-                 **run_detail(run, progress_line=True, via=via, progress=0))
-
-
-def log_progress(run, word, progress):
-    """Bring the run's progress line up to date: GVM's status word and its own percentage, as cheap as the poll that read them."""
-    entry = _progress_entry(run)
-    if entry is None:
-        return
-    message = f'{run_label(run)}: {clean(word, 30) or "unknown"}, {max(0, progress)} %'
-    if entry.message != message:
-        try:
-            entry.message, entry.detail = message[:500], {**(entry.detail or {}), 'progress': progress, 'gvm_status': clean(word, 30)}
-            entry.save(update_fields=['message', 'detail'])
-        except Exception:  # noqa: BLE001
-            logger.info('could not update the progress line of OpenVAS run %s', run.pk)
-
-
 def _settle_progress(run):
     from cveFeed import activity
     entry = _progress_entry(run)
@@ -978,10 +595,20 @@ def _settle_progress(run):
                     gvm_status=run.gvm_status, progress=run.progress)
 
 
-def per_host_text(run, minutes):
-    """``www.example.com 83 min, api.example.com 0 min``: how long GVM spent on each host of the run, from its report."""
-    parts = [f'{run.hosts.get(address, address)} {_duration(m)}' for address, m in sorted(minutes.items(), key=lambda kv: run.hosts.get(kv[0], kv[0]))]
-    return ', '.join(parts[:8])
+def log_started(run, via='local'):
+    """The run's progress line: shown as running while GVM works (``log_progress`` keeps its status and percentage current) and settled when the
+    run ends (``finish``)."""
+    from cveFeed import activity
+    activity.log('run_check', f'{run_label(run)}: started', project=run.project_id, status='running',
+                 **run_detail(run, progress_line=True, via=via, progress=0))
+
+
+def _progress_entry(run):
+    from cveFeed.models import AgentActivity
+    try:
+        return AgentActivity.objects.filter(status='running', detail__openvas_run=run.pk, detail__progress_line=True).order_by('-id').first()
+    except Exception:  # noqa: BLE001 - telemetry never breaks the sweep
+        return None
 
 
 INCONCLUSIVE = 'OpenVAS ran but reported no scanned host'
@@ -993,49 +620,6 @@ def stale_cache_error(count, where='gvmd'):
     """What a run says when ``count`` of its results came without their CVE references because gvmd's NVT cache is out of date (``parse_result``)."""
     return (f'{where} sent {count} result(s) without their CVE references: its NVT cache is out of date (greenbone/gvmd#3220). Imported as partial, '
             f'so nothing earlier is resolved by it; restart gvmd ({RESTART_GVMD}) and the next scan of these hosts reads them')
-READ_MISMATCH = 'gvmd counts results for the task but none could be read'
-DEFAULT_KEEP_DAYS = 7  # how long the GVM task and report of an inconclusive run stay in gvmd for a person to look at
-
-
-def keep_days():
-    """``CVENGINE_OPENVAS_KEEP_DAYS``: how long the GVM task and report of an inconclusive or failed import are kept (0 removes them at once)."""
-    return _env_int('CVENGINE_OPENVAS_KEEP_DAYS', DEFAULT_KEEP_DAYS, 0)
-
-
-def keep_until():
-    return timezone.now() + timedelta(days=keep_days())
-
-
-def _delete_task(gmp, run):
-    """Remove the run's task (and with it its report) from gvmd, after a conclusive import or when the time it was kept for is over."""
-    try:
-        gmp.delete_task(run.task_id, ultimate=True)
-        return True
-    except Exception as exc:  # noqa: BLE001 - the results are imported; a leftover task is harmless
-        if _task_gone(exc):  # gvmd no longer has it (removed by hand, or its database was reset): nothing is left to remove
-            logger.info('the GVM task of run %s was already gone', run.pk)
-            return True
-        logger.info('could not remove the GVM task of run %s', run.pk)
-        return False
-
-
-def remove_kept_tasks(gmp, now=None, limit=20):
-    """Remove the GVM tasks of inconclusive runs once they were kept long enough (``keep_days``). Returns how many were removed."""
-    from cveFeed.models import OpenvasRun
-    now = now or timezone.now()
-    removed = 0
-    for run in OpenvasRun.objects.filter(summary__has_key='kept_task_until', sentinel_task__isnull=True).exclude(task_id='').exclude(status='running').order_by('id')[:200]:
-        until = _parse_time((run.summary or {}).get('kept_task_until'))
-        if until is not None and until > now:
-            continue
-        if not _delete_task(gmp, run):
-            continue
-        run.summary = {k: v for k, v in (run.summary or {}).items() if k != 'kept_task_until'}
-        run.save(update_fields=['summary'])
-        removed += 1
-        if removed >= limit:
-            break
-    return removed
 
 
 def inconclusive(summary):
@@ -1074,28 +658,6 @@ def interrupted_out_hosts(project_id, names):
     return out
 
 
-def interrupted_streak(run, names, limit=None):
-    """``{host: attempts}``: for each of ``names``, how many tasks in a row gvmd reported Interrupted for it, counting ``run`` (the one
-    that just was). Walks the project's earlier runs newest first and stops, for a host, at the first run that covered it and was not
-    Interrupted (a success, an inconclusive report, a stop, any other failure) or that already gave it up (``summary.interrupt_limit``:
-    three more attempts start from there, once the three days are over). Only ``limit`` attempts need counting, so it reads no more."""
-    from cveFeed.models import OpenvasRun
-    limit = limit or max_interrupts()
-    count, open_ = {host: 1 for host in names}, set(names)
-    for earlier in OpenvasRun.objects.filter(project_id=run.project_id, id__lt=run.pk).order_by('-id').only(
-            'gvm_status', 'hosts', 'summary')[:max(50, 10 * limit)]:
-        if not open_:
-            break
-        for host in set(earlier.hosts.values()) & open_:
-            if earlier.gvm_status == 'Interrupted' and host not in (earlier.summary or {}).get('interrupt_limit', {}):
-                count[host] += 1
-                if count[host] >= limit:
-                    open_.discard(host)
-            else:
-                open_.discard(host)
-    return count
-
-
 # ----------------------------------------------------------------------------- results
 
 def _tags(raw):
@@ -1122,15 +684,6 @@ _VERSION_LINE = {'installed': re.compile(r'Installed\s+version\s*:\s*([A-Za-z0-9
                  'fixed': re.compile(r'Fixed\s+version\s*:\s*([A-Za-z0-9][A-Za-z0-9._:+~-]{0,99})', re.I)}
 
 
-def _detected_cpe(result):
-    """The CPE of the product the NVT tested, from the result's ``<detection>`` block (the detection NVT that identified the product), or ''."""
-    for detail in result.findall('./detection/result/details/detail'):
-        if _text(detail, 'name').lower() == 'product':
-            value = _text(detail, 'value')
-            return value[:200] if _CPE_RE.match(value) else ''
-    return ''
-
-
 def _version_from(text, kind):
     found = _VERSION_LINE[kind].search(str(text or ''))
     value = found.group(1).rstrip('.') if found else ''
@@ -1151,45 +704,6 @@ def identified(ev):
     return {'product': product, 'cpe': cpe, 'installed_version': installed, 'fixed_version': _version_from(ev.get('result'), 'fixed')}
 
 
-def parse_result(result):
-    """One ``<result>`` element as a plain dict, or None when it is unusable (no host, no NVT OID). Every text is cleaned and clipped; the
-    CVE ids are the ``cve`` references of the NVT, validated; a missing or malformed number reads as zero."""
-    nvt = result.find('nvt')
-    host_el = result.find('host')
-    oid = (nvt.get('oid') or '').strip() if nvt is not None else ''
-    address = ((host_el.text or '').strip() if host_el is not None else '')
-    if not re.fullmatch(r'[0-9.]{3,64}', oid) or not address:
-        return None
-
-    def number(path, default=0.0):
-        try:
-            return float(_text(result, path) or default)
-        except ValueError:
-            return default
-    refs = nvt.findall('./refs/ref')
-    cves = sorted({r.get('id', '').strip().upper() for r in refs if r.get('type', '').lower() == 'cve' and CVE_RE.match(r.get('id', '').strip().upper())})
-    cves = sorted(set(cves) | {c for c in (x.strip().upper() for x in re.split(r'[,\s]+', _text(nvt, 'cve'))) if CVE_RE.match(c)})[:50]
-    urls = [clean(r.get('id'), 500) for r in refs if r.get('type', '').lower() == 'url' and re.match(r'^https?://', r.get('id', ''))][:20]
-    tags = _tags(_text(nvt, 'tags'))
-    port, number_port = _port(_text(result, 'port'))
-    # gvmd prints an NVT's own references (cve, url) from its in-memory NVT cache, and the CERT-Bund / DFN-CERT ones from its database, where
-    # they are linked to the NVT through its CVEs. CERT references with no CVE reference therefore mean the cache lacks this NVT: gvmd 26.35 and
-    # later reload it only in their periodic-jobs process, so the cache stays empty after the first feed load and misses NVTs a later feed sync
-    # added, until gvmd restarts (greenbone/gvmd#3220). Such a result is not "without a CVE": its CVEs exist and were not sent.
-    stale = not cves and any(r.get('type', '').lower() in CERT_REF_TYPES for r in refs)
-    return {
-        'id': result.get('id', ''), 'oid': oid, 'name': clean(_text(nvt, 'name') or _text(result, 'name'), 300), 'family': clean(_text(nvt, 'family'), 100),
-        'address': address, 'hostname': clean(_text(host_el, 'hostname'), 255), 'port': port, 'port_number': number_port,
-        'severity': max(0.0, min(10.0, number('severity'))), 'threat': clean(_text(result, 'threat'), 20),
-        'qod': int(max(0, min(100, number('qod/value')))), 'qod_type': clean(_text(result, 'qod/type'), 40),
-        'result': clean(_text(result, 'description'), 2000), 'summary': clean(tags.get('summary'), 1500),
-        'insight': clean(tags.get('insight'), 1500), 'impact': clean(tags.get('impact'), 1500), 'affected': clean(tags.get('affected'), 800),
-        'solution': clean(_text(nvt, 'solution') or tags.get('solution'), 1500), 'solution_type': clean(tags.get('solution_type'), 30),
-        'cvss_vector': clean(tags.get('cvss_base_vector'), 200), 'cves': cves, 'urls': urls, 'stale_refs': stale,
-        'cpe': _detected_cpe(result),
-    }
-
-
 def severity_level(score):
     """The Vulnerability severity (0 info .. 4 critical) of a CVSS base score."""
     return 4 if score >= 9.0 else 3 if score >= 7.0 else 2 if score >= 4.0 else 1 if score > 0 else 0
@@ -1208,181 +722,6 @@ def confirmed(item):
 # severities as the scanner gave them (no overrides), highest first. ``result_hosts_only=0`` makes a report list every host it scanned, not only
 # those with a result.
 RESULT_FILTER = 'apply_overrides=0 min_qod=0 levels=chmlg sort-reverse=severity'
-REPORT_FILTER = RESULT_FILTER + ' result_hosts_only=0'
-
-
-def _results_of(container):
-    """The ``<result>`` elements of a GMP answer, wherever gvmd put them: direct children of ``<get_results_response>`` (gvmd's own shape: the
-    ``<results start max/>`` after them is an empty marker), or inside ``<results>`` (a report's shape)."""
-    if container is None:
-        return []
-    return container.findall('result') or container.findall('./results/result')
-
-
-def _parse_into(elements, out):
-    for element in elements:
-        parsed = parse_result(element)
-        if parsed is None:
-            out['unusable'] += 1
-        elif not parsed['cves']:
-            out['no_cve'] += 1
-            out['stale'] = out.get('stale', 0) + bool(parsed.get('stale_refs'))
-            out['items'].append({**parsed, 'cves': []})  # kept for the scanned-host set only; never stored
-        else:
-            out['items'].append(parsed)
-
-
-def _last_page(elements, read, count):
-    """Whether paging stops after this page. gvmd clamps ``rows`` to its "Max Rows Per Page" setting, so with that set below ``RESULT_PAGE``
-    every page is short and a short page is not the end: paging goes on until a page is empty or as many results as gvmd counts are read. Only
-    when gvmd gives no count does a page shorter than asked end it. A count below what was read is wrong, so paging goes on to an empty page."""
-    if not elements:
-        return True
-    if count is None:
-        return len(elements) < RESULT_PAGE
-    return read == count
-
-
-def _short(out):
-    """Whether fewer results were read than gvmd counts (and fewer than ``MAX_RESULTS``, which is partial by itself): a read that stopped early
-    says nothing about the results it did not get, so it is imported as partial and resolves nothing."""
-    return out['count'] is not None and len(out['items']) + out['unusable'] < min(out['count'], MAX_RESULTS)
-
-
-def _paged(ask, out):
-    """Read pages of results with ``ask(first)`` (an answer holding ``<result>``s) into ``out`` (``_parse_into``), from ``first=1`` on by as many
-    as each page gave, until ``_last_page``, at most ``MAX_RESULTS`` results and ``MAX_RESULTS // RESULT_PAGE`` pages (a gvmd that never ends a
-    page still stops). ``out['count']`` is set from the first answer by ``ask`` when gvmd gives one."""
-    first = 1
-    for _page in range(max(1, MAX_RESULTS // RESULT_PAGE)):
-        if first > MAX_RESULTS:
-            break
-        elements = ask(first)
-        if elements is None:
-            break
-        _parse_into(elements, out)
-        if _last_page(elements, len(out['items']) + out['unusable'], out['count']):
-            break
-        first += len(elements)  # gvmd may give fewer than asked ("Max Rows Per Page"): continue from what it gave
-    out['short'] = _short(out)
-    return out
-
-
-def fetch_results(gmp, task_id):
-    """Every result of a task through ``get_results`` (filter ``task_id=``), a page at a time, at most ``MAX_RESULTS``: ``{items, no_cve,
-    unusable, count, short}``, ``count`` being the results gvmd says match (``<result_count><filtered>``). The fallback for a task whose report
-    id gvmd did not name; ``read_report`` is the main path."""
-    out = {'items': [], 'no_cve': 0, 'unusable': 0, 'count': None}
-
-    def ask(first):
-        page = gmp.get_results(filter_string=f'task_id={task_id} {RESULT_FILTER} rows={RESULT_PAGE} first={first}', details=True)
-        if first == 1:
-            out['count'] = _report_count(page)
-        return _results_of(page)
-    return _paged(ask, out)
-
-
-def report_id_of(task_status):
-    """The id of the task's report: the last finished one, else the one being written (a running or stopping task)."""
-    task = task_status.find('./task') if task_status is not None else None
-    for path in ('./last_report/report', './current_report/report'):
-        report = task.find(path) if task is not None else None
-        if report is not None and report.get('id'):
-            return report.get('id')
-    return None
-
-
-def gvm_result_count(task_status):
-    """How many results gvmd counts in the task's last report, or ``None`` when it does not say. gvmd 22.4 to 24.x name the levels ``hole``,
-    ``warning``, ``info`` and ``log`` only; gvmd 25.0.0 and later print ``critical``, ``high``, ``medium``, ``low`` and ``log`` and keep ``hole``,
-    ``warning`` and ``info`` as deprecated duplicates of high, medium and low. Each level is counted once, by the first of its names present."""
-    counts = task_status.find('./task/last_report/report/result_count') if task_status is not None else None
-    if counts is None:
-        return None
-
-    def level(*names):
-        for name in names:
-            if counts.find(name) is not None:
-                return _count(_text(counts, name)) or 0
-        return 0
-    return level('critical') + level('high', 'hole') + level('medium', 'warning') + level('low', 'info') + level('log')
-
-
-def _report_element(answer):
-    """The report itself in a ``get_reports`` answer: ``<report>`` (the envelope) holds ``<report>`` (the report)."""
-    outer = answer.find('report') if answer is not None else None
-    inner = outer.find('report') if outer is not None else None
-    return inner if inner is not None else outer
-
-
-def _report_count(report):
-    """How many results the report holds under the filter that was asked (``<result_count><filtered>``), else in all, else ``None``."""
-    counts = report.find('result_count') if report is not None else None
-    if counts is None:
-        return None
-    for value in (_text(counts, 'filtered'), _text(counts, 'full'), counts.text):
-        if _count(value) is not None:
-            return _count(value)
-    return None
-
-
-def read_report(gmp, report_id):
-    """Every result of one report and every host it scanned, read from the report itself a page at a time (``first``, ``rows``; a ``rows=-1``
-    is capped by gvmd's "Max Rows Per Page", so it is not relied on). ``details`` is on: without it gvmd sends neither the results nor a
-    ``<host>``, only counts. Returns ``{items, no_cve, unusable, hosts: {address: {start, end}}, count}``: ``count`` is the number of results gvmd
-    says the report holds under the same filter, ``None`` when it does not say; ``short`` is true when fewer results were read than that
-    count (``_short``). Paging does not stop at a page shorter than asked while gvmd counts more (``_last_page``)."""
-    out = {'items': [], 'no_cve': 0, 'unusable': 0, 'hosts': {}, 'count': None}
-
-    def ask(first):
-        report = _report_element(gmp.get_report(report_id, filter_string=f'{REPORT_FILTER} first={first} rows={RESULT_PAGE}', details=True))
-        if report is None:
-            return None
-        if first == 1:
-            out['count'] = _report_count(report)
-            for host in report.findall('host'):
-                address = _text(host, 'ip')
-                if address:
-                    out['hosts'][address] = {'start': _text(host, 'start'), 'end': _text(host, 'end')}
-        return _results_of(report)
-    return _paged(ask, out)
-
-
-def task_results(gmp, task_status, task_id):
-    """What gvmd has for a task: its report read in full (``read_report``), or, when gvmd named no report, its results through ``get_results``.
-    Also the number of results gvmd itself counts for the task (``gvm_count``, from the task and the report)."""
-    report_id = report_id_of(task_status)
-    if report_id:
-        out = read_report(gmp, report_id)
-    else:
-        out = {**fetch_results(gmp, task_id), 'hosts': {}}
-    counted = [c for c in (gvm_result_count(task_status), out['count']) if c is not None]
-    out['report_id'], out['gvm_count'] = report_id, (max(counted) if counted else None)
-    return out
-
-
-def _scanned_host(times):
-    """A report host gvmd finished: one with an end time (a host whose scan never ended proves nothing), or one of a gvmd that gives no times."""
-    return bool(times.get('end')) or not (times.get('start') or times.get('end'))
-
-
-def scanned_addresses(gmp, task_status, items, hosts=None):
-    """The addresses gvmd really scanned: the hosts its report lists as scanned and every host that has a result. A host that was down produces
-    neither, and its earlier findings are then not resolved: an absent host says nothing about a vulnerability. ``hosts`` is the report's
-    host list when it was read already (``read_report``); otherwise the report is asked for it (``details`` on and ``result_hosts_only=0``:
-    without them gvmd lists no host, or only the hosts with a result)."""
-    seen = {i['address'] for i in items}
-    if hosts is None:
-        hosts = {}
-        report_id = report_id_of(task_status)
-        if report_id:
-            try:
-                report = _report_element(gmp.get_report(report_id, filter_string=f'{REPORT_FILTER} first=1 rows=1', details=True))
-                hosts = {_text(h, 'ip'): {'start': _text(h, 'start'), 'end': _text(h, 'end')} for h in report.findall('host') if _text(h, 'ip')} \
-                    if report is not None else {}
-            except Exception:  # noqa: BLE001 - the report's host list is a bonus; the results are the floor
-                logger.info('could not read the host list of the report')
-    return seen | {address for address, times in hosts.items() if _scanned_host(times)}
 
 
 def _parse_time(text):
@@ -1541,38 +880,6 @@ def resolve_missing(domain, sub, gone, matches, products):
             ai_verdict='not_affected', confidence=0.0, updated_at=timezone.now(),
             ai_reason='Closed automatically: a later OpenVAS scan of this host no longer reports this result.')
     return count
-
-
-def import_results(run, gmp, status_xml):
-    """Import a finished local task: read its report from gvmd (``task_results``), then store the results exactly as a Sentinel-reported run's own
-    results are stored (``_apply_import``, the one path both use). Returns ``(summary, names)``.
-
-    A report gvmd says holds results of which none could be read is not imported at all: an empty read would otherwise count the hosts as
-    scanned clean and close what earlier scans found. It is inconclusive (``read_mismatch``), and the task and its report are kept in gvmd."""
-    got = task_results(gmp, status_xml, run.task_id)
-    items, no_cve, unusable = got['items'], got['no_cve'], got['unusable']
-    logger.info('OpenVAS run %s: gvmd counts %s result(s) for task %s (report %s); %s read, %s host(s) in the report', run.pk,
-                got['gvm_count'] if got['gvm_count'] is not None else 'no', run.task_id, got['report_id'] or 'unknown', len(items) + unusable,
-                len(got['hosts']))
-    extra = {'gvm_results': got['gvm_count'], 'report_id': got['report_id'] or '', 'host_minutes': host_minutes(got['hosts'])}
-    if got.get('stale'):  # results whose CVEs gvmd did not send: imported as partial, so nothing an earlier scan found is closed by their absence
-        extra['nvt_cache_stale'] = got['stale']
-        logger.warning('OpenVAS run %s: %s result(s) came with CERT references but no CVE reference: gvmd\'s NVT cache is out of date; imported as '
-                       'partial', run.pk, got['stale'])
-    if got.get('short'):  # gvmd counts more than it gave: what was read is kept, and nothing earlier is resolved by it
-        extra['short_read'] = {'read': len(items) + unusable, 'count': got['count']}
-        logger.warning('OpenVAS run %s: read %s of the %s result(s) gvmd counts in the report; imported as partial', run.pk, len(items) + unusable,
-                       got['count'])
-    if got['gvm_count'] and not (items or unusable):
-        summary = {'results': 0, 'without_cve': 0, 'unusable': 0, 'hosts_scanned': 0, 'hosts_not_scanned': len(run.hosts), 'findings': 0,
-                   'evidence': 0, 'resolved': 0, 'not_in_batch': 0, 'partial': False, 'read_mismatch': True, **extra}
-        return summary, []
-    scanned = scanned_addresses(gmp, status_xml, items, hosts=got['hosts'] if got['report_id'] else None)
-    # Results come highest severity first and stop at MAX_RESULTS: a scan that hit the cap says nothing about what lies beyond it, so it is
-    # partial (nothing earlier is resolved by it) rather than a complete answer. So is a read that ended before the count gvmd gives.
-    summary, names = _apply_import(run, items, scanned, no_cve, unusable,
-                                   partial=len(items) + unusable >= MAX_RESULTS or 'short_read' in extra or 'nvt_cache_stale' in extra)
-    return {**summary, **extra}, names
 
 
 def _apply_import(run, items, scanned, no_cve, unusable, partial=False):
@@ -1782,214 +1089,21 @@ def carry_forward(scan):
 
 # ----------------------------------------------------------------------------- the tick
 
-def _record_state(row, **state):
-    row.state = {**state, 'checked_at': timezone.now().isoformat()}
-    row.save(update_fields=['state', 'updated_at'])
 
 
-def check(gmp):
-    """The connection state shown in Settings: ``{connected, gmp_version, feed, guard}``."""
-    version = _text(gmp.get_version(), 'version')
-    ok, reason = resource_guard()
-    return {'connected': True, 'gmp_version': version, 'feed': feed_state(gmp), 'guard': {'ok': ok, 'reason': reason}, 'error': ''}
+def tick(resolve=None, blocked=None):
+    """One step of the sweep (every 15 minutes, queue ``openvas_queue``): follow the running Sentinel task, or hand the next due batch to a Sentinel.
+    Returns what it did, or ``{'skipped': reason}``. This server runs no OpenVAS engine and opens no GMP session: a Sentinel's own gvmd containers
+    scan (``cvengine_scanner``, ``client/openvas.py``), so a due batch with no eligible Sentinel right now is left due and the next step tries again.
 
+    Enablement is this instance's global switch (``row.enabled``) AND the opt-in of the project, its own (``OpenvasProject.enabled``) or its
+    organization's (``OpenvasOrg``) unless the project was excluded (``sweep_links``).
 
-def check_now(session_factory=None):
-    """Test connection (Settings): record and return the state. Runs in a worker, the only container that has the sidecar's socket."""
-    from cveFeed.models import OpenvasSettings
-    row = OpenvasSettings.current()
-    try:
-        if session_factory is None:
-            ensure_login()
-        with (session_factory or session)() as gmp:
-            state = check(gmp)
-    except OpenvasError as exc:
-        state = {'connected': False, 'gmp_version': '', 'feed': None, 'guard': None, 'error': str(exc)}
-    _record_state(row, **state)
-    return {**state, 'checked_at': row.state['checked_at']}
-
-
-def _stop(gmp, run, status, why):
-    try:
-        gmp.stop_task(run.task_id)
-    except Exception:  # noqa: BLE001 - the task may already be over
-        logger.info('could not stop the GVM task of run %s', run.pk)
-    finish(run, status, why)
-    return {'run': run.pk, 'status': status, 'error': why}
-
-
-def _out_of_budget(run, gmp, status=None):
-    """The task ran past its time budget: stop it and keep what it found. With no result at all it failed like before (the hosts are asked
-    again in three days); with some, they are imported as a partial scan (nothing earlier is resolved by it) and the hosts count as scanned.
-    The results are read from the report being written (``status`` is the task's ``get_task`` answer), else through ``get_results``."""
-    from cveFeed import activity, ledger
-    hours = budget_hours(len(run.hosts))
-    try:
-        got = task_results(gmp, status, run.task_id)
-        items, no_cve, unusable = got['items'], got['no_cve'], got['unusable']
-    except Exception:  # noqa: BLE001 - gvmd would not say: nothing to keep
-        items, no_cve, unusable = [], 0, 0
-    stopped = _stop(gmp, run, 'failed', f'the task ran for more than {hours} hours')
-    if not items:
-        ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
-        return stopped
-    summary, names = _apply_import(run, items, {i['address'] for i in items}, no_cve, unusable, partial=True)
-    gone = [h for h in run.hosts.values() if h not in names]
-    ledger.record(SERVICE, names, run.project_id)
-    ledger.record(FAILED_SERVICE, gone, run.project_id)
-    finish(run, 'done', error=f'stopped at the {hours} hour budget; the results found so far were kept', summary=summary)
-    activity.log('run_check', f'{run_label(run)}: stopped at the {hours} hour budget; kept {summary["findings"]} finding(s) of {summary["hosts_scanned"]} host(s)',
-                 project=run.project_id, **run_detail(run))
-    return {'run': run.pk, 'status': 'done', **summary}
-
-
-POLL_RETRIES = 4  # polls in a row (15 minutes apart) gvmd may fail to answer about a running task before the run is given up
-
-
-def _task_gone(exc):
-    """Whether ``exc`` is gvmd saying it has no such task (a 404 answer, "Failed to find task"), as opposed to a socket timeout, a restart or any
-    other trouble."""
-    return str(getattr(exc, 'status', '')) == '404' or str(getattr(exc, 'message', '') or '').startswith('Failed to find task')
-
-
-def _trouble_key(run):
-    return f'cvengine:openvas:poll-trouble:{run.pk}:{int(run.started_at.timestamp())}'
-
-
-def _poll_trouble(run, gmp, exc):
-    """gvmd did not answer about a running task (busy, restarting, a timeout). The task may well still be running, so nothing is decided from a
-    single failure: the run stays ``running`` and the next tick asks again, no host is marked failed and no second task can start. After
-    ``POLL_RETRIES`` ticks in a row it is stopped (best effort) and the run fails without blaming a host."""
-    from django.core.cache import cache
-    key = _trouble_key(run)
-    count = (cache.get(key) or 0) + 1
-    if count < POLL_RETRIES:
-        cache.set(key, count, 6 * 3600)
-        return {'run': run.pk, 'status': 'running', 'error': f'gvmd did not answer about the task ({type(exc).__name__}); asking again at the next step'}
-    cache.delete(key)
-    return _stop(gmp, run, 'failed', f'gvmd did not answer about the task {POLL_RETRIES} times in a row ({type(exc).__name__}): the hosts stay due')
-
-
-def poll(run, gmp, now=None):
-    """One step of the running task: update it, stop it when scanning is paused, memory is critical or it ran too long, import it when Done."""
-    from django.core.cache import cache
-    from cveFeed import activity, ledger
-    from cveFeed.scan_control import operator_pause_requested
-    now = now or timezone.now()
-    if not run.task_id:  # the worker died between making the run and making the task
-        finish(run, 'failed', 'the task was never created')
-        return {'run': run.pk, 'status': 'failed'}
-    try:
-        status = gmp.get_task(run.task_id)
-    except Exception as exc:  # noqa: BLE001
-        if not _task_gone(exc):
-            return _poll_trouble(run, gmp, exc)
-        finish(run, 'failed', f'gvmd no longer has the task ({type(exc).__name__})')  # deleted by hand, or the database was reset
-        ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
-        return {'run': run.pk, 'status': 'failed'}
-    cache.delete(_trouble_key(run))
-    task = status.find('./task')
-    word = _text(task, 'status')
-    progress = _text(task, 'progress')
-    run.gvm_status, run.progress = word[:30], _int(progress)
-    run.save(update_fields=['gvm_status', 'progress'])
-    if word in ACTIVE:
-        if operator_pause_requested():  # an update's drain pause lets running work finish; Pause all scanning does not
-            return _stop(gmp, run, 'stopped', 'scanning is paused: the hosts stay due')
-        if memory_critical():
-            return _stop(gmp, run, 'stopped', 'memory ran critically low: the hosts stay due')
-        if now - run.started_at > timedelta(hours=budget_hours(len(run.hosts))):
-            return _out_of_budget(run, gmp, status)
-        log_progress(run, word, run.progress)
-        return {'run': run.pk, 'status': 'running', 'gvm_status': word, 'progress': run.progress}
-    if word == 'Done':
-        entry = activity.log('run_check', f'{run_label(run)}: importing the results', project=run.project_id, status='running', **run_detail(run))
-        try:
-            summary, names = import_results(run, gmp, status)
-        except Exception as exc:  # noqa: BLE001
-            finish(run, 'failed', f'the results could not be imported ({type(exc).__name__})',
-                   summary={'kept_task_until': keep_until().isoformat(), 'gvm_results': gvm_result_count(status)})
-            ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
-            activity.settle(entry, 'done', message=f'{run_label(run)}: ' + activity.diagnostic('OpenVAS result import', exc)
-                            + f'; the GVM task and its report are kept for {keep_days()} days')
-            return {'run': run.pk, 'status': 'failed'}
-        gone = [h for h in run.hosts.values() if h not in names]
-        stale = summary.get('nvt_cache_stale')
-        # A read whose CVEs gvmd left out is not a scan of these hosts: they are asked again in three days, by then with a restarted gvmd.
-        ledger.record(FAILED_SERVICE if stale else SERVICE, names, run.project_id)
-        ledger.record(FAILED_SERVICE, gone, run.project_id)  # gvmd found no live host: asked again in three days
-        if stale:
-            from cveFeed import openvas_admin
-            openvas_admin.request_gvmd_restart()
-        empty = inconclusive(summary)
-        if empty or stale:  # the task and its report stay in gvmd for a person to look at (removed after keep_days())
-            summary['kept_task_until'] = keep_until().isoformat()
-        short = summary.get('short_read')
-        error = (READ_MISMATCH if summary.get('read_mismatch') else INCONCLUSIVE if empty
-                 else stale_cache_error(stale) if stale
-                 else f'only {short["read"]} of the {short["count"]} results gvmd counts could be read: imported as partial, nothing earlier is '
-                      'resolved by it' if short
-                 else f'more than {MAX_RESULTS} results: the lowest-severity ones were not imported' if summary['partial'] else '')
-        finish(run, 'done', error=error, summary=summary)
-        if not (empty or stale):
-            _delete_task(gmp, run)
-        label = run_label(run)
-        if empty:
-            gvm = summary.get('gvm_results')
-            said = f'gvmd counts {gvm} result(s) for the task' if gvm is not None else 'gvmd gave no result count'
-            spent = per_host_text(run, summary.get('host_minutes') or {})
-            activity.settle(entry, 'done', message=(f'{label}: {READ_MISMATCH if summary.get("read_mismatch") else INCONCLUSIVE} ({len(run.hosts)} host(s) asked; '
-                                                    f'{said}{"; GVM spent " + spent if spent else ""}); none is marked scanned, and the GVM task and '
-                                                    f'its report are kept for {keep_days()} days'),
-                            gvm_results=gvm, host_minutes=summary.get('host_minutes') or {}, report_id=summary.get('report_id') or '')
-            return {'run': run.pk, 'status': 'done', **summary}
-        activity.settle(entry, 'done', message=(f'{label}: {summary["hosts_scanned"]} host(s) scanned, {summary["findings"]} finding(s) with a CVE, '
-                                                f'{summary["resolved"]} resolved' + (f', {summary["without_cve"]} result(s) without a CVE not imported' if summary['without_cve'] else '')
-                                                + (f'; {stale_cache_error(stale)}' if stale else '')),
-                        gvm_results=summary.get('gvm_results'), results=summary['results'])
-        return {'run': run.pk, 'status': 'done', **summary}
-    # Stopped, Interrupted, a delete in progress or a word this version does not know: not a result. An interrupted task (gvmd or its scanner
-    # restarted under it) says nothing about the hosts at first, so none is marked failed and they stay due. A host that is interrupted
-    # again and again is the likely cause (it crashes gvmd or its scanner), so after ``max_interrupts()`` tasks in a row it waits three days.
-    hold = 'stopped' if word == 'Stopped' else 'failed'
-    said = f'gvmd reports the task as "{clean(word, 30) or "unknown"}"'
-    if hold == 'failed' and word != 'Interrupted':
-        ledger.record(FAILED_SERVICE, run.hosts.values(), run.project_id)
-    elif word == 'Interrupted':
-        limit = max_interrupts()
-        streak = interrupted_streak(run, sorted(set(run.hosts.values())), limit)
-        worn = {host: n for host, n in streak.items() if n >= limit}
-        if worn:
-            ledger.record(FAILED_SERVICE, worn, run.project_id)
-            finish(run, hold, interrupted_reason(limit) if len(run.hosts) == 1 else
-                   f'OpenVAS was interrupted {limit} times scanning {len(worn)} host(s) of this run; asked again after three days',
-                   summary={'interrupt_limit': worn})
-            return {'run': run.pk, 'status': hold, 'gave_up': sorted(worn)}
-        said += f' (attempt {max(streak.values(), default=1)} of {limit}; the host is tried again)'
-    finish(run, hold, said)
-    return {'run': run.pk, 'status': hold}
-
-
-def tick(session_factory=None, resolve=None, blocked=None):
-    """One step of the sweep (every 15 minutes, queue ``openvas_queue``): poll the running task, or start the next due batch. Returns what it
-    did, or ``{'skipped': reason}``.
-
-    Enablement is this instance's global switch (``row.enabled``, just above) AND the opt-in of the project, its own
-    (``OpenvasProject.enabled``) or its organization's (``OpenvasOrg``) unless the project was excluded (``sweep_links``). A
-    Sentinel never changes that; it only changes *where* an already-due, already-opted-in batch runs.
-
-    Pausing. This step is exempt from the pause gate of the task layer (``scan_control.PAUSE_EXEMPT_TASKS``) because it is what reaches a
-    task that is already running: while scanning is paused it never starts or dispatches a task, and when an App Admin paused everything
-    (not just an update's drain, which lets running work finish) it stops the running local GVM task, or expires the running Sentinel task. Before opening a local GMP session for a due project, this also asks whether a live,
-    eligible Sentinel (capability ``openvas``) could take that project's work instead - a project with no such Sentinel
-    pays for nothing beyond that one query and behaves exactly as before this existed. Only one GVM task, local or
-    Sentinel-dispatched, ever runs at a time (``OpenvasRun``'s own unique constraint), so a project already running one
-    way is never also started the other.
-
-    ``row.sentinel_only`` (Settings > OpenVAS) refuses the local fallback entirely: when it is set, a due batch with no
-    eligible Sentinel right now is simply left due rather than ever touching this instance's own sidecar - the next tick
-    tries again, same as a batch that failed to vet. It does not touch a local run already in progress (started before
-    the toggle was turned on, or one this process itself is mid-poll of), which is let finish."""
+    Pausing. This step is exempt from the pause gate of the task layer (``scan_control.PAUSE_EXEMPT_TASKS``) because it is what reaches a task that is
+    already running: while scanning is paused it never dispatches a task, and when an App Admin paused everything (not just an update's drain, which
+    lets running work finish) it expires the running Sentinel task. Only one task ever runs at a time (``OpenvasRun``'s own unique constraint). A run
+    left ``running`` by an earlier version, one with no Sentinel task (it ran on a sidecar this server no longer has), is closed as failed here, so it
+    never holds that slot."""
     from cveFeed.models import OpenvasRun, OpenvasSettings
     from cveFeed.scan_control import operator_pause_requested
     from reNgine import resources
@@ -2001,74 +1115,41 @@ def tick(session_factory=None, resolve=None, blocked=None):
         if holder is not True:
             return {'skipped': 'another OpenVAS step is running'}
         run = OpenvasRun.objects.select_related('sentinel_task').filter(status='running').first()
+        if run is not None and not run.sentinel_task_id:
+            finish(run, 'failed', 'this run was started on a scanner that ran on the server; the server no longer runs OpenVAS, a Sentinel does')
+            run = None
         if run is None and resources.global_pause_requested(fail_closed=True):
             return {'skipped': 'scanning is paused'}
-        if run is not None and run.sentinel_task_id:
+        if run is not None:
             if operator_pause_requested():
                 from agentapi import sentinel_broker
                 sentinel_broker.expire(run.sentinel_task, 'scanning is paused: the hosts stay due')  # an expired task marks no host failed
             return poll_sentinel(run)
-        if run is None:
-            found_due = False
-            skipped = _SkippedProjects()
-            for link in sweep_links():
-                if not skipped.eligible(link.project, internal=False):
-                    continue
-                batch = next_batch(link, resolve=resolve, blocked=blocked)
-                if not batch:
-                    continue
-                found_due = True
-                started = dispatch_to_sentinel(link, batch)
-                if started is not None:
-                    return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'sentinel'}
-            for link in sweep_links():  # a project's declared internal networks: only a Sentinel inside them can scan, never this server
-                if not skipped.eligible(link.project, internal=True):
-                    continue
-                batch = internal_batch(link)
-                if not batch:
-                    continue
-                found_due = True
-                started = dispatch_to_sentinel(link, batch)
-                if started is not None:
-                    return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'internal sentinel'}
-            skipped.log()
-            if row.sentinel_only:
-                return {'skipped': ('Sentinel-only mode is on: a due host has no eligible Sentinel right now; it stays due' if found_due
-                                    else 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due') + skipped.suffix()}
-        try:
-            if session_factory is None:
-                ensure_login()
-            with (session_factory or session)() as gmp:
-                if run is not None:
-                    return poll(run, gmp)
-                state = check(gmp)
-                _record_state(row, **state)
-                try:
-                    remove_kept_tasks(gmp)
-                except Exception:  # noqa: BLE001 - housekeeping never stops the sweep
-                    logger.info('could not remove the kept GVM tasks of earlier runs', exc_info=True)
-                if not state['feed']['ready']:
-                    return {'skipped': state['feed']['reason']}
-                if resources.global_pause_requested(fail_closed=True):
-                    return {'skipped': 'scanning is paused'}
-                if not state['guard']['ok']:
-                    return {'skipped': state['guard']['reason']}
-                for link in sweep_links():
-                    batch = next_batch(link, resolve=resolve, blocked=blocked)
-                    if not batch:
-                        continue
-                    started = start(gmp, link, batch)
-                    log_started(started)
-                    return {'run': started.pk, 'status': 'running', 'hosts': len(batch)}
-                return {'skipped': 'no opted-in host is due'}
-        except OpenvasError as exc:
-            _record_state(row, connected=False, gmp_version='', feed=None, guard=None, error=str(exc))
-            if run is not None and timezone.now() - run.started_at > timedelta(hours=budget_hours(len(run.hosts))):
-                # gvmd cannot be reached, so the budget check in ``poll`` never runs: a local run of a sidecar that was removed or stopped would hold
-                # the one-at-a-time slot for ever. The hosts are not marked failed: nothing says the scan itself did.
-                finish(run, 'failed', 'gvmd could not be reached and the run is past its time budget')
-                return {'run': run.pk, 'status': 'failed', 'error': str(exc)}
-            return {'error': str(exc)}
+        found_due = False
+        skipped = _SkippedProjects()
+        for link in sweep_links():
+            if not skipped.eligible(link.project, internal=False):
+                continue
+            batch = next_batch(link, resolve=resolve, blocked=blocked)
+            if not batch:
+                continue
+            found_due = True
+            started = dispatch_to_sentinel(link, batch)
+            if started is not None:
+                return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'sentinel'}
+        for link in sweep_links():  # a project's declared internal networks: only a Sentinel inside them can scan
+            if not skipped.eligible(link.project, internal=True):
+                continue
+            batch = internal_batch(link)
+            if not batch:
+                continue
+            found_due = True
+            started = dispatch_to_sentinel(link, batch)
+            if started is not None:
+                return {'run': started.pk, 'status': 'running', 'hosts': len(batch), 'via': 'internal sentinel'}
+        skipped.log()
+        return {'skipped': ('a due host has no eligible Sentinel right now; it stays due' if found_due
+                            else 'no opted-in host with an eligible Sentinel is due') + skipped.suffix()}
 
 
 def _register():

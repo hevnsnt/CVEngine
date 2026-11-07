@@ -2,7 +2,6 @@
 organizational-domain fallback reported once on the parent, and no findings for the vendor's own endpoints. Every fixture is synthetic
 (example.com / example.net); all DNS is mocked."""
 import datetime
-import functools
 from io import StringIO
 from unittest import mock
 
@@ -10,13 +9,12 @@ import dns.exception
 import dns.resolver
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import hygiene as hy
 from cveFeed import hygiene_rating as hr
-from cveFeed import mailfail as mf
 from cveFeed import tls_audit
 from cveFeed.models import HostLabel, HygieneFinding, RouteAuth
 from cveFeed.threat import host_heat
@@ -206,17 +204,6 @@ class CertificateExpiryTests(Base):
 		self.assertFalse(hr.is_dev_host('developer.example.com'))
 
 
-class DmarcReportAuthorizationTests(SimpleTestCase):
-	def test_a_report_authorisation_gap_under_an_enforcing_policy_is_info(self):
-		for policy, severity in (('reject', hy.INFO), ('quarantine', hy.INFO), ('none', hy.MEDIUM), ('', hy.MEDIUM)):
-			found = mf.evaluate_report_authorization('example.com', 'reports.example.net', [], policy)
-			self.assertEqual([(f.check, f.severity) for f in found], [('dmarc_report_unauthorized', severity)], policy)
-
-	def test_review_reads_the_policy_from_the_record(self):
-		zone = {}
-		fetch = lambda n: zone.get(n, [])  # noqa: E731
-		found = mf.review('example.com', True, [], ['v=DMARC1; p=reject; rua=mailto:d@reports.example.net'], {}, fetch, lambda n, t: [])
-		self.assertEqual([f.severity for f in found if f.check == 'dmarc_report_unauthorized'], [hy.INFO])
 
 
 # ----------------------------------------------------------------------------- item 19: two resolvers or two runs
@@ -254,172 +241,10 @@ def os_environ_without(key):
 	os.environ.pop(key, None)
 
 
-class DnsConsensusTests(Base):
-	ZONE = {'example.com': ['v=spf1 include:_spf.example.net -all'], '_dmarc.example.com': ['v=DMARC1; p=reject; rua=mailto:d@example.com']}
-
-	def emailer(self, askers, zone=None):
-		zone = self.ZONE if zone is None else zone
-		return functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)
-
-	def sweep(self, emailer):
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: False)
-		return {r.check_name: r for r in HygieneFinding.objects.filter(domain=self.domain, check_name__in=hy.ABSENCE_CHECKS)}
-
-	def test_a_one_off_failure_never_opens_a_finding(self):
-		"""Fixture shape: the apex DMARC record recorded missing once, no evidence, while it was published all along."""
-		flaky = [('system', asker(self.ZONE, failing=['_dmarc.example.com'])), ('192.0.2.53', asker(self.ZONE, failing=['*']))]
-		rows = self.sweep(self.emailer(flaky))
-		row = rows['dmarc_missing']
-		self.assertEqual(row.status, hy.PENDING)  # stored with its evidence, not opened
-		self.assertEqual(row.evidence['dns_confirmed'], False)
-		self.assertEqual([o['result'] for o in row.evidence['dns']], ['error', 'error'])
-		self.assertEqual(HygieneFinding.objects.filter(domain=self.domain, status='open', check_name='dmarc_missing').count(), 0)
-		# the next run reads the record: the pending observation is resolved, never opened
-		rows = self.sweep(self.emailer([('system', asker(self.ZONE)), ('192.0.2.53', asker(self.ZONE))]))
-		self.assertEqual(rows['dmarc_missing'].status, 'resolved')
-
-	def test_one_resolver_missing_the_record_is_outvoted_by_one_that_has_it(self):
-		stale = dict(self.ZONE)
-		del stale['_dmarc.example.com']
-		findings, _ = hy.email_findings('example.com', fetch=lambda n: self.ZONE.get(n, []), mx=lambda n, t: t == 'MX',
-										askers=[('system', asker(stale)), ('192.0.2.53', asker(self.ZONE))])
-		self.assertNotIn('dmarc_missing', checks(findings))
-
-	def test_two_resolvers_agreeing_open_the_finding_at_once(self):
-		zone = {'example.com': ['v=spf1 -all']}
-		rows = self.sweep(self.emailer([('system', asker(zone)), ('192.0.2.53', asker(zone))], zone=zone))
-		row = rows['dmarc_missing']
-		self.assertEqual((row.status, row.evidence['dns_confirmed']), ('open', True))
-		self.assertEqual([o['resolver'] for o in row.evidence['dns']], ['system', '192.0.2.53'])
-
-	def test_two_consecutive_observations_open_it_when_resolvers_cannot_agree(self):
-		zone = {'example.com': ['v=spf1 -all']}
-		lonely = [('system', asker(zone)), ('192.0.2.53', asker(zone, failing=['*']))]
-		self.assertEqual(self.sweep(self.emailer(lonely, zone=zone))['dmarc_missing'].status, hy.PENDING)
-		row = self.sweep(self.emailer(lonely, zone=zone))['dmarc_missing']
-		self.assertEqual((row.status, row.evidence['confirmed_by']), ('open', 'seen again on the next run'))
-
-	def test_a_fixed_record_that_goes_missing_twice_reopens(self):
-		zone = {'example.com': ['v=spf1 -all']}
-		lonely = [('system', asker(zone)), ('192.0.2.53', asker(zone, failing=['*']))]
-		HygieneFinding.objects.create(domain=self.domain, host='example.com', check_name='dmarc_missing', severity=hy.HIGH, title='No DMARC',
-									  status='resolved', remediation_status='fixed')
-		self.assertEqual(self.sweep(self.emailer(lonely, zone=zone))['dmarc_missing'].status, hy.PENDING)
-		row = self.sweep(self.emailer(lonely, zone=zone))['dmarc_missing']
-		self.assertEqual((row.status, row.remediation_status), ('open', 'open'))
-
-	def test_ask_txt_classifies_answers_and_follows_a_cname(self):
-		class Rdata:
-			def __init__(self, text):
-				self.strings = [text.encode()]
-
-		class Answer(list):
-			canonical_name = 'mail1.example.net.'
-
-		class Resolver:
-			def __init__(self, outcome):
-				self.outcome = outcome
-
-			def resolve(self, name, rtype):
-				if isinstance(self.outcome, Exception):
-					raise self.outcome
-				return self.outcome
-		got = hy.ask_txt(Resolver(Answer([Rdata('v=spf1 include:_spf.example.net ~all')])), 'help.example.com')
-		self.assertEqual(got, {'result': 'answer', 'records': ['v=spf1 include:_spf.example.net ~all'], 'cname': 'mail1.example.net'})
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NXDOMAIN()), 'x.example.com')['result'], 'nxdomain')
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoAnswer()), 'x.example.com')['result'], 'noanswer')
-		self.assertEqual(hy.ask_txt(Resolver(dns.exception.Timeout()), 'x.example.com')['result'], 'error')
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoNameservers()), 'x.example.com')['result'], 'error')
-
-	def real_dns_emailer(self, zone):
-		"""email_findings with the resolvers ``dns_askers()`` builds (the installation's setting), over fake DNS objects."""
-		return lambda name: hy.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=hy.dns_askers())
-
-	def test_by_default_no_third_party_resolver_is_asked_and_a_missing_record_needs_two_runs(self):
-		zone = {'example.com': ['v=spf1 -all']}
-		system = FakeResolver(zone)
-		with mock.patch.dict('os.environ', {}), mock.patch.object(hy, '_resolver', return_value=system), \
-				mock.patch('dns.resolver.Resolver', side_effect=AssertionError('no extra resolver may be built')) as extra:
-			os_environ_without('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
-			self.assertEqual(hy.confirm_resolvers(), ())
-			self.assertEqual([label for label, _ in hy.dns_askers()], ['system'])
-			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
-			self.assertEqual((row.status, [o['resolver'] for o in row.evidence['dns']]), (hy.PENDING, ['system']))
-			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
-			self.assertEqual((row.status, row.evidence['confirmed_by']), ('open', 'seen again on the next run'))
-		extra.assert_not_called()  # no client name was sent to any resolver but the system's
-		self.assertEqual(set(system.asked), {'example.com', '_dmarc.example.com'})
-
-	def test_configured_resolvers_confirm_an_absence_in_one_run(self):
-		zone = {'example.com': ['v=spf1 -all']}
-		system, built = FakeResolver(zone), []
-
-		def build(configure=True):
-			built.append(FakeResolver(zone))
-			return built[-1]
-		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': '192.0.2.53,198.51.100.53'}), \
-				mock.patch.object(hy, '_resolver', return_value=system), mock.patch('dns.resolver.Resolver', side_effect=build):
-			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
-		self.assertEqual((row.status, row.evidence['dns_confirmed']), ('open', True))
-		self.assertEqual([o['resolver'] for o in row.evidence['dns']], ['system', '192.0.2.53'])
-		self.assertEqual(built[0].nameservers, ['192.0.2.53'])
-		self.assertEqual(built[0].asked, ['_dmarc.example.com'])  # only the name whose record seemed missing
-		self.assertEqual(built[1].asked, [])  # two votes were enough
-
-	def test_the_confirming_resolvers_are_configurable(self):
-		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': ''}):
-			self.assertEqual(hy.confirm_resolvers(), ())
-		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': '192.0.2.53, 198.51.100.53'}):
-			self.assertEqual([label for label, _ in hy.dns_askers()], ['system', '192.0.2.53', '198.51.100.53'])
 
 
 # ----------------------------------------------------------------------------- item 20: organizational domain, sp=, CNAMEs, one row
 
-class OrganizationalDomainTests(Base):
-	def findings(self, name, zone, askers=None):
-		return hy.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)[0]
-
-	def test_a_subdomain_covered_by_the_parents_policy_has_no_dmarc_finding(self):
-		"""Fixture shape: a mail subdomain with no record of its own under a parent p=quarantine; sp=quarantine."""
-		zone = {'_dmarc.example.com': ['v=DMARC1;p=quarantine;sp=quarantine;pct=100;rua=mailto:d@example.com'],
-				'gh-mail.example.com': ['v=spf1 include:_spf.example.net -all']}
-		self.assertEqual({c for c in checks(self.findings('gh-mail.example.com', zone)) if c.startswith('dmarc')}, set())
-
-	def test_missing_spf_on_a_subdomain_under_an_enforcing_parent_is_info(self):
-		"""Fixture shape: a subdomain target with no SPF of its own under a parent p=reject (medium before)."""
-		zone = {'_dmarc.example.com': ['v=DMARC1; p=reject; rua=mailto:d@example.com']}
-		spf = by_check(self.findings('events.example.com', zone))['spf_missing']
-		self.assertEqual((spf.severity, spf.evidence['dmarc_policy']), (hy.INFO, 'reject'))
-		zone['_dmarc.example.com'] = ['v=DMARC1; p=reject; sp=none']  # the parent's sp= decides for its subdomains
-		self.assertEqual(by_check(self.findings('events.example.com', zone))['spf_missing'].severity, hy.MEDIUM)
-		self.assertEqual(by_check(self.findings('example.com', {'_dmarc.example.com': ['v=DMARC1; p=reject']}))['spf_missing'].severity,
-						 hy.MEDIUM)  # the organizational domain itself is not a subdomain
-
-	def test_spf_is_read_through_a_cname(self):
-		"""Fixture shape: help.<client> CNAME to the help-desk vendor's mail host, whose SPF record answers the TXT lookup."""
-		zone = {'_dmarc.example.com': ['v=DMARC1; p=none']}
-		via_cname = {'help.example.com': ['v=spf1 include:_netblocks.example.net ~all']}
-		def system(name):  # the resolver followed the CNAME: the answer is the vendor host's TXT
-			if name in via_cname:
-				return {'result': 'answer', 'records': via_cname[name], 'cname': 'mail3.example.net'}
-			return asker(zone)(name)
-		found = self.findings('help.example.com', zone, askers=[('system', system), ('192.0.2.53', asker(zone))])
-		self.assertNotIn('spf_missing', checks(found))
-		self.assertIn('spf_softfail', checks(found))
-
-	def test_a_p_none_parent_is_one_finding_not_one_per_subdomain(self):
-		zone = {'_dmarc.example.com': ['v=DMARC1; p=none; rua=mailto:d@example.com'], 'example.com': ['v=spf1 -all']}
-		names = [f'm{i}.example.com' for i in range(20)]
-		for name in names:
-			self.host(name)
-			zone[name] = ['v=spf1 -all']
-		emailer = functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: t == 'MX')
-		rows = HygieneFinding.objects.filter(domain=self.domain, status='open', check_name='dmarc_none')
-		self.assertEqual([r.host for r in rows], ['example.com'])
-		self.assertEqual(sorted(rows[0].evidence['covers']), sorted(names))
-		self.assertIn('m0.example.com', rows[0].detail)
-		self.assertEqual(HygieneFinding.objects.filter(domain=self.domain, check_name='dmarc_missing').count(), 0)
 
 
 # ----------------------------------------------------------------------------- the backfill

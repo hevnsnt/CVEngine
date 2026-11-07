@@ -150,15 +150,23 @@ class FakeScanner:
             env = {name: '1' for name in ('CVENGINE_SENTINEL_CLAIM_TIMEOUT', 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT') if name not in os.environ}
             stack.enter_context(mock.patch.dict(os.environ, env))
             admin = self._admin()
-            state = builtin_scanner.ensure()['state']
-            if state != 'blob_written':
-                raise RuntimeError(f'the built-in enrollment did not write its blob: {state}')
-            with open(builtin_scanner.blob_path(), encoding='utf-8') as handle:
-                blob = sentinel_broker.decode_enrollment_blob(handle.read())
-            out = sentinel_broker.bootstrap({'enrollment_token': blob['enrollment_token'], 'name': 'fake-scanner', 'capabilities': self.kinds,
-                                             'max_concurrent': self.max_concurrent})
             from agentapi.models import Agent
-            self.agent = Agent.objects.select_related('token__user').get(pk=out['id'])
+            from agentapi.models import SentinelEnrollment
+            used = SentinelEnrollment.objects.filter(builtin=True, used_by_agent__isnull=False).select_related('used_by_agent__token__user').first()
+            again = used.used_by_agent if used is not None else None
+            if again is not None:  # a second fake in the same test (the first one was stopped): the same enrolled scanner, with the new kinds
+                again.capabilities, again.max_concurrent = list(self.kinds), self.max_concurrent
+                again.save(update_fields=['capabilities', 'max_concurrent'])
+                self.agent = again
+            else:
+                state = builtin_scanner.ensure()['state']
+                if state != 'blob_written':
+                    raise RuntimeError(f'the built-in enrollment did not write its blob: {state}')
+                with open(builtin_scanner.blob_path(), encoding='utf-8') as handle:
+                    blob = sentinel_broker.decode_enrollment_blob(handle.read())
+                out = sentinel_broker.bootstrap({'enrollment_token': blob['enrollment_token'], 'name': 'fake-scanner', 'capabilities': self.kinds,
+                                                 'max_concurrent': self.max_concurrent})
+                self.agent = Agent.objects.select_related('token__user').get(pk=out['id'])
             assert self.agent.token.user_id == admin.pk
             self.clock = _Clock(self)
             stack.enter_context(mock.patch('agentapi.sentinel_dispatch.time', self.clock))
@@ -398,11 +406,11 @@ LOCAL_RUNNERS = {
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
-    'subdir_probe': ('cveFeed.slow_web.get',),
-    'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
-    'hygiene_check': ('cveFeed.hygiene._fetch_cert', 'cveFeed.hygiene._resolver'),  # the certificate read and every DNS lookup of the sweep
-    'dangling_dns_check': ('cveFeed.dangling_dns.Net.ns', 'cveFeed.dangling_dns.Net.ask', 'cveFeed.dangling_dns.Net.registered', 'cveFeed.dangling_dns.Net.http_control'),
+    'vhost_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'subdir_probe': (),  # likewise
+    'supplier_check': (),  # likewise
+    'hygiene_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'dangling_dns_check': (),  # likewise
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'waf': (),  # likewise
     'nmap_full': (),  # likewise

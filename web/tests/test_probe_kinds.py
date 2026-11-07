@@ -13,7 +13,7 @@ from agentapi import probe_dispatch, probe_results
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
-from cveFeed import bucket_scan, changes, dangling_dns, discovery, domain_ownership, hosting, ledger, probe_scope, probes, route_auth, slow_web, subdir_apps, supplier_scan, vhost_scan
+from cveFeed import bucket_scan, changes, dangling_dns, discovery, domain_ownership, hosting, ledger, probe_scope, probes, route_auth, subdir_apps, supplier_scan, vhost_scan
 from cveFeed import hygiene as hy
 from cveFeed.models import (AgentActivity, AssetChange, CVEEntry, DiscoveryEvent, HostExclusion, HostState, HygieneFinding, ProbeObservation, RouteAuth, SecretFinding,
                             ServiceRun, SupplierFinding, SupplierHostCard, TlsCertificate)
@@ -27,8 +27,8 @@ from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_route_auth import RouteFixture
 from tests.test_subdir_apps import BASELINE_PATH, SubdirFixture
 from tests.test_vhost_scan import VhostFixture
-from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
-from tests.test_suppliers import NO_WAIT, Fixture as SupplierFixture, cert as supplier_cert, page as supplier_page
+from tests.test_scanner_unavailable_stages import FallbackOffBase
+from tests.test_suppliers import Fixture as SupplierFixture, cert as supplier_cert, page as supplier_page
 
 HOST = 'www.example.test'
 
@@ -113,13 +113,6 @@ class HttpProbeStageTests(ProbeStageBase):
         self.assertTrue(stats['waiting'])
         self.assertFalse(ServiceRun.objects.filter(service=probes.SERVICE).exists())
 
-    def test_with_the_fallback_allowed_and_no_scanner_the_probes_run_here_as_before(self):
-        with mock.patch.dict(os.environ, {ENV: 'all'}):
-            with mock.patch('cveFeed.probes.run_one', return_value=[]) as local:
-                stats = probes.run_for_scan(self.scan.id)
-        self.assertGreaterEqual(local.call_count, 2)
-        self.assertNotIn('waiting', stats)
-        self.assertFalse(SentinelTask.objects.exists())
 
 
 class DnsResolveStageTests(FallbackOffBase):
@@ -439,7 +432,7 @@ class VhostProbeStageTests(VhostFixture, TestCase):
 
     def test_the_scanner_asks_and_the_sweep_records_what_a_local_sweep_records(self):
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
-            out = self.run_sweep(fetch=None, pace=None)
+            out = vhost_scan.sweep(self.project.id)
         self.assertEqual(fake.served_kinds(), ['vhost_probe'])
         self.assertEqual(self.guard.calls, [])
         self.assertEqual((out['asked'], out['distinct'], out['default_site'], out['same_app'], out['no_answer']), (4, 1, 1, 1, 1))
@@ -452,7 +445,7 @@ class VhostProbeStageTests(VhostFixture, TestCase):
 
     def test_the_task_names_the_address_the_names_and_the_stored_own_site_and_no_project_data_else(self):
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
-            self.run_sweep(fetch=None, pace=None)
+            vhost_scan.sweep(self.project.id)
         target = fake.served[0]['target']
         item = target['addresses'][0]
         self.assertEqual((item['address'], item['scheme'], item['port']), (self.ADDRESS, 'https', 443))
@@ -470,13 +463,13 @@ class VhostProbeStageTests(VhostFixture, TestCase):
                 row['classification'] = 'distinct'  # a field the contract does not have: never read
             return out
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': liar}):
-            self.run_sweep(fetch=None, pace=None)
+            vhost_scan.sweep(self.project.id)
         self.assertEqual(self.observations(), {('portal.example.test', 'found', 'distinct'), ('app.example.test', 'absent', 'default_site'),
                                                ('wiki.example.test', 'absent', 'same_app')})
 
     def test_a_name_the_scanner_did_not_report_stays_due(self):
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': lambda task: self.answers(task, drop=('portal.example.test',))}):
-            self.run_sweep(fetch=None, pace=None)
+            vhost_scan.sweep(self.project.id)
         self.assertNotIn('portal.example.test', {o[0] for o in self.observations()})
         self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE, asset=f'{self.ADDRESS}|portal.example.test').exists())
         self.assertFalse(Subdomain.objects.filter(name='portal.example.test', scan_history__isnull=True).exists())
@@ -488,20 +481,20 @@ class VhostProbeStageTests(VhostFixture, TestCase):
                                                  'page': _page_of(self.table[('portal.example.test', self.ADDRESS)])})
             return out
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': extra}):
-            self.run_sweep(fetch=None, pace=None)
+            vhost_scan.sweep(self.project.id)
         self.assertNotIn('other.example.test', {o[0] for o in self.observations()})
         self.assertFalse(Subdomain.objects.filter(name='other.example.test').exists())
 
     def test_a_challenge_is_recorded_and_the_address_left_alone(self):
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': lambda task: self.answers(task, state='challenged')}):
-            out = self.run_sweep(fetch=None, pace=None)
+            out = vhost_scan.sweep(self.project.id)
         self.assertEqual(out['challenged'], 1)
         self.assertEqual({o[1] for o in self.observations()}, {'challenged'})
         self.assertTrue(ServiceRun.objects.filter(service=vhost_scan.IP_SERVICE, asset=self.ADDRESS).exists())
 
     def test_with_the_scanner_offline_the_addresses_stay_due(self):
         with FakeScanner(kinds=['vhost_probe'], mode='offline') as fake:
-            out = self.run_sweep(fetch=None, pace=None)
+            out = vhost_scan.sweep(self.project.id)
         self.assertEqual(fake.served, [])
         self.assertEqual(self.guard.calls, [])
         self.assertIn('waiting for a scanner', out['skipped'])
@@ -511,13 +504,13 @@ class VhostProbeStageTests(VhostFixture, TestCase):
 
     def test_a_failed_task_with_the_kind_off_the_fallback_list_records_nothing(self):
         with FakeScanner(kinds=['vhost_probe'], mode='fail'):
-            out = self.run_sweep(fetch=None, pace=None)
+            out = vhost_scan.sweep(self.project.id)
         self.assertEqual(out['ips'], 0)
         self.assertFalse(ServiceRun.objects.filter(service__in=(vhost_scan.SERVICE, vhost_scan.IP_SERVICE)).exists())
 
     def test_an_address_the_server_would_not_ask_is_never_sent(self):
         with FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.answers}) as fake:
-            self.run_sweep(fetch=None, pace=None, vet_ip=lambda ip: False)
+            vhost_scan.sweep(self.project.id, vet_ip=lambda ip: False)
         self.assertEqual(fake.served, [])
 
 
@@ -800,23 +793,7 @@ class RouteProbeStageTests(RouteFixture, TestCase):
         self.assertEqual(RouteAuth.objects.get(path='/admin').auth_state, 'catch_all')
         self.assertFalse(AssetChange.objects.filter(kind='auth_changed').exists())
 
-    def test_with_the_fallback_allowed_and_no_scanner_the_routes_are_asked_here_as_before(self):
-        with mock.patch.dict(os.environ, {ENV: 'all'}):
-            out = route_auth.run_route_auth(self.scan().id)
-        self.assertGreaterEqual(self.local.call_count, len(route_auth.COMMON_PATHS))
-        self.assertEqual(out['errors'], len(route_auth.COMMON_PATHS))
-        self.assertFalse(SentinelTask.objects.exists())
 
-    def test_an_injected_probe_is_asked_here_even_with_a_scanner(self):
-        asked = []
-
-        def local(url):
-            asked.append(url)
-            return {'url': url, 'status': 404, 'location': '', 'www_authenticate': '', 'cookies': [], 'content_type': 'text/html', 'body': '', 'title': ''}
-        with FakeScanner(kinds=['route_probe']) as fake:
-            route_auth.run_route_auth(self.scan().id, probe=local)
-        self.assertEqual(fake.served, [])
-        self.assertEqual(len([u for u in asked if '/cvengine-' not in u]), len(route_auth.COMMON_PATHS))
 
 
 class RouteProbeResultTests(SimpleTestCase):
@@ -881,22 +858,6 @@ class RouteScopeTests(RouteFixture, TestCase):
 
 # ----------------------------------------------------------------------------- supplier_check
 
-def supplier_row(res, base_server=''):
-    """What a Sentinel reports for one name: ``supplier_scan.DomainResult`` of the local checks, as the contract's row (no ``ask`` text, no technology
-    list, no CVE findings: the server writes and matches those itself)."""
-    from cvengine_scanner import fingerprint
-    card = {k: v for k, v in res.card.items() if k != 'technologies'}
-    card['evidence'] = {k: v for k, v in (res.card.get('evidence') or {}).items() if k not in ('edge', 'fingerprint_sources', 'announced')}
-    fingerprints = [{'name': t['name'] + (f':{t["version"]}' if t['version'] else ''), 'source': t['source']} for t in res.card.get('technologies') or []]
-    assert all(fingerprint.categorize(f['name']) is not None for f in fingerprints)
-    return {'domain': res.domain,
-            'postures': [{'check': p.check, 'severity': p.severity, 'title': p.title, 'detail': p.detail, 'category': p.category, 'evidence': p.evidence}
-                         for p in res.postures if p.category != 'cve'],
-            'resolvable': {c: sorted(v) for c, v in res.resolvable.items()}, 'summary': res.summary, 'card': card, 'fingerprints': fingerprints,
-            'edges': list((res.card.get('evidence') or {}).get('edge') or []), 'distro': '',
-            'answered': res.answered, 'stopped': res.stopped, 'partial': res.partial, 'requests': 17 if res.card.get('state') == 'ok' else 3}
-
-
 class SupplierCheckStageTests(SupplierFixture, TestCase):
     """The supplier sweep (``supplier_scan.sweep``): a supplier's names go to the scanner as one ``supplier_check`` task, and the server stores what
     comes back as it stores its own checks, writing the text and the CVE match itself."""
@@ -914,8 +875,7 @@ class SupplierCheckStageTests(SupplierFixture, TestCase):
         def serve(task):
             rows = []
             for domain in task['target']['domains']:
-                res = supplier_scan.check_domain(domain, self.net, slow_web.Pace(**NO_WAIT), supplier_scan.Budget(1000), lambda: ({}, {}))
-                rows.append(supplier_row(res))
+                rows.append(self.net.row(domain))
             out = {'outcome': 'done', 'domains': rows, 'touched': list(task['target']['domains']), 'refused': []}
             return change(out) if change else out
         return {'supplier_check': serve}
@@ -954,19 +914,6 @@ class SupplierCheckStageTests(SupplierFixture, TestCase):
         self.assertEqual((scope['private'], scope['addresses']), (False, []))
         self.assertEqual(list(SentinelTask.objects.filter(kind='supplier_check').values_list('host', flat=True)), [self.D])
 
-    def test_a_remote_check_stores_what_a_local_one_stores(self):
-        local = supplier_scan.sweep(self.project.id, net=self.net, pace=slow_web.Pace(**NO_WAIT))
-        local_findings = sorted(SupplierFinding.objects.filter(supplier=self.s).values_list('check_name', 'severity', 'title', 'ask'))
-        local_card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
-        local_card = (local_card.state, local_card.tls, local_card.http, local_card.technologies, local_card.tech_text, local_card.addresses)
-        SupplierFinding.objects.all().delete()
-        SupplierHostCard.objects.all().delete()
-        ServiceRun.objects.all().delete()
-        remote, _fake = self.remote_sweep(responders=self.responder())
-        remote_card = SupplierHostCard.objects.get(supplier=self.s, domain=self.D)
-        self.assertEqual(sorted(SupplierFinding.objects.filter(supplier=self.s).values_list('check_name', 'severity', 'title', 'ask')), local_findings)
-        self.assertEqual((remote_card.state, remote_card.tls, remote_card.http, remote_card.technologies, remote_card.tech_text, remote_card.addresses), local_card)
-        self.assertEqual((remote['new'], remote['suppliers'], remote['domains']), (local['new'], local['suppliers'], local['domains']))
 
     def test_the_catalog_is_matched_here_from_what_the_response_announced(self):
         CVEEntry.objects.create(cve_id='CVE-2099-7', cvss=7.5, kev=False, title='t', published_at=timezone.now(),
@@ -1002,12 +949,6 @@ class SupplierCheckStageTests(SupplierFixture, TestCase):
         self.assertIn('waiting for a scanner', out['skipped'])
         self.assertFalse(ServiceRun.objects.filter(service__in=(supplier_scan.SERVICE, supplier_scan.FAILED_SERVICE)).exists())
 
-    def test_with_the_fallback_allowed_and_no_scanner_the_names_are_checked_here_as_before(self):
-        with mock.patch.dict(os.environ, {ENV: 'all'}), mock.patch.object(supplier_scan, 'Network', return_value=self.net):
-            out = supplier_scan.sweep(self.project.id, pace=slow_web.Pace(**NO_WAIT))
-        self.assertEqual((out['suppliers'], out['domains']), (1, 1))
-        self.assertNotIn('skipped', out)
-        self.assertIn('hsts_missing', self.checks(self.s))
 
     def test_a_name_the_scanner_could_not_read_changes_nothing_and_is_asked_again_tomorrow(self):
         with FakeScanner(kinds=['supplier_check'], responders=self.responder()):
@@ -1345,12 +1286,6 @@ class HygieneCheckStageTests(TestCase):
             hy.run_hygiene(self.domain.id)
         self.assertEqual(self.open_checks(), {'spf_softfail'})
 
-    def test_with_no_scanner_for_the_kind_and_the_fallback_allowed_it_runs_here_as_before(self):
-        LocalFallback('all').apply(self)
-        guard = mock.patch('cveFeed.hygiene._resolver', side_effect=RuntimeError('local DNS')).start()
-        out = hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda n, t: False)
-        self.assertEqual(out['tls_hosts'], 0)  # injected helpers keep the sweep here whatever scanners exist
-        guard.assert_not_called()
 
 
 def timezone_now():
@@ -1472,9 +1407,3 @@ class DanglingDnsCheckTests(TestCase):
         self.assertIn('old.example.test', target['scope']['excluded'])
         self.assertEqual((got[0].severity, got[1]), (1, None))
 
-    def test_without_a_project_or_a_scanner_the_findings_are_assessed_here_as_before(self):
-        LocalFallback('all').apply(self)
-        with mock.patch.object(dangling_dns, 'assess', side_effect=lambda f, net=None: dangling_dns.Rating(note=f['host'])) as local:
-            got = dangling_dns.assess_all(self.findings, project=self.project)
-        self.assertEqual([r.note if r else None for r in got], ['app.example.test', 'old.example.test', None])
-        self.assertEqual(local.call_count, 2)

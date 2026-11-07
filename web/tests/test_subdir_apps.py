@@ -2,20 +2,17 @@
 answers count, what is a lead and what is a confirmed application, and the politeness the sweep keeps (cap, pace, pause, exclusions, challenges,
 no body, one GET per path)."""
 import os
-from datetime import timedelta
 from unittest import mock
 
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import correlation, ledger, slow_web, subdir_apps, vhost_scan
+from cveFeed import correlation, ledger, subdir_apps, vhost_scan
 from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HostArchive, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun
-from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Technology
-from targetApp.models import Domain
-from tests.test_vhost_scan import VhostFixture, answer
+from tests.test_vhost_scan import VhostFixture
 
 EXPECTED_PATHS = [
     '/jira/', '/confluence/', '/bitbucket/', '/grafana/', '/wordpress/', '/phpmyadmin/', '/gitlab/', '/jenkins/', '/owa/', '/sonarqube/',

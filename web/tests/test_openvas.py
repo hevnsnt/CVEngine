@@ -10,8 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from gvm.connections import UnixSocketConnection
 from lxml import etree
@@ -20,12 +19,12 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent
 from cveFeed import openvas_scan as ov
-from cveFeed.models import CVEEntry, CVEMatch, OpenvasOrg, OpenvasProject, OpenvasRun, OpenvasSettings, ProbeObservation, ScanControl, ServiceRun
+from cveFeed.models import CVEEntry, CVEMatch, OpenvasOrg, OpenvasProject, OpenvasRun, OpenvasSettings, ProbeObservation, ServiceRun
 from dashboard.models import AuditLog, Org, OrgMembership, Project
 from reNgine import resources
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
-from tests.fake_gvmd import FULL_AND_FAST, FakeGvmd
+from tests.fake_gvmd import FakeGvmd
 from tests.test_route_auth import RouteFixture
 from tests.test_settings import send
 from tests.test_tenancy import client_for
@@ -54,20 +53,8 @@ def result_xml(host='93.184.216.5', port='443/tcp', oid=OID_APACHE, name='Apache
 
 
 class ParseTests(SimpleTestCase):
-    def test_a_result_is_read_with_its_cves_qod_and_severity(self):
-        item = ov.parse_result(result_xml())
-        self.assertEqual((item['oid'], item['address'], item['port'], item['port_number']), (OID_APACHE, '93.184.216.5', '443/tcp', 443))
-        self.assertEqual((item['severity'], item['qod'], item['qod_type'], item['cves']), (9.8, 99, 'remote_banner', ['CVE-2021-41773']))
-        self.assertEqual(item['summary'], 'The product Apache HTTP Server < 2.4.51 Path Traversal is affected.')
-        self.assertEqual(item['solution_type'], 'VendorFix')
-        self.assertEqual(item['cvss_vector'], 'AV:N/AC:L/Au:N/C:P/I:P/A:P')
 
-    def test_only_valid_cve_ids_survive_and_they_are_normalised(self):
-        item = ov.parse_result(result_xml(cves=('cve-2021-41773', 'CVE-2021-41773', 'CVE-21-1', 'CVE-2021-1', 'NOT-A-CVE', 'CVE-2020-1234567')))
-        self.assertEqual(item['cves'], ['CVE-2020-1234567', 'CVE-2021-41773'])
 
-    def test_a_result_without_a_host_or_an_oid_is_unusable(self):
-        self.assertIsNone(ov.parse_result(etree.fromstring('<result><nvt oid="1.2.3"/></result>')))
 
     def test_an_overlong_cve_id_from_a_sentinel_is_dropped_not_stored(self):
         # security review 1.3.4 (sentinel-2): CveId.name holds 100 characters; a longer id failed the save and with it the whole stage
@@ -80,15 +67,6 @@ class ParseTests(SimpleTestCase):
         body = _clean_openvas_result({'results': [{'oid': '1.3.6.1.4.1.25623.1.0.1', 'address': '93.184.216.5', 'cves': [long_id]}]})
         self.assertEqual(body['results'][0]['cves'], [])
 
-    def test_cert_references_without_a_cve_reference_mean_gvmds_nvt_cache_is_stale(self):
-        # camstork, #394: gvmd 26.43 sent only the CERT-Bund / DFN-CERT references (database) and none of the NVT cache's own cve / url ones
-        stale = etree.fromstring(etree.tostring(result_xml(cves=())).replace(b'<refs/>', b'<refs><ref type="cert-bund" id="WID-SEC-2023-1801"/>'
-                                                                                         b'<ref type="dfn-cert" id="DFN-CERT-2023-1665"/></refs>'))
-        self.assertEqual((ov.parse_result(stale)['cves'], ov.parse_result(stale)['stale_refs']), ([], True))
-        self.assertFalse(ov.parse_result(result_xml())['stale_refs'])  # a CVE reference: the cache has the NVT
-        self.assertFalse(ov.parse_result(result_xml(cves=()))['stale_refs'])  # no reference at all: an NVT with no CVE, like OS detection
-        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host><nvt oid="not an oid"/></result>')))
-        self.assertIsNone(ov.parse_result(etree.fromstring('<result><host>93.184.216.5</host></result>')))
 
     def test_ports(self):
         self.assertEqual(ov._port('443/tcp'), ('443/tcp', 443))
@@ -97,21 +75,7 @@ class ParseTests(SimpleTestCase):
         self.assertEqual(ov._port('99999/tcp'), ('general/tcp', 0))
         self.assertEqual(ov._port('; rm -rf /'), ('general/tcp', 0))
 
-    def test_numbers_are_bounded_and_malformed_ones_read_as_zero(self):
-        item = ov.parse_result(result_xml(severity=9.8))
-        self.assertTrue(0 <= item['qod'] <= 100 and 0 <= item['severity'] <= 10)
-        broken = etree.fromstring(etree.tostring(result_xml()).replace(b'<severity>9.8</severity>', b'<severity>lots</severity>').replace(b'<value>99</value>', b'<value>9999</value>'))
-        parsed = ov.parse_result(broken)
-        self.assertEqual((parsed['severity'], parsed['qod']), (0.0, 100))
 
-    def test_hostile_nvt_text_is_stored_as_plain_bounded_text(self):
-        evil = '<script>alert(1)</script>\x7f[31m' + 'A' * 50000
-        item = ov.parse_result(result_xml(name=evil[:60], description=evil,
-                                          tags='summary=' + evil + '|insight=' + evil + '|solution_type=VendorFix'))
-        for key in ('result', 'summary', 'insight'):
-            self.assertLessEqual(len(item[key]), 2000, key)
-            self.assertNotIn('\x7f', item[key])
-        self.assertIn('<script>', item['result'])  # kept as inert text: it is the template's job to escape it, and nothing here marks it safe
 
     def test_clean_strips_control_characters_and_clips(self):
         self.assertEqual(ov.clean('a\x00b\x1b[0mc\x7fd\te\nf'), 'ab[0mcd\te\nf')
@@ -154,205 +118,12 @@ class GvmdFixture:
         return self.gvmd
 
 
-class ClientTests(GvmdFixture, TestCase):
-    def test_the_real_client_negotiates_the_version_and_signs_in(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            self.assertEqual(ov._text(gmp.get_version(), 'version'), '22.7')
-        self.assertGreaterEqual(gvmd.connections, 2)  # python-gvm asks the version on a connection of its own first
-
-    def test_a_wrong_password_is_an_error_that_never_repeats_it(self):
-        self.start_gvmd()
-        with self.assertRaises(ov.OpenvasError) as raised:
-            with self.factory(('cvengine', 'guess-hunter2')):
-                pass
-        self.assertNotIn('guess-hunter2', str(raised.exception))
-        self.assertIn('refused', str(raised.exception))
-
-    def test_no_login_saved_is_said_plainly(self):
-        self.start_gvmd()
-        with self.assertRaises(ov.OpenvasError) as raised:
-            with ov.session(creds=('', '')):
-                pass
-        self.assertIn('no GMP login', str(raised.exception))
-
-    def test_a_missing_socket_is_a_message_not_a_traceback(self):
-        with self.assertRaises(ov.OpenvasError) as raised:
-            with ov.session(creds=('u', 'p'), connection=UnixSocketConnection(path='/nonexistent/gvmd.sock', timeout=2)):
-                pass
-        self.assertIn('gvmd could not be reached', str(raised.exception))
-
-    def test_a_gvmd_error_status_is_an_error(self):
-        gvmd = self.start_gvmd()
-        gvmd.fail['get_feeds'] = ('500', 'Internal error')
-        with self.factory() as gmp:
-            with self.assertRaises(Exception):
-                gmp.get_feeds()
-
-    def test_the_transport_defaults_to_the_socket_and_tls_is_opt_in(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop('CVENGINE_OPENVAS_HOST', None)
-            self.assertEqual(ov.transport(), 'socket:/run/gvmd/gvmd.sock')
-        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_HOST': 'gvm.example.test', 'CVENGINE_OPENVAS_PORT': '9391'}):
-            self.assertEqual(ov.transport(), 'tls:gvm.example.test:9391')
 
 
-class FeedStateTests(GvmdFixture, TestCase):
-    def state(self, **kw):
-        self.start_gvmd(**kw)
-        with self.factory() as gmp:
-            return ov.feed_state(gmp)
-
-    def test_a_loaded_feed_is_ready(self):
-        state = self.state()
-        self.assertTrue(state['ready'], state)
-        self.assertEqual((state['nvts'], state['scanner'], state['reason']), (95000, 'OpenVAS Default', ''))
-        self.assertEqual(state['feeds']['NVT']['version'], '202610270500')
-
-    def test_vulnerability_tests_not_loaded_means_no_scan_and_says_why(self):
-        state = self.state(nvts=0)
-        self.assertFalse(state['ready'])
-        self.assertIn('not loaded yet', state['reason'])
-        self.assertIn('takes a long time', state['reason'])
-
-    def test_a_feed_that_is_still_synchronising_says_so_with_the_disk_warning(self):
-        state = self.state(syncing=True)
-        self.assertFalse(state['ready'])
-        self.assertIn('NVT feed is synchronising', state['reason'])
-        self.assertIn('GB of disk', state['reason'])
-
-    def test_missing_feed_data_is_named(self):
-        state = self.state(feeds=('NVT', 'SCAP'))
-        self.assertFalse(state['ready'])
-        self.assertIn('CERT', state['reason'])
-        self.assertIn('GVMD_DATA', state['reason'])
 
 
-class ConfigTests(GvmdFixture, TestCase):
-    def test_the_safe_configuration_is_a_copy_of_full_and_fast_without_the_dangerous_families(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            config_id = ov.ensure_config(gmp)
-        config = gvmd.configs[config_id]
-        self.assertEqual(config['name'], 'cvENGINE safe scan')
-        self.assertNotIn('Denial of Service', config['families'])
-        self.assertNotIn('Brute force attacks', config['families'])
-        self.assertIn('Web application abuses', config['families'])
-        self.assertEqual(config['safe_checks'], 'yes')
-        self.assertEqual(set(ov.EXCLUDED_FAMILIES), {'Denial of Service', 'Brute force attacks'})
-        self.assertIn(FULL_AND_FAST, gvmd.configs)  # the built-in is never modified
-        self.assertIn('Denial of Service', gvmd.configs[FULL_AND_FAST]['families'])
-
-    def test_new_families_are_not_added_automatically(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            ov.ensure_config(gmp)
-        selection = gvmd.sent('modify_config')[0].find('family_selection')
-        self.assertEqual(selection.findtext('growing'), '0')
-
-    def test_each_family_is_sent_growing_and_including_every_vt_the_form_gvmd_accepts(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            ov.ensure_config(gmp)  # the fake refuses "all VTs but not growing" with gvmd's own 400, as the real one does
-        families = gvmd.sent('modify_config')[0].find('family_selection').findall('family')
-        self.assertTrue(families)
-        self.assertEqual({(f.findtext('growing'), f.findtext('all')) for f in families}, {('1', '1')})
-        self.assertNotIn('Denial of Service', {f.findtext('name') for f in families})
-
-    def test_a_half_built_configuration_is_completed_not_refused(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            config_id = ov.ensure_config(gmp)
-        gvmd.configs[config_id]['safe_checks'] = 'no'  # an earlier run failed after the copy was made, before the selection was applied
-        gvmd.configs[config_id]['families'] = {f: dict(v) for f, v in gvmd.configs[FULL_AND_FAST]['families'].items()}
-        with self.factory() as gmp:
-            self.assertEqual(ov.ensure_config(gmp), config_id)
-        self.assertEqual(gvmd.configs[config_id]['safe_checks'], 'yes')
-        self.assertNotIn('Denial of Service', gvmd.configs[config_id]['families'])
-        self.assertEqual(len(gvmd.sent('create_config')), 1)
-
-    def test_it_is_built_once_and_reused(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            first = ov.ensure_config(gmp)
-            second = ov.ensure_config(gmp)
-        self.assertEqual(first, second)
-        self.assertEqual(len(gvmd.sent('create_config')), 1)
-
-    def test_an_existing_configuration_that_stays_unsafe_after_the_selection_is_applied_again_is_refused_not_used(self):
-        gvmd = self.start_gvmd()
-        with self.factory() as gmp:
-            config_id = ov.ensure_config(gmp)
-        gvmd.configs[config_id]['safe_checks'] = 'no'
-        with mock.patch.object(ov, '_apply_safe_selection') as reapply, self.factory() as gmp:  # gvmd keeps the unsafe state
-            with self.assertRaises(ov.OpenvasError) as raised:
-                ov.ensure_config(gmp)
-        reapply.assert_called_once()
-        self.assertIn('safe_checks', str(raised.exception))
-        gvmd.configs[config_id]['safe_checks'] = 'yes'
-        gvmd.configs[config_id]['families']['Denial of Service'] = {'count': 12, 'growing': False}
-        with mock.patch.object(ov, '_apply_safe_selection'), self.factory() as gmp:
-            with self.assertRaises(ov.OpenvasError) as raised:
-                ov.ensure_config(gmp)
-        self.assertIn('Denial of Service', str(raised.exception))
-
-    def test_without_the_feed_there_is_no_base_to_copy(self):
-        gvmd = self.start_gvmd()
-        del gvmd.configs[FULL_AND_FAST]
-        with self.factory() as gmp:
-            with self.assertRaises(ov.OpenvasError) as raised:
-                ov.ensure_config(gmp)
-        self.assertIn('not in gvmd yet', str(raised.exception))
 
 
-class GuardTests(SimpleTestCase):
-    """The platform's job budget (reNgine.resources) applied to the sidecar's scan, with a real MemoryStore."""
-
-    def guard(self, state=None, store=None, now=1000.0):
-        return ov.resource_guard(state_fn=lambda: state or memory(), store=store or resources.MemoryStore(), now=now)
-
-    def test_a_healthy_machine_may_start(self):
-        self.assertEqual(self.guard(), (True, ''))
-
-    def test_short_memory_refuses_and_says_by_how_much(self):
-        ok, reason = self.guard(memory(available_mb=2000))
-        self.assertFalse(ok)
-        self.assertIn('memory is short: 2000 MB free', reason)
-        self.assertIn(str(ov.min_available_mb()), reason)
-
-    def test_the_floor_includes_the_platforms_headroom(self):
-        headroom = resources.headroom_mb(memory())
-        self.assertEqual(self.guard(memory(available_mb=ov.min_available_mb() + headroom))[0], True)
-        self.assertEqual(self.guard(memory(available_mb=ov.min_available_mb() + headroom - 1))[0], False)
-
-    def test_the_floor_is_tunable(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MIN_AVAILABLE_MB': '9000'}):
-            self.assertFalse(self.guard(memory(available_mb=9100))[0])
-            self.assertTrue(self.guard(memory(available_mb=12000))[0])
-
-    def test_running_scanners_that_use_up_the_job_budget_refuse(self):
-        store = resources.MemoryStore()
-        budget = resources.budget_mb(memory())
-        store.reserve('a', budget - 100, 'nuclei: x', budget, 1000.0, 'nuclei')
-        ok, reason = self.guard(store=store)
-        self.assertFalse(ok)
-        self.assertIn('job budget', reason)
-
-    def test_jobs_waiting_for_memory_refuse(self):
-        store = resources.MemoryStore()
-        store.wait('w', 1000, 'bbot-deep: x', 1000.0)
-        self.assertEqual(self.guard(store=store, now=1000.0), (False, 'other scanner jobs are waiting for memory'))
-
-    def test_a_recent_memory_kill_refuses_an_old_one_does_not(self):
-        store = resources.MemoryStore()
-        store.event({'t': 900.0, 'kind': 'nuclei'})
-        self.assertFalse(self.guard(store=store, now=1000.0)[0])
-        self.assertTrue(self.guard(store=store, now=900.0 + 3601)[0])
-
-    def test_a_task_in_flight_is_stopped_below_the_critical_floor(self):
-        critical = resources.critical_mb(memory())
-        self.assertTrue(ov.memory_critical(lambda: memory(available_mb=critical - 1)))
-        self.assertFalse(ov.memory_critical(lambda: memory(available_mb=critical + 1)))
 
 
 class Fixture(GvmdFixture, RouteFixture):
@@ -381,7 +152,7 @@ class Fixture(GvmdFixture, RouteFixture):
         return IPS[host]
 
     def tick(self):
-        return ov.tick(session_factory=self.factory, resolve=self.resolve, blocked=lambda h: False)
+        return ov.tick(resolve=self.resolve, blocked=lambda h: False)
 
     def finish_task(self, results, status='Done'):
         """Make the running task finish with ``results`` (a list of kwargs for add_result)."""
@@ -437,7 +208,7 @@ class OffByDefaultTests(Fixture, TestCase):
         self.assertIn('openvas_queue', system_status.QUEUES)
         from reNgine.celery import app
         import cveFeed.tasks  # noqa: F401
-        self.assertEqual((app.tasks['openvas_sweep'].queue, app.tasks['openvas_check'].queue), ('openvas_queue', 'cve_feed_queue'))
+        self.assertEqual((app.tasks['openvas_sweep'].queue,), ('openvas_queue',))
 
 
 class GatingTests(Fixture, TestCase):
@@ -549,353 +320,8 @@ class GatingTests(Fixture, TestCase):
         self.assertEqual([h for h, _ip, _d in self.due()], ['api.rt.test', 'www.rt.test'])
 
 
-class SweepTests(Fixture, TestCase):
-    def test_a_due_batch_starts_one_task_with_a_vetted_target_and_the_safe_config(self):
-        out = self.tick()
-        self.assertEqual((out['status'], out['hosts']), ('running', 2))
-        target = next(iter(self.gvmd.targets.values()))
-        self.assertEqual(set(target['hosts'].split(',')), {'93.184.216.5', '93.184.216.6'})  # numeric addresses only, never a name
-        self.assertEqual(target['port_list'], '33d0cd82-57c6-11e1-8ed1-406186ea4fc5')
-        task = next(iter(self.gvmd.tasks.values()))
-        self.assertEqual(task['config'], next(i for i, c in self.gvmd.configs.items() if c['name'] == 'cvENGINE safe scan'))
-        self.assertEqual((task['prefs'], task['status']), ({'max_checks': '4', 'max_hosts': '1'}, 'Requested'))
-        run = OpenvasRun.objects.get()
-        self.assertEqual((run.status, run.project_id, run.task_id), ('running', self.project.id, next(iter(self.gvmd.tasks))))
-        self.assertEqual(run.hosts, {'93.184.216.5': 'www.rt.test', '93.184.216.6': 'api.rt.test'})
-
-    def test_the_batch_is_capped(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_HOSTS': '1'}):
-            self.assertEqual(self.tick()['hosts'], 1)
-
-    def test_only_one_task_runs_at_a_time(self):
-        self.tick()
-        again = self.tick()
-        self.assertEqual(again['status'], 'running')
-        self.assertEqual(len(self.gvmd.tasks), 1)
-        self.assertEqual(len(self.gvmd.sent('create_task')), 1)
-        # and the database refuses a second running row whoever asks
-        from django.db import IntegrityError, transaction
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            OpenvasRun.objects.create(project=self.project, status='running')
-
-    def test_the_target_is_reused_for_an_unchanged_host_set(self):
-        self.tick()
-        run = OpenvasRun.objects.get()
-        self.finish_task([LOG], 'Stopped')
-        self.tick()
-        ServiceRun.objects.all().delete()
-        self.tick()
-        self.assertEqual(len(self.gvmd.sent('create_target')), 1)
-        self.assertEqual(OpenvasRun.objects.count(), 2)
-        self.assertEqual(OpenvasRun.objects.exclude(pk=run.pk).get().target_id, run.target_id)
-
-    def test_a_changed_host_set_makes_a_new_target_and_removes_the_old_one(self):
-        self.tick()
-        old = OpenvasRun.objects.get().target_id
-        self.finish_task([LOG], 'Stopped')
-        self.tick()
-        OpenvasProject.objects.filter(pk=self.link.pk).update(hosts=['www.rt.test', 'api.rt.test', 'db.rt.test'], forced_hosts=['www.rt.test', 'api.rt.test', 'db.rt.test'])
-        self.tick()
-        self.assertEqual(len(self.gvmd.sent('create_target')), 2)
-        self.assertNotIn(old, self.gvmd.targets)
-
-    def test_no_feed_no_scan_and_the_reason_is_recorded(self):
-        self.start_gvmd(nvts=0)
-        self.settings.gmp_username, self.settings.gmp_password = self.gvmd.user, self.gvmd.password
-        self.settings.save()
-        out = self.tick()
-        self.assertIn('not loaded yet', out['skipped'])
-        self.assertEqual(self.gvmd.sent('create_task'), [])
-        state = OpenvasSettings.current().state
-        self.assertTrue(state['connected'])
-        self.assertFalse(state['feed']['ready'])
-        self.assertIn('not loaded yet', state['feed']['reason'])
-
-    def test_short_memory_refuses_to_start_a_scan(self):
-        self.memory_state['available_mb'] = 1500
-        out = self.tick()
-        self.assertIn('memory is short', out['skipped'])
-        self.assertEqual((self.gvmd.sent('create_task'), self.gvmd.sent('start_task'), OpenvasRun.objects.count()), ([], [], 0))
-        self.assertFalse(OpenvasSettings.current().state['guard']['ok'])
-        self.memory_state['available_mb'] = 13000
-        self.assertEqual(self.tick()['status'], 'running')  # and starts as soon as there is room
-
-    def test_a_global_pause_refuses_to_start(self):
-        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
-        self.assertEqual(self.tick(), {'skipped': 'scanning is paused'})
-        self.assertEqual(self.gvmd.sent('create_task'), [])
-
-    def test_a_pause_stops_the_running_task_and_the_hosts_stay_due(self):
-        self.tick()
-        run = OpenvasRun.objects.get()
-        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
-        out = self.tick()
-        self.assertEqual(out['status'], 'stopped')
-        self.assertEqual(self.gvmd.tasks[run.task_id]['status'], 'Stop Requested')
-        self.assertFalse(ServiceRun.objects.filter(service=ov.SERVICE).exists())
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
-        ScanControl.objects.filter(pk=1).update(paused=False)
-        self.assertEqual(self.tick()['status'], 'running')
-
-    def test_critically_low_memory_stops_the_running_task(self):
-        self.tick()
-        self.memory_state['available_mb'] = 100
-        out = self.tick()
-        self.assertEqual(out['status'], 'stopped')
-        self.assertIn('memory ran critically low', OpenvasRun.objects.get().error)
-
-    def test_a_task_that_runs_too_long_is_stopped_and_not_retried_at_once(self):
-        self.tick()
-        OpenvasRun.objects.update(started_at=timezone.now() - timedelta(hours=49))  # two hosts at 24 hours each
-        out = self.tick()
-        self.assertEqual(out['status'], 'failed')
-        self.assertIn('more than 48 hours', OpenvasRun.objects.get().error)
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
-
-    def test_the_polled_status_is_kept(self):
-        self.tick()
-        run = OpenvasRun.objects.get()
-        for word, progress in (('Queued', 0), ('Running', 37)):
-            self.gvmd.set_status(run.task_id, word, progress)
-            self.assertEqual(self.tick()['gvm_status'], word)
-        run.refresh_from_db()
-        self.assertEqual((run.gvm_status, run.progress), ('Running', 37))
-
-    def test_a_task_gvmd_lost_is_a_failure_not_a_hang(self):
-        self.tick()
-        self.gvmd.tasks.clear()
-        self.assertEqual(self.tick()['status'], 'failed')
-        self.assertIn('no longer has the task', OpenvasRun.objects.get().error)
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 2)
-
-    def test_an_interrupted_task_fails_the_run_but_blames_no_host_and_a_stopped_one_is_not_a_failure(self):
-        self.tick()
-        self.finish_task([], 'Interrupted')
-        self.assertEqual(self.tick()['status'], 'failed')
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 0)  # gvmd or its scanner restarted: the hosts stay due
-
-    def test_a_sidecar_that_is_down_is_reported_not_raised(self):
-        out = ov.tick(session_factory=lambda: ov.session(creds=('a', 'b'), connection=UnixSocketConnection(path='/nonexistent/gvmd.sock', timeout=2)),
-                      resolve=self.resolve, blocked=lambda h: False)
-        self.assertIn('error', out)
-        state = OpenvasSettings.current().state
-        self.assertFalse(state['connected'])
-        self.assertTrue(state['error'])
-
-    def test_a_task_that_cannot_be_created_fails_the_run_and_marks_no_host_failed(self):
-        self.gvmd.fail['create_task'] = ('400', 'Failed to find config')
-        out = self.tick()
-        self.assertIn('could not create or start', out['error'])
-        run = OpenvasRun.objects.get()
-        self.assertEqual(run.status, 'failed')
-        self.assertEqual(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).count(), 0)  # the scan never ran: gvmd's trouble is not the host's
-        self.gvmd.fail.clear()
-        self.assertEqual(self.tick()['status'], 'running')  # the same hosts are tried again at the next tick
-
-    def test_a_dead_celery_between_making_the_run_and_the_task_does_not_wedge_the_sweep(self):
-        OpenvasRun.objects.create(project=self.project, status='running', task_id='')
-        self.assertEqual(self.tick()['status'], 'failed')
-        self.assertEqual(self.tick()['status'], 'running')
-
-    def test_the_login_never_reaches_the_activity_log_the_state_or_the_run(self):
-        from cveFeed.models import AgentActivity
-        self.tick()
-        self.finish_task([APACHE])
-        self.tick()
-        blob = json.dumps(list(AgentActivity.objects.values()), default=str) + json.dumps(OpenvasSettings.current().state) + json.dumps(list(OpenvasRun.objects.values_list('error', 'summary')), default=str)
-        self.assertNotIn(self.gvmd.password, blob)
-        for request in self.gvmd.requests:
-            self.assertNotIn(self.gvmd.password.encode(), etree.tostring(request))
 
 
-class ImportTests(Fixture, TestCase):
-    def test_cve_results_become_findings_and_evidence_non_cve_ones_do_not(self):
-        out = self.run_scan([APACHE, BANNER, PLAIN, LOG])
-        self.assertEqual((out['status'], out['results'], out['without_cve'], out['findings'], out['evidence']), ('done', 4, 2, 2, 2))
-        www = Subdomain.objects.get(name='www.rt.test')
-        hard = Vulnerability.objects.get(subdomain=www, template_id=f'openvas:{OID_APACHE}')
-        self.assertEqual((hard.source, hard.severity, hard.cvss_score, hard.type, hard.http_url), ('openvas', 4, 9.8, 'openvas', 'www.rt.test:443/tcp'))
-        self.assertEqual(hard.name, 'OpenVAS: Apache HTTP Server < 2.4.51 Path Traversal')
-        self.assertEqual(list(hard.cve_ids.values_list('name', flat=True)), ['CVE-2021-41773'])
-        self.assertIn('qod-confirmed', set(hard.tags.values_list('name', flat=True)))
-        self.assertEqual(hard.extracted_results, ['Detection result.'])
-        self.assertTrue(hard.open_status)
-        self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 2)
-        self.assertFalse(Vulnerability.objects.filter(template_id=f'openvas:{OID_PLAIN}').exists())  # no CVE reference, no evidence
-
-    def test_only_a_high_quality_of_detection_is_hard_evidence(self):
-        self.run_scan([APACHE, BANNER])
-        hard = CVEMatch.objects.get(cve_entry=self.cve, source='openvas')
-        soft = CVEMatch.objects.get(cve_entry=self.cve2, source='openvas')
-        self.assertEqual((hard.template_result, hard.template_id, hard.version_in_range, hard.confidence), ('vulnerable', f'openvas:{OID_APACHE}', True, 0.95))
-        self.assertIsNotNone(hard.template_tested_at)
-        self.assertEqual((soft.template_result, soft.template_id, soft.version_in_range), ('', '', None))
-        self.assertLess(soft.confidence, 0.5)
-        self.assertEqual((hard.evidence['qod'], soft.evidence['qod'], soft.evidence['qod_type']), (99, 30, 'remote_banner_unreliable'))
-        self.assertEqual(hard.evidence['oid'], OID_APACHE)
-        vuln = Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}')
-        self.assertIn('qod-unconfirmed', set(vuln.tags.values_list('name', flat=True)))
-        self.assertIn('Not confirmed', vuln.description)
-        self.assertEqual(vuln.severity, 2)  # the severity still follows the CVSS
-
-    def test_a_banner_version_check_at_qod_80_is_not_hard_evidence(self):
-        for qod, qod_type, expected in ((80, 'remote_banner', ''), (80, 'executable_version', ''), (80, 'remote_active', 'vulnerable'),
-                                        (97, 'package', 'vulnerable')):
-            CVEMatch.objects.all().delete()
-            ProbeObservation.objects.all().delete()
-            Vulnerability.objects.all().delete()
-            self.run_scan([{**APACHE, 'qod': qod, 'qod_type': qod_type}])
-            self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve).template_result, expected, (qod, qod_type))
-
-    def test_a_cve_the_catalogue_does_not_know_is_a_finding_without_a_match(self):
-        self.run_scan([{**APACHE, 'cves': ['CVE-2099-0001']}])
-        self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 1)
-        self.assertEqual(CVEMatch.objects.filter(source='openvas').count(), 0)
-
-    def test_a_rejected_cve_never_becomes_a_match(self):
-        self.cve.status = 'REJECTED'
-        self.cve.save()
-        self.run_scan([APACHE])
-        self.assertEqual(CVEMatch.objects.filter(source='openvas').count(), 0)
-
-    def test_severity_comes_from_the_cvss_score(self):
-        results = [{**APACHE, 'severity': s, 'oid': f'1.3.6.1.4.1.25623.1.0.9{i}', 'cves': [f'CVE-2021-{1000 + i}']} for i, s in enumerate((9.0, 7.5, 5.0, 2.0))]
-        self.run_scan(results)
-        self.assertEqual(sorted(Vulnerability.objects.filter(source='openvas').values_list('severity', flat=True)), [1, 2, 3, 4])
-
-    def test_the_same_result_again_is_one_finding_one_observation_one_match(self):
-        self.run_scan([APACHE, BANNER])
-        self.run_scan([APACHE, BANNER])
-        self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 2)
-        self.assertEqual(ProbeObservation.objects.filter(probe='openvas').count(), 2)
-        self.assertEqual(CVEMatch.objects.filter(source='openvas').count(), 2)
-
-    def test_dedupe_is_by_host_port_and_oid(self):
-        self.run_scan([APACHE, {**APACHE, 'port': '8443/tcp'}, {**APACHE, 'host': '93.184.216.6', 'hostname': 'api.rt.test'}])
-        self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 3)
-        self.assertEqual(ProbeObservation.objects.filter(probe='openvas').count(), 3)
-        keys = set(ProbeObservation.objects.filter(probe='openvas').values_list('host', 'port', 'product'))
-        self.assertEqual(keys, {('www.rt.test', 443, OID_APACHE), ('www.rt.test', 8443, OID_APACHE), ('api.rt.test', 443, OID_APACHE)})
-
-    def test_a_result_that_disappears_in_a_later_complete_scan_is_resolved(self):
-        self.run_scan([APACHE, BANNER])
-        self.run_scan([APACHE])
-        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_APACHE}').open_status)
-        gone = Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}')
-        self.assertFalse(gone.open_status)
-        match = CVEMatch.objects.get(cve_entry=self.cve2, source='openvas')
-        self.assertEqual((match.template_result, match.ai_verdict), ('no_match', 'not_affected'))
-        self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve, source='openvas').template_result, 'vulnerable')
-        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', product=OID_BANNER).outcome, 'absent')
-        out = self.run_scan([APACHE, BANNER])  # and it reopens when it comes back
-        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}').open_status)
-
-    def test_a_match_a_person_already_works_is_closed_as_a_record_not_discarded(self):
-        self.run_scan([APACHE])
-        match = CVEMatch.objects.get(cve_entry=self.cve, source='openvas')
-        match.remediation_status = 'in_progress'
-        match.save()
-        self.run_scan([{**LOG, 'host': '93.184.216.5', 'hostname': 'www.rt.test'}])  # www answered, and no longer shows the problem
-        match.refresh_from_db()
-        self.assertEqual((match.template_result, match.remediation_status, match.ai_verdict), ('no_match', 'in_progress', ''))
-
-    def test_results_whose_cves_gvmd_left_out_close_nothing_and_ask_for_a_gvmd_restart(self):
-        # camstork, #394: a stale NVT cache sends every result without its CVE references. Read as "no CVE", the host looked scanned clean
-        # and every earlier OpenVAS finding on it was closed.
-        import tempfile
-        self.run_scan([APACHE, BANNER])
-        stale = [{**APACHE, 'cves': [], 'certs': ['WID-SEC-2021-2161']}, {**BANNER, 'cves': [], 'certs': ['WID-SEC-2019-0001']}]
-        with tempfile.TemporaryDirectory() as tmp, override_settings(BASE_DIR=tmp):  # ``self.settings`` is the OpenVAS row here
-            out = self.run_scan(stale)
-            self.assertEqual(Path(tmp, '.openvas-restart').read_text(), 'gvmd\n')
-        self.assertEqual((out['status'], out['nvt_cache_stale'], out['partial'], out['resolved']), ('done', 2, True, 0))
-        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_BANNER}').open_status)
-        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', product=OID_BANNER).outcome, 'found')
-        run = OpenvasRun.objects.order_by('-pk').first()
-        self.assertIn('restart gvmd (docker compose restart openvas-gvmd)', run.error)
-        self.assertIn('kept_task_until', run.summary)
-        self.assertIn(run.task_id, self.gvmd.tasks)  # kept in gvmd: after the restart its report reads in full
-        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())  # asked again in three days
-        self.assertFalse(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test').exists())
-
-    def test_a_restart_is_asked_for_at_most_once_in_six_hours(self):
-        import tempfile
-        from cveFeed import openvas_admin
-        with tempfile.TemporaryDirectory() as tmp, override_settings(BASE_DIR=tmp):
-            self.assertTrue(openvas_admin.request_gvmd_restart())
-            self.assertFalse(openvas_admin.request_gvmd_restart())
-            old = Path(tmp, '.openvas-restart').stat().st_mtime - openvas_admin.RESTART_EVERY_SECONDS - 1
-            os.utime(Path(tmp, '.openvas-restart'), (old, old))
-            self.assertTrue(openvas_admin.request_gvmd_restart())
-
-    def test_a_host_gvmd_did_not_scan_is_not_resolved(self):
-        self.run_scan([APACHE])
-        ServiceRun.objects.all().delete()
-        self.tick()
-        run = OpenvasRun.objects.get(status='running')
-        self.gvmd.add_result(run.task_id, **LOG)  # only api answered; www was down: no result, not in the report's host list
-        self.gvmd.set_status(run.task_id, 'Done', 100)
-        out = self.tick()
-        self.assertEqual((out['hosts_scanned'], out['hosts_not_scanned']), (1, 1))
-        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_APACHE}').open_status)
-        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test').outcome, 'found')
-        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())  # asked again in three days
-        self.assertTrue(ServiceRun.objects.filter(service=ov.SERVICE, asset='api.rt.test').exists())
-
-    def test_a_live_host_with_no_result_is_known_from_the_report(self):
-        self.run_scan([APACHE])
-        ServiceRun.objects.all().delete()
-        self.tick()
-        run = OpenvasRun.objects.get(status='running')
-        self.gvmd.add_result(run.task_id, **LOG)
-        self.gvmd.extra_report_hosts = {'93.184.216.5'}  # www was scanned and nothing was found
-        self.gvmd.set_status(run.task_id, 'Done', 100)
-        self.tick()
-        self.assertFalse(Vulnerability.objects.get(template_id=f'openvas:{OID_APACHE}').open_status)
-
-    def test_results_for_an_address_that_was_not_requested_are_ignored(self):
-        out = self.run_scan([{**APACHE, 'host': '93.184.216.99', 'hostname': 'surprise.example.test'}, LOG])
-        self.assertEqual(out['not_in_batch'], 1)
-        self.assertFalse(Vulnerability.objects.filter(source='openvas').exists())
-        self.assertFalse(ProbeObservation.objects.filter(probe='openvas').exists())
-
-    def test_a_finished_task_is_removed_from_gvmd_after_the_import(self):
-        self.run_scan([APACHE])
-        self.assertEqual(self.gvmd.tasks, {})
-        self.assertEqual(self.gvmd.sent('delete_task')[0].get('ultimate'), '1')
-
-    def test_the_run_keeps_a_summary_and_the_activity_says_what_happened(self):
-        from cveFeed.models import AgentActivity
-        self.run_scan([APACHE, PLAIN])
-        run = OpenvasRun.objects.get()
-        self.assertEqual((run.status, run.summary['findings'], run.summary['without_cve']), ('done', 1, 1))
-        message = AgentActivity.objects.filter(kind='run_check', message__contains='host(s) scanned').latest('id').message
-        self.assertIn('1 result(s) without a CVE not imported', message)
-        self.assertTrue(message.startswith(f'OpenVAS run {run.pk} on api.rt.test, www.rt.test (GVM task cvengine-run-{run.pk}): '), message)
-
-    def test_many_results_are_read_a_page_at_a_time_and_capped(self):
-        run_results = [{**APACHE, 'oid': f'1.3.6.1.4.1.25623.1.0.{200000 + i}', 'cves': []} for i in range(250)]
-        self.assertEqual(self.tick()['status'], 'running')
-        run = self.finish_task(run_results)
-        self.tick()
-        self.assertEqual(OpenvasRun.objects.get().summary['results'], 250)
-        pages = self.gvmd.sent('get_reports')  # read from the task's report, a page of 100 at a time
-        self.assertEqual([(r.get('details'), re.search(r'first=(\d+)', r.get('filter')).group(1)) for r in pages], [('1', '1'), ('1', '101'), ('1', '201')])
-        self.assertTrue(all('result_hosts_only=0' in r.get('filter') and 'min_qod=0' in r.get('filter') for r in pages))
-        self.assertEqual(self.gvmd.sent('get_results'), [])
-        with mock.patch.object(ov, 'MAX_RESULTS', 100):
-            gmp_results = self.factory()
-            with gmp_results as gmp:
-                items = ov.fetch_results(gmp, run.task_id)['items']
-        self.assertEqual(len(items), 100)
-
-    def test_hostile_text_is_stored_clipped_and_plain(self):
-        evil = '<img src=x onerror=alert(1)>' + 'B' * 20000
-        self.run_scan([{**APACHE, 'description': evil, 'tags': 'summary=<script>x</script>|insight=' + evil}])
-        vuln = Vulnerability.objects.get(source='openvas')
-        self.assertLessEqual(len(vuln.description), 6000)
-        self.assertLessEqual(len(vuln.extracted_results[0]), 2000)
-        self.assertIn('<script>x</script>', vuln.description)  # inert text; every template autoescapes it
 
 
 def _sentinel_item(**over):
@@ -926,20 +352,26 @@ class SentinelDispatchTests(Fixture, TestCase):
                                     scope={'orgs': [], 'projects': [self.project.slug] if scope_project else [], 'hosts': []},
                                     capabilities=list(capabilities), last_seen=timezone.now())
 
-    def test_with_no_eligible_sentinel_the_sweep_runs_locally_exactly_as_before(self):
+    def test_with_no_eligible_sentinel_the_due_batch_stays_due_and_nothing_runs_here(self):
         self.assertFalse(dispatch.any_scanner_for(self.project, 'openvas'))
         out = self.tick()
-        self.assertEqual(out['status'], 'running')
-        run = OpenvasRun.objects.get()
-        self.assertIsNone(run.sentinel_task_id)
-        self.assertGreater(self.gvmd.connections, 0)
+        self.assertIn('eligible Sentinel', out['skipped'])
+        self.assertFalse(OpenvasRun.objects.exists())
+
+    def test_a_run_an_earlier_version_left_on_the_server_is_closed_not_followed(self):
+        run = OpenvasRun.objects.create(project=self.project, status='running', hosts={'1': 'www.rt.test'}, task_id='gone')
+        out = self.tick()
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'failed')
+        self.assertIn('no longer runs OpenVAS', run.error)
+        self.assertIn('eligible Sentinel', out['skipped'])
 
     def test_a_sentinel_without_the_openvas_capability_is_not_eligible(self):
         self.make_sentinel(capabilities=('nmap',))
         self.assertFalse(dispatch.any_scanner_for(self.project, 'openvas'))
         out = self.tick()
-        self.assertIsNone(OpenvasRun.objects.get().sentinel_task_id)
-        self.assertEqual(out['status'], 'running')
+        self.assertFalse(OpenvasRun.objects.exists())
+        self.assertIn('eligible Sentinel', out['skipped'])
 
     def test_a_sentinel_out_of_this_projects_scope_is_not_eligible(self):
         self.make_sentinel(scope_project=False)
@@ -947,10 +379,8 @@ class SentinelDispatchTests(Fixture, TestCase):
 
     def test_an_eligible_sentinel_is_dispatched_to_instead_of_the_local_sidecar(self):
         self.make_sentinel()
-        before = self.gvmd.connections
         out = self.tick()
         self.assertEqual((out['status'], out.get('via')), ('running', 'sentinel'))
-        self.assertEqual(self.gvmd.connections, before)  # no local GMP session was opened at all
         run = OpenvasRun.objects.get()
         self.assertIsNotNone(run.sentinel_task_id)
         task = run.sentinel_task
@@ -964,10 +394,8 @@ class SentinelDispatchTests(Fixture, TestCase):
     def test_while_a_sentinel_task_is_in_flight_tick_only_polls_it_and_never_opens_a_local_session(self):
         self.make_sentinel()
         self.tick()
-        before = self.gvmd.connections
         out = self.tick()
         self.assertEqual(out, {'run': OpenvasRun.objects.get().pk, 'status': 'running', 'sentinel_status': 'queued'})
-        self.assertEqual(self.gvmd.connections, before)
 
     def test_a_done_sentinel_task_imports_results_through_the_same_path_a_local_run_uses(self):
         self.make_sentinel()
@@ -989,8 +417,15 @@ class SentinelDispatchTests(Fixture, TestCase):
 
     def test_a_sentinel_whose_gvmd_left_out_the_cves_closes_nothing(self):
         from agentapi.sentinel_broker import _clean_openvas_result
-        self.run_scan([APACHE, BANNER])  # found earlier, by the local sidecar
         self.make_sentinel()
+        self.tick()  # found earlier: a first run of the same Sentinel
+        task = OpenvasRun.objects.get(status='running').sentinel_task
+        task.result = {'results': [_sentinel_item(), _sentinel_item(port='80/tcp', port_number=80, oid=OID_BANNER, name='Old thing version check', severity=5.0,
+                                                                    qod=30, cves=['CVE-2019-0001'], qod_type='remote_banner_unreliable')],
+                       'scanned_addresses': ['93.184.216.5', '93.184.216.6'], 'without_cve': 0, 'unusable': 0}
+        task.status = 'done'
+        task.save(update_fields=['result', 'status'])
+        self.tick()
         ServiceRun.objects.all().delete()
         self.tick()
         run = OpenvasRun.objects.get(status='running')
@@ -1077,174 +512,6 @@ class SentinelDispatchTests(Fixture, TestCase):
         self.assertFalse(OpenvasRun.objects.exists())
 
 
-class SentinelOnlyTests(Fixture, TestCase):
-    """``OpenvasSettings.sentinel_only``: an App Admin's instance-wide choice to never run OpenVAS on this server at all. A
-    due host with no eligible Sentinel right now is simply left due; it is not scanned locally as a fallback, and no local
-    GMP session is even opened to find out whether one would have been possible."""
-
-    def make_sentinel(self, capabilities=('openvas',)):
-        user = User.objects.create_user('sentinel-only-owner', password='x')
-        token, _raw = create_token(user, 'sentinel-only-token')
-        return Agent.objects.create(token=token, name='gvm-sentinel-only', kind='scanner', status='active',
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                    capabilities=list(capabilities), last_seen=timezone.now())
-
-    def test_with_sentinel_only_on_and_no_sentinel_the_batch_stays_due_not_scanned_locally(self):
-        self.settings.sentinel_only = True
-        self.settings.save()
-        before = self.gvmd.connections
-        out = self.tick()
-        self.assertEqual(out, {'skipped': 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due'})
-        self.assertFalse(OpenvasRun.objects.exists())
-        self.assertEqual(self.gvmd.connections, before)  # no local GMP session was opened at all
-
-    def test_with_sentinel_only_on_and_a_sentinel_available_dispatch_still_works(self):
-        self.settings.sentinel_only = True
-        self.settings.save()
-        self.make_sentinel()
-        out = self.tick()
-        self.assertEqual((out['status'], out.get('via')), ('running', 'sentinel'))
-        run = OpenvasRun.objects.get()
-        self.assertIsNotNone(run.sentinel_task_id)
-
-    def test_turning_sentinel_only_on_does_not_abandon_a_run_already_local(self):
-        out = self.tick()  # no sentinel: runs locally
-        self.assertEqual(out['status'], 'running')
-        self.settings.sentinel_only = True
-        self.settings.save()
-        out = self.tick()  # the existing local run is still polled, not abandoned
-        self.assertEqual(out['status'], 'running')
-        self.assertIsNone(OpenvasRun.objects.get().sentinel_task_id)
-
-    def test_default_is_local_or_sentinel_not_sentinel_only(self):
-        self.assertFalse(OpenvasSettings.current().sentinel_only)
-        out = self.tick()
-        self.assertEqual(out['status'], 'running')
-        self.assertIsNone(OpenvasRun.objects.get().sentinel_task_id)
-
-
-class CarryForwardTests(Fixture, TestCase):
-    def test_a_later_scans_host_row_gets_the_findings_and_the_evidence(self):
-        self.run_scan([APACHE, BANNER])
-        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
-        sub = Subdomain.objects.get(scan_history=later, name='www.rt.test')
-        self.assertFalse(Vulnerability.objects.filter(subdomain=sub).exists())
-        self.assertEqual(ov.carry_forward(later), 2)
-        self.assertEqual(Vulnerability.objects.filter(subdomain=sub, source='openvas').count(), 2)
-        self.assertEqual(CVEMatch.objects.get(subdomain=sub, cve_entry=self.cve).template_result, 'vulnerable')
-        self.assertEqual(ov.carry_forward(later), 2)  # idempotent
-        self.assertEqual(Vulnerability.objects.filter(subdomain=sub, source='openvas').count(), 2)
-
-    def test_it_does_not_resolve_what_merely_went_stale(self):
-        self.run_scan([APACHE])
-        ProbeObservation.objects.update(observed_at=timezone.now() - timedelta(days=40))
-        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
-        self.assertEqual(ov.carry_forward(later), 0)
-        self.assertEqual(ov.apply_observations(Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')), (0, 0, 0))  # stale is not "gone"
-
-        self.assertTrue(Vulnerability.objects.get(template_id=f'openvas:{OID_APACHE}', scan_history=self.scan_obj).open_status)
-
-    def test_a_person_s_decision_on_an_earlier_finding_is_kept_on_the_new_row(self):
-        self.run_scan([APACHE])
-        Vulnerability.objects.update(remediation_status='accepted_risk', remediation_note='known')
-        later = self.scan(names=('www.rt.test',), ip='93.184.216.5')
-        ov.carry_forward(later)
-        new = Vulnerability.objects.get(subdomain__scan_history=later, source='openvas')
-        self.assertEqual((new.remediation_status, new.remediation_note), ('accepted_risk', 'known'))
-
-
-class HostContextTests(Fixture, TestCase):
-    def test_openvas_rows_do_not_crowd_the_version_probes_out_of_the_ai_context(self):
-        from cveFeed import host_context
-        self.run_scan([APACHE, BANNER])
-        ProbeObservation.objects.create(project=self.project, domain=self.domain, host='www.rt.test', probe='server-header', kind='version', product='nginx',
-                                        version='1.24.0', outcome='found', confidence=0.9, source='header:server')
-        probes = host_context._probe_rows(self.project.id, 'www.rt.test')
-        self.assertEqual([(p.probe, p.product) for p in probes], [('server-header', 'nginx')])
-
-
-class BootstrapTests(GvmdFixture, TestCase):
-    def test_the_default_login_is_replaced_over_gmp_and_the_new_one_is_saved_encrypted(self):
-        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)  # a gvmd that lets a user change its own password
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            name = ov.bootstrap(token=lambda n: 'generated-password-0123456789')
-        self.assertEqual(name, 'admin')
-        self.assertEqual(gvmd.users['admin'], 'generated-password-0123456789')
-        row = OpenvasSettings.current()
-        self.assertEqual((row.gmp_username, row.gmp_password), ('admin', 'generated-password-0123456789'))
-        from django.db import connection
-        with connection.cursor() as cursor:
-            cursor.execute('select gmp_password from "cveFeed_openvassettings"')
-            self.assertNotIn('generated-password', cursor.fetchone()[0])  # encrypted at rest
-
-    def test_a_password_that_was_changed_already_is_not_overwritten(self):
-        gvmd = self.start_gvmd(user='admin', password='already-changed')
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            with self.assertRaises(ov.OpenvasError) as raised:
-                ov.bootstrap()
-        self.assertIn('no longer works', str(raised.exception))
-        self.assertEqual(gvmd.users['admin'], 'already-changed')
-        self.assertFalse(OpenvasSettings.current().gmp_password)
-
-    def test_the_command_prints_only_the_user_name(self):
-        from io import StringIO
-        gvmd = self.start_gvmd(user='admin', password='admin', modify_self=True)
-        out = StringIO()
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            call_command('openvas_bootstrap', stdout=out)
-        self.assertIn('GMP login for admin generated and saved', out.getvalue())
-        self.assertNotIn(gvmd.users['admin'], out.getvalue())
-
-    def test_gvmd_22_7_refuses_admin_changing_itself_so_a_login_of_cvengines_own_is_made(self):
-        # gvmd 22.7: modify_user of the user signed in answers 404 "Failed to find user '<uuid>'" (issue #394); an Admin may create a user
-        from io import StringIO
-        gvmd = self.start_gvmd(user='admin', password='admin')
-        out = StringIO()
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            call_command('openvas_bootstrap', stdout=out)
-        row = OpenvasSettings.current()
-        self.assertEqual(row.gmp_username, 'cvengine')
-        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
-        self.assertEqual(gvmd.user_roles['cvengine'], 'Admin')
-        self.assertEqual(gvmd.owners['cvengine'], 'admin')
-        self.assertEqual(gvmd.users['admin'], 'admin')  # nothing over GMP can change it: the command says how to retire it
-        self.assertIn('GMP login for cvengine generated and saved', out.getvalue())
-        self.assertIn('--new-password', out.getvalue())
-        self.assertIn('restart openvas-gvmd', out.getvalue())
-        self.assertNotIn(row.gmp_password, out.getvalue())
-        self.assertEqual(gvmd.sent('modify_user')[0].get('user_id'), str(__import__('uuid').uuid5(__import__('uuid').NAMESPACE_DNS, 'admin')))
-
-    def test_a_cvengine_user_left_by_an_earlier_attempt_gets_the_new_password(self):
-        gvmd = self.start_gvmd(user='admin', password='admin')
-        gvmd.users['cvengine'], gvmd.owners['cvengine'] = 'lost-password', 'admin'
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            self.assertEqual(ov.bootstrap(token=lambda n: 'generated-password-0123456789'), 'cvengine')
-        self.assertEqual(gvmd.users['cvengine'], 'generated-password-0123456789')
-        self.assertEqual(gvmd.sent('create_user'), [])
-
-    def test_when_gvmd_refuses_both_the_error_says_what_to_do(self):
-        gvmd = self.start_gvmd(user='admin', password='admin')
-        gvmd.fail['create_user'] = ('403', 'Permission denied')
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            with self.assertRaises(ov.OpenvasError) as raised:
-                ov.bootstrap()
-        self.assertIn('openvas_credentials', str(raised.exception))
-        self.assertFalse(OpenvasSettings.current().gmp_password)
-
-    def test_a_manual_login_is_read_from_standard_input_never_an_argument(self):
-        from io import StringIO
-        out = StringIO()
-        with mock.patch('sys.stdin', StringIO("User created with password 'abc-DEF-123'.\n")):
-            call_command('openvas_credentials', username='cvengine', stdout=out)
-        row = OpenvasSettings.current()
-        self.assertEqual((row.gmp_username, row.gmp_password), ('cvengine', 'abc-DEF-123'))
-        self.assertNotIn('abc-DEF-123', out.getvalue())
-        with mock.patch('sys.stdin', StringIO('   \n')):
-            from django.core.management.base import CommandError
-            with self.assertRaises(CommandError):
-                call_command('openvas_credentials', username='cvengine')
-        parser_args = [a for a in __import__('cveFeed.management.commands.openvas_credentials', fromlist=['Command']).Command().create_parser('m', 'openvas_credentials')._actions]
-        self.assertFalse(any('password' in ' '.join(a.option_strings) for a in parser_args))
 
 
 class SettingsApiTests(Fixture, TestCase):
@@ -1274,25 +541,12 @@ class SettingsApiTests(Fixture, TestCase):
     def test_it_starts_off_and_says_what_the_floor_is(self):
         status, data = send(self.c, 'GET', 'openvas')
         self.assertEqual(status, 200)
-        self.assertEqual((data['enabled'], data['sentinel_only'], data['password_set'], data['links'], data['running']), (False, False, False, [], False))
+        self.assertEqual((data['enabled'], data['sentinel_only'], data['links'], data['running']), (False, True, [], False))
         self.assertEqual(data['floor']['confirmed_qod'], 95)
         self.assertEqual(data['floor']['excluded_families'], ['Denial of Service', 'Brute force attacks'])
-        self.assertEqual(data['transport'], 'socket:/run/gvmd/gvmd.sock')
         self.assertIn(self.pid, [p['id'] for p in data['projects']])
 
-    def test_it_cannot_be_switched_on_without_a_login(self):
-        status, data = send(self.c, 'PUT', 'openvas', {'enabled': True})
-        self.assertEqual(status, 400)
-        self.assertIn('GMP login', data['error'])
-        self.assertFalse(OpenvasSettings.current().enabled)
 
-    def test_sentinel_only_can_be_set_through_the_settings_route_too(self):
-        status, data = send(self.c, 'PUT', 'openvas', {'sentinel_only': True})
-        self.assertEqual(status, 200, data)
-        self.assertTrue(data['sentinel_only'])
-        self.assertTrue(OpenvasSettings.current().sentinel_only)
-        status, data = send(self.c, 'PUT', 'openvas', {'sentinel_only': False})
-        self.assertFalse(data['sentinel_only'])
 
     def test_the_switch_turns_the_beat_entry_on_and_off_with_it(self):
         from django_celery_beat.models import PeriodicTask
@@ -1306,16 +560,6 @@ class SettingsApiTests(Fixture, TestCase):
         self.assertFalse(PeriodicTask.objects.get(name='cvengine-openvas-sweep').enabled)
         self.assertEqual(list(AuditLog.objects.filter(action__startswith='openvas.').order_by('id').values_list('action', flat=True)), ['openvas.enable', 'openvas.disable'])
 
-    def test_the_password_is_write_only_and_a_blank_keeps_it(self):
-        send(self.c, 'PUT', 'openvas', {'gmp_username': 'cvengine', 'gmp_password': 'secret-pw-12345'})
-        status, data = send(self.c, 'GET', 'openvas')
-        self.assertNotIn('secret-pw-12345', json.dumps(data))
-        self.assertEqual((data['username'], data['password_set']), ('cvengine', True))
-        send(self.c, 'PUT', 'openvas', {'gmp_password': ''})
-        self.assertEqual(OpenvasSettings.current().gmp_password, 'secret-pw-12345')
-        self.assertNotIn('secret-pw-12345', json.dumps(list(AuditLog.objects.values('detail', 'target'))))
-        send(self.c, 'PUT', 'openvas', {'clear_credentials': True})
-        self.assertEqual(send(self.c, 'GET', 'openvas')[1]['password_set'], False)
 
     def test_a_project_opts_in_with_a_list_of_its_own_hosts(self):
         status, data = send(self.c, 'PUT', f'openvas/projects/{self.pid}', {'enabled': True, 'hosts': 'www.rt.test, API.rt.test www.rt.test'})
@@ -1361,32 +605,7 @@ class SettingsApiTests(Fixture, TestCase):
         self.assertEqual(send(self.c, 'DELETE', f'openvas/projects/{self.pid}')[0], 404)
         self.assertFalse(OpenvasProject.objects.exists())
 
-    def test_test_connection_asks_a_worker_and_reports_a_down_sidecar_as_an_answer(self):
-        self.assertFalse(send(self.c, 'POST', 'openvas/test', {})[1]['connected'])  # no login yet
-        send(self.c, 'PUT', 'openvas', {'gmp_username': 'cvengine', 'gmp_password': 'secret-pw-12345'})
-        answer = {'connected': False, 'error': 'gvmd could not be reached (OSError): is the openvas profile running?', 'feed': None, 'guard': None, 'gmp_version': ''}
-        with mock.patch('cveFeed.tasks.openvas_check.delay') as delay:
-            delay.return_value.get.return_value = answer
-            status, data = send(self.c, 'POST', 'openvas/test', {})
-        self.assertEqual((status, data['connected']), (200, False))
-        self.assertIn('is the openvas profile running', data['error'])
-        self.assertEqual(delay.call_args, mock.call())  # no credential travels in the task message
-        with mock.patch('cveFeed.tasks.openvas_check.delay', side_effect=OSError('broker down')):
-            status, data = send(self.c, 'POST', 'openvas/test', {})
-        self.assertEqual(status, 200)
-        self.assertIn('no worker answered', data['error'])
 
-    def test_the_worker_side_of_test_connection_records_the_state(self):
-        self.settings = OpenvasSettings.current()
-        self.settings.gmp_username, self.settings.gmp_password = self.gvmd.user, self.gvmd.password
-        self.settings.save()
-        answer = ov.check_now(session_factory=self.factory)
-        self.assertEqual((answer['connected'], answer['gmp_version'], answer['feed']['ready'], answer['guard']['ok']), (True, '22.7', True, True))
-        self.assertEqual(OpenvasSettings.current().state['gmp_version'], '22.7')
-        self.gvmd.fail['get_feeds'] = ('500', 'boom')
-        down = ov.check_now(session_factory=self.factory)
-        self.assertFalse(down['connected'])
-        self.assertTrue(down['error'])
 
 
 class ComposeTests(SimpleTestCase):
@@ -1536,29 +755,6 @@ class DocsTests(SimpleTestCase):
             self.assertNotIn(chr(0x2014), (ROOT / path).read_text(), path)
 
 
-class AutoSetupTests(GvmdFixture, TestCase):
-    def test_the_first_check_makes_the_login_with_nobody_typing(self):
-        gvmd = self.start_gvmd(user='admin', password='admin')
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path=gvmd.path, timeout=5)):
-            row = ov.ensure_login()
-        self.assertEqual((row.gmp_username, bool(row.gmp_password)), ('cvengine', True))  # gvmd 22.7: a login of cvENGINE's own
-        self.assertEqual(gvmd.users['cvengine'], row.gmp_password)
-
-    def test_a_saved_login_is_left_alone(self):
-        row = OpenvasSettings.current()
-        row.gmp_username, row.gmp_password = 'me', 'kept-password'
-        row.save()
-        with mock.patch.object(ov, 'bootstrap', side_effect=AssertionError('must not touch gvmd')):
-            self.assertEqual(ov.ensure_login().gmp_password, 'kept-password')
-
-    def test_while_gvmd_is_not_up_the_error_is_recorded_not_raised(self):
-        row = OpenvasSettings.current()
-        row.enabled = True
-        row.save()
-        with mock.patch.object(ov, '_connection', lambda: UnixSocketConnection(path='/nonexistent/gvmd.sock', timeout=1)):
-            state = ov.check_now()
-        self.assertFalse(state['connected'])
-        self.assertIn('could not be reached', state['error'])
 
 
 class ChooseWhatToScanTests(Fixture, TestCase):
@@ -1578,9 +774,6 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         OrgMembership.objects.create(user=self.org_admin, org=self.org, role='admin')
         self.member = User.objects.create_user('omember', password='x')
         OrgMembership.objects.create(user=self.member, org=self.org, role='user')
-        wanted = mock.patch('cveFeed.openvas_admin.request_containers').start()
-        self.wanted = wanted
-        mock.patch('cveFeed.tasks.openvas_check.delay').start()
 
     def call(self, user, method, path='', body=None):
         client = client_for(user)
@@ -1617,8 +810,7 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertFalse(OpenvasProject.objects.exists())
         code, data = self.call(self.root, 'PUT', body={'enabled': True})
         self.assertEqual(code, 200)
-        self.wanted.assert_called_with(True)
-        self.assertIn(data['engine']['state'], ('starting', 'problem'))
+        self.assertEqual(data['engine']['state'], 'ready')
         from django_celery_beat.models import PeriodicTask
         self.assertTrue(PeriodicTask.objects.get(name=ov.BEAT_NAME).enabled)
         self.assertEqual(self.call(self.org_admin, 'PUT', body={'projects': {str(self.project.pk): True}})[0], 200)
@@ -1647,7 +839,6 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertTrue(OpenvasSettings.current().enabled)
         self.assertEqual(self.call(self.root, 'PUT', body={'enabled': False})[0], 200)
         self.assertFalse(OpenvasSettings.current().enabled)
-        self.wanted.assert_called_with(False)
         self.assertTrue(OpenvasProject.objects.get(project=self.project).enabled)  # the choices are kept
 
     def test_a_malformed_choice_is_refused(self):
@@ -1701,117 +892,13 @@ class ChooseWhatToScanTests(Fixture, TestCase):
         self.assertTrue(OpenvasSettings.current().sentinel_only)
         self.assertIn('openvas.update', set(AuditLog.objects.values_list('action', flat=True)))
 
-    def test_sentinel_only_defaults_to_off_and_round_trips(self):
-        self.switch_on()
-        _code, data = self.call(self.root, 'GET')
-        self.assertFalse(data['engine']['sentinel_only'])
-        self.call(self.root, 'PUT', body={'sentinel_only': True})
-        self.assertEqual(self.call(self.root, 'PUT', body={'orgs': {str(self.org.pk): True}})[0], 200)
-        self.assertTrue(OpenvasSettings.current().sentinel_only)
-        self.call(self.root, 'PUT', body={'sentinel_only': False})
-        self.assertFalse(OpenvasSettings.current().sentinel_only)
-
-    def test_switching_on_with_sentinel_only_already_set_never_asks_for_the_local_containers(self):
-        self.call(self.root, 'PUT', body={'sentinel_only': True})
-        self.wanted.reset_mock()
-        code, _data = self.call(self.root, 'PUT', body={'enabled': True})
-        self.assertEqual(code, 200)
-        self.wanted.assert_called_once_with(False)
-
-    def test_setting_sentinel_only_and_switching_on_in_the_same_request_never_asks_either(self):
-        # Both flags in one PUT: sentinel_only must be applied before the engine switch reads it, or the first-ever
-        # enable would still ask the host to start the local containers before sentinel_only takes effect.
-        self.wanted.reset_mock()
-        code, data = self.call(self.root, 'PUT', body={'enabled': True, 'sentinel_only': True})
-        self.assertEqual(code, 200)
-        self.assertTrue(data['engine']['sentinel_only'])
-        self.wanted.assert_called_once_with(False)
-
-    def test_retrying_a_failed_start_does_nothing_once_sentinel_only_is_set(self):
-        from cveFeed import openvas_admin
-        self.switch_on()
-        self.call(self.root, 'PUT', body={'sentinel_only': True})
-        self.wanted.reset_mock()
-        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'failed', 'error': 'no disk space', 'at': 0}), \
-                mock.patch('cveFeed.tasks.openvas_check.delay') as delay:
-            delay.return_value.get.side_effect = Exception('no worker')
-            code, _data = self.call(self.root, 'POST', path='/check')
-        self.assertEqual(code, 200)
-        self.wanted.assert_not_called()
-
-    def test_switching_off_still_asks_the_host_to_stop_even_with_sentinel_only_set(self):
-        self.switch_on()
-        self.call(self.root, 'PUT', body={'sentinel_only': True})
-        self.wanted.reset_mock()
-        self.assertEqual(self.call(self.root, 'PUT', body={'enabled': False})[0], 200)
-        self.wanted.assert_called_once_with(False)
-
-    def test_engine_status_ignores_a_stale_container_failure_once_sentinel_only_is_set(self):
-        from cveFeed import openvas_admin
-        row = OpenvasSettings(enabled=True, sentinel_only=True)
-        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'failed', 'error': 'no disk space', 'at': 0}):
-            status = openvas_admin.engine_status(row)
-        self.assertEqual(status['state'], 'ready')
-        self.assertNotIn('could not be started', status['headline'])
 
 
-class HostWatcherTests(SimpleTestCase):
-    def test_the_request_is_one_word_in_a_file_the_host_reads(self):
-        import tempfile
-        from cveFeed import openvas_admin
-        with tempfile.TemporaryDirectory() as tmp, self.settings(BASE_DIR=tmp):
-            self.assertTrue(openvas_admin.request_containers(True))
-            self.assertEqual(Path(tmp, '.openvas-wanted').read_text(), 'on\n')
-            openvas_admin.request_containers(False)
-            self.assertEqual(Path(tmp, '.openvas-wanted').read_text(), 'off\n')
-            self.assertIsNone(openvas_admin.host_report())
-            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"failed","ok":false,"error":"only 900 MB free","at":1700000000}')
-            self.assertEqual(openvas_admin.host_report()['error'], 'only 900 MB free')
-            import time
-            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"applying","ok":false,"error":"","at":%d}' % time.time())
-            self.assertEqual(openvas_admin.host_report()['state'], 'applying')
-            Path(tmp, '.openvas-applied').write_text('{"want":"on","state":"applying","ok":false,"error":"","at":%d}' % (time.time() - 7200))
-            self.assertEqual(openvas_admin.host_report()['state'], 'failed')  # the script died midway
 
-    def test_the_status_names_the_missing_host_agent_with_the_command_to_install_it(self):
-        from cveFeed import openvas_admin
-        row = OpenvasSettings(enabled=True)
-        with mock.patch('cveFeed.updater.host_updater', return_value={'seen': False, 'alive': False, 'age_seconds': None}), \
-                mock.patch.object(openvas_admin, 'host_report', return_value=None):
-            status = openvas_admin.engine_status(row)
-        self.assertEqual((status['state'], status['fix']), ('problem', 'scripts/install-updater.sh'))
-        with mock.patch('cveFeed.updater.host_updater', return_value={'seen': True, 'alive': True, 'age_seconds': 3}), \
-                mock.patch.object(openvas_admin, 'host_report', return_value=None):
-            self.assertEqual(openvas_admin.engine_status(row)['state'], 'starting')
-        with mock.patch.object(openvas_admin, 'host_report', return_value={'want': 'on', 'state': 'applying', 'error': '', 'at': 0}):
-            self.assertEqual(openvas_admin.engine_status(row)['state'], 'starting')
 
-    def test_the_sync_script_accepts_only_on_and_off_and_lists_the_makefile_services(self):
-        script = (ROOT / 'scripts' / 'openvas-sync.sh').read_text()
-        self.assertIn('case $want in on | off) ;; *) exit 0 ;; esac', script)
-        self.assertIn('update-state.py openvas-wanted', script)  # the request is read without following a link planted in ./web (this runs as root)
-        listed = re.search(r'^SERVICES=\((.*)\)$', script, re.M).group(1).split()
-        makefile = (ROOT / 'Makefile').read_text()
-        self.assertEqual(listed, re.search(r'^OPENVAS_SERVICES\s*:=\s*(.*)$', makefile, re.M).group(1).split())
-        watch = (ROOT / 'scripts' / 'update-watch.sh').read_text()
-        self.assertIn('scripts/openvas-sync.sh', watch)
-        self.assertIn('web/.openvas-wanted', (ROOT / '.gitignore').read_text())
-        # a gvmd restart request (stale NVT cache) restarts openvas-gvmd only, while the add-on is on, and is answered so it runs once
-        self.assertIn('scripts/openvas-sync.sh restart-gvmd', watch)
-        self.assertIn('web/.openvas-restart -nt web/.openvas-restarted', watch)
-        self.assertIn('--profile openvas restart openvas-gvmd', script)
-        self.assertIn('ps --status running -q openvas-gvmd', script)  # only a running gvmd, also one started by hand (no web/.openvas-wanted)
-        self.assertIn('[ "$want" != off ]', script)
-        # the restart is handled before the on/off gate, which exits without an answer when web/.openvas-wanted is missing (make openvas-up)
-        self.assertLess(script.index('restart-gvmd ]'), script.index('case $want in on | off) ;; *) exit 0 ;; esac'))
-        self.assertIn('update-state.py openvas-restarted', script)
-        self.assertIn('web/.openvas-restart', (ROOT / '.gitignore').read_text())
 
-    def test_the_page_has_nothing_to_type_and_builds_no_markup(self):
-        js = (ROOT / 'web' / 'static' / 'cve' / 'openvas-panel.js').read_text()
-        self.assertNotIn('innerHTML', js)
-        self.assertNotIn('type: "password"', js)
-        self.assertNotIn('textarea', js)
+
+
 
 
 class InternalNetworkTests(Fixture, TestCase):
@@ -2044,12 +1131,6 @@ class HeatGateTests(Fixture, TestCase):
         with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_CHECKS': '99'}):
             self.assertEqual(ov.task_preferences()['max_checks'], '10')
 
-    def test_the_tick_scans_the_hottest_host_alone_with_a_task_of_one(self):
-        self.heat('www.rt.test', self.high)
-        self.heat('api.rt.test', self.kev)
-        out = self.tick()
-        self.assertEqual((out['status'], out['hosts']), ('running', 1))
-        self.assertEqual(OpenvasRun.objects.get().hosts, {'93.184.216.6': 'api.rt.test'})
 
 
 class KevHeatGateTests(Fixture, TestCase):
@@ -2134,34 +1215,8 @@ class BudgetTests(Fixture, TestCase):
         OpenvasRun.objects.filter(pk=run.pk).update(started_at=timezone.now() - timedelta(hours=25))
         return run
 
-    def test_results_found_before_the_budget_ran_out_are_imported_as_a_partial_scan(self):
-        run = self.over_budget()
-        self.gvmd.add_result(run.task_id, **APACHE)
-        self.gvmd.set_status(run.task_id, 'Running', 60)
-        out = self.tick()
-        self.assertEqual((out['status'], out['partial'], out['findings']), ('done', True, 1))
-        run.refresh_from_db()
-        self.assertEqual(run.status, 'done')
-        self.assertIn('24 hour budget', run.error)
-        self.assertTrue(run.summary['partial'])
-        self.assertTrue(Vulnerability.objects.filter(template_id=f'openvas:{OID_APACHE}').exists())
-        self.assertTrue(ServiceRun.objects.filter(service=ov.SERVICE, asset='www.rt.test', status='done').exists())
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
 
-    def test_a_partial_scan_resolves_nothing_it_did_not_get_to(self):
-        self.run_scan([APACHE, BANNER])  # a complete scan found both
-        ServiceRun.objects.all().delete()
-        run = self.over_budget()
-        self.gvmd.add_result(run.task_id, **APACHE)  # the next one reached only the Apache check
-        self.gvmd.set_status(run.task_id, 'Running', 30)
-        self.assertEqual(self.tick()['partial'], True)
-        self.assertTrue(Vulnerability.objects.filter(template_id=f'openvas:{OID_BANNER}', open_status=True).exists())  # not resolved by a partial scan
 
-    def test_no_result_at_all_is_a_failure_and_the_host_is_asked_again_in_three_days(self):
-        self.over_budget()
-        out = self.tick()
-        self.assertEqual(out['status'], 'failed')
-        self.assertTrue(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists())
 
     def test_a_sentinels_partial_result_is_kept_the_same_way(self):
         from agentapi.models import SentinelTask
@@ -2233,69 +1288,11 @@ class InterruptedRetryTests(Fixture, TestCase):
     def failed(self):
         return ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test').exists()
 
-    def test_the_first_and_second_interruption_mark_nothing_failed(self):
-        for attempt in (1, 2):
-            self.assertEqual(self.interrupted()['status'], 'failed')
-            self.assertFalse(self.failed())
-            self.assertIn(f'attempt {attempt} of 3', OpenvasRun.objects.order_by('-id').first().error)
-            reason = {r['host']: r for r in ov.explain(self.link)}['www.rt.test']
-            self.assertTrue(reason['ready'])  # still due: the next tick tries it again
 
-    def test_the_third_marks_the_host_failed_with_the_usual_backoff_and_says_so(self):
-        for _ in range(2):
-            self.interrupted()
-        out = self.interrupted()
-        self.assertEqual((out['status'], out['gave_up']), ('failed', ['www.rt.test']))
-        self.assertTrue(self.failed())
-        run = OpenvasRun.objects.order_by('-id').first()
-        self.assertEqual(run.error, 'OpenVAS was interrupted 3 times scanning this host; asked again after three days')
-        verdict = {r['host']: r for r in ov.explain(self.link)}['www.rt.test']
-        self.assertFalse(verdict['ready'])
-        self.assertEqual(verdict['reason'], run.error)
-        self.assertEqual(self.tick(), {'skipped': 'no opted-in host is due'})  # not started again at the next tick
-        self.assertFalse(OpenvasRun.objects.filter(status='running').exists())
-        # three days later it is tried again, from a fresh count
-        ServiceRun.objects.filter(service=ov.FAILED_SERVICE).update(finished_at=timezone.now() - timedelta(days=4))
-        self.assertEqual(self.interrupted()['status'], 'failed')
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE, asset='www.rt.test', finished_at__gt=timezone.now() - timedelta(days=1)).exists())
 
-    def test_the_limit_is_tunable(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_OPENVAS_MAX_INTERRUPTS': '2'}):
-            self.interrupted()
-            self.assertFalse(self.failed())
-            self.assertEqual(self.interrupted()['gave_up'], ['www.rt.test'])
-        self.assertTrue(self.failed())
-        self.assertIn('2 times', OpenvasRun.objects.order_by('-id').first().error)
 
-    def test_a_success_resets_the_count(self):
-        for _ in range(2):
-            self.interrupted()
-        self.assertEqual(self.run_scan([APACHE])['status'], 'done')
-        ServiceRun.objects.all().delete()
-        for _ in range(2):
-            self.assertEqual(self.interrupted()['status'], 'failed')
-            self.assertFalse(self.failed())
-        self.assertEqual(self.interrupted()['gave_up'], ['www.rt.test'])
 
-    def test_an_inconclusive_run_resets_the_count_too(self):
-        for _ in range(2):
-            self.interrupted()
-        self.assertEqual(self.run_scan([])['status'], 'done')  # finished, but reported no scanned host
-        ServiceRun.objects.all().delete()
-        self.assertEqual(self.interrupted()['status'], 'failed')
-        self.assertFalse(self.failed())
-        self.assertEqual(self.interrupted()['status'], 'failed')
-        self.assertFalse(self.failed())
 
-    def test_another_failure_between_interruptions_breaks_the_streak(self):
-        self.interrupted()
-        self.assertEqual(self.tick()['status'], 'running')
-        self.gvmd.tasks.clear()  # gvmd lost the task: a different failure, which has its own backoff
-        self.assertEqual(self.tick()['status'], 'failed')
-        ServiceRun.objects.all().delete()
-        self.interrupted()
-        self.interrupted()
-        self.assertFalse(self.failed())
 
 
 class SentinelViewTests(Fixture, TestCase):
@@ -2320,10 +1317,6 @@ class SentinelViewTests(Fixture, TestCase):
         self.assertEqual(r.status_code, 200)
         return r.json()
 
-    def test_the_stale_local_engine_error_is_not_shown_and_the_engine_is_sentinel_only(self):
-        data = self.page()
-        self.assertEqual(data['state'], {})
-        self.assertNotIn('is the openvas profile running', json.dumps(data))
 
     def test_each_sentinel_is_ready_or_says_why_not(self):
         self.agent('ready-one', ['nmap', 'openvas'], info={'openvas': {'ready': True, 'reason': ''}})

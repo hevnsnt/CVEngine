@@ -146,14 +146,6 @@ def supplier_sweep():
     return supplier_scan.sweep_all()
 
 
-@app.task(name='openvas_check', bind=False, queue='cve_feed_queue')
-def openvas_check():
-    """Settings > OpenVAS' Test connection: only a worker has the sidecar's socket (the web container has none), so the page asks here. No
-    credential travels in the message: the worker reads the saved login itself."""
-    from cveFeed import openvas_scan
-    return openvas_scan.check_now()
-
-
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
 def sync_tailscale():
     """Every 15 minutes: bring each connected tailnet's devices, findings and scans up to date (see cveFeed.tailscale_sync)."""
