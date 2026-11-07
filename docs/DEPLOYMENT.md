@@ -228,6 +228,20 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the Sentinel commit `scanner.lock.json` pins (the fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
+## SETUP-WIZARD
+
+The first sign-in of the first App Admin opens a setup wizard at `/cve/welcome/`; most installs are set up there and never need the command line. It asks for what a discovery needs first and starts one at once, so the dashboard already has findings when it opens.
+
+| Step | What it asks | What it does |
+| --- | --- | --- |
+| 1. Start discovering | Organization, project and **one** seed domain (plus a tick that you are authorized to test it) | Creates the organization, project and target, using the same domain rules as Targets (an address, range, URL path, or a name that resolves to a loopback, link-local or internal address is refused), and queues a bbot discovery (`bbot_discovery`) for it. With no Sentinel live yet it is queued and starts as soon as one connects; the worker is asked to enrol the built-in scanner now rather than at its next five-minute beat. |
+| 2. How you scan | Built-in scanner only, built-in plus external Sentinels, or external only | For external Sentinels it makes the real one-time enrollment command (the same enrollment as Sentinels > Add) and shows the connection status live. External only turns the built-in scanner off through the existing instance setting once the wizard finishes; it still completes the first discovery. |
+| 3. What runs | Scanner families, each a per-kind toggle | Writes the instance defaults of the Sentinel settings (`builtin_kinds` for the built-in scanner, `external_kinds` for every other Sentinel). A machine with under 6 GB of memory starts with the heavy kinds (full port and UDP sweeps, deep nuclei, thorough WordPress, screenshots) off. **OpenVAS is its own group, off by default**; it needs about 4 GB of memory, 2 CPUs and 60 GB of disk and an hours-long feed download, and can be turned on for the built-in scanner, for external Sentinels (which must run the Full profile), or both. |
+| 4. Optional extras | AI model key, Slack or Discord webhook, time zone, your own password | Each can be skipped and is stored in the same place as in Settings. A key or webhook is never shown again. |
+| 5. Building | Nothing | Shows the two engineers and what is really happening: whether a Sentinel is ready, whether the discovery is running, and how many subdomains it has found so far (a cheap live-count endpoint). While discovery has found fewer than 10 hosts the screen waits for up to `CVENGINE_SETUP_DWELL_SECONDS` seconds (default 90, 0 to 900; set in `.env`) so the dashboard is not empty, with a visible Skip. |
+
+Everything is stored on the server (`dashboard.SetupWizard`), so the wizard resumes in any browser, every step can be sent again without duplicating anything (the same values change nothing and start no second discovery; other names rename the organization and project), and "Skip the rest and open the dashboard" leaves it at any point (`/cve/?skip=1` also leaves it). An install that already has targets (an upgrade, or one set up by hand) is never redirected to it, but it can be opened from `/cve/welcome/` by an App Admin. Only an App Admin can read or write it, writes need the CSRF token and are rate limited per account, and the only secret it ever shows is a Sentinel enrollment command, once.
+
 ## Development stack
 
 A single-machine stack on `http://localhost:8000` with Django's auto-reloading server:
