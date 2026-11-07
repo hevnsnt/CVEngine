@@ -914,7 +914,10 @@ poll(pollFeed, 6000);
 // Two charts under the counters (new findings per day, inventory changes per day) and a small trend line in the CVE matches and
 // scanner findings counters. They are built in the browser from the dates the API already returns, so they show what arrived
 // and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
-(async () => {
+// The two lists behind the charts are up to 1,000 findings and 1,000 changes (about 0.9 MB of JSON), so nothing is asked for until the
+// Trends section is about to be seen: a dashboard that is read at the top never pays for them. The counters' small trend lines fill in
+// at the same moment.
+const loadTrends = async () => {
   if (!slug) return;
   const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
@@ -976,6 +979,24 @@ poll(pollFeed, 6000);
   } catch (_) {
     /* trends are extra: leave the section hidden when the data does not come */
   }
+};
+(() => {
+  const section = $("trends");
+  if (!slug || !section) return;
+  if (!("IntersectionObserver" in window)) {
+    loadTrends();
+    return;
+  }
+  // the section is hidden until it has data, so a one-pixel marker after it stands in for "the end of the page is near"
+  const marker = el("div", "trends-marker", null, { "aria-hidden": "true", style: "height:1px;grid-column:1/-1" });
+  section.after(marker);
+  const watch = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    watch.disconnect();
+    marker.remove();
+    loadTrends();
+  }, { rootMargin: "400px 0px" });
+  watch.observe(marker);
 })();
 
 // --- scanning now ---------------------------------------------------------------------------------

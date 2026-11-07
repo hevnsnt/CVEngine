@@ -55,18 +55,7 @@ function adminCells(h) {
   return out;
 }
 
-async function load(first) {
-  const [live, strip, health] = await Promise.all([
-    api("GET", "/api/v1/sentinels/live").catch(() => null),
-    fetch("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    isAdmin ? api("GET", "/cve/api/admin/health").catch((e) => ({ error: e.message })) : Promise.resolve(null),
-  ]);
-  if (!root.isConnected) return;
-  const cells = [sentinelCell(live), waitingCell(live, strip)];
-  if (isAdmin) {
-    if (health && !health.error) cells.push(...adminCells(health));
-    else cells.push({ node: cell("Workers and scheduler", "Not read", (health && health.error) || "The health check did not answer.", true), problem: "Workers and scheduler could not be read." });
-  }
+function paint(cells) {
   const problems = cells.map((c) => c.problem).filter(Boolean);
   const head = el("p", "health-line");
   head.append(el("span", `badge ${problems.length ? "high" : "success"}`, problems.length ? "Needs attention" : "All working"));
@@ -76,19 +65,40 @@ async function load(first) {
   root.replaceChildren(head, grid);
 }
 
+// The Sentinel answers come back at once and are drawn at once; the worker inspection waits up to five seconds for the workers to reply,
+// so it fills in its own cell when it arrives instead of holding the page.
+async function load() {
+  const adminRead = isAdmin ? api("GET", "/cve/api/admin/health").catch((e) => ({ error: e.message })) : null;
+  const [live, strip] = await Promise.all([
+    api("GET", "/api/v1/sentinels/live").catch(() => null),
+    fetch("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+  ]);
+  if (!root.isConnected) return;
+  const base = [sentinelCell(live), waitingCell(live, strip)];
+  if (!isAdmin) {
+    paint(base);
+    return;
+  }
+  paint([...base, { node: cell("Workers and scheduler", "Checking…", "Asking the workers; this can take a few seconds."), problem: "" }]);
+  const health = await adminRead;
+  if (!root.isConnected) return;
+  if (health && !health.error) paint([...base, ...adminCells(health)]);
+  else paint([...base, { node: cell("Workers and scheduler", "Not read", (health && health.error) || "The health check did not answer.", true), problem: "Workers and scheduler could not be read." }]);
+}
+
 let timer = null;
-async function loop(first) {
+async function loop() {
   try {
-    await load(first);
+    await load();
   } catch (err) {
     root.replaceChildren(el("p", "msg err", err.message));
   }
-  timer = setTimeout(() => loop(false), EVERY_MS);
+  timer = setTimeout(loop, EVERY_MS);
 }
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     clearTimeout(timer);
-    loop(false);
+    loop();
   }
 });
-loop(true);
+loop();
