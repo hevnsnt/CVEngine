@@ -142,7 +142,10 @@ class InstallTests(unittest.TestCase):
 
     def test_the_port_check_still_refuses_a_busy_port_and_defaults_to_443_and_8082(self):
         import socket
-        self.assertIn('${CVENGINE_INSTALL_PORTS-443 8082}', (ROOT / 'install.sh').read_text())
+        text = (ROOT / 'install.sh').read_text()
+        self.assertIn('https_port=${https_port:-443}', text)
+        self.assertIn('http_port=${http_port:-8082}', text)
+        self.assertIn('CVENGINE_INSTALL_PORTS-$https_port $http_port', text)
         if not shutil.which('ss'):
             self.skipTest('needs ss')
         with socket.socket() as busy:
