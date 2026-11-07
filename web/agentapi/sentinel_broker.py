@@ -865,9 +865,16 @@ def validating(task):
 
 
 def builtin_pk():
-    """The id of the built-in scanner's Agent, or ``None`` while there is none."""
+    """The id of the built-in scanner's Agent, or ``None`` while there is none. Inside ``sentinel_policy.shared_lookups`` it is read once and reused (the claim
+    pass asks for it per task)."""
+    memo = getattr(sentinel_policy._local, 'cache', None)
+    if memo is not None and 'builtin-pk' in memo:
+        return memo['builtin-pk']
     agent = builtin_scanner.builtin_agent()
-    return agent.pk if agent is not None else None
+    pk = agent.pk if agent is not None else None
+    if memo is not None:
+        memo['builtin-pk'] = pk
+    return pk
 
 
 def is_builtin(agent):
@@ -1099,9 +1106,10 @@ def explain_none(project, kind, internal=False, now=None, builtin_only=False):
     return _none_answer(kind, reason, clauses, bool(agents))
 
 
-def _builtin_last(agents):
-    """``agents`` with the built-in scanner moved to the end (the order is otherwise kept): it is the path of last resort, so no list the server writes names it first."""
-    own = builtin_pk()
+def _builtin_last(agents, own=None):
+    """``agents`` with the built-in scanner moved to the end (the order is otherwise kept): it is the path of last resort, so no list the server writes names it first.
+    ``own`` is the built-in scanner's id when the caller has read it already."""
+    own = builtin_pk() if own is None else own
     return sorted(agents, key=lambda a: a.pk == own)
 
 
@@ -2688,7 +2696,8 @@ def _live_overview(ctx):
     projects the caller may read (``_live_task``): another tenant's work shows as its kind on a target and nothing more."""
     reap_expired()
     now = timezone.now()
-    agents = _builtin_last(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])  # the last resort is listed last
+    builtin_id = sentinel_policy.builtin_pk()  # one read for the page: the order below and each card compare ids
+    agents = _builtin_last(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES], builtin_id)  # the last resort is listed last
     ids = [a.pk for a in agents]
     allowed = roles.allowed_project_ids(ctx.user)  # looked up once for the whole request and handed to every helper below
     allowed = None if allowed is None else set(allowed)
@@ -2716,7 +2725,6 @@ def _live_overview(ctx):
     activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
-    builtin_id = sentinel_policy.builtin_pk()  # likewise: one read, then each card compares ids
     decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
