@@ -98,7 +98,7 @@ contents other than the OS metadata above, user accounts, network shares, browse
 - **The token is never a command-line argument, and never in a command you copy.** Arguments are visible to every user in `ps` and are saved
   in shell history and PowerShell's PSReadLine history; so is `CVENGINE_TOKEN=cve_... sh ...`. The generated commands read the token from the
   keyboard (into a file only you can read, or a secure string); an environment variable (`CVENGINE_TOKEN`) or a root-only file (`--token-file`,
-  `-TokenFile`) are how the scripts take it. They refuse `--token`, warn when the token file is readable by other users, refuse a token with
+  `-TokenFile`, or `CVENGINE_TOKEN_FILE` in the environment) are how the scripts take it. The address and project take the same way: `--server` or `CVENGINE_URL`, `--project` or `CVENGINE_PROJECT`. They refuse `--token`, warn when the token file is readable by other users, refuse a token with
   anything but the characters a token has (a newline would add a setting to curl's configuration), and give `curl` the token on its standard
   input (`-K -`) so it is not in `curl`'s argument list either.
 - **TLS is verified by default,** TLS 1.2 or newer, https only (an `http://` server is refused before any token is read). `--ca-file` trusts

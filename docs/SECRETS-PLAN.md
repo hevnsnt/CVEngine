@@ -33,7 +33,7 @@ gate bbot's trufflehog) is being done separately on `develop` for 1.3.2, and its
 
  `hevnsnt/CVEngine` `origin/develop` @ `c06b407`, `origin/1.4-develop` @ `e0f8c74`, `hevnsnt/cvengine-sentinel` @ `458997d`,
 `mongodb/kingfisher` @ `67c1ad7` (v2.16.0), `projectdiscovery/nuclei-templates` HEAD (sparse checkout of `http/exposures/tokens` and `file/keys`),
-and bbot 3.0.2 as installed from PyPI (the version `web/Dockerfile:15` pins). Citations are `file:line` on `origin/1.4-develop` @ `e0f8c74` (re-based from `develop`, where the lines differ in the files that diverged); `develop` is named
+and bbot 3.0.2 as installed from PyPI (the version the Sentinel image pins). Citations are `file:line` on `origin/1.4-develop` @ `e0f8c74` (re-based from `develop`, where the lines differ in the files that diverged); `develop` is named
 where a claim is about it. **Proven** means
 the code or the docs show it. **Assumption** means it is inferred and has to be checked.
 

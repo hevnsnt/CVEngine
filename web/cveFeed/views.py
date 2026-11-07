@@ -676,7 +676,10 @@ def how_page(request):
 
 
 def about_page(request):
-    return render(request, 'cveFeed/about.html', ui_context(request, 'about'))
+    from . import software
+    context = {'tool_groups': software.tools_by_group(), 'data_sources': software.DATA_SOURCES, 'ai_providers': software.AI_PROVIDERS,
+               'server_libraries': software.server_libraries(), 'sentinel_libraries': software.SENTINEL_LIBRARIES}
+    return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context})
 
 
 def admin_page(request):

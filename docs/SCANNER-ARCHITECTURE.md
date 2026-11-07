@@ -1,10 +1,10 @@
 # One scanner for cvENGINE: the plan for 1.4
 
-Status: in progress, on the `1.4-develop` branch. Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
+Status: built on the `1.4-develop` branch (every phase below is done). Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
 published by digest, the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
 anything, no local path for any kind (`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) with the derived
 "scanner offline" state and non-fatal waiting, signed-in nuclei through the secure read, and the server's vantage point delivered to the
-built-in scanner. The phases below say what is left. How the built-in scanner works for an operator is in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
+built-in scanner. The phases below say what each one moved. How the built-in scanner works for an operator is in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
 ## Why
 
@@ -123,7 +123,7 @@ which send nothing to the target and need no vantage point.
 ## Target shape
 
 - **Scanner library** (`cvengine_scanner`, in the Sentinel repo, pip-installable): runners, parsers, flags, policy constants, the
-  scope floor, the contract schema and fixtures. cvENGINE pins it by tag and imports what it needs (policy constants to build
+  scope floor, the contract schema and fixtures. cvENGINE pins it by commit sha (`web/requirements.txt`) and imports what it needs (policy constants to build
   targets, fixtures in tests). One copy.
 - **Scanner service**: the Sentinel image, published to a registry by digest with an SBOM, amd64 and arm64.
   It contains the tools, the daemon and the library. It does not contain the GVM stack, git, Go or a docker socket.
@@ -160,9 +160,7 @@ which send nothing to the target and need no vantage point.
     chunk with `secret_ref` set (`sentinel_dispatch.signed_in_stream`), offered only to a built-in scanner whose image reports the
     `secret_read` feature (`SentinelEff.reads_secrets`); the task the scanner receives says `signed_in: true`. The client reads the credential
     once, runs nuclei with a 0600 secrets file on a memory file system (`-sf`, `-dr`), wipes it and redacts any echo (cvENGINE-sentinel
-    `client/signed_in.py`); any other Sentinel refuses such a task. Without such a scanner the pass runs on the server as before when nuclei
-    may run there, and waits otherwise. The signed-in CVE template check (`templategen`) still runs nuclei on the server: it belongs with the
-    template validation open item below.
+    `client/signed_in.py`); any other Sentinel refuses such a task. Without such a scanner the pass waits: nuclei has no local path. The signed-in CVE template check is the `nuclei_validate` kind, built-in scanner only.
 - **Updates**: the release manifest pins `(server tag, scanner digest)` and the updater swaps the pair with rollback. The
   built-in never updates itself. The version check compares against the digest the server expects, not GitHub's head.
 - **Contract**: the file gains a `targets` half (server to scanner) next to `results`, a `contract_version` declared at
@@ -179,7 +177,7 @@ which send nothing to the target and need no vantage point.
    (`resources.ScannerUnavailable`): nothing is marked failed or recorded, the strip on every page says the scanner is offline, and the
    hosts of a scan or host run during which a stage waited are queued again as a deferred re-test (`cveFeed.scanner_wait`, due
    `CVENGINE_SCANNER_REQUEUE_MINUTES` later and held back while a scanner is still missing), so a scanner restart costs a delay, never a
-   failed scan. It is a derived state, not the pause: the conductor keeps starting discovery, which runs on the server.
+   failed scan. It is a derived state, not the pause: the conductor keeps starting scans, and their stages wait for a scanner.
 5. Move one kind at a time off this server, then delete its local path. Done in 1.4: every contract kind is in `sentinel_dispatch.NEVER_LOCAL` (the
    internal `discover` kind is Sentinel-only by design), `CVENGINE_LOCAL_FALLBACK` is ignored, and the fallback telemetry that gated the deletions
    (`agentapi.ScannerFallback`, `manage.py scanner_fallbacks`) is gone with the paths it watched.
@@ -194,10 +192,10 @@ which send nothing to the target and need no vantage point.
    `cveFeed.probe_scope` when a task is built and enforced by the scanner (`cvengine_scanner.probes.policy`) at every hop, redirects and script
    reads included, which reports the hosts it touched and the hops it refused. Moved: the version and identity probes (`http_probe`), the
    discovery and retire-check lookups (`dns_resolve`), the zombie check (`alive_check`), the cloud storage checks (`bucket_check`), the virtual host and subdirectory application checks (`vhost_probe`, `subdir_probe`), the supplier posture checks (`supplier_check`), the anonymous web route check (`route_probe`), the TLS and mail hygiene sweep (`hygiene_check`), the dangling-DNS ratings (`dangling_dns_check`), with the pure readers they share (`versions`, `fingerprint`, `cms`, `wp_core`, `js_libraries`, `soft404`,
-   `sensitive`) copied into the library. Not moved yet: the route check's signed-in half.
-8. Drop the scan tools, Go and bbot from the server image.
+   `sensitive`) copied into the library. The route check's signed-in half moved too (`route_probe_signed`, built-in scanner only), and so did the screenshots (`web_screenshot`), the secret scan (`secrets_scan`), the SSH inspection (`ssh_probe`), the validation page reads (`page_read`) and the name and certificate reads (`identity_check`): 36 kinds in all.
+8. Drop the scan tools, Go and bbot from the server image. Done: `web/Dockerfile` builds nuclei in a throwaway stage and carries nothing else of the scan tools.
 
-Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).
+Exposed secrets (Kingfisher as the Sentinel kind `secrets_scan`, with a project inventory) is built on top of these phases; its design is in [SECRETS-PLAN.md](SECRETS-PLAN.md).
 
 ### Fallback telemetry (removed)
 
