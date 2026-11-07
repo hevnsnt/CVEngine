@@ -95,6 +95,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **The server resolves no target name and connects to no retired address**: `dns_resolve` and `alive_check` are `NEVER_LOCAL`, the server's own
   lookups and connects are deleted (`discovery.resolve_names`, `zombie.http_alive`, `zombie.tcp_alive`), and the archived-host, inactive-host and
   unresolved-host reviews ask a Sentinel (`identity_check` for names, `alive_check` for the stored addresses' ports). With no scanner the reviews wait.
+- **The server reads no certificate, mail record or dangling name itself**: `hygiene_check` and `dangling_dns_check` are `NEVER_LOCAL`. `hygiene.run_hygiene` and `dangling_dns.assess_all` hand the work to a Sentinel and the server's own sweep (the injectable probe, emailer and MX helpers), `dangling_dns.Net` and the local branch of `rerate_dangling_dns` are deleted; with no scanner the target stays due.
 - **The server opens no database connection, storage request or Node.js probe**: `db_probe`, `bucket_check` and `node2shell` are `NEVER_LOCAL`. The
   server's database clients and checks (`db_exposure.check_*`), its storage request code (`bucket_probe.http_fetch`, `dns_exists`, the pacer) and its
   copy of the Brotli detector (`cveFeed/vendor/node2shell.py`) are deleted; the validation re-test of a database exposure goes to a Sentinel too.

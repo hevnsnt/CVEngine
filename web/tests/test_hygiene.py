@@ -12,6 +12,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call, create_token
+from tests import hygiene_harness
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
@@ -201,7 +202,7 @@ class HygieneRunnerTests(TestCase):
 		ip.ports.add(Port.objects.create(number=8443), Port.objects.create(number=22))
 
 	def run_with(self, probe, emailer):
-		return hy.run_hygiene(self.domain.id, probe=probe, emailer=emailer, mx=lambda n, t: False)
+		return hygiene_harness.run_hygiene(self.domain.id, probe=probe, emailer=emailer, mx=lambda n, t: False)
 
 	def test_targets_are_443_everywhere_plus_other_tls_ports_only(self):
 		self.assertEqual(set(hy.tls_targets(self.domain)), {('example.test', 443), ('www.example.test', 443), ('www.example.test', 8443)})
@@ -227,11 +228,11 @@ class HygieneRunnerTests(TestCase):
 	def test_a_host_only_run_resolves_a_fixed_certificate_finding(self):
 		soon = timezone.now() + datetime.timedelta(days=5)
 		bad = lambda host, port: cert(host=host, port=port, sans=[host], subject=host, not_after=soon) if host == 'www.example.test' and port == 443 else None
-		hy.run_hygiene(self.domain.id, probe=bad, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		hygiene_harness.run_hygiene(self.domain.id, probe=bad, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
 		row = HygieneFinding.objects.get(domain=self.domain, check_name='tls_expiring')
 		self.assertEqual((row.host, row.status), ('www.example.test:443', 'open'))
 		fixed = lambda host, port: cert(host=host, port=port, sans=[host], subject=host) if host == 'www.example.test' and port == 443 else None
-		hy.run_hygiene(self.domain.id, probe=fixed, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		hygiene_harness.run_hygiene(self.domain.id, probe=fixed, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
 		row.refresh_from_db()
 		self.assertEqual(row.status, 'resolved')  # S08-14: not left for the next whole-target sweep
 

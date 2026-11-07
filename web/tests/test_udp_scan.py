@@ -17,6 +17,7 @@ from scanEngine.models import EngineType
 from startScan.models import OPEN_PORT_STATES, IpAddress, Port, ScanHistory, Subdomain, open_ports, open_services
 from targetApp.models import Domain
 from tests.test_agentapi import call
+from tests import hygiene_harness
 
 # nmap -sU -sV output, written to the format nmap 7.9x prints (scaninfo, state with reason, extraports with extrareasons, service
 # with method/conf and cpe, script elements). Host 192.0.2.10 answers on four ports and ignores the rest.
@@ -459,8 +460,7 @@ class FindingTests(UdpBase):
 		udp_scan.store_findings(self.ip1)
 		hygiene.store_findings(self.domain, [], owns=lambda check: not check.startswith(('ts_', 'udp_')))
 		self.assertEqual(len(self.findings()), 3)
-		with mock.patch('cveFeed.hygiene.probe_tls', return_value=None):
-			hygiene.run_hygiene(self.domain.id, probe=lambda *a, **k: None, emailer=lambda name: ([], None), mx=lambda *a: False)
+		hygiene_harness.run_hygiene(self.domain.id, probe=lambda *a, **k: None, emailer=lambda name: ([], None), mx=lambda *a: False)
 		self.assertEqual(len(self.findings()), 3)
 
 

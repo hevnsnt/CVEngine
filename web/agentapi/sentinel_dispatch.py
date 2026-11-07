@@ -83,6 +83,8 @@ NEVER_LOCAL = (
     'node2shell',  # the Brotli decoder check: the detector is vendored on the scanner only, this server carries no copy of it
     'dns_resolve',  # the discovery and retire-check name lookups (agentapi.probe_dispatch.try_dns_resolve): a Sentinel's resolver, never this server's
     'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
+    'hygiene_check',  # the certificate, TLS and email-authentication reads (cveFeed.hygiene.run_hygiene): a Sentinel's, never this server's
+    'dangling_dns_check',  # the zone-cut and control-request checks of baddns findings (cveFeed.dangling_dns.assess_all): a Sentinel's, never this server's
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
     'web_screenshot',
     'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): built-in scanner only, this server sends no stored sign-in anywhere
