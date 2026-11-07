@@ -6,7 +6,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 
 | Document                               | What it covers                                                                                                                                                                            |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [FRONTEND.md](FRONTEND.md)             | The interface: design system, every page and route, the Live dashboard, Hosts, Findings, Suppliers, Sentinels, Settings, PDF reports, the rebuilding page, themes, and keyboard shortcuts |
+| [FRONTEND.md](FRONTEND.md)             | The interface: design system, the six-link left rail, every page and route, the Overview (formerly Live) dashboard, Hosts, Findings, Suppliers, Sentinels, Settings, PDF reports, the rebuilding page, themes, and keyboard shortcuts |
 | [SEARCH.md](SEARCH.md)                 | Shodan-style search over your inventory: filters, examples, the Shodan equivalents, and saved searches with alerts                                                                        |
 | [FIRE-SMOKE-ICE.md](FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why                                                                                                                                                      |
 | [BUG-BOUNTY.md](BUG-BOUNTY.md)         | The bug bounty page: who may use it, program scope, reports, and submission                                                                                                               |
@@ -25,9 +25,10 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | Document                               | What it covers                                                                                                                                                                                                         |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [SENTINELS.md](SENTINELS.md)           | Sentinels: scaling scans across machines, and scanning private networks                                                                                                                                            |
-| [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md) | Trying the optional built-in scanner (1.4): what moves to it and what stays on the server, and a test recipe from build to rollback                                                                                    |
+| [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md) | The built-in scanner (1.4): the scanner every install starts, what runs in it, how it enrols, why it is the last resort, and how to check it                                                                              |
+| [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md) | The 1.4 design: one scanner for cvENGINE, the kinds of the result contract, asynchronous stages, the scanner-offline reading and what each phase moved |
 | [AI-REVIEWER.md](AI-REVIEWER.md) | The AI reviewer (1.4): its own locked-down container that reviews every open finding once and checks operations, and how it resists prompt injection |
-| [SECRETS-PLAN.md](SECRETS-PLAN.md) | The 1.4 plan for exposed secrets: a project secrets inventory built on the Kingfisher detector, run by the Sentinel, with severity rules, gated read-only validation and the PR breakdown (planning, not built) |
+| [SECRETS-PLAN.md](SECRETS-PLAN.md) | The 1.4 exposed-secrets design: a project secrets inventory built on the Kingfisher detector, run by the Sentinel, with severity rules, gated read-only validation |
 | [OPENVAS.md](OPENVAS.md)               | The optional OpenVAS (Greenbone) scanner: the compose profile, the hardware floor and resource guard, which hosts it scans and how, the safe scan configuration, how results become findings, and what is not verified |
 | [TAILSCALE.md](TAILSCALE.md)           | Attaching a tailnet: the scanner's node, device import and auto-scan, the Tailscale checks, and how tailnet addresses are allowed                                                                                      |
 | [HOST-INVENTORY.md](HOST-INVENTORY.md) | Hosts reporting about themselves: the Linux, macOS and Windows scripts, what they collect, the report format, how it finds its host, and the local CVEs it makes decidable                                             |
@@ -40,7 +41,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | [HOSTING-ONLINE.md](HOSTING-ONLINE.md) | Putting an install on the Internet under a real name: DNS, Let's Encrypt, Cloudflare, your own proxy                   |
 | [CONFIGURATION.md](CONFIGURATION.md)   | Every environment variable: memory, workers, scan windows, Sentinels, AI limits, feeds, retention, PDF reports, access |
 | [UPDATES.md](UPDATES.md)               | Automatic deployment, in-app approval, and the manual updater                                                          |
-| [UPGRADE.md](UPGRADE.md)               | Moving an older install to the current release                                                                         |
+| [UPGRADE.md](UPGRADE.md)               | Moving an older install to the current release, including the 1.3 to 1.4 notes                                         |
 
 ## Access and integration
 

@@ -6,7 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 
 | Project | License | Used for |
 | --- | --- | --- |
-| [bbot](https://github.com/blacklanternsecurity/bbot) | AGPL-3.0 | Subdomain and asset discovery, run as a separate process |
+| [bbot](https://github.com/blacklanternsecurity/bbot) | AGPL-3.0 | Subdomain and asset discovery, run as a separate process on the Sentinel (its own virtual environment, pinned in the Sentinel image); the server image has none |
 | [nuclei](https://github.com/projectdiscovery/nuclei) | MIT | Vulnerability scanning and CVE tests |
 | [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | MIT | The community template library |
 | [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting and the UDP exposure sweep. Pinned to one release with its checksum: on amd64 the official release package from nmap.org is unpacked, on arm64 (where nmap.org publishes no binary) the release tarball is compiled |
@@ -16,7 +16,11 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [gowitness](https://github.com/sensepost/gowitness) | GPL-3.0 | Front-page screenshots taken during a bbot discovery, installed by bbot (with a Chromium that bbot downloads alongside it, under its own licenses) and used in the default and deep discovery modes; the host page falls back to them where the browser has taken none |
 | [MailFail](https://github.com/ACK-J/MailFail) | AGPL-3.0 | Source of the email-security checks, re-implemented server side with credit |
 | [wafw00f](https://github.com/EnableSecurity/wafw00f) | BSD-3-Clause | Names the web application firewall in front of a web host |
-| [Kingfisher](https://github.com/mongodb/kingfisher) by MongoDB, with its rule bundle (rules imported from Betterleaks, Gitleaks and Veles; their notices ship in the archive) and the [Vectorscan](https://github.com/VectorCamp/vectorscan) engine it links | Apache-2.0 (Vectorscan BSD-3-Clause) | Secret detection in the scanner image only (the Sentinel kind `secrets_scan`, docs/SECRETS-PLAN.md): the release tarball pinned by sha256 per architecture, with its build attestation verified in CI, and its `NOTICE` files kept under `/usr/share/doc/kingfisher/`. The server image has none |
+| [Kingfisher](https://github.com/mongodb/kingfisher) by MongoDB, with its rule bundle (rules imported from Betterleaks, Gitleaks and Veles; their notices ship in the archive) and the [Vectorscan](https://github.com/VectorCamp/vectorscan) engine it links | Apache-2.0 (Vectorscan BSD-3-Clause) | Secret detection in the scanner image only (the Sentinel kind `secrets_scan`, docs/SECRETS-PLAN.md): the release tarball pinned by sha256 per architecture, with its build attestation verified in CI, and its `NOTICE` files kept under `/usr/share/doc/kingfisher/` (Apache-2.0 section 4(d): "Copyright 2025-2026 MongoDB, Inc", with the attributions for Nosey Parker, Praetorian Security and the rules it imports). The server image has none |
+| [sshamble](https://github.com/runZeroInc/sshamble) by runZero | BSD-2-Clause (Copyright (c) 2024, runZero, Inc; it also carries a modified copy of [golang/crypto](https://github.com/golang/crypto) under the Go BSD 3-clause license) | SSH inspection in the Sentinel image only (the Sentinel kind `ssh_probe`): the release tarball per architecture, pinned by sha256, with its `LICENSE.md` kept at `/usr/share/doc/sshamble/LICENSE.md`. Only `sshamble scan` with the one fixed check `badkeys-blocklist` is ever run (the client refuses any other command line): it reads the server's own handshake (banner, host keys, algorithms, offered authentication methods) and compares the host keys with the badkeys blocklist. Nothing submits a credential or tries to log in. The server image has none |
+| [badkeys.info](https://badkeys.info) blocklist data (from the [badkeys](https://github.com/badkeys/badkeys) project) | The badkeys software is MIT (Copyright Hanno Böck); the license of the blocklist data itself is not stated where it is downloaded and is recorded here as **unknown** | The known-weak SSH host keys sshamble checks against. Not baked into the image: the Sentinel downloads it daily with `sshamble badkeys-update` into its own state volume (off with `CVENGINE_BADKEYS_REFRESH=0` for an air-gapped Sentinel, which then reports "not checked") |
+| [cvengine-scanner](https://github.com/hevnsnt/cvENGINE-sentinel) (the scanner library) | GPL-3.0-only (the Sentinel repository's declared license) | The scan policy, parsers and the result contract the server shares with every Sentinel; `web/requirements.txt` pins it to a full commit sha |
+| The Sentinel image's Python libraries (`requests`, `python-gvm`, `xmltodict`, `h11`, `aardwolf`, `Pillow`, `redis`, `playwright`, `PyMySQL`, `pymongo`, `dnspython`, `cryptography`, `tldextract`) | MIT, Apache-2.0, BSD-3-Clause, ISC, GPL-3.0-or-later (python-gvm) and MIT-CMU (Pillow), each under its own license (read from the package metadata) | The Sentinel client's dependencies, pinned in the Sentinel repository's `requirements.txt` (PyMySQL and pymongo speak the one credential-less database greeting of `db_probe`; Pillow and aardwolf the RDP screenshot) |
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial license is needed for managed or hosted use) | WordPress vulnerability scanning |
 | [testssl.sh](https://github.com/testssl/testssl.sh) | GPL-2.0 (run as a separate program, never linked) | Tests the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named TLS vulnerabilities |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
@@ -27,8 +31,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | Redis, in Greenbone's `redis-server` image | The license of the Redis version Greenbone ships (check it in the image before redistributing) | The scanner's cache in the `openvas` profile; a separate container |
 | Greenbone feed data (`vulnerability-tests`, `notus-data`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `report-formats` images, and `gpg-data`, the signing keys) | Its own terms, printed by the data containers when they start | Vulnerability tests and advisory data for the `openvas` profile. The data images follow a moving tag on purpose (the definitions must keep updating), so what they contain changes without a cvENGINE release; `gpg-data` is pinned by digest |
 | [python-gvm](https://github.com/greenbone/python-gvm) (pinned in `web/requirements.txt`) | GPL-3.0-or-later (its dependencies: `httpx` and `httpcore` BSD-3-Clause, `lxml` BSD-3-Clause, `paramiko` LGPL-2.1, `PyNaCl` and `bcrypt` Apache-2.0, `invoke` BSD-2-Clause, `h2`, `hpack` and `hyperframe` MIT) | The GMP client library behind the OpenVAS add-on; installed in the cvENGINE image (it is linked, which is why its license must fit the GPL-3.0) |
-| [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot |
-| [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `web/cveFeed/vendor/node2shell.py`, with the exact source commit in that file's header |
+| [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot, in the Sentinel image (pinned in the Sentinel `requirements.txt`; the server image no longer installs it) |
+| [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `client/vendor/node2shell.py` in the Sentinel repository ([cvENGINE-sentinel](https://github.com/hevnsnt/cvENGINE-sentinel)), with the exact source commit in that file's header; the server's `web/cveFeed/node2shell_scan.py` only queues the work |
 
 ## Data sources
 
@@ -44,9 +48,14 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
-| [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) | Registry lookups for email hygiene checks |
+| [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) and the registries it names | Registry lookups for the hygiene and dangling-domain checks |
 | [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
 | [GitHub API](https://docs.github.com/rest) | The in-app update check |
+| [badkeys.info](https://badkeys.info) | Known-weak SSH host keys, downloaded by the Sentinel (see sshamble above) |
+| [nuclei-templates releases](https://github.com/projectdiscovery/nuclei-templates/releases) | The server's template refresh and the reviewer's check for a newer release |
+| [Greenbone Community feed](https://greenbone.github.io/docs/latest/) | The OpenVAS add-on's vulnerability tests, from `registry.community.greenbone.net` |
+| [HackerOne API](https://api.hackerone.com) | Submitting a report you wrote, with your own API token |
+| Slack, Discord, Telegram and Lark webhooks | Notifications to the webhook or bot you configure |
 | [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
 | [Tailscale API](https://tailscale.com/api) and [security bulletins](https://tailscale.com/security-bulletins) | Read-only access to your own tailnet with your own credentials, and the fixed versions the Tailscale checks use |
 | [Tailworm](https://tailworm.com/) (an October 2026 security assessment of Tailscale and headscale, unconfirmed by the vendor) | Guidance behind the SSH, tag-owner and Funnel policy checks; referenced, nothing copied |
@@ -73,4 +82,13 @@ cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://opena
 
 ## Platform
 
-[Django](https://github.com/django/django), [Celery](https://github.com/celery/celery), [Redis](https://github.com/redis/redis), [PostgreSQL](https://www.postgresql.org), [nginx](https://github.com/nginx/nginx), [Gunicorn](https://github.com/benoitc/gunicorn), and [WeasyPrint](https://github.com/Kozea/WeasyPrint) run the application. The libraries in `web/requirements.txt` are installed from PyPI under their own licenses.
+| Project | License | Where |
+| --- | --- | --- |
+| [Ubuntu](https://ubuntu.com) 26.04 | Free software, each package under its own license (the per-package copyright files were not read for this list) | The base of the server and Sentinel images (`web/Dockerfile`, the Sentinel `Dockerfile`) |
+| [Django](https://github.com/django/django) 5.2, [Celery](https://github.com/celery/celery) 5.6, [Gunicorn](https://github.com/benoitc/gunicorn) 26 and gevent, [WeasyPrint](https://github.com/Kozea/WeasyPrint) 70 | BSD-3-Clause, BSD-3-Clause, MIT, BSD-3-Clause (WeasyPrint's PyPI classifier) | The server application, pinned in `web/requirements.txt` |
+| [PostgreSQL](https://www.postgresql.org) 18 | PostgreSQL License | The `postgres:18-alpine` compose image |
+| [Redis](https://github.com/redis/redis) | The compose image `redis:alpine` is a moving tag. Redis 8 and later is RSALv2, SSPLv1 or AGPLv3 at your option; Redis 7.2 and earlier is BSD-3-Clause. Check the version you pulled | The Celery broker, cache and locks. cvENGINE links no Redis code: it talks to a separate container |
+| [nginx](https://github.com/nginx/nginx) | BSD-2-Clause | The `nginx:alpine` compose image, the TLS reverse proxy |
+| [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) 2.3.0 and its pinned dependencies | Apache-2.0 (SDK) and MIT, BSD-3-Clause, Apache-2.0, PSF-2.0 for the rest, per their package metadata | The AI reviewer image only (`reviewer/requirements.txt`) |
+
+The libraries in `web/requirements.txt` are installed from PyPI under their own licenses. Which tools run in which image, with their versions and licenses, is also on the About page of every install (`web/cveFeed/software.py`).

@@ -1,6 +1,6 @@
 # Sentinels
 
-A Sentinel is a scanner you run on any machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE stores that result exactly as if it had run the tool itself.
+A Sentinel is a scanner you run on any machine of your own. It checks in with cvENGINE, takes scan work off a project's queue, runs the tool there, and sends the typed result back. cvENGINE validates and clips that result and stores it through the same code for every Sentinel.
 
 Why run one:
 
@@ -8,28 +8,44 @@ Why run one:
 - **Private networks.** The cvENGINE server never scans a private address. A Sentinel inside an office LAN, a VPC or a VPN is the only way to cover one ([Internal networks](#internal-networks)).
 - **Another vantage point.** Scan your internet-facing targets from a different network or region than the cvENGINE server.
 
-A project with no live Sentinel scans on the server, as it always did.
+The server runs no scan of its own. Every install starts a built-in scanner next to it (a Sentinel, [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)), so a new install scans at once; external Sentinels add scale, private networks and other vantage points, and take work ahead of it ([below](#the-built-in-scanner-is-the-last-resort)).
 
 ## What a Sentinel runs
 
-Eleven kinds of work, each a capability the Sentinel declares (the list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel); the code reads it from the installed library):
+Thirty-six kinds of work (`contract_version` 3), each a capability the Sentinel declares. The list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (ten kinds since contract version 1, one since 2, twenty-five since 3); the code reads it from the installed library, and `tests/test_docs_accuracy.py` fails when this table and the contract disagree. **The server runs none of them**: every kind but `discover` is in `sentinel_dispatch.NEVER_LOCAL`, and `discover` is Sentinel-only by design.
 
-| Kind                                             | Work                                                                         |
+| Kind                                             | Work (the tool that does it)                                                 |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `nmap`, `naabu`                                  | The service fingerprint pass and the port sweep                              |
-| `nuclei_light`, `nuclei_targeted`, `nuclei_deep` | The HTTP and technology pass, the AI-targeted pass, and the weekly deep pass |
-| `testssl`                                        | The TLS audit (one `host:port` per task)                                     |
-| `nmap_udp`                                       | The UDP exposure sweep                                                       |
-| `wpscan`                                         | WPScan on WordPress sites                                                    |
-| `wpscan_thorough`                                | The thorough WPScan pass on one WordPress site: hours per site (contract version 3) |
-| `route_probe_signed`                             | The web route check signed in, built-in scanner only: reads a stored sign-in once, sends it only where it was stored for (contract version 3) |
-| `page_read`                                      | A validation re-test's HEAD of a URL or re-read of a host's front pages and scripts, the control GET of the result screen (one path no site serves, answered as a digest) and the readme titles of a WordPress site's plugins (contract version 3) |
-| `ssh_probe`                                      | A read-only inspection of the SSH services the port stage found open: banner, host key types and sizes, offered authentication methods, and the badkeys blocklist of compromised host keys (contract version 3; no login is ever attempted) |
+| `nmap`, `naabu`                                  | The service fingerprint pass and the port sweep (nmap, naabu)                |
+| `nmap_full`                                      | The background full-port sweep (nmap) |
+| `nmap_verify`                                    | Service detection with the reviewed NSE scripts on named ports (nmap) |
+| `nmap_udp`                                       | The UDP exposure sweep (nmap)                                                |
+| `nuclei_light`, `nuclei_targeted`, `nuclei_deep` | The HTTP and technology pass, the AI-targeted pass, and the weekly deep pass (nuclei) |
+| `nuclei_validate`                                | The test of an AI-written template (nuclei; built-in scanner only) |
+| `testssl`                                        | The TLS audit, one `host:port` per task (testssl.sh)                         |
+| `wpscan`, `wpscan_thorough`                      | WPScan on a WordPress site: the quick pass, and the thorough pass of hours per site (WPScan) |
+| `waf`                                            | WAF fingerprinting of a web host (wafw00f)          |
+| `bbot_discovery`                                 | Discovery of subdomains and addresses, a streamed task (bbot, with gowitness) |
+| `web_screenshot`                                 | Screenshots of a host's web pages, at most six pages per task (Playwright's headless Chromium) |
+| `rdp_shot`                                       | The RDP pre-authentication screenshot (aardwolf) |
+| `secrets_scan`                                   | Exposed secrets in the pages and scripts the route check read, `--no-validate` (Kingfisher) |
+| `ssh_probe`                                      | A read-only inspection of SSH services: banner, host key types and sizes, offered authentication methods, algorithm lists, and the badkeys blocklist of compromised host keys (sshamble, one fixed check). No login or credential is ever sent |
+| `node2shell`                                     | The read-only check for CVE-2026-111497 (vendored node2shell detector) |
+| `db_probe`                                       | One credential-less connection to a database port, to read its greeting |
+| `http_probe`, `route_probe`                      | The version and identity probes, and the anonymous web route check (Python, in the client) |
+| `route_probe_signed`                             | The web route check signed in: reads a stored sign-in once and sends it only where it was stored for (built-in scanner only) |
+| `vhost_probe`, `subdir_probe`                    | Other sites on an address, and applications under a path |
+| `page_read`                                      | A validation re-test's HEAD of a URL or re-read of a host's front pages and scripts, the control GET of the result screen and the readme titles of a WordPress site's plugins |
+| `bucket_check`                                   | The anonymous checks of cloud storage |
+| `supplier_check`                                 | A third-party supplier's DNS, certificate, pages and MTA-STS file |
+| `hygiene_check`, `dangling_dns_check`            | DNS, mail and certificate hygiene (SPF, DMARC, DKIM, CAA, MailFail), and the zone-cut checks of dangling-DNS findings |
+| `dns_resolve`, `identity_check`                  | Name lookups for discovery, and the alias, name server, reverse name and certificate-name reads of a name or address |
+| `alive_check`                                    | Whether a retired name's last known addresses still answer |
+| `path_probe`                                     | The plain SYN and the FIN+PSH+URG probe that measure the path scans leave from (built-in scanner only) |
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
-| `waf`                                            | WAF fingerprinting (contract version 2; no stage dispatches it yet)          |
 
-Everything else (bbot, bucket checks, vhost and subdirectory sweeps, and any Nuclei pass that uses a stored sign-in) always runs on the server.
+Three kinds are offered only to the built-in scanner (`sentinel_broker.BUILTIN_KINDS`): `path_probe`, `nuclei_validate` and `route_probe_signed`. The server itself keeps the plans, the schedules, the budgets and the storing and judging of what comes back.
 
 ## External or internal, full or light
 
@@ -40,7 +56,7 @@ You choose two things when you provision a Sentinel, and can change both later.
 
 ## Get one
 
-1. Open **Sentinels** (the Agents group in the side rail). In **Provision a Sentinel**, pick a scope, **Where it runs** and **Size**, then press **Provision**.
+1. Open **Scanners** in the left rail, then its **Sentinels** tab. In **Provision a Sentinel**, pick a scope, **Where it runs** and **Size**, then press **Provision**.
 2. Copy the blob. It is one string holding a single-use secret that expires in 30 minutes.
 3. On the machine that will scan (it needs Docker and outbound HTTPS to cvENGINE), clone the client from its own repository, [hevnsnt/cvengine-sentinel](https://github.com/hevnsnt/cvengine-sentinel), put the blob in `CVENGINE_SENTINEL_BLOB` in its `.env`, and run `docker compose up -d`. The page does this for you: after Provision it shows one command to paste on that machine (it clones the client, or reuses a clone already there, runs `setup.sh` with the blob, names the Sentinel after the machine and starts it), and a finished prompt to hand an AI agent with a shell on that machine, with the blob and your choices already in it. The same two strings are in the enrollment reply as `setup.one_liner` and `setup.agent_prompt`.
 4. Watch it appear on the Sentinels page. The client keeps its own token in a Docker volume, so a restart never needs the blob again.
@@ -113,9 +129,9 @@ When you add an external Sentinel, the built-in scanner steps back for the work 
 
 ## When no Sentinel is live
 
-Before a stage runs its tool, it asks for a live, eligible Sentinel with the right capability. With none, the stage runs on the server, as before. With one, the work is queued and the stage waits: 8 seconds for a Sentinel with a free slot to claim it, 5 minutes for a slot when every Sentinel is at its limit, then a per-kind ceiling for the run itself (counted from the claim). On a timeout or failure the stage runs locally.
+Before a stage hands work over, it asks for a live, eligible Sentinel with the right capability. With none, the stage waits: it records nothing, is not marked failed, and its targets stay due until a scanner is back (a strip on every page says so). With one, the work is queued and the stage waits: 8 seconds for a Sentinel with a free slot to claim it, 5 minutes for a slot when every Sentinel is at its limit, then a per-kind ceiling for the run itself (counted from the claim). On a timeout or failure the targets stay due and are tried again; nothing runs on the server.
 
-Two exceptions never run locally: targets inside an internal network, and OpenVAS while Sentinel-only mode is on. Each dispatch shows as a line in the AI activity feed. Timings are in [CONFIGURATION.md](CONFIGURATION.md).
+Targets inside an internal network need a Sentinel that holds `network:internal`; OpenVAS needs one that declares `openvas`. Each dispatch shows as a line in the AI activity feed. Timings are in [CONFIGURATION.md](CONFIGURATION.md).
 
 The message says why a kind has nowhere to go: **disabled** (a live Sentinel has it and the capability policy keeps it off), **offline** (a Sentinel that has it is not heard from), **withheld** (it keeps failing the kind, or its client is too old), **inactive** (pending or suspended) or **never** (no Sentinel declares it), for example "OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it but is offline); the targets stay due". A kind turned off on every Sentinel that has it also shows on the page strip as "OpenVAS is turned off on every Sentinel that has it", not as an offline scanner.
 
@@ -123,7 +139,7 @@ No scan kind runs on the server (see [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECT
 
 ### Future: Sentinel egress capabilities
 
-Not built yet (planned for 1.4's capability-aware placement): a Sentinel would declare which egress ports it can reach, found by itself with a canary connection at start-up (for example, whether outbound port 25 works from its network), and the server would route the stages that need port 25 only to Sentinels that can reach it, instead of to any Sentinel with the tool. Today any eligible Sentinel takes the work, and a Sentinel whose own network blocks port 25 reports that port as filtered.
+Not built (planned): a Sentinel would declare which egress ports it can reach, found by itself with a canary connection at start-up (for example, whether outbound port 25 works from its network), and the server would route the stages that need port 25 only to Sentinels that can reach it, instead of to any Sentinel with the tool. Today any eligible Sentinel takes the work, and a Sentinel whose own network blocks port 25 reports that port as filtered.
 
 ## Security model
 
@@ -158,11 +174,11 @@ The tests tie the file to the server: every task kind has a schema, one fixture 
 
 A Sentinel says which contract it speaks: `info.contract_version` (a whole number, 1 to 1000) in its registration and heartbeat. A client from before the field is taken to speak version 1. The file lists `kind_since` (the version that introduced each kind) and `min_supported_contract_version` (the server speaks the current contract and the one before it), and a Sentinel is offered only the kinds its version can run; one older than the server still speaks is offered nothing and shows as `unsupported`. Every register and heartbeat answer carries `contract: {version, min_supported}` so the client can see for itself that it is behind, and the Sentinels list shows each one's `contract_version` and `contract_state` (`current`, `previous`, `unsupported`, `newer` or `unreported`).
 
-Contract version 2 adds one kind, `waf` (wafw00f against the root of one web host): the target is `{host, ip, port, scheme}` and the result is `{outcome, products: [{name, manufacturer?}], generic}`, at most 20 products with names cut to 100 characters. It is dormant groundwork: the server can validate and store a `waf` result (`cveFeed.waf_fingerprint.persist_waf_result`, the same code a local run stores through), but nothing creates `waf` tasks yet and the local scan keeps running as before. `waf` is offered only to a Sentinel that declares `contract_version` 2 or higher and lists `waf` in its capabilities; a Sentinel that declares 1, or nothing, is never offered it even if it lists it. The kinds a version-1 Sentinel can run are unchanged, and `min_supported_contract_version` stays 1, so a Sentinel declaring 1 now shows as `previous`.
+Contract version 2 adds one kind, `waf` (wafw00f against the root of one web host): the target is `{host, ip, port, scheme}` and the result is `{outcome, products: [{name, manufacturer?}], generic}`, at most 20 products with names cut to 100 characters. The server stores a `waf` result through `cveFeed.waf_fingerprint.persist_waf_result`, and the WAF stage dispatches it. `waf` is offered only to a Sentinel that declares `contract_version` 2 or higher and lists `waf` in its capabilities; a Sentinel that declares 1, or nothing, is never offered it even if it lists it. `min_supported_contract_version` stays 1, so a Sentinel declaring 1 shows as `previous`.
 
 ## Troubleshooting
 
-- **"No Sentinel picked up work in time; it ran locally."** The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).
+- **"No scanner could take this work" or a task that was not picked up in time.** The targets stay due and the stage tries again. The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).
 - **A task shows "lost (the Sentinel stopped answering)".** Its lease ran out: the Sentinel stopped heartbeating, or was suspended or revoked. Check its logs with `docker compose logs -f`. The stage already moved on.
 - **The enrollment secret is refused (`403`).** It expired, was already used, or is mistyped. Provision again.
 - **A Sentinel answers `401` after being off a long time.** Its token (90 days) expired. Enroll it again with a new secret.

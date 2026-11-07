@@ -100,6 +100,18 @@ jobs:
           printf '%s  %s\n' "$pinned" kingfisher-rule-bundle.tgz | sha256sum --check --status
           tar xzf kingfisher-rule-bundle.tgz
           printf 'CVENGINE_KINGFISHER_RULES=%s\n' "$dir/generated/rules" >> "$GITHUB_ENV"
+      - name: Sentinel image pins (the About page lists every tool they hold)
+        # tests/test_about_page.py reads the Sentinel repository's Dockerfile and requirements.txt at the commit web/requirements.txt pins and fails when a tool
+        # pinned there is missing from the About page or listed at another version
+        run: |
+          set -euo pipefail
+          sha=$(sed -n 's/.*cvENGINE-sentinel@\([0-9a-f]\{40\}\).*/\1/p' web/requirements.txt | head -1)
+          dir="$RUNNER_TEMP/sentinel-files"
+          mkdir -p "$dir"
+          for f in Dockerfile requirements.txt; do
+            curl -fsSL "https://raw.githubusercontent.com/hevnsnt/cvENGINE-sentinel/$sha/$f" -o "$dir/$f"
+          done
+          printf 'CVENGINE_SENTINEL_FILES=%s\nCVENGINE_REQUIRE_SENTINEL_FILES=1\n' "$dir" >> "$GITHUB_ENV"
       - name: Django test suite
         working-directory: web
         env:
