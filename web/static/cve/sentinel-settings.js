@@ -347,7 +347,14 @@ export function versionBlock(d, { onChange, builtin = false }) {
   line.append(
     el("span", "note", "Version"),
     el("b", "mono", d.version || "not reported"),
+    el("span", "note", "Release"),
+    el("b", "mono", d.release_label || d.release || "not reported"),
   );
+  const cn = d.contract_note;
+  if (cn && cn.label && cn.state !== "current")
+    line.append(
+      badge(cn.label, cn.state === "unsupported" ? "fire" : ""),
+    );
   const u = d.update || {};
   const pending = Boolean(u.requested_at);
   if (u.status && u.status !== "idle") {
@@ -379,6 +386,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
         sub,
       ),
     );
+  if (cn && cn.reason && cn.state !== "current")
+    box.append(el("p", cn.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", cn.reason));
   if (builtin) box.append(el("p", "note ss-detail", "The built-in scanner never updates itself, so there is no Update now."));
   const actions = el("div", "ss-actions");
   const now = button(

@@ -16,6 +16,7 @@ and limits (``agent_broker``): a setting only changes how this Sentinel presents
 """
 import hashlib
 import json
+import re
 from datetime import datetime
 
 from django.utils import timezone
@@ -326,8 +327,11 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 FEATURES = ('secret_read', 'vantage')
 
 
+RELEASE_RE = re.compile(r'^[0-9]+(\.[0-9]+){1,3}([.-]?(a|b|rc)[0-9]+)?$')  # 1.4.0, 1.4, 1.4.0rc1 (the tag without its v); a dev or commit string is not a release number
+
+
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version`` (the commit), its ``release`` number (display only), the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -336,6 +340,9 @@ def clean_info(raw):
         if not isinstance(version, str) or len(version) > 64 or not all(c.isalnum() or c in '.-_+' for c in version):
             raise ApiError(400, 'version must be at most 64 letters, digits and . - _ +')
         out['version'] = version
+    release = raw.get('release')  # the release number (1.4.0) of a Sentinel built from a tagged release: display only, never a gate. A value that does not look like one is dropped, never an error, so a newer client's heartbeat is not refused over a label.
+    if isinstance(release, str) and 1 <= len(release) <= 32 and RELEASE_RE.fullmatch(release):
+        out['release'] = release
     contract = raw.get('contract_version')
     if contract is not None:
         if isinstance(contract, bool) or not isinstance(contract, int) or not 1 <= contract <= 1000:

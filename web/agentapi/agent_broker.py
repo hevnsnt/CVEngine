@@ -1019,6 +1019,12 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         from agentapi import sentinel_settings
         out['builtin'] = _sentinel().is_builtin(agent) if builtin_id is _UNKNOWN else agent.pk == builtin_id  # the install's own scanner (its updater is the server's)
         out['version'] =(agent.info or {}).get('version')
+        from agentapi import sentinel_contract
+        out['release'] = (agent.info or {}).get('release')  # 1.4.0 when the Sentinel is a tagged release's image, else None (display only)
+        out['release_label'] = out['release'] or 'not reported'
+        out['contract_version'] = (agent.info or {}).get('contract_version')
+        out['contract_state'] = sentinel_contract.state(out['contract_version'])
+        out['contract_note'] = sentinel_contract.describe(out['contract_version'])
         out['version_label'] = out['version'] or 'unknown (built without the updater)'  # a Sentinel installed with plain docker compose reports the build's commit; one with neither says so
         out['self_update'] = sentinel_settings.effective(agent, kinds=False)['self_update']
         out['updater'] = sentinel_settings.updater_state(agent)

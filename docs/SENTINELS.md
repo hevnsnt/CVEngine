@@ -176,6 +176,13 @@ A Sentinel says which contract it speaks: `info.contract_version` (a whole numbe
 
 Contract version 2 adds one kind, `waf` (wafw00f against the root of one web host): the target is `{host, ip, port, scheme}` and the result is `{outcome, products: [{name, manufacturer?}], generic}`, at most 20 products with names cut to 100 characters. The server stores a `waf` result through `cveFeed.waf_fingerprint.persist_waf_result`, and the WAF stage dispatches it. `waf` is offered only to a Sentinel that declares `contract_version` 2 or higher and lists `waf` in its capabilities; a Sentinel that declares 1, or nothing, is never offered it even if it lists it. `min_supported_contract_version` stays 1, so a Sentinel declaring 1 shows as `previous`.
 
+### Release number, contract floor and updates
+
+- **The contract floor is the only gate.** What a Sentinel is offered depends on `info.contract_version` against `min_supported_contract_version` and each kind's `kind_since`, nothing else. A Sentinel below the floor shows **update required** (with the contract it speaks and the one the server needs) and is offered no work. One above this server's contract shows **newer than this server (fine)**: it is offered the kinds this server knows and nothing else, a kind this server has never heard of is never offered, and a field it sends that the server does not read is ignored without an error.
+- **The release number is for display.** A Sentinel built from a tagged release reports `info.release` (for example `1.4.0`, read from its installed package metadata) next to `info.version` (the commit). The Sentinels page, `GET /api/v1/agents`, `GET /api/v1/sentinels/live` and the MCP `list_sentinels` and `get_sentinel` show both as `release` and `version`; a client that reports none (an older client, or an image built without a tag) shows **not reported**. A development build never invents a release number. No release number gates, hides or enables anything.
+- **The built-in scanner is pinned to an exact image digest** (`scanner.lock.json`); it changes only when a digest is approved and re-pinned, never by a tag moving.
+- **External Sentinels may update on their own** (their updater, or by hand) and keep working with a server that has not been updated, within the contract rules above.
+
 ## Troubleshooting
 
 - **"No scanner could take this work" or a task that was not picked up in time.** The targets stay due and the stage tries again. The Sentinel is offline, suspended, pending, out of scope, lacks the capability, or is busy. Check its card and the project's Sentinels tab. Internal targets need an internal Sentinel (one the server granted `network:internal`).
