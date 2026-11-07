@@ -20,6 +20,7 @@ urlpatterns = [
     path('settings/', views.settings_page, name='cve_settings'),
     re_path(r'^api/settings/(?P<path>.*)$', settings_api.dispatch, name='cve_api_settings'),
     path('agents/', views.agents_page, name='cve_agents'),
+    path('scanners/', views.scanners_page, name='cve_scanners'),
     path('sentinels/', views.sentinels_page, name='cve_sentinels'),
     path('setup/', views.onboarding, name='cve_onboarding'),
     path('cves/', views.cve_explorer_page, name='cve_explorer'),

@@ -366,9 +366,9 @@ SECTIONS = {
     'activity': 'Activity',
     'vulns': 'Findings',
     'matches': 'CVE matches',
-    'hygiene': 'Hygiene',
+    'hygiene': 'Config checks',
     'secrets': 'Secrets',
-    'suppliers': 'Suppliers',
+    'suppliers': 'Third parties',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
 }
@@ -428,10 +428,14 @@ def ui_context(request, active, slug=None, remember=True):
     ai_connected = bool(ai_cfg and ai_cfg.enabled)
     from agentapi.sentinel_broker import has_sentinels
     here = next((p for p in projects if p['slug'] == current), None) if slug != ALL_PROJECTS else None
-    return {'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
+    from cveFeed import nav as navmod
+    bounty_on = _bounty_allowed(request.user)
+    sentinels_on = bool(here and has_sentinels(here['slug'], here['org_slug']))
+    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS)
+    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
             'is_app_admin': request.user.is_superuser,
-            'bounty_enabled': _bounty_allowed(request.user),
-            'sentinels_enabled': bool(here and has_sentinels(here['slug'], here['org_slug'])),
+            'bounty_enabled': bounty_on,
+            'sentinels_enabled': sentinels_on,
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -697,6 +701,12 @@ def sentinels_page(request):
     enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
     return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs,
                                                       **ui_context(request, 'sentinels')})
+
+
+def scanners_page(request):
+    """Scanners: whether the scanners are working, in one click (static/cve/scanners.js). The Sentinels, the workers and scheduler (App Admin) and the
+    scan pause are read from the endpoints they already have; the Sentinels list and Provision form stay at /cve/sentinels/."""
+    return render(request, 'cveFeed/scanners.html', ui_context(request, 'scanners'))
 
 
 def cve_explorer_page(request):

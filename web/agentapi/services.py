@@ -596,6 +596,9 @@ def list_scans(ctx, slug, params):
     status = str(params.get('status', '')).lower()
     if status in ('running', '1'):  # the dashboard's definition: a scan "running" since before the window is stalled
         qs = counts.running_scans(qs)
+    elif status == 'active':  # running (the dashboard's definition) and queued together: one request where the shell used two
+        from django.db.models import Q
+        qs = qs.filter(Q(pk__in=counts.running_scans(qs).values('pk')) | Q(scan_status=-1))
     elif status == 'stalled':
         qs = counts.stalled_scans(qs)
     elif SCAN_STATUS_FILTER.get(status) is not None:
@@ -2549,7 +2552,7 @@ def search_hosts(ctx, slug, params):
     google: hosts that serve an exposed secret the inventory counts), ``zombie:`` (yes, no) and ``country:`` (ISO code
     or name) filter one field; a filter value takes a comma-separated list for OR (``port:80,443``), unless quoted; ``-term``
     negates; quote a phrase; a bare word followed by a dotted version (``wordpress 7.1``) is that product at that release, a version on its own
-    keeps matching any text that contains it. ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
+    keeps matching any text that contains it. ``exposed=1`` keeps only the exposed hosts (the dashboard tile's rule); ``heat`` (fire|smoke|ice|clean|unscanned) narrows the page to that heat; ``facets.heat`` in the response
     always counts every value over the whole match of q, ignoring ``heat`` itself, so the chips keep their real totals while one is
     selected. Counting heat walks the match (up to HEAT_FACET_CAP hosts), so ``facets=none`` skips it and every facet (``facets`` is
     then null), and ``page_size=0`` answers with ``count`` alone (no rows, no facets): the cheap modes for a poll, a palette or a badge.
@@ -2570,6 +2573,9 @@ def search_hosts(ctx, slug, params):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _internal_filter(search_host_rows(project, terms), params)
+    if str(params.get('exposed') or '').lower() in ('1', 'true', 'yes'):  # the hosts the dashboard's Exposed tile counts (cveFeed.counts.exposed_among)
+        from cveFeed.counts import exposed_among
+        qs = qs.filter(pk__in=exposed_among(qs, project_ids=None if _is_all(project) else [project.id]).values('pk'))
     # facets=none and page_size=0 are the cheap modes: no walk over the match for heat counts (a poll, a palette, an export page need none)
     counts_only = page_args(params, zero_ok=True)[1] == 0
     no_facets = counts_only or str(params.get('facets') or '').strip().lower() == 'none'
