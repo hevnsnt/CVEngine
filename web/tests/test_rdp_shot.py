@@ -255,8 +255,7 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		from cveFeed import discovery
 		return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 									 port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-									 light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-									 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kw)
+									 light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), **kw)
 
 	def test_the_pipeline_runs_the_stage_only_when_a_candidate_exists(self):
 		from cveFeed import discovery

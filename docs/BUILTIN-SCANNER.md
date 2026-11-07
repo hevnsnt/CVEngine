@@ -38,11 +38,11 @@ The container's health check passes while the scanner's heartbeats reach the ser
 
 ## When the scanner is away
 
-A scan never fails because the scanner is restarting or gone. Once the built-in scanner has enrolled, its kinds never run on the server again (`CVENGINE_LOCAL_FALLBACK` unset). A stage that needs one waits instead: nothing is marked failed and nothing is recorded, so its targets stay due. A strip on every page says **Scanner offline: ... work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.**, System status carries `scanning.scanner.offline: true` and, for an App Admin, a `problems` line. The hosts of a scan whose stage waited are queued again (a deferred re-test, due ten minutes later, `CVENGINE_SCANNER_REQUEUE_MINUTES`, and held back for as long as a scanner is still missing), so the work runs soon after the scanner is back and not at the target's next scheduled scan.
+A scan never fails because the scanner is restarting or gone. No kind runs on the server (since 1.4 there is no local path for any of them). A stage that needs a scanner waits instead: nothing is marked failed and nothing is recorded, so its targets stay due. A strip on every page says **Scanner offline: ... work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.**, System status carries `scanning.scanner.offline: true` and, for an App Admin, a `problems` line. The hosts of a scan whose stage waited are queued again (a deferred re-test, due ten minutes later, `CVENGINE_SCANNER_REQUEUE_MINUTES`, and held back for as long as a scanner is still missing), so the work runs soon after the scanner is back and not at the target's next scheduled scan.
 
-What still runs on the server whatever the scanner does: bbot discovery, the HTTP and version probes and the other in-process checks, the all-ports nmap sweep and its version pass, the nmap script probes of single ports, wafw00f, the node2shell check, the database exposure probes and the RDP login-screen screenshots. Those move in later phases ([SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#what-exists-today)).
+Nothing is scanned on the server whatever the scanner does: every scan kind, the HTTP and version probes and the other checks that used to run in-process included, is a Sentinel's work. With no scanner able to take it a stage waits and its targets stay due, as above.
 
-`CVENGINE_LOCAL_FALLBACK=all` in `.env` (then `make up`) lets every kind run on the server again, the way 1.3 did: the escape hatch while you sort a scanner out.
+`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4: it used to let a kind run on the server when no scanner took it, and no kind has a local path any more. Remove it from `.env`; setting it changes nothing.
 
 ## Signed-in work
 

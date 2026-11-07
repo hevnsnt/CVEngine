@@ -550,9 +550,9 @@ def run_fact_probe(check):
             project = Project.objects.get(pk=params['project_id'])
             asset = probes.asset_key(sub.name, entry)
             answered = probe_dispatch.try_http_probes(project, None, [(sub, asset, entry)], unattended=params.get('unattended', True))
-            if answered is None or answered[1]:  # no Sentinel took it, or its task ended with no result: nothing ran
+            found = answered.get(asset)  # try_http_probes raises ScannerUnavailable when no Sentinel took it or its task ended with no result: nothing ran
+            if found is None:
                 raise ScannerUnavailable('http_probe', 'no scanner returned a result for this probe')
-            found = answered[0][asset]
             if isinstance(found, Exception):
                 return {'status': 'failed', 'error': str(found)[:200], 'summary': 'the scanner could not run the probe'}
             found = probes.apply_remote(params['project_id'], params['domain_id'], sub, entry, found)

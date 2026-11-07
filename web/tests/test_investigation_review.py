@@ -134,7 +134,7 @@ class CapOrderTests(WordPressFixture, TestCase):
         with mock.patch.object(probes, 'max_hosts', return_value=1), mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
             ran = []
             with mock.patch.object(probes, 'run_one', side_effect=lambda project, domain, sub, entry, **kw: ran.append(sub.name) or []):
-                probes.run_for_scan(self.scan_obj.id, get=lambda url: None, sleep=lambda s: None)
+                probes.run_for_scan(self.scan_obj.id)
         self.assertTrue(all(name not in ('www.rt.test', 'rt.test') for name in ran))
 
 

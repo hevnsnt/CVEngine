@@ -10,14 +10,14 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
-from agentapi import scanner_fallback, scanner_state
+from agentapi import scanner_state
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
 from agentapi import sentinel_policy as policy
 from agentapi import sentinel_settings as ss
 from agentapi.auth import create_token
-from agentapi.models import Agent, ScannerFallback, SentinelDefaults, SentinelTask
+from agentapi.models import Agent, SentinelDefaults, SentinelTask
 from agentapi.services import ApiError, Ctx
 from dashboard.models import AuditLog, ProjectMembership
 from reNgine import resources
@@ -125,21 +125,23 @@ class DenyTests(PolicyBase):
         self.assertIn('off on CVEngine Scanner', raised.exception.why)
         self.assertFalse(SentinelTask.objects.exists())  # nothing was queued for a Sentinel that was told not to take it
 
-    def test_the_telemetry_row_says_disabled_everywhere_when_the_kind_runs_here_instead(self):
+    def test_a_kind_turned_off_everywhere_waits_with_the_reason_and_nothing_is_recorded(self):
         fake = FakeScanner(kinds=['openvas', 'nmap']).start_for(self)
         outside = self.external('Remote-1')
         self.deny_everywhere(fake, outside)
-        self.assertIsNone(dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10']))
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('openvas', 'disabled_everywhere')])
-        self.assertIn('disabled_everywhere', scanner_fallback.REASONS)
+        with self.assertRaises(resources.ScannerUnavailable) as raised:
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
+        self.assertIn('OpenVAS is not enabled on any live Sentinel (', raised.exception.why)
+        self.assertEqual(sb.capacity_state(self.project, 'openvas', why=True)['reason'], 'disabled')
 
     def test_a_plain_offline_scanner_is_still_no_scanner(self):
         outside = self.external('Remote-1')
         Agent.objects.filter(pk=outside.pk).update(last_seen=timezone.now() - timedelta(hours=1))
         state = sb.capacity_state(self.project, 'openvas', why=True)
         self.assertEqual((state['reason'], state['message']), ('offline', 'OpenVAS is not enabled on any live Sentinel (Remote-1 has it but is offline)'))
-        dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
-        self.assertEqual(list(ScannerFallback.objects.values_list('reason', flat=True)), ['no_scanner'])
+        with self.assertRaises(resources.ScannerUnavailable) as raised:
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, ips=['192.0.2.10'])
+        self.assertIn('Remote-1 has it but is offline', raised.exception.why)
 
     def test_the_reasons_for_none(self):
         self.assertEqual(sb.capacity_state(self.project, 'openvas', why=True)['reason'], 'never')

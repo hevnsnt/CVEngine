@@ -853,7 +853,7 @@ def api_alive(request):
 @require_GET
 def api_scanner(request):
     """The derived "scanner offline" state for the page's strip (static/cve/scannerbar.js): which kinds are waiting for a scanner and the sentence to
-    show, from ``agentapi.scanner_state`` (cached for 15 seconds, no query at all when ``CVENGINE_LOCAL_FALLBACK`` is unset). Read only. The sentence
+    show, from ``agentapi.scanner_state`` (cached for 15 seconds, no query at all until the built-in scanner has enrolled). Read only. The sentence
     about a scanner that never registered names a server setting, so only an App Admin gets it."""
     from agentapi import scanner_state
     response = JsonResponse(scanner_state.status(admin=request.user.is_superuser))

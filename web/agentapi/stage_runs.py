@@ -9,11 +9,10 @@ How a stage is continued (replay). A stage is ordinary code that calls ``sentine
 StageRun those calls are keyed (``task_key``: the kind and the target): the first time a key is asked for, the task is created and the pass
 stops (``Suspend``, a ``BaseException``, so no ``except Exception`` of the stage swallows it); the callback runs the same stage code again, and
 this time the call finds the task it made, over, and returns its result exactly as the blocking wait would have (the same activity lines, the
-same ``_no_local`` decision and ``ScannerFallback`` row, the same ``ScannerUnavailable``). A stage with two waits in a row (the port sweep, then the fingerprint)
+same ``ScannerUnavailable``). A stage with two waits in a row (the port sweep, then the fingerprint)
 simply stops twice. Everything the stage does before its waits is done again on every pass, so it must be safe to repeat: the ledger makes the
 scan stages so (a port sweep that was recorded is not run again), ``once`` keeps a step that is not (a pipeline stage that finished, a row
-that was written), activity lines said in an earlier pass are not said again (``activity.log`` asks ``repeated_activity``), a fallback row is
-written once per decision, and a ledger claim taken in a pass is held, not released, while the run waits (``hold_claim``).
+that was written), activity lines said in an earlier pass are not said again (``activity.log`` asks ``repeated_activity``), and a ledger claim taken in a pass is held, not released, while the run waits (``hold_claim``).
 
 The waits a blocking stage did itself are done by ``drive``: the claim budget (a task nobody claimed in time is expired), the queue budget,
 the completion budget counted from the claim, the reap of a Sentinel that stopped heartbeating, the last Sentinel leaving, and a stop of the scan.
@@ -149,7 +148,7 @@ def task_key(kind, target, host='', ips=None, internal=False, secret_ref=None):
 
 class Pass:
     """One pass of a StageRun's work in this worker: the run's row (unsaved until the first wait), the waits it already has, and what the
-    engine remembers from earlier passes (the results of ``once``, the fallback decisions and activity lines already recorded)."""
+    engine remembers from earlier passes (the results of ``once`` and activity lines already recorded)."""
 
     def __init__(self, row, adapter_name):
         self.row = row
@@ -157,8 +156,6 @@ class Pass:
         self.tasks = dict(row.tasks or {})  # str(task id) -> wait state (``sentinel_dispatch._Dispatch.state``)
         engine = (row.context or {}).get('_engine') or {}
         self.memo = dict(engine.get('once') or {})
-        self.fallbacks = list(engine.get('fallbacks') or [])
-        self.fallback_cursor = 0
         self.activity_prev = list(engine.get('activity') or [])
         self.activity_new = []
         self.groups = dict(engine.get('groups') or {})
@@ -218,16 +215,6 @@ class Pass:
         work.settle()
         state['settled'] = True
 
-    def counted(self, work):
-        """Whether the fallback decision of this task was recorded already (``_Dispatch.no_local`` records it once per run)."""
-        state = self.tasks.get(str(work.task.pk)) or {}
-        return bool(state.get('counted'))
-
-    def mark_counted(self, work):
-        state = self.tasks.get(str(work.task.pk))
-        if state is not None:
-            state['counted'] = True
-
     def group(self, gid):
         return self.groups.setdefault(gid, {})
 
@@ -245,17 +232,6 @@ class Pass:
         value = fn()
         self.memo[name] = _jsonable(value)
         return value
-
-    def fallback_seen(self, signature):
-        """Whether a fallback decision with this ``signature`` (kind, reason) at this point of the pass was recorded by an earlier pass. The passes
-        replay the same stage code, so the n-th decision of this pass is the n-th of the last one when the code took the same way."""
-        signature = list(signature)
-        if self.fallback_cursor < len(self.fallbacks) and self.fallbacks[self.fallback_cursor] == signature:
-            self.fallback_cursor += 1
-            return True
-        self.fallbacks = self.fallbacks[:self.fallback_cursor] + [signature]
-        self.fallback_cursor = len(self.fallbacks)
-        return False
 
     def repeated_activity(self, kind, message, project_id, scan_id, status):
         """An activity line an earlier pass of this run already wrote with these words (still running, for a running one): it is not written again."""
@@ -285,7 +261,7 @@ class Pass:
     # --- saving ------------------------------------------------------------------------------------------------------------------------
 
     def engine(self):
-        return {'once': self.memo, 'fallbacks': self.fallbacks, 'activity': (self.activity_prev + self.activity_new)[-500:],
+        return {'once': self.memo, 'activity': (self.activity_prev + self.activity_new)[-500:],
                 'groups': self.groups, 'claims': [list(c) for c in self.claims], 'token': self.token, 'refill': self.refill}
 
     def save_waiting(self):
@@ -422,7 +398,7 @@ def once(name, fn):
 
 
 class _LeaseKeeper:
-    """Keeps a running pass's lease alive while the pass works (a long local fallback, a slow persistence), so the tick never mistakes it for
+    """Keeps a running pass's lease alive while the pass works (a slow persistence), so the tick never mistakes it for
     an orphan; a pass whose worker died stops renewing it, and the tick re-drives the run once it ran out."""
 
     def __init__(self, pk):
@@ -720,7 +696,7 @@ def _drive(row, sentinel_broker, sentinel_dispatch):
                 capacity[ck] = sentinel_broker.capacity_state(work.project, work.kind, work.internal)['state'] == 'none'
             none_left = capacity[ck]
         over = work.step(now, none_left)
-        keep = {k: state[k] for k in ('key', 'group', 'index', 'settled', 'counted', 'stop_check') if k in state}
+        keep = {k: state[k] for k in ('key', 'group', 'index', 'settled', 'stop_check') if k in state}
         state.clear()
         state.update(work.state(keep.get('key')), **{k: v for k, v in keep.items() if k != 'key'})
         if over:

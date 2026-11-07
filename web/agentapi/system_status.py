@@ -53,15 +53,10 @@ def _scanning():
 
 
 def _scanner(admin):
-    """The derived "scanner offline" state (``agentapi.scanner_state``): the kinds that may not run on this server and have no live scanner, the ones no
+    """The derived "scanner offline" state (``agentapi.scanner_state``): the kinds that have no live scanner, the ones no
     scanner ever registered for, and the wording the interface shows. Read only; nothing is paused or failed by it."""
-    from agentapi import scanner_fallback, scanner_state
-    out = scanner_state.status(admin=admin)
-    try:  # the telemetry is a nicety next to the state: a failure to read it leaves the block out rather than failing the scanner reading
-        out['fallbacks'] = scanner_fallback.status(admin=admin)
-    except Exception:  # noqa: BLE001
-        logger.warning('scanner fallback telemetry could not be read', exc_info=True)
-    return out
+    from agentapi import scanner_state
+    return scanner_state.status(admin=admin)
 
 
 BUILTIN_ENROLL_GRACE = timedelta(minutes=10)  # a freshly switched-on scanner needs a beat run, the blob and its own start; longer than this is a problem
@@ -632,10 +627,6 @@ def system_status(ctx):
         notes.append(scanner['message'])
     if admin and scanner.get('never_seen'):
         problems.append(scanner['never_seen_message'])
-    if admin and scanner.get('unknown_kinds'):
-        problems.append(scanner['unknown_kinds_message'])
-    if admin:
-        problems.extend(scanner.get('vantage') or [])  # kinds moved to a scanner that lacks this server's proxy, Tailscale or private-target setting
     scanning['scanner'] = scanner
     scanning['builtin_scanner'] = _probe(problems, 'built-in scanner', lambda: _builtin_scanner(admin, problems))
     update = _probe(problems, 'update', _update)

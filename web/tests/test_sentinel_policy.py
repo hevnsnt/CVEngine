@@ -16,6 +16,7 @@ from cvengine_scanner import flags as scan_flags
 from agentapi import agent_broker as broker
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
+from reNgine.resources import ScannerUnavailable
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from cveFeed import nuclei_scan
@@ -327,14 +328,14 @@ class CapacityQueueTests(DispatchBase):
         SentinelTask.objects.filter(pk=orphan.pk).update(created_at=timezone.now() - timedelta(hours=2))
         self.assertEqual(sb.capacity_state(self.project, 'nmap')['state'], 'free')
 
-    def test_a_free_sentinel_that_never_claims_falls_back_after_the_claim_timeout_not_the_queue_budget(self):
+    def test_a_free_sentinel_that_never_claims_gives_up_after_the_claim_timeout_not_the_queue_budget(self):
         from tests.test_sentinel_capacity import Clock
         self.sentinel(1)
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, timeout=120)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # the work stays due; it is not run here
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, timeout=120)
         self.assertLess(clock.now - 1000, 30)  # its own queued task did not turn the wait into the 300 s queue wait
 
 

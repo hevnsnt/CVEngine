@@ -2,7 +2,7 @@
 
 Status: in progress, on the `1.4-develop` branch. Built: the result contract (`web/agentapi/sentinel_contract.json`), the Sentinel image
 published by digest, the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
-anything, `CVENGINE_LOCAL_FALLBACK` (unset, the built-in scanner's kinds never run on the server once it has enrolled) with the derived
+anything, no local path for any kind (`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) with the derived
 "scanner offline" state and non-fatal waiting, signed-in nuclei through the secure read, and the server's vantage point delivered to the
 built-in scanner. The phases below say what is left. How the built-in scanner works for an operator is in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
@@ -43,8 +43,8 @@ rough sizes of the work.
 
 ### B. Tool work that became Sentinel kinds in contract version 3
 
-Built in 1.4: each module asks for a scanner first (`sentinel_dispatch.scanner_or_local`) and runs here only when no scanner takes the work and
-`CVENGINE_LOCAL_FALLBACK` lets the kind run here; otherwise the stage waits and its targets stay due. The server keeps every decision (scope, exclusions,
+Built in 1.4: each module asks for a scanner first (`sentinel_dispatch.scanner_or_local`) and never runs here: when no scanner takes the work the stage
+waits (`ScannerUnavailable`) and its targets stay due. The server keeps every decision (scope, exclusions,
 the finding) and the scanner runs the tool. A Sentinel declares these kinds only to a server whose contract has them (`server_knows`).
 
 | Module | What it runs | Kind | Notes |
@@ -176,8 +176,9 @@ which send nothing to the target and need no vantage point.
    hosts of a scan or host run during which a stage waited are queued again as a deferred re-test (`cveFeed.scanner_wait`, due
    `CVENGINE_SCANNER_REQUEUE_MINUTES` later and held back while a scanner is still missing), so a scanner restart costs a delay, never a
    failed scan. It is a derived state, not the pause: the conductor keeps starting discovery, which runs on the server.
-5. Move one kind at a time behind `CVENGINE_LOCAL_FALLBACK=<kinds>` (unset, the built-in scanner's kinds, `sentinel_dispatch.BUILTIN_SCANNER_KINDS`, are taken off this server once it has enrolled; `all` is the 1.3 behaviour; a kind joins that list in the change that teaches the built-in scanner to run it; see the note below), delete each local path after the telemetry shows no fallbacks
-   for a set number of days. The kinds of section B exist since contract version 3 (1.4), so each can now be moved like the others.
+5. Move one kind at a time off this server, then delete its local path. Done in 1.4: every contract kind is in `sentinel_dispatch.NEVER_LOCAL` (the
+   internal `discover` kind is Sentinel-only by design), `CVENGINE_LOCAL_FALLBACK` is ignored, and the fallback telemetry that gated the deletions
+   (`agentapi.ScannerFallback`, `manage.py scanner_fallbacks`) is gone with the paths it watched.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
    and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
    source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
@@ -193,23 +194,14 @@ which send nothing to the target and need no vantage point.
 
 Exposed secrets (Kingfisher as a new Sentinel kind, `secrets_scan`, with a project inventory) is planned as its own set of PRs on top of these phases in [SECRETS-PLAN.md](SECRETS-PLAN.md).
 
-### Fallback telemetry: the gate for deleting a local path
+### Fallback telemetry (removed)
 
-Step 5 deletes a local path only after the telemetry shows no fallbacks. `sentinel_dispatch._no_local` is the one place the decision "no Sentinel took it,
-the local run is allowed" is made, and when `CVENGINE_LOCAL_FALLBACK` allows the kind it writes one row to `agentapi.ScannerFallback` (`agentapi/scanner_fallback.py`):
-kind, project and a reason, never a target or an address. A kind that is off the list waits instead and records nothing, as does a Sentinel that answers and
-an internal task (which never had a local run). The reasons are `no_scanner` (nothing live could take it, including the last Sentinel leaving while the task
-queued), `not_claimed_in_time`, `slot_busy` (every slot stayed in use until the queue budget ran out), `failed_then_local`, `completion_timeout` (claimed, never
-reported), `over_chunk` (a chunk of an nmap, naabu or nuclei stage that was never sent to a Sentinel because an earlier chunk of the same stage went unclaimed, so the stage stopped sending and it runs here; each chunk that runs here is one row, every chunk of a stage now goes to a Sentinel side by side through `dispatch_many`; a chunk never sent because no live Sentinel was left, including the last one leaving while an earlier chunk queued, is `no_scanner`), `partial_result` (the nmap stage's leftover: a Sentinel finished the chunk but reported no host row for some addresses, or did not report every port naabu found on one, so those are fingerprinted here; one row per stage; also a background UDP scan whose Sentinel report named no host for the address) and `disabled_everywhere` (a `no_scanner` with a cause: a live Sentinel has the kind and the capability policy keeps it off every one; the column is a plain `CharField(24)` with no `choices`, so it needed no migration). Recording is one INSERT in its own savepoint, catches every error and logs the
-first failure of a process once; it can never fail or slow a scan. The weekly maintenance prunes rows older than 30 days.
-
-`python manage.py scanner_fallbacks --days N [--kind K]` prints the counts by kind and reason and when each kind last ran locally. The system status carries
-`scanning.scanner.fallbacks`: `{days: 7, by_kind: {kind: {count, last_at}}}`. An App Admin also gets `ready_to_delete`, the kinds with no fallback in the last
-`SOAK_HOURS` (72) hours and a live built-in scanner that declares the kind; anyone else sees the counts only. That is the gate, together with the fake-scanner
-tests: a kind in `ready_to_delete` has soaked and may have its local path deleted. Two things it does not see: the clock starts when the table is first deployed
-(an empty table says nothing about the days before it, so read the soak from the upgrade on), and the by-design local runs that are not a fallback from a
-Sentinel (a signed-in nuclei pass) are not recorded, so that path needs its own migration before its kind is deleted. The addresses of an nmap chunk a
-Sentinel finished without covering them are a fallback like any other (`partial_result`): recorded when nmap may run here, left due when it may not.
+Step 5 used to delete a local path only after telemetry showed no fallbacks: `sentinel_dispatch._no_local` wrote a row to `agentapi.ScannerFallback` whenever
+`CVENGINE_LOCAL_FALLBACK` let a kind run here, `manage.py scanner_fallbacks` printed the counts and the system status carried
+`scanning.scanner.fallbacks` with a `ready_to_delete` gate. With every local path deleted there is nothing left to count: the model, its weekly prune, the
+command, the status block, the reviewer's `local_share` check, the per-hour fallback caps (`CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR`,
+`CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR`) and the fallback warning of the egress status are removed (migration `agentapi.0019_drop_scanner_fallback`
+drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavailable`.
 
 ## Risks
 
@@ -224,8 +216,7 @@ Sentinel finished without covering them are a fallback like any other (`partial_
    its own), and its settings reply carries `vantage` (`sentinel_settings.builtin_vantage`: the proxies, the bypass list, whether private
    addresses go through the proxy, and the private ranges the server may scan), derived at every reply, stored nowhere and sent to the
    built-in scanner alone, which applies it to nuclei, WPScan, testssl.sh, wafw00f and its scope floor. An external Sentinel ignores it. Its
-   nmap OS guesses are judged as this server's own (they cross the same path). `vantage_warnings` now speaks only of a built-in image too old
-   to apply them.
+   nmap OS guesses are judged as this server's own (they cross the same path). (The warning that an image too old to apply them would scan from the wrong network, `vantage_warnings`, is gone with the local fallback it described.)
 
    Why share celery's namespace rather than route through the sidecar: routing the tailnet from another container needs forwarding and
    address translation inside celery's namespace and still leaves the host network and macvlan overlays behind; a second Tailscale node
@@ -263,39 +254,32 @@ It is shown in System status as `scanning.builtin_scanner` (`builtin_scanner.sta
 server wrote its enrollment, or enrolled and not heard from for three minutes. Every Sentinel row of the Sentinels page and the agent list carries `builtin`;
 the card of the built-in scanner shows a Built-in chip and no Update now button. The steps to try it are in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
 
-## `CVENGINE_LOCAL_FALLBACK`
+## `CVENGINE_LOCAL_FALLBACK` (ignored since 1.4)
 
-Kinds in `sentinel_dispatch.NEVER_LOCAL` (`secrets_scan` and the nuclei kinds: the three passes and `nuclei_validate`) never run on this server, whatever this variable says; a name of one in it is ignored. Unset, every other kind except the built-in scanner's (`sentinel_dispatch.BUILTIN_SCANNER_KINDS`: nmap, naabu, the three nuclei passes, testssl, the UDP sweep and WPScan) may still run on this server once the built-in scanner has enrolled, and every kind before that or with the scanner turned off (`default_fallback_kinds`). `all` is every kind, as in 1.3. `none` or a comma list of kinds
-(`nmap,naabu`) names the kinds that may; any other kind is never run here. A stage that needs one raises
+No kind runs on this server: `sentinel_dispatch.NEVER_LOCAL` holds every contract kind (`discover`, the internal ranges, is Sentinel-only by design), so
+the variable has nothing left to allow. It used to be `all`, `none` or a comma list of the kinds that may run here when no scanner took them. It is
+read nowhere now: a value in `.env` changes nothing, nothing warns about it, and it can be removed. A stage that needs a scanner raises
 `resources.ScannerUnavailable` (a `MemoryBusy`) where it used to run the tool locally. Every stage that can see it waits: it records
 nothing in the ledger (not `failed`, not `done`, so the target stays due and its claim is released; the one exception is the nmap fast scan,
 which marks `done` an address a Sentinel already fingerprinted in full, so only the rest stay due, an address a Sentinel finished without a host row
 or without every port naabu found among them: it is never fingerprinted here), the stage is not marked failed, and its activity line says "no scanner could take this work (<kind>)", never that memory was short. That covers the nmap
-fast scan, the naabu sweep (nmap keeps its default ports), the nuclei light, targeted and weekly deep passes, WPScan, testssl,
-UDP, and the kinds of contract version 3: wafw00f, node2shell, the RDP screenshot and the database check (the stage returns `skipped`), the
+fast scan, the naabu sweep, the nuclei light, targeted and weekly deep passes, WPScan, testssl,
+UDP, the web probes, the checks that read a target (certificates, DNS, pages, buckets, suppliers) and the kinds of contract version 3: wafw00f, node2shell, the RDP screenshot and the database check (the stage returns `skipped`), the
 background full sweep (the address is swept later, with no back-off), the nmap probe (counted as held), the path check (no verdict) and the
 template check (no AI template is written, an approved template's test reports the hosts as not tested). Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
 signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes follow the same rule, through the built-in scanner's secure read. The hosts of a run during which a stage waited are queued again (`cveFeed.scanner_wait`).
 
-A name in the list that is not a kind (`nmpa` for `nmap`) is ignored, which reads as `none` for that kind and so strands it. It is never silent: the server logs one warning per
-process for each distinct value, the status's `scanner` block carries `unknown_kinds`, and for an App Admin `problems` says "CVENGINE_LOCAL_FALLBACK names kinds
-that do not exist: ...; check the spelling". The semantics do not change; the name is still ignored.
-
-Moving a kind does not change where its scans start from (risk 6): the built-in scanner shares celery's network namespace and is sent this server's egress proxy and private-target
-setting (`sentinel_settings.builtin_vantage`). `scanner_state.vantage_warnings()` warns (it never refuses) only when the enrolled built-in scanner's image does not report the `vantage` feature, so
-it would ignore them: then, when the policy takes a kind off and a proxy is configured, the `tailscale` profile is on, or private targets are allowed, `scanning.scanner.vantage` lists a sentence per
-cause and an App Admin gets each in `problems`. The proxy sentence names only the kinds whose tools take a proxy. Internal ranges are not a cause: they are Sentinel-only already.
+The built-in scanner shares celery's network namespace and is sent this server's egress proxy and private-target setting (`sentinel_settings.builtin_vantage`), so its scans start from where the server's did (risk 6). The older warning that an image without the `vantage` feature would ignore them (`scanning.scanner.vantage`) went with the policy it described.
 
 
 ### The "scanner offline" reading
 
 Waiting is visible, not a pause. `agentapi/scanner_state.py` derives, from the Sentinels' own heartbeats and with nothing written, which kinds
-are waiting: the kinds `CVENGINE_LOCAL_FALLBACK` takes off this server (`waiting_kinds()`) for which no live, active Sentinel on the instance declares
-the capability right now. It is cached for 15 seconds, and with the variable unset it is empty and costs no query. `state()` adds `never_seen`: the
-waiting kinds for which no Sentinel that could run them has ever registered, in any status (revoked and suspended ones count as seen). That is the
-foot-gun: `CVENGINE_LOCAL_FALLBACK=none` on a server with no scanner strands every kind, and it is a `problems` line in the system status.
+are waiting: every kind (`waiting_kinds()`, none but `discover` runs here) for which no live, active Sentinel on the instance declares
+the capability right now. It is cached for 15 seconds, and until the built-in scanner has enrolled for the first time it is empty and costs no query (a fresh install's stages wait all the same). `state()` adds `never_seen`: the
+waiting kinds for which no Sentinel that could run them has ever registered, in any status (revoked and suspended ones count as seen), a `problems` line in the system status for an App Admin.
 
 It is shown as a `scanning.scanner` block in the system status, a note ("Scanner offline: ... Nothing has failed; it resumes automatically when a scanner
 reconnects.") and, for an App Admin, the never-seen sentence, and as a strip on every page (`static/cve/scannerbar.js`, `/cve/api/scanner`) with a
@@ -312,7 +296,7 @@ A kind can also wait because it is **turned off**, not because a scanner is gone
 
 `agentapi/sentinel_policy.py` is the per-Sentinel, per-kind policy: `allow` (the default for a declared kind), `deny` (what `disabled_kinds` always meant) or `prefer`, and a per-kind `max_concurrent`. It lives in `Agent.managed_settings['kinds']` (the same `{value, at, by}` envelope as every managed setting, so last write wins and each change is audited with the map before and after) and, for kinds a Sentinel has no policy for, in `SentinelDefaults.builtin_kinds` (shipped as OpenVAS denied) and `external_kinds`. Resolution per Sentinel and kind: the machine's veto (`disabled_kinds` it reported; the server cannot lift it), the Sentinel's own policy, the instance default of its class (built-in or external), allow. Only a kind the Sentinel declares can be allowed or preferred (`409` otherwise).
 
-`sentinel_broker.effective_capabilities` leaves out every denied kind, so `_claimable`, `refusal`, `capacity_state` and `eligible_sentinels` need no other rule. `_try_claim` then orders: deny, the per-kind cap (a queued task whose kind is at its cap for this Sentinel is skipped, a later task of another kind may be taken), then prefer (a task younger than `prefer_defer_for(kind)`, which is `CVENGINE_SENTINEL_PREFER_DEFER_SECONDS` (default 60, a ceiling) and for every kind but OpenVAS at most the stage claim window less two seconds so a preference never costs a stage its Sentinel, is held back from a Sentinel that does not prefer its kind while another live Sentinel that does is in scope, not updating and has room). `capacity_state` counts the slots of a kind as the sum over the eligible Sentinels of the smaller of their free slots and their headroom under the cap. With `why=True`, a `none` carries `reason` (`disabled`, `offline`, `withheld`, `inactive`, `outdated` or `never`) and a sentence naming each Sentinel that has the kind, which `dispatch_or_none` and the stages pass into the stage message and `ScannerFallback.reason` (`disabled_everywhere` for `disabled`). The OpenVAS tick logs one line per tick naming the state instead of passing silently over a project. The wire format to a Sentinel is unchanged: `settings.disabled_kinds` in the registration and heartbeat replies is derived from the policy (every denied kind), so a client that predates the policy keeps honouring it. After prefer, `_try_claim` balances: a task younger than `balance_defer_for(kind)` (`CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS`, default 60; the same stage-window rule as `prefer_defer_for`, `_stage_window`: at most the claim window less two seconds for every kind but OpenVAS) is passed over by a Sentinel that holds tasks while `_lighter_elsewhere` finds another live Sentinel with a strictly lower `held / max_concurrent` that `_can_take` the task (live, not updating, free slot, per-kind cap, and the same `refusal` as `_preferred_elsewhere`: scope, hosts, credential, internal network, capability). The candidates (`_peers`) and what they hold are read once per `(project, kind)` for one pass (one query for the Sentinels, one for their tasks), with the rights shared with the prefer check, and the answer is memoised like the prefer answer, so a pass over many queued tasks does not query per task; a Sentinel that holds nothing skips the check altogether. A Sentinel that prefers the kind is never held back (prefer wins), the built-in scanner is a symmetric peer (signed-in work is refused to the others by `refusal`), and `CVENGINE_SENTINEL_BALANCE=0` is the kill switch. `activity_metrics` (the last hour's utilisation, finished tasks and queue wait of each Sentinel and kind, and the queue depth by kind) feeds `GET sentinels/live` (`load` per Sentinel, `kinds`) and the system status (`sentinels.load`).
+`sentinel_broker.effective_capabilities` leaves out every denied kind, so `_claimable`, `refusal`, `capacity_state` and `eligible_sentinels` need no other rule. `_try_claim` then orders: deny, the per-kind cap (a queued task whose kind is at its cap for this Sentinel is skipped, a later task of another kind may be taken), then prefer (a task younger than `prefer_defer_for(kind)`, which is `CVENGINE_SENTINEL_PREFER_DEFER_SECONDS` (default 60, a ceiling) and for every kind but OpenVAS at most the stage claim window less two seconds so a preference never costs a stage its Sentinel, is held back from a Sentinel that does not prefer its kind while another live Sentinel that does is in scope, not updating and has room). `capacity_state` counts the slots of a kind as the sum over the eligible Sentinels of the smaller of their free slots and their headroom under the cap. With `why=True`, a `none` carries `reason` (`disabled`, `offline`, `withheld`, `inactive`, `outdated` or `never`) and a sentence naming each Sentinel that has the kind, which `dispatch_or_none` and the stages pass into the stage message. The OpenVAS tick logs one line per tick naming the state instead of passing silently over a project. The wire format to a Sentinel is unchanged: `settings.disabled_kinds` in the registration and heartbeat replies is derived from the policy (every denied kind), so a client that predates the policy keeps honouring it. After prefer, `_try_claim` balances: a task younger than `balance_defer_for(kind)` (`CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS`, default 60; the same stage-window rule as `prefer_defer_for`, `_stage_window`: at most the claim window less two seconds for every kind but OpenVAS) is passed over by a Sentinel that holds tasks while `_lighter_elsewhere` finds another live Sentinel with a strictly lower `held / max_concurrent` that `_can_take` the task (live, not updating, free slot, per-kind cap, and the same `refusal` as `_preferred_elsewhere`: scope, hosts, credential, internal network, capability). The candidates (`_peers`) and what they hold are read once per `(project, kind)` for one pass (one query for the Sentinels, one for their tasks), with the rights shared with the prefer check, and the answer is memoised like the prefer answer, so a pass over many queued tasks does not query per task; a Sentinel that holds nothing skips the check altogether. A Sentinel that prefers the kind is never held back (prefer wins), the built-in scanner is a symmetric peer (signed-in work is refused to the others by `refusal`), and `CVENGINE_SENTINEL_BALANCE=0` is the kill switch. `activity_metrics` (the last hour's utilisation, finished tasks and queue wait of each Sentinel and kind, and the queue depth by kind) feeds `GET sentinels/live` (`load` per Sentinel, `kinds`) and the system status (`sentinels.load`).
 
 ## Asynchronous stages (queue Q4)
 
@@ -336,9 +320,7 @@ asks for a key creates the task and stops (`stage_runs.Suspend`, a `BaseExceptio
 failure). The callback runs the same stage again; this time the call finds its task over and ends it exactly as the blocking wait did:
 
 - the same activity line is closed (`Sentinel X checked in nmap work for ...`, or `No Sentinel picked up ...`);
-- `_no_local` makes the same decision: `ScannerUnavailable` for a kind `CVENGINE_LOCAL_FALLBACK` keeps off this server (the stage says it
-  waits, records nothing in the ledger, releases its claim), or one `ScannerFallback` row with the same reason (`not_claimed_in_time`,
-  `slot_busy`, `failed_then_local`, `completion_timeout`, `over_chunk`, `no_scanner`, `partial_result`) and the local run;
+- `_no_local` makes the same decision: `ScannerUnavailable` (the stage says it waits, records nothing in the ledger, releases its claim);
 - `dispatch_many` keeps its window (the free slots, the stage's share, `CVENGINE_STAGE_PARALLEL`), refills it when any chunk ends, stops
   sending when a chunk goes unclaimed or the last Sentinel leaves, and yields nothing until every chunk is over, so a stage never handles a
   chunk's result twice. A nuclei pass sends all its targets in one call when it runs this way, so its findings and counts are saved once.

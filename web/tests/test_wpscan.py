@@ -186,8 +186,7 @@ class StageTests(RouteFixture, TestCase):
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             discovery._run_stages(self.scan_obj.id, {'scan_id': self.scan_obj.id, 'status': discovery.SUCCESS}, hygiene=False,
                                   port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-                                  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-                                  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, wpscan_runner=runner,
+                                  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), wpscan_runner=runner,
                                   probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '', 'final_url': url, 'url': url})
         self.assertEqual(stages, ['https://www.rt.test'])
         self.assertTrue(ScanActivity.objects.filter(scan_of=self.scan_obj, name='wpscan').exists())

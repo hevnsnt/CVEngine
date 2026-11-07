@@ -474,7 +474,6 @@ def review_summary(triage_id):
 ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
-LOCAL_SHARE_PROBLEM = 0.5       # with Sentinels live, the share of scan stages run on this server above which it is a problem
 DRAFT_WAIT = timedelta(days=3)
 
 
@@ -527,19 +526,6 @@ def ops_checks(now=None, templates_release=None):
                              {'live': live, 'done_2h': done_2h, 'queued': queued, 'backlog': backlog}, actions=('feed_sentinels',)))
     else:
         checks.append(_check('sentinels_idle', 'ok', 'Sentinels are busy', '', {'live': live, 'done_2h': done_2h, 'queued': queued}))
-
-    # Most scanning done on this server although Sentinels exist
-    if live:
-        from agentapi.models import ScannerFallback
-        day = now - timedelta(days=1)
-        local = ScannerFallback.objects.filter(created_at__gte=day).count()
-        remote = SentinelTask.objects.filter(status='done', finished_at__gte=day).count()
-        share = local / (local + remote) if local + remote else 0.0
-        state = 'problem' if local + remote >= 20 and share > LOCAL_SHARE_PROBLEM else 'ok'
-        checks.append(_check('local_share', state, 'Most scanning ran on this server, not on the Sentinels',
-                             f'In the last 24 hours {local} scan stage(s) ran on this server and {remote} on Sentinels ({round(share * 100)}% '
-                             'local). Check CVENGINE_LOCAL_FALLBACK, each Sentinel\'s capabilities and its placement rules on the Sentinels page.'
-                             if state != 'ok' else '', {'local_24h': local, 'sentinel_24h': remote, 'local_share': round(share, 2)}))
 
     # nuclei templates
     templates = ((system.get('tools') or {}).get('nuclei_templates')) or {}

@@ -155,7 +155,7 @@ class APersonsRequestStillReachesTheHost(PlainWorld):
 class VirtualHostSweepTests(test_vhost_scan.VhostFixture, TestCase):
     def test_a_manual_only_target_gives_no_address_and_no_name_to_ask(self):
         Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)
-        summary = test_vhost_scan.vhost_scan.sweep(self.project.id, fetch=self.server, pace=test_vhost_scan.pace())
+        summary = self.run_sweep()
         self.assertEqual(self.server.calls, [])
         self.assertIn('skipped', summary)
 
@@ -349,7 +349,7 @@ class SharedHostScreenshotTests(test_web_shot.ShotFixture, TestCase):
 
 class SubdirectoryVirtualHostLookupTests(test_subdir_apps.SubdirFixture, TestCase):
     def test_a_virtual_host_found_under_a_manual_only_target_is_not_asked(self):
-        test_vhost_scan.vhost_scan.sweep(self.project.id, fetch=self.server, pace=test_vhost_scan.pace())
+        self.run_sweep()
         names = {e['name'] for e in test_subdir_apps.subdir_apps.web_hosts(self.project.id)}
         self.assertIn('portal.example.test', names)  # control: found by the virtual host sweep, asked at its own address
         Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)

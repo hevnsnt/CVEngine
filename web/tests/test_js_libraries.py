@@ -7,6 +7,7 @@ from cvengine_scanner import fingerprint
 from cveFeed import js_libraries, route_auth
 from cveFeed.models import RouteAuth
 from startScan.models import Subdomain
+from tests import route_scanner
 from tests.test_route_auth import RouteFixture, probe
 
 PAGE = """<html><head>
@@ -52,42 +53,32 @@ class LibraryDetectionTests(unittest.TestCase):
 
 
 class ScriptReadingTests(RouteFixture, TestCase):
+	"""The scanner reads the scripts a front page loads (cvengine_scanner/tests/probes/test_routes.py: a script of the front page is read and its library
+	recorded, a script outside the policy is not read); the server stores what it reports with the route and joins it to the host's technologies."""
+
 	def setUp(self):
 		super().setUp()
 		self.scan_obj = self.scan()
 
-	def run_check(self, scripts):
-		def fake(url):
-			if url.endswith('/'):
-				return probe(url=url, body=PAGE)
-			if '.js' in url:
-				fetched.append(url)
-			return probe(url=url, content_type='application/javascript', body=scripts.get(url.rsplit('/', 1)[-1].split('?')[0], ''))
-		fetched = []
-		route_auth.run_route_auth(self.scan_obj.id, probe=fake)
-		return fetched
+	def test_what_the_scanner_read_in_the_scripts_is_stored_with_the_route_and_joins_the_hosts_technologies(self):
+		names = ['jQuery:3.4.1', 'Bootstrap:3.3.7', 'Vue.js:3.3.4']
 
-	def test_script_banners_join_the_hosts_fingerprints_and_technologies(self):
-		fetched = self.run_check({'jquery-3.4.1.min.js': '/*! jQuery v3.4.1 | MIT */', 'app.js': '/*! Bootstrap v3.3.7 */'})
-		# the three same-host scripts and the library on a public CDN; never the script of another site
-		self.assertEqual(len(fetched), 4)
-		self.assertNotIn('https://other.example/x.js', fetched)
+		def front_page_only(url):
+			return probe(url=url, body=PAGE) if url.rstrip('/') == 'https://www.rt.test' else probe(url=url, status=404)
+
+		def serve(task):
+			out = route_scanner.result(task, front_page_only)
+			for row in out['routes']:
+				if row['id'] == 'https://www.rt.test/':  # the scanner read the scripts: their banners and the CDN path are in what it reports
+					row['evidence'].update({'fingerprints': [{'name': n, 'source': 'script:banner'} for n in names], 'fingerprint_names': names,
+											'script_urls': ['https://www.rt.test/assets/jquery-3.4.1.min.js']})
+			return out
+		self.scanner().responders['route_probe'] = serve
+		route_auth.run_route_auth(self.scan_obj.id)
 		root = RouteAuth.objects.get(path='/')
 		self.assertNotIn('local_scripts', root.evidence)
 		self.assertNotIn('page_scripts', root.evidence)
-		self.assertIn('jQuery:3.4.1', root.evidence['fingerprint_names'])
-		self.assertIn('Bootstrap:3.3.7', root.evidence['fingerprint_names'])
-		self.assertIn('Vue.js:3.3.4', root.evidence['fingerprint_names'])  # its file states nothing here: the CDN path is the hint
-		self.assertEqual(root.evidence['libraries']['vue']['version_source'], 'filename')
+		self.assertEqual(root.evidence['fingerprint_names'], names)
 		route_auth.link_technologies(self.scan_obj, {root.url: {'evidence': root.evidence}})
 		sub = Subdomain.objects.get(scan_history=self.scan_obj)
 		self.assertIn('Bootstrap:3.3.7', [t.name for t in sub.technologies.all()])
-
-	def test_an_unreadable_script_does_not_stop_the_check(self):
-		def fake(url):
-			if url.endswith('/'):
-				return probe(url=url, body=PAGE)
-			raise OSError('reset')
-		route_auth.run_route_auth(self.scan_obj.id, probe=fake)
-		root = RouteAuth.objects.get(path='/')
-		self.assertIn('jQuery:3.4.1', root.evidence['fingerprint_names'])  # from the script name alone

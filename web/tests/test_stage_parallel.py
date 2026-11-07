@@ -131,11 +131,17 @@ class StageBase(DispatchBase):
         return [self.agent('sentinel-a', slots=slots), self.agent('sentinel-b', slots=slots)]
 
     def fan_out(self, fake, kind='openvas', **kw):
+        """The ``(index, result)`` pairs the stage was handed. A chunk no Sentinel finished is never handed over: ``dispatch_many`` raises
+        ``ScannerUnavailable`` once the chunks in flight are in, and it is kept in ``self.blocked`` (None when every chunk was done)."""
         got = []
+        self.blocked = None
 
         def call():
-            for index, result in dispatch.dispatch_many(self.project, kind, fake.chunks, scan=self.scan, **kw):
-                got.append((index, result))
+            try:
+                for index, result in dispatch.dispatch_many(self.project, kind, fake.chunks, scan=self.scan, **kw):
+                    got.append((index, result))
+            except resources.ScannerUnavailable as exc:
+                self.blocked = exc
         fake.run(call)
         return got
 
@@ -233,13 +239,14 @@ class WindowTests(StageBase):
             return {**state, 'free': 2} if len(calls) == 1 else state
         with mock.patch.object(sentinel_broker, 'capacity_state', two_free_slots_once):
             got = dict(self.fan_out(fake, timeout=ttl * 4))
-        self.assertIsNone(got[1])  # the queued chunk was given up, to run here
+        self.assertNotIn(1, got)  # the queued chunk was given up: it stays due, nothing runs here
         self.assertIsNotNone(got[0])
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
         queued = SentinelTask.objects.get(kind='openvas', target__addresses=fake.chunks[1])
         self.assertEqual(queued.status, 'expired')
         self.assertIn('no Sentinel slot freed up in time', queued.error)  # step ended it, not reap_expired ('while it waited in the queue')
         self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 2)  # and the stage stopped sending: chunks 2 and 3 were never created
-        self.assertEqual([got[2], got[3]], [None, None])
+        self.assertEqual(sorted(got), [0])
         self.assertTrue(AgentActivity.objects.filter(message__contains='No Sentinel slot freed up for openvas work').exists())
         self.assertFalse(AgentActivity.objects.filter(message__contains='No Sentinel checked in openvas work').exists())
 
@@ -254,24 +261,32 @@ class WindowTests(StageBase):
             self.assertLessEqual(len(reads), fake.sleeps + 1)  # one read of every task in flight per tick, not one per task
 
 
-class FallbackTests(StageBase):
-    def test_a_failed_chunk_and_an_expired_one_fall_back_alone_and_the_rest_carry_on(self):
+class WaitTests(StageBase):
+    """A chunk no Sentinel finished is never run here: the stage is handed what finished, then ``ScannerUnavailable``, and the rest stays due."""
+    STAYS_DUE = 'the targets stay due until a scanner can take the work'
+
+    def test_a_failed_chunk_and_an_expired_one_stay_due_and_the_stage_sends_no_more_chunks(self):
         outcomes = {1: 'failed', 3: 'hang'}
         fake = FakeSentinels(self.two_agents(), chunks_of(6), outcome=lambda i: outcomes.get(i, 'done'))
         got = dict(self.fan_out(fake, timeout=40))
-        self.assertEqual([i for i, result in sorted(got.items()) if result is None], [1, 3])
-        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 6)  # a failure does not stop the chunks after it
+        self.assertEqual(sorted(got), [0, 2])  # what finished is handed over; the two that did not never are
+        self.assertTrue(all(result is not None for result in got.values()))
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # the first window; a chunk nobody finished stops the stage sending the last two
         self.assertEqual(list(SentinelTask.objects.filter(status='expired').values_list('error', flat=True)),
-                         ['the dispatch wait timed out; the stage fell back to local execution'])
+                         [f'the dispatch wait timed out; {self.STAYS_DUE}'])
         self.assertEqual(self.active_tasks(), 0)
 
-    def test_no_live_sentinel_creates_nothing_and_every_chunk_is_left_to_run_here(self):
+    def test_no_live_sentinel_creates_nothing_and_the_stage_waits(self):
         got = self.fan_out(FakeSentinels([], chunks_of(5)))
-        self.assertEqual(got, [(i, None) for i in range(5)])
+        self.assertEqual(got, [])
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
+        self.assertEqual(self.blocked.kind, 'openvas')
         self.assertFalse(SentinelTask.objects.exists())
 
-    def test_the_sentinels_going_away_stops_the_fan_out_and_the_chunks_not_sent_are_left_to_run_here(self):
+    def test_the_sentinels_going_away_stops_the_fan_out_and_the_chunks_not_sent_stay_due(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 3)
+
         def go_quiet():
             fake.heartbeating = False
             Agent.objects.update(last_seen=fake.wall() - timedelta(hours=1))
@@ -279,14 +294,12 @@ class FallbackTests(StageBase):
         got = dict(self.fan_out(fake))
         sent = SentinelTask.objects.filter(kind='openvas').count()
         self.assertLess(sent, 8)
-        self.assertEqual(sorted(got), list(range(8)))  # every chunk is accounted for
-        self.assertTrue(all(result is None for i, result in got.items() if i >= sent))  # the unsent ones are the caller's, in order
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
+        self.assertTrue(set(got) <= set(range(sent)))  # nothing that was never sent is handed over, and nothing runs here in its place
         self.assertEqual(self.active_tasks(), 0)
 
-    def test_the_last_sentinel_leaving_while_chunks_queue_records_the_chunks_never_sent_as_no_scanner(self):
-        # the loop sees the Sentinels gone at a reap (each queued chunk task expires as vanished) before a refill does: the chunks it never sent
-        # are no_scanner, as the queued ones are, not over_chunk (which is for a chunk left behind one that went unclaimed while a Sentinel was live)
-        from agentapi.models import ScannerFallback
+    def test_the_last_sentinel_leaving_while_chunks_queue_stops_the_stage_and_sends_no_more(self):
+        # the loop sees the Sentinels gone at a reap (each queued chunk task expires as vanished) before a refill does: the other chunks are never sent
         fake = FakeSentinels(self.two_agents(), chunks_of(8), claim=False)
 
         def go_quiet():
@@ -296,23 +309,23 @@ class FallbackTests(StageBase):
         with mock.patch.dict(os.environ, {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '60'}), mock.patch.object(dispatch, 'REFILL_EVERY', 10_000):
             got = dict(self.fan_out(fake))
         self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # one window went out, the other four chunks were never sent
-        self.assertEqual(sorted(got), list(range(8)))
-        self.assertTrue(all(result is None for result in got.values()))
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('openvas', 'no_scanner')] * 8)
+        self.assertEqual(got, {})
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
         self.assertEqual(self.active_tasks(), 0)
 
-    def test_a_chunk_left_behind_one_nobody_claimed_while_a_sentinel_is_live_is_still_over_chunk(self):
-        from agentapi.models import ScannerFallback
+    def test_a_chunk_left_behind_one_nobody_claimed_while_a_sentinel_is_live_is_not_sent(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(10), claim=False)
-        self.fan_out(fake)
-        reasons = list(ScannerFallback.objects.values_list('reason', flat=True))
-        self.assertEqual(sorted(reasons), ['not_claimed_in_time'] * 4 + ['over_chunk'] * 6)
+        got = self.fan_out(fake)
+        self.assertEqual(got, [])
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
+        self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # the first window; the six after it were never created
+        self.assertEqual(set(SentinelTask.objects.values_list('status', flat=True)), {'expired'})
 
     def test_a_sentinel_that_never_claims_stops_the_fan_out_after_the_first_window(self):
         fake = FakeSentinels(self.two_agents(), chunks_of(10), claim=False)
         got = dict(self.fan_out(fake))
-        self.assertTrue(all(result is None for result in got.values()))
-        self.assertEqual(sorted(got), list(range(10)))
+        self.assertEqual(got, {})
+        self.assertIsInstance(self.blocked, resources.ScannerUnavailable)
         self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 4)  # one window, not ten waits of the claim timeout
         self.assertEqual(set(SentinelTask.objects.values_list('status', flat=True)), {'expired'})
 
@@ -380,9 +393,12 @@ class SerialTests(StageBase):
             calls.append(target['addresses'])
             return None
         with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '1'}), mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch):
-            got = list(dispatch.dispatch_many(self.project, 'openvas', chunks_of(4), stop_on_none=True))
+            got = []
+            with self.assertRaises(resources.ScannerUnavailable):  # the chunks after the first nobody took are never sent, and never run here
+                for pair in dispatch.dispatch_many(self.project, 'openvas', chunks_of(4), stop_on_none=True):
+                    got.append(pair)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(got, [(i, None) for i in range(4)])
+        self.assertEqual(got, [(0, None)])
 
     def test_the_ceiling_setting_is_read_and_defaults_to_four(self):
         self.assertEqual(dispatch.stage_parallel(), 4)

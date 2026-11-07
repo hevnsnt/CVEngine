@@ -17,6 +17,7 @@ from agentapi.models import SentinelTask
 from cveFeed import web_shot
 from cveFeed.models import HostExclusion, HostScreenshot, HostState, InternalRange
 from dashboard.models import Org, Project, ProjectMembership
+from reNgine import resources
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
@@ -371,8 +372,7 @@ class DiscoveryStageTests(ShotFixture, TestCase):
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 										 port_stage_run=port_double(),
-										 db_exposure_checks={}, provider=None, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-										 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kwargs)
+										 db_exposure_checks={}, provider=None, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), **kwargs)
 
 	def test_a_scan_with_web_pages_queues_them_in_its_own_stage_after_nmap(self):
 		from startScan.models import ScanActivity
@@ -889,7 +889,8 @@ class WiringTests(TestCase):
 		self.assertIn('web_screenshot', sentinel_dispatch.NEVER_LOCAL)
 		self.assertIn('web_screenshot', SentinelTask.KINDS)
 		with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': 'all'}):
-			self.assertFalse(sentinel_dispatch.fallback_allowed('web_screenshot'))
+			with self.assertRaises(resources.ScannerUnavailable):
+				sentinel_dispatch._no_local('web_screenshot', 'nothing took it')
 
 
 # ------------------------------------------------------------------------------------------------ review round: hardening

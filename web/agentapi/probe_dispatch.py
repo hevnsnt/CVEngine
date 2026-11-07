@@ -3,9 +3,8 @@
 
 The server keeps the choice of what to probe (the plan, the ledger, the per-scan cap), the scope policy (``cveFeed.probe_scope``), the
 validation of what comes back (``agentapi.probe_results``) and what is stored. The Sentinel runs the requests (``cvengine_scanner.probes``) under
-the policy the task carries. Like every other kind: a project with no Sentinel for the kind runs the work here as before, and when
-``CVENGINE_LOCAL_FALLBACK`` takes the kind off its list the stage waits for a scanner instead (``reNgine.resources.ScannerUnavailable``) and the
-work stays due."""
+the policy the task carries. None of these kinds has a local path (``sentinel_dispatch.NEVER_LOCAL``): with no Sentinel able to take the work the
+stage waits for a scanner (``reNgine.resources.ScannerUnavailable``) and the work stays due."""
 import logging
 import os
 
@@ -18,13 +17,10 @@ MAX_NAMES_PER_TASK = 500   # the contract's bound (cvengine_scanner.probes.dns.M
 
 
 def _offered(project, kind):
-    """Whether a Sentinel may take ``kind`` work of ``project`` now. When none can: ``ScannerUnavailable`` if the kind may not run here (the
-    stage waits), else ``False`` (the caller runs it here, as before)."""
+    """True when a Sentinel may take ``kind`` work of ``project`` now. When none can: ``ScannerUnavailable`` (the kind never runs here, the stage waits)."""
     if sentinel_dispatch.any_scanner_for(project, kind):
         return True
     sentinel_dispatch._no_scanner(kind, project)
-    sentinel_dispatch.offline_fallback(project, kind)
-    return False
 
 
 def _hosts_label(names):
@@ -32,16 +28,21 @@ def _hosts_label(names):
     return ','.join(names)[:480] if len(names) <= 5 else f'{len(names)} hosts'
 
 
+def _unfinished(kind, what):
+    """A task of a kind with no local path that ended without a result: nothing was asked, the work stays due."""
+    from reNgine.resources import ScannerUnavailable
+    return ScannerUnavailable(kind, f'a Sentinel returned no result for {what}')
+
+
 def try_http_probes(project, scan, planned, unattended=True):
-    """``{asset: observations}`` for the planned http probes a Sentinel ran, and the list of ``(sub, asset, entry)`` left to run here, or
-    ``None`` when no Sentinel can take the kind (the caller runs everything here). ``planned`` is ``[(sub, asset, entry)]`` (``probes.asset_key``
-    and a ``plan_for_host`` entry of the http family). A probe the Sentinel reports with an error is in the answer as that error (an ``Exception``),
-    so the caller treats it as a failed probe: retried later, never recorded as clean. Raises ``ScannerUnavailable`` when no Sentinel can take the
-    work and the kind may not run here."""
+    """``{asset: observations}`` for the planned http probes a Sentinel ran. ``planned`` is ``[(sub, asset, entry)]`` (``probes.asset_key`` and a
+    ``plan_for_host`` entry of the http family). A probe the Sentinel reports with an error is in the answer as that error (an ``Exception``), so the
+    caller treats it as a failed probe: retried later, never recorded as clean. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``):
+    ``ScannerUnavailable`` when no Sentinel can take the work or a task ended without a result."""
     from cveFeed import probe_scope
     if not planned or not _offered(project, 'http_probe'):
-        return None
-    answered, local = {}, []
+        return {}
+    answered = {}
     for start in range(0, len(planned), MAX_PROBES_PER_TASK):
         chunk = planned[start:start + MAX_PROBES_PER_TASK]
         target = {'probes': [{'id': asset, 'host': sub.name.lower(), 'probe': entry['probe'], 'base': entry['target']['base'].rstrip('/'),
@@ -49,9 +50,8 @@ def try_http_probes(project, scan, planned, unattended=True):
                   'scope': probe_scope.for_probes(project.pk, [(sub, entry) for sub, _asset, entry in chunk], unattended=unattended)}
         result = sentinel_dispatch.dispatch_or_none(project, 'http_probe', target, host=_hosts_label(sub.name for sub, _a, _e in chunk),
                                                     scan=scan)
-        if result is None:  # not claimed, failed or timed out: this chunk runs here (dispatch_or_none recorded the fallback, or raised)
-            local += chunk
-            continue
+        if result is None:
+            raise _unfinished('http_probe', 'a version probe task')
         reported = {row['id']: row for row in result.get('probes') or []}
         for sub, asset, entry in chunk:
             row = reported.get(asset)
@@ -63,7 +63,7 @@ def try_http_probes(project, scan, planned, unattended=True):
                 answered[asset] = row['observations']
         if result.get('refused'):
             logger.info('http_probe task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
-    return answered, local
+    return answered
 
 
 def _allowed(sub):
@@ -133,21 +133,20 @@ MAX_SUPPLIER_REQUESTS = 5000  # the contract's bound
 
 
 def try_suppliers(project, domains, max_requests):
-    """``{domain: row}`` for the supplier names a Sentinel checked (each row as ``probe_results.clean_supplier_check`` leaves it), or ``None`` when
-    no Sentinel can take ``supplier_check`` or one did not answer (the caller checks them here, as before). A name the task did not ask about, or
-    that the Sentinel did not report, is simply not in the answer: it was not checked. ``max_requests`` is what the sweep's budget still allows
-    (the Sentinel counts requests as the server does and reports a name that does not fit as partial). Raises ``ScannerUnavailable`` when no Sentinel
-    can take the work and the kind may not run here."""
+    """``{domain: row}`` for the supplier names a Sentinel checked (each row as ``probe_results.clean_supplier_check`` leaves it). A name the task did
+    not ask about, or that the Sentinel did not report, is simply not in the answer: it was not checked. ``max_requests`` is what the sweep's budget
+    still allows (the Sentinel counts requests as the server does and reports a name that does not fit as partial). The kind has no local path
+    (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work or the task ended without a result."""
     from cveFeed import probe_scope, slow_web
     domains = list(dict.fromkeys(domains))[:MAX_SUPPLIER_DOMAINS_PER_TASK]
     if not domains or max_requests < 1 or not _offered(project, 'supplier_check'):
-        return None
+        return {}
     target = {'domains': domains,
               'pace': {'gap': min(60.0, max(0.25, slow_web.global_gap())), 'host_gap': min(60.0, max(0.5, slow_web.host_gap()))},
               'max_requests': min(MAX_SUPPLIER_REQUESTS, int(max_requests)), 'scope': probe_scope.for_suppliers(project.pk, domains)}
     result = sentinel_dispatch.dispatch_or_none(project, 'supplier_check', target, host=_hosts_label(domains))
     if result is None:
-        return None
+        raise _unfinished('supplier_check', 'a supplier check task')
     if result.get('refused'):
         logger.info('supplier_check task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
     return {row['domain']: row for row in result.get('domains') or []}
@@ -159,13 +158,12 @@ MAX_SUBDIR_HOSTS_PER_TASK = 10     # the contract's bound
 
 def try_vhosts(project, items, gap):
     """``{address: report}`` for the addresses (``items``: ``[{'id', 'address', 'scheme', 'port', 'names': [{'name', 'own'?}]}]``, ``id`` is the
-    address) a Sentinel asked their default response and each name, or ``None`` when no Sentinel can take ``vhost_probe`` or one did not answer
-    (the caller asks them here, as before). A report is what ``probe_results.clean_vhost_probe`` keeps of one address; an address or a name the
-    Sentinel did not report is missing from the answer: unknown, so it stays due. Raises ``ScannerUnavailable`` when no Sentinel can take the
-    work and the kind may not run here."""
+    address) a Sentinel asked their default response and each name. A report is what ``probe_results.clean_vhost_probe`` keeps of one address; an
+    address or a name the Sentinel did not report is missing from the answer: unknown, so it stays due. The kind has no local path
+    (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work or a task ended without a result."""
     from cveFeed import probe_scope
     if not items or not _offered(project, 'vhost_probe'):
-        return None
+        return {}
     answered = {}
     for start in range(0, len(items), MAX_VHOST_ADDRESSES_PER_TASK):
         chunk = items[start:start + MAX_VHOST_ADDRESSES_PER_TASK]
@@ -175,19 +173,18 @@ def try_vhosts(project, items, gap):
         result = sentinel_dispatch.dispatch_or_none(project, 'vhost_probe', target, host=_hosts_label(i['address'] for i in chunk),
                                                     ips=[i['address'] for i in chunk][:64])
         if result is None:
-            return None
+            raise _unfinished('vhost_probe', 'a virtual host task')
         answered.update({row['id']: row for row in result.get('addresses') or []})
     return answered
 
 
 def try_subdirs(project, items, paths, max_requests, gap):
     """``{id: report}`` for the web hosts (``items``: ``[{'id', 'name', 'scheme', 'port', 'connect_ip'?, 'root'?, 'leads'?}]``) a Sentinel asked
-    for their mount paths, or ``None`` when no Sentinel can take ``subdir_probe`` or one did not answer (the caller asks them here, as before).
-    A host the Sentinel did not report is missing from the answer: unknown, so it stays due. Raises ``ScannerUnavailable`` when no Sentinel can
-    take the work and the kind may not run here."""
+    for their mount paths. A host the Sentinel did not report is missing from the answer: unknown, so it stays due. The kind has no local path
+    (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work or a task ended without a result."""
     from cveFeed import probe_scope
     if not items or not _offered(project, 'subdir_probe'):
-        return None
+        return {}
     answered = {}
     for start in range(0, len(items), MAX_SUBDIR_HOSTS_PER_TASK):
         chunk = items[start:start + MAX_SUBDIR_HOSTS_PER_TASK]
@@ -196,7 +193,7 @@ def try_subdirs(project, items, paths, max_requests, gap):
         result = sentinel_dispatch.dispatch_or_none(project, 'subdir_probe', target, host=_hosts_label(i['name'] for i in chunk),
                                                     ips=[i['connect_ip'] for i in chunk if i.get('connect_ip')][:64] or None)
         if result is None:
-            return None
+            raise _unfinished('subdir_probe', 'a subdirectory task')
         answered.update({row['id']: row for row in result.get('hosts') or []})
     return answered
 
@@ -369,29 +366,27 @@ MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.r
 
 
 def try_routes(project, scan, by_host):
-    """``({url: result or error}, local_hosts)`` for the routes of ``by_host`` (``{host: [urls]}``, the route plan's) a Sentinel asked, or ``None`` when no
-    Sentinel can take ``route_probe`` (the caller asks every route here). A result has the shape ``route_auth.analyse`` gives (plus the soft 404
-    comparison and the front page's scripts, which the scanner did); a route the Sentinel reports with an error, or not at all, is in the answer as an
-    ``Exception``, so the caller treats it as unanswered: asked again later, never recorded as a state. ``local_hosts`` are the hosts of a task that
-    nobody finished (the caller asks them here, ``dispatch_or_none`` having recorded that, or raised). Raises ``ScannerUnavailable`` when no Sentinel can
-    take the work and the kind may not run here: nothing was asked, nothing is recorded, the routes stay due."""
+    """``{url: result or error}`` for the routes of ``by_host`` (``{host: [urls]}``, the route plan's) a Sentinel asked. A result has the shape
+    ``route_auth.analyse`` gives (plus the soft 404 comparison and the front page's scripts, which the scanner did); a route the Sentinel reports
+    with an error, or not at all, is in the answer as an ``Exception``, so the caller treats it as unanswered: asked again later, never recorded as a
+    state. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work or a task ended
+    without a result; nothing was asked, nothing is recorded, the routes stay due."""
     from cveFeed import probe_scope
     if not by_host or not _offered(project, 'route_probe'):
-        return None
+        return {}
     hosts = list(by_host)
-    answered, local = {}, []
+    answered = {}
     for start in range(0, len(hosts), MAX_ROUTE_HOSTS_PER_TASK):
         chunk = hosts[start:start + MAX_ROUTE_HOSTS_PER_TASK]
         target = {'hosts': [{'host': host, 'urls': by_host[host]} for host in chunk],
                   'scope': probe_scope.for_routes(project.pk, scan, chunk)}
         result = sentinel_dispatch.dispatch_or_none(project, 'route_probe', target, host=_hosts_label(chunk), scan=scan)
-        if result is None:  # not claimed, failed or timed out: this chunk is asked here (dispatch_or_none recorded the fallback, or raised)
-            local += chunk
-            continue
+        if result is None:
+            raise _unfinished('route_probe', 'a route check task')
         answered.update(_route_answers(result, by_host, chunk))
         if result.get('refused'):
             logger.info('route_probe task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
-    return answered, local
+    return answered
 
 
 def _route_answers(result, by_host, chunk):

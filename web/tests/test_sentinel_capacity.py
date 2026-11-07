@@ -9,6 +9,7 @@ from django.utils import timezone
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent, SentinelTask
+from reNgine.resources import ScannerUnavailable
 from tests.test_agentapi import call, tool_call
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
@@ -117,15 +118,15 @@ class QueueTests(CapacityBase):
         self.assertIn('Queued openvas work', log.call_args_list[0].args[1])
         self.assertIn('Sentinel slot', log.call_args_list[0].args[1])
 
-    def test_the_queue_budget_ending_falls_back_locally_and_says_no_slot_freed_up(self):
+    def test_the_queue_budget_ending_leaves_the_targets_due_and_says_no_slot_freed_up(self):
         agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep, mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_QUEUE_TIMEOUT': '90'}):
-            out = self.dispatch(timeout=120)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # nothing runs here: the work stays due
+                self.dispatch(timeout=120)
         self.assertGreaterEqual(clock.now - 1000, 90)
         self.assertLess(clock.now - 1000, 100)
         task = SentinelTask.objects.exclude(target={}).get()
@@ -156,8 +157,8 @@ class QueueTests(CapacityBase):
         clock.at(11, lambda: self.claim(agent))
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = self.dispatch(timeout=60)  # claimed at ~11 s, never reported
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # claimed at ~11 s, never reported
+                self.dispatch(timeout=60)
         self.assertGreaterEqual(clock.now - 1000, 71)
         self.assertEqual(SentinelTask.objects.exclude(target={}).get().status, 'expired')
 
@@ -169,8 +170,8 @@ class QueueTests(CapacityBase):
         clock.at(15, lambda: Agent.objects.filter(pk=agent.pk).update(last_seen=timezone.now() - timedelta(hours=1)))
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = self.dispatch(timeout=60)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):
+                self.dispatch(timeout=60)
         self.assertLess(clock.now - 1000, 40)  # nowhere near the 300 s queue budget
         self.assertIn('no live Sentinel is left', SentinelTask.objects.exclude(target={}).get().error)
 
@@ -188,8 +189,9 @@ class QueueTests(CapacityBase):
             out = self.dispatch(timeout=120)
         self.assertEqual(out, RESULT)
 
-    def test_no_sentinel_at_all_is_still_an_immediate_no_op(self):
-        self.assertIsNone(self.dispatch(timeout=5))
+    def test_no_sentinel_at_all_is_still_an_immediate_wait_with_no_task(self):
+        with self.assertRaises(ScannerUnavailable):
+            self.dispatch(timeout=5)
         self.assertFalse(SentinelTask.objects.exists())
 
 

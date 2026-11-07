@@ -7,6 +7,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene, tls_audit
+from reNgine import resources
 from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HygieneFinding, ProbeObservation, ServiceRun
 from startScan.models import Subdomain
 from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
@@ -294,9 +295,11 @@ class SweepTests(RouteFixture, TestCase):
     def test_a_kind_named_in_the_fallback_variable_still_never_runs_here(self):
         from agentapi import sentinel_dispatch
         with LocalFallback('all'):
-            self.assertFalse(sentinel_dispatch.fallback_allowed('testssl'))
+            with self.assertRaises(resources.ScannerUnavailable):
+                sentinel_dispatch._no_local('testssl', 'nothing took it')
         with LocalFallback('testssl'):
-            self.assertFalse(sentinel_dispatch.fallback_allowed('testssl'))
+            with self.assertRaises(resources.ScannerUnavailable):
+                sentinel_dispatch._no_local('testssl', 'nothing took it')
 
     def test_the_local_skip_list_does_not_stop_a_sentinel_from_being_handed_port_25(self):
         Subdomain.objects.all().delete()

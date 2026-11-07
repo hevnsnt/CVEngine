@@ -177,7 +177,6 @@ the numbers behind that state, and the actions it allows:
 | Check | Problem when | Action it can offer |
 | --- | --- | --- |
 | `sentinels_idle` | Live Sentinels finished no task in the last two hours while hosts are due | `feed_sentinels`: queue due hosts for the Sentinels now |
-| `local_share` | Sentinels exist, but most scans in the last 24 hours ran on the server | none: the alert says why (local fallback setting, capabilities, placement) |
 | `nuclei_templates` | The last template refresh failed or is older than a day, or a newer nuclei-templates release exists | `refresh_nuclei_templates` |
 | `sentinel_errors` | Sentinel tasks failed or expired in the last six hours, grouped by Sentinel and kind | none |
 | `scan_errors` | Failed lines in the activity feed in the last six hours, by kind | none |

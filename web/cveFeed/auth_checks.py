@@ -274,7 +274,8 @@ def origin_of(scheme, port):
 
 class AuthScope:
     """The credentials of one target, and the rule for when one may be sent. Build it with ``for_domain``; ask ``credential(host, scheme,
-    port)`` for the credential that applies to a destination (None when none does) or ``headers_for`` for what to put on the request."""
+    port)`` for the credential that applies to a destination (None when none does). This server puts a credential on no request: the signed-in
+    route check is the built-in scanner's (``cveFeed.auth_routes``)."""
 
     def __init__(self, creds, now=None):
         self.now = now
@@ -317,20 +318,6 @@ class AuthScope:
             elif best is None and host_in_target(host, cred.domain):
                 best = cred
         return best
-
-    def accepts_untrusted_certificate(self, host, scheme, port):
-        """Whether the credential that applies to ``scheme://host:port`` may be sent over a connection whose certificate does not verify (the
-        owner's per-target switch). False when no credential applies."""
-        cred = self.credential(host, scheme, port)
-        return bool(cred is not None and cred.allow_untrusted_certificate)
-
-    def headers_for(self, host, scheme, port):
-        """``[(name, value), ...]`` for a request to ``scheme://host:port``, ``[]`` when no credential applies."""
-        cred = self.credential(host, scheme, port)
-        if cred is None:
-            return []
-        self.used[cred.pk] = cred
-        return request_headers(cred)
 
     def mark_used(self):
         """Stamp ``last_used_at`` on every credential this scope sent (once per scan stage, not per request)."""

@@ -9,7 +9,7 @@ from unittest import mock
 
 
 from cveFeed import local_egress
-from cveFeed.models import AgentActivity, ServiceRun
+from cveFeed.models import AgentActivity
 from dashboard.models import Org, Project
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
@@ -183,43 +183,20 @@ class _ScanFixture:
 
 # --- naabu --------------------------------------------------------------------------------------------------------------------
 
-# --- the fallback cap and its warning --------------------------------------------------------------------------------------
+# --- the fallback cap and its warning: gone, with the local fallback they limited ------------------------------------------
 
-class FallbackTests(Clean, _ScanFixture, TestCase):
-    def setUp(self):
-        super().setUp()
-        self.make_scan(['192.0.2.10', '192.0.2.11'])
+class NoFallbackCapTests(SimpleTestCase):
+    def test_no_kind_falls_back_to_a_local_run_so_the_cap_the_counter_and_the_warning_are_gone(self):
+        for name in ('admit_fallback', 'note_fallback', 'fallback_runs_this_hour', 'fallbacks_last_hour', 'fallback_warning', 'fallback_cap', 'sentinel_trouble',
+                     'FALLBACK_WARN_AT', 'FALLBACK_KEY', 'DEFAULT_FALLBACK_NMAP_PER_HOUR', 'DEFAULT_FALLBACK_NAABU_PER_HOUR'):
+            self.assertFalse(hasattr(local_egress, name), name)
 
-    def make_sentinel(self, name, live=True, capabilities=('nmap', 'naabu')):
-        from agentapi.auth import create_token
-        from agentapi.models import Agent
-        user = User.objects.create_user(f'owner-{name}', password='x')
-        token, _raw = create_token(user, f'token-{name}')
-        return Agent.objects.create(token=token, name=name, kind='scanner', status='active',
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, capabilities=list(capabilities),
-                                    last_seen=timezone.now() if live else timezone.now() - timezone.timedelta(days=1))
-
-    @mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '2'})
-    def test_admit_fallback_caps_per_hour_and_zero_is_unlimited(self):
-        self.assertEqual([local_egress.admit_fallback('nmap', now=T0) for _ in range(3)], [True, True, False])
-        self.assertTrue(local_egress.admit_fallback('nmap', now=T0 + 3600))  # the next hour
-        self.assertTrue(any('did not fall back to local execution: 2 local fallback runs of nmap this hour is the cap' in m for m in _messages()))
-        with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '0'}):
-            self.assertTrue(all(local_egress.admit_fallback('nmap', now=T0) for _ in range(50)))
-        self.assertTrue(all(local_egress.admit_fallback('nuclei_light', now=T0) for _ in range(50)))  # only nmap and naabu are capped
-
-    def test_the_warning_names_offline_and_full_sentinels_and_a_system_problem_follows(self):
-        self.make_sentinel('edge-1', live=False)
-        for _ in range(local_egress.FALLBACK_WARN_AT):
-            local_egress.note_fallback('nmap', self.project.id)
-        warnings = [m for m in _messages() if 'fell back to local execution in the last hour' in m]
-        self.assertEqual(len(warnings), 1)
-        self.assertIn('5 stages fell back to local execution in the last hour: check your Sentinels (offline: edge-1)', warnings[0])
+    def test_the_status_has_no_fallback_figures_and_adds_no_fallback_problem(self):
         problems = []
-        local_egress.status(problems)
-        self.assertTrue(any(p.startswith('egress: 5 stages fell back') for p in problems))
-        local_egress.note_fallback('nmap', self.project.id)
-        self.assertEqual(len([m for m in _messages() if 'fell back to local execution in the last hour' in m]), 1)  # once per hour
+        out = local_egress.status(problems)
+        self.assertNotIn('fallbacks_last_hour', out)
+        self.assertNotIn('fallback_caps_per_hour', out)
+        self.assertEqual([p for p in problems if 'fell back' in p], [])
 
 
 # --- Sentinels are never paced ----------------------------------------------------------------------------------------------
@@ -231,9 +208,9 @@ class TunableTests(Clean, SimpleTestCase):
         from cveFeed import tunables
         self.assertEqual(tunables.BY_KEY['egress_port25_per_hour'].default, local_egress.DEFAULT_PORT25_PER_HOUR)
         self.assertEqual(local_egress.parse_budgets(local_egress.DEFAULT_BUDGETS)[25], local_egress.DEFAULT_PORT25_PER_HOUR)
-        self.assertEqual(tunables.BY_KEY['fallback_nmap_per_hour'].default, local_egress.DEFAULT_FALLBACK_NMAP_PER_HOUR)
-        self.assertEqual(tunables.BY_KEY['fallback_naabu_per_hour'].default, local_egress.DEFAULT_FALLBACK_NAABU_PER_HOUR)
-        self.assertFalse(any(tunables.BY_KEY[k].auto_tunable for k in ('egress_port25_per_hour', 'fallback_nmap_per_hour', 'fallback_naabu_per_hour')))
+        self.assertNotIn('fallback_nmap_per_hour', tunables.BY_KEY)  # the local fallback caps went with the local fallback
+        self.assertNotIn('fallback_naabu_per_hour', tunables.BY_KEY)
+        self.assertFalse(tunables.BY_KEY['egress_port25_per_hour'].auto_tunable)
 
 
 # --- the connection log --------------------------------------------------------------------------------------------------------
@@ -418,11 +395,9 @@ class InProcessAccountingTests(Clean, TestCase):
 
 
 class HermeticTests(SimpleTestCase):
-    def test_the_test_runner_turns_pacing_and_fallback_caps_off_outside_these_tests(self):
+    def test_the_test_runner_turns_pacing_off_outside_these_tests(self):
         self.assertEqual(os.environ.get('CVENGINE_LOCAL_PORT_BUDGETS'), '')
         self.assertEqual(local_egress.budgets(), {})
-        self.assertEqual(os.environ.get('CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR'), '0')
-        self.assertEqual(os.environ.get('CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR'), '0')
 
 
 # --- second review of PR #389: regressions ---------------------------------------------------------------------------------------
@@ -503,14 +478,6 @@ class OtherInProcessGateTests(Clean, _ScanFixture, TestCase):
         with mock.patch('targetApp.target_types.is_scannable_ip', return_value=True):
             db_exposure.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
         probe.assert_not_called()
-
-class FallbackWindowTests(Clean, TestCase):
-    def test_the_fallback_count_is_a_true_60_minute_window(self):
-        local_egress.note_fallback('nmap', now=T0 - 1900)  # 61 minutes before the look below: out of the window
-        for _ in range(2):
-            local_egress.note_fallback('nmap', now=T0 - 1700)
-        self.assertEqual(local_egress.fallbacks_last_hour(now=T0 + 1800), 2)
-
 
 # --- round 2 of the #389 review, completed: the stated limits, exactly ------------------------------------------------------------
 

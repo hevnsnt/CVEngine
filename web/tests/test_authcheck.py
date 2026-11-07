@@ -23,6 +23,8 @@ from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembe
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests import route_scanner
+from tests.fake_scanner import FakeScanner, LocalFallback
 from tests.test_agentapi import call, rpc, tool_call
 
 SECRET = 'Bearer sk-live-4F9aQ7xT2mZ8'
@@ -414,66 +416,72 @@ class ScopeTests(Fixture):
 	def scope(self, domain=None):
 		return AuthScope.for_domain(domain or self.domain)
 
+	def headers_for(self, scope, host, scheme, port):
+		"""What would go on a request to ``scheme://host:port``: the headers of the credential the scope allows there, ``[]`` when none applies. The
+		server sends none itself (the signed-in route check is the built-in scanner's); the scope rule is what decides which credential a task may name."""
+		cred = scope.credential(host, scheme, port)
+		return [] if cred is None else auth_checks.request_headers(cred)
+
 	def test_exactly_the_host_the_scheme_and_the_port_it_was_stored_for(self):
 		self.make(host='app.example.test', origins=['https:443'])
 		scope = self.scope()
-		self.assertEqual(scope.headers_for('app.example.test', 'https', 443)[0], ('Authorization', SECRET))
-		self.assertEqual(scope.headers_for('APP.example.test.', 'https', 443)[0], ('Authorization', SECRET))
-		self.assertEqual(scope.headers_for('www.app.example.test', 'https', 443), [])  # a subdomain of the host is another host
-		self.assertEqual(scope.headers_for('example.test', 'https', 443), [])
-		self.assertEqual(scope.headers_for('evil-app.example.test', 'https', 443), [])
-		self.assertEqual(scope.headers_for('app.example.test.evil.test', 'https', 443), [])  # a name that merely starts like it
-		self.assertEqual(scope.headers_for('app.example.test', 'http', 443), [])  # another scheme
-		self.assertEqual(scope.headers_for('app.example.test', 'https', 8443), [])  # another port
-		self.assertEqual(scope.headers_for('app.example.test', 'http', 80), [])  # plain http was never named
-		self.assertEqual(scope.headers_for('203.0.113.7', 'https', 443), [])  # the address the name points at is another destination
-		self.assertEqual(scope.headers_for('cdn.thirdparty.test', 'https', 443), [])
-		self.assertEqual(scope.headers_for('', 'https', 443), [])
-		self.assertEqual(scope.headers_for('app.example.test', 'ftp', 443), [])
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'https', 443)[0], ('Authorization', SECRET))
+		self.assertEqual(self.headers_for(scope, 'APP.example.test.', 'https', 443)[0], ('Authorization', SECRET))
+		self.assertEqual(self.headers_for(scope, 'www.app.example.test', 'https', 443), [])  # a subdomain of the host is another host
+		self.assertEqual(self.headers_for(scope, 'example.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(scope, 'evil-app.example.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(scope, 'app.example.test.evil.test', 'https', 443), [])  # a name that merely starts like it
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'http', 443), [])  # another scheme
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'https', 8443), [])  # another port
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'http', 80), [])  # plain http was never named
+		self.assertEqual(self.headers_for(scope, '203.0.113.7', 'https', 443), [])  # the address the name points at is another destination
+		self.assertEqual(self.headers_for(scope, 'cdn.thirdparty.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(scope, '', 'https', 443), [])
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'ftp', 443), [])
 
 	def test_the_cookie_goes_as_a_cookie_header(self):
 		self.make()
-		headers = dict(self.scope().headers_for('app.example.test', 'https', 443))
+		headers = dict(self.headers_for(self.scope(), 'app.example.test', 'https', 443))
 		self.assertEqual(headers['Cookie'], COOKIE)
 
 	def test_a_target_wide_sign_in_covers_that_targets_hosts_only(self):
 		self.make(host='', origins=['https:443', 'http:8080'])
 		scope = self.scope()
 		for host in ('app.example.test', 'www.app.example.test', 'a.b.app.example.test'):
-			self.assertTrue(scope.headers_for(host, 'https', 443), host)
-		self.assertTrue(scope.headers_for('www.app.example.test', 'http', 8080))
+			self.assertTrue(self.headers_for(scope, host, 'https', 443), host)
+		self.assertTrue(self.headers_for(scope, 'www.app.example.test', 'http', 8080))
 		for host in ('shop.example.test', 'example.test', 'notapp.example.test', 'app.example.test.evil.test', 'cdn.thirdparty.test'):
-			self.assertEqual(scope.headers_for(host, 'https', 443), [], host)
-		self.assertEqual(scope.headers_for('www.app.example.test', 'https', 8080), [])
+			self.assertEqual(self.headers_for(scope, host, 'https', 443), [], host)
+		self.assertEqual(self.headers_for(scope, 'www.app.example.test', 'https', 8080), [])
 
 	def test_it_never_reaches_another_target_or_another_project(self):
 		self.make(host='')
-		self.assertEqual(self.scope(self.sibling).headers_for('app.example.test', 'https', 443), [])  # the sibling target's scope holds nothing
-		self.assertEqual(self.scope(self.foreign).headers_for('app.example.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(self.scope(self.sibling), 'app.example.test', 'https', 443), [])  # the sibling target's scope holds nothing
+		self.assertEqual(self.headers_for(self.scope(self.foreign), 'app.example.test', 'https', 443), [])
 
 	def test_a_host_only_target_does_not_extend_to_its_subdomains(self):
 		Domain.objects.filter(pk=self.domain.pk).update(scope_mode=Domain.SCOPE_HOST)
 		self.make(host='')
 		scope = self.scope(Domain.objects.get(pk=self.domain.pk))
-		self.assertTrue(scope.headers_for('app.example.test', 'https', 443))
-		self.assertEqual(scope.headers_for('www.app.example.test', 'https', 443), [])
+		self.assertTrue(self.headers_for(scope, 'app.example.test', 'https', 443))
+		self.assertEqual(self.headers_for(scope, 'www.app.example.test', 'https', 443), [])
 
 	def test_a_host_specific_sign_in_wins_over_a_target_wide_one_and_they_are_never_merged(self):
 		self.make(host='', headers=[['X-Wide', 'wide-value-123']], cookie='')
 		self.make(host='app.example.test', headers=[['X-Narrow', 'narrow-value-1']], cookie='')
 		scope = self.scope()
-		self.assertEqual(scope.headers_for('app.example.test', 'https', 443), [('X-Narrow', 'narrow-value-1')])
-		self.assertEqual(scope.headers_for('www.app.example.test', 'https', 443), [('X-Wide', 'wide-value-123')])
+		self.assertEqual(self.headers_for(scope, 'app.example.test', 'https', 443), [('X-Narrow', 'narrow-value-1')])
+		self.assertEqual(self.headers_for(scope, 'www.app.example.test', 'https', 443), [('X-Wide', 'wide-value-123')])
 
 	def test_an_expired_sign_in_is_not_sent_and_shows_as_expired(self):
 		cred = self.make(expires=timezone.now() - datetime.timedelta(seconds=1))
-		self.assertEqual(self.scope().headers_for('app.example.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(self.scope(), 'app.example.test', 'https', 443), [])
 		self.assertEqual(auth_checks.summary(cred)['state'], 'expired')
 		cred.expires_at = timezone.now() + datetime.timedelta(hours=1)
 		cred.save()
-		self.assertTrue(self.scope().headers_for('app.example.test', 'https', 443))
+		self.assertTrue(self.headers_for(self.scope(), 'app.example.test', 'https', 443))
 		later = timezone.now() + datetime.timedelta(hours=2)
-		self.assertEqual(AuthScope.for_domain(self.domain, now=later).headers_for('app.example.test', 'https', 443), [])
+		self.assertEqual(self.headers_for(AuthScope.for_domain(self.domain, now=later), 'app.example.test', 'https', 443), [])
 
 	def test_the_redaction_list_covers_values_parts_and_encodings(self):
 		values = auth_checks.secret_values([self.make()])
@@ -551,8 +559,8 @@ class LiveProbeTests(Fixture):
 
 
 class LiveTlsTests(Fixture):
-	"""The real probe and the real certificate check against a local TLS server: one certificate that chains to a CA the client trusts, one that is
-	self-signed. The sign-in is sent to the first, withheld from the second unless the target's switch is on, and an anonymous probe is unchanged."""
+	"""The real anonymous probe against a local TLS server with a certificate that does not verify: it is read all the same and nothing is sent with it.
+	Whether a sign-in goes over such a connection is the built-in scanner's decision (client/tests/test_signed_routes.py in the Sentinel repository)."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -640,6 +648,8 @@ class SignedRouteTests(Fixture):
 		self.calls = []
 		self.refuse = {}  # url -> the error the fake scanner reports for it
 		self.refuse_all = None  # or one error for every route
+		LocalFallback('none').apply(self)  # the anonymous pass is a scanner's too (route_probe): a fake one answers it with a redirect to the login page
+		self.fake = FakeScanner(kinds=['route_probe'], responders={'route_probe': lambda task: route_scanner.result(task, self.probe)}).start_for(self)
 
 	def scan(self, names=('app.example.test',), ports=((443, 'https'),)):
 		scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=1, tasks=[], results_dir='x')
@@ -675,7 +685,7 @@ class SignedRouteTests(Fixture):
 
 	def test_the_signed_in_answer_is_recorded_beside_the_anonymous_one_and_marked(self):
 		self.make(host='app.example.test')
-		out = ra.run_route_auth(self.scan().id, probe=self.probe)
+		out = ra.run_route_auth(self.scan().id)
 		row = RouteAuth.objects.get(url='https://app.example.test/')
 		self.assertEqual(row.auth_state, 'session_required')  # the anonymous state stands
 		signed = row.evidence['authenticated']
@@ -689,7 +699,7 @@ class SignedRouteTests(Fixture):
 
 	def test_the_scanner_is_asked_for_the_covered_routes_of_the_credential_and_no_value_travels(self):
 		cred = self.make(host='app.example.test')
-		ra.run_route_auth(self.scan().id, probe=self.probe)
+		ra.run_route_auth(self.scan().id)
 		pk, hosts = self.tasks[0]
 		self.assertEqual(pk, cred.pk)  # the credential by its id: the scanner reads it itself
 		self.assertEqual(list(hosts), ['app.example.test'])
@@ -699,7 +709,7 @@ class SignedRouteTests(Fixture):
 	def test_a_route_the_scanner_did_not_send_for_an_untrusted_certificate_is_said_with_the_switch_to_change_it(self):
 		self.make(host='app.example.test')
 		self.refuse_all = auth_routes.UNTRUSTED_CERTIFICATE
-		out = ra.run_route_auth(self.scan().id, probe=self.probe)
+		out = ra.run_route_auth(self.scan().id)
 		self.assertEqual(out['signed_in']['routes'], 0)
 		self.assertGreater(out['signed_in']['untrusted_certificate'], 0)
 		self.assertEqual(out['signed_in']['errors'], 0)
@@ -711,7 +721,7 @@ class SignedRouteTests(Fixture):
 		self.make(host='app.example.test')
 		scan = self.scan()
 		self.refuse['https://app.example.test/'] = 'ConnectionResetError: gone'
-		out = ra.run_route_auth(scan.id, probe=self.probe)
+		out = ra.run_route_auth(scan.id)
 		self.assertEqual(out['signed_in']['errors'], 1)
 		self.assertNotIn('authenticated', RouteAuth.objects.get(url='https://app.example.test/').evidence)
 		self.assertTrue(ServiceRun.objects.filter(service=auth_routes.SERVICE, status='failed').exists())
@@ -724,7 +734,7 @@ class SignedRouteTests(Fixture):
 		from reNgine.resources import ScannerUnavailable
 		self.make(host='app.example.test')
 		scan = self.scan()
-		ra.run_route_auth(scan.id, probe=self.probe)
+		ra.run_route_auth(scan.id)
 		RouteAuth.objects.update(evidence={})
 		ServiceRun.objects.filter(service=auth_routes.SERVICE).delete()
 		self.asked.side_effect = ScannerUnavailable('route_probe_signed', 'no scanner')
@@ -739,7 +749,7 @@ class SignedRouteTests(Fixture):
 	def test_another_host_a_third_party_host_and_another_port_are_never_asked(self):
 		self.make(host='app.example.test')
 		scan = self.scan(names=('app.example.test', 'www.example.test', 'cdn.thirdparty.test'), ports=((443, 'https'), (8443, 'https')))
-		ra.run_route_auth(scan.id, probe=self.probe)
+		ra.run_route_auth(scan.id)
 		for url, sent in self.signed_calls():
 			self.assertTrue(url.startswith('https://app.example.test/'), url)  # and 8443 is not an origin the credential was stored for
 		self.assertTrue(self.signed_calls())
@@ -748,20 +758,20 @@ class SignedRouteTests(Fixture):
 	def test_a_target_wide_sign_in_stays_inside_its_target(self):
 		self.make(host='')
 		scan = self.scan(names=('app.example.test', 'api.app.example.test', 'cdn.thirdparty.test', 'shop.example.test'))
-		ra.run_route_auth(scan.id, probe=self.probe)
+		ra.run_route_auth(scan.id)
 		signed_hosts = {url.split('/')[2] for url, _ in self.signed_calls()}
 		self.assertEqual(signed_hosts, {'app.example.test', 'api.app.example.test'})
 
 	def test_an_expired_sign_in_is_skipped_and_said(self):
 		self.make(expires=timezone.now() - datetime.timedelta(minutes=1))
-		out = ra.run_route_auth(self.scan().id, probe=self.probe)
+		out = ra.run_route_auth(self.scan().id)
 		self.assertEqual(self.signed_calls(), [])
 		self.assertEqual(out['signed_in'].get('skipped'), 'no covered route')
 		self.assertFalse(RouteAuth.objects.filter(evidence__has_key='authenticated').exists())
 		self.assertTrue(AgentActivity.objects.filter(message__contains='expired and was not sent').exists())
 
 	def test_without_a_sign_in_nothing_changes(self):
-		out = ra.run_route_auth(self.scan().id, probe=lambda url: self.probe(url))
+		out = ra.run_route_auth(self.scan().id)
 		self.assertNotIn('signed_in', out)
 		self.assertEqual(self.signed_calls(), [])
 		self.asked.assert_not_called()
@@ -769,7 +779,7 @@ class SignedRouteTests(Fixture):
 	def test_paused_scanning_asks_nothing_signed_in(self):
 		self.make()
 		scan = self.scan()
-		ra.run_route_auth(scan.id, probe=lambda url, **k: self.probe(url))  # the anonymous rows exist first
+		ra.run_route_auth(scan.id)  # the anonymous rows exist first
 		self.calls.clear()
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
 		out = auth_routes.run_signed_in(scan.id)
@@ -779,7 +789,7 @@ class SignedRouteTests(Fixture):
 	def test_the_ledger_skips_a_repeat_and_a_replaced_credential_runs_again(self):
 		cred = self.make()
 		scan = self.scan()
-		ra.run_route_auth(scan.id, probe=self.probe)
+		ra.run_route_auth(scan.id)
 		first = len(self.signed_calls())
 		self.assertGreater(first, 0)
 		self.assertTrue(ServiceRun.objects.filter(service=auth_routes.SERVICE).exists())
@@ -790,20 +800,20 @@ class SignedRouteTests(Fixture):
 		auth_routes.run_signed_in(scan.id)
 		self.assertEqual(len(self.signed_calls()), first * 2)
 		# the anonymous check rewrites a route whole; the signed-in evidence is put back
-		ra.run_route_auth(scan.id, probe=self.probe, force=True)
+		ra.run_route_auth(scan.id, force=True)
 		self.assertTrue(RouteAuth.objects.get(url='https://app.example.test/').evidence.get('authenticated'))
 
 	def test_an_excluded_host_is_never_asked_signed_in(self):
 		self.make(host='')
 		HostExclusion.objects.create(org=self.org, host='api.app.example.test')
 		scan = self.scan(names=('app.example.test', 'api.app.example.test'))
-		ra.run_route_auth(scan.id, probe=self.probe)
+		ra.run_route_auth(scan.id)
 		self.assertFalse([c for c in self.calls if 'api.app.example.test' in c[0]])
 
 	def test_a_host_the_ssrf_gate_refuses_is_never_asked_signed_in(self):
 		self.make(host='')
 		scan = self.scan(names=('app.example.test', 'api.app.example.test'))
-		ra.run_route_auth(scan.id, probe=lambda url, **k: self.probe(url))
+		ra.run_route_auth(scan.id)
 		self.calls.clear()
 		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda host, **k: host == 'api.app.example.test'):
 			auth_routes.run_signed_in(scan.id, force=True)

@@ -54,10 +54,10 @@ def isolate_redis(worker_id):
         redis.Redis.from_url(url).flushdb()
 
 
-# The egress governor and the local fallback caps (cveFeed.local_egress) keep shared state in Redis, which a test database does not roll back:
+# The egress governor (cveFeed.local_egress) keep shared state in Redis, which a test database does not roll back:
 # a bucket drained by one test would change the nmap and naabu command lines another test asserts. Outside tests.test_local_egress (which sets
 # what it needs) they are off, and that module's Redis keys are cleared before every test.
-EGRESS_TEST_ENV = {'CVENGINE_LOCAL_PORT_BUDGETS': '', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR': '0', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR': '0'}
+EGRESS_TEST_ENV = {'CVENGINE_LOCAL_PORT_BUDGETS': ''}
 
 
 def clear_egress_state():

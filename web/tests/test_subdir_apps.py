@@ -15,7 +15,7 @@ from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
-from tests.test_vhost_scan import VhostFixture, answer, pace
+from tests.test_vhost_scan import VhostFixture, answer
 
 EXPECTED_PATHS = [
     '/jira/', '/confluence/', '/bitbucket/', '/grafana/', '/wordpress/', '/phpmyadmin/', '/gitlab/', '/jenkins/', '/owa/', '/sonarqube/',
@@ -25,6 +25,7 @@ EXPECTED_PATHS = [
     '/umbraco/', '/sitecore/', '/graylog/',
 ]
 DOCS = os.path.join(os.path.dirname(__file__), '..', '..', 'docs')
+BASELINE_PATH = '/.cvengine-probe/404'  # the path no site serves, which the scanner asks first (cvengine_scanner.probes.subdir)
 
 
 def page(status=200, title='', body='', headers=None, location='', length=None, url='https://www.example.test/'):
@@ -217,9 +218,53 @@ class SubdirFixture(VhostFixture):
         EndPoint.objects.create(subdomain=self.www, target_domain=self.domain, scan_history=self.scan, http_url='https://www.example.test/portal/index.jsp')
         cache.clear()
 
+    def subdir_report(self, task):
+        """What a Sentinel's ``subdir_probe`` reports for ``task`` from ``self.site`` (the table of answers by path): the baseline path first, then the
+        task's paths and its leads, within the task's request budget. A path that raises ``OSError`` was not answered (not in ``probed``); a challenge
+        or a busy answer ends the host. The scanner's own walk (robots.txt, sitemap.xml, the order, the lead cap) is tested in the Sentinel repository
+        (cvengine_scanner/tests/probes/test_subdir.py); this only answers what the server's settling of a report needs."""
+        self.tasks.append(task)
+        target = task['target']
+        hosts = []
+        for item in target['hosts']:
+            base = f"{item['scheme']}://{slow_web.authority(item['name'], item['port'], item['scheme'])}"
+            connect_ip = item.get('connect_ip')
+            plan = [(path, 'curated') for path in target['paths']] + [(lead['path'], lead['source']) for lead in item.get('leads') or []]
+            report = {'id': item['id'], 'state': 'done', 'requests': 0, 'baseline': None, 'probed': [], 'answers': []}
+
+            def ask(path):
+                if report['requests'] >= target['max_requests'] or report['state'] != 'done':
+                    return None
+                report['requests'] += 1
+                try:
+                    response = self.site(base + path, connect_ip=connect_ip) if connect_ip else self.site(base + path)
+                except OSError:
+                    return None
+                if response.get('challenge'):
+                    report.update(state='challenged', challenge={'edge': response['challenge'], 'status': response['status'], 'path': path})
+                    return None
+                if response['status'] in (429, 503):
+                    report['state'] = 'busy'
+                    return None
+                return response
+            baseline = ask(BASELINE_PATH)
+            report['baseline'] = vhost_scan.fingerprint_of(baseline) if baseline is not None else None
+            for path, source in plan:
+                if report['state'] != 'done':
+                    break
+                response = ask(path)
+                if response is None:
+                    continue
+                report['probed'].append(path)
+                fingerprint = vhost_scan.fingerprint_of(response)
+                if fingerprint['status'] in subdir_apps.THERE:
+                    found = subdir_apps.identify(response, path)
+                    report['answers'].append({'path': path, 'source': source, 'fingerprint': fingerprint, 'found': found})
+            hosts.append(report)
+        return {'outcome': 'done', 'hosts': hosts, 'touched': [item['name'] for item in target['hosts']], 'refused': []}
+
     def run_subdirs(self, **kw):
-        kw.setdefault('fetch', self.site)
-        kw.setdefault('pace', pace())
+        self.scanner()
         kw.setdefault('vet_ip', lambda address: True)
         return subdir_apps.sweep(self.project.id, **kw)
 
@@ -263,22 +308,19 @@ class SweepTests(SubdirFixture, TestCase):
         matches = CVEMatch.objects.filter(subdomain=self.www)
         self.assertEqual([(m.cve_entry.cve_id, m.matched_version) for m in matches], [('CVE-2099-1111', '2.401.3')])  # no version, no match
 
-    def test_the_sweep_is_get_only_one_request_per_path_and_every_path_is_a_curated_or_a_seen_one(self):
-        self.run_subdirs()
-        paths = self.site.paths()
-        self.assertEqual(len(paths), len(set(paths)))  # one GET per path per host
-        allowed = {subdir_apps.BASELINE_PATH, '/robots.txt', '/sitemap.xml', '/portal/'} | set(EXPECTED_PATHS)
-        self.assertEqual(set(paths) - allowed, set())
-
-    def test_the_questions_asked_of_a_host_are_the_curated_paths_one_lead_and_three_fixed_ones_in_that_order(self):
-        self.run_subdirs()
-        self.assertEqual(self.site.paths(), [subdir_apps.BASELINE_PATH, '/robots.txt', '/sitemap.xml'] + EXPECTED_PATHS + ['/portal/'])
-
     def test_a_per_host_cap_limits_the_requests_of_one_sweep(self):
         with mock.patch.dict(os.environ, {'CVENGINE_SUBDIR_MAX_REQUESTS': '12'}):
             summary = self.run_subdirs()
+        self.assertEqual(self.tasks[0]['target']['max_requests'], 12)  # the cap travels with the task: the scanner enforces it
         self.assertEqual(len(self.site.calls), 12)
         self.assertEqual(summary['requests'], 12)
+
+    def test_the_task_asks_for_the_curated_paths_and_the_host_s_own_leads_and_nothing_else(self):
+        self.run_subdirs()
+        target = self.tasks[0]['target']
+        self.assertEqual(target['paths'], EXPECTED_PATHS)
+        self.assertEqual([(lead['path'], lead['source']) for lead in target['hosts'][0]['leads']], [('/portal/', 'crawled')])
+        self.assertEqual(set(self.site.paths()) - {BASELINE_PATH, '/portal/'} - set(EXPECTED_PATHS), set())  # every request is a curated or a seen path
 
     def test_the_default_cap_is_sixty_requests_and_covers_the_curated_list(self):
         self.assertEqual(subdir_apps.max_requests(), 60)
@@ -312,18 +354,25 @@ class SweepTests(SubdirFixture, TestCase):
         self.run_subdirs()
         self.assertNotIn('/portal/', {o.url for o in ProbeObservation.objects.filter(probe=subdir_apps.PROBE)})
 
-    def test_robots_and_sitemap_name_directories_to_ask(self):
-        self.site.table['/robots.txt'] = page(200, '', 'User-agent: *\nDisallow: /intranet/\n')
-        self.site.table['/sitemap.xml'] = page(200, '', '<urlset><url><loc>https://www.example.test/crm/login</loc></url></urlset>')
+    def test_a_lead_the_scanner_found_in_robots_is_recorded_with_its_source(self):
         self.site.table['/intranet/'] = page(200, 'Intranet', '<html>' + 'i' * 700 + '</html>')
+        report = self.subdir_report
+
+        def with_robots_lead(task):  # the scanner reads robots.txt itself: its answer names the lead and where it came from
+            out = report(task)
+            out['hosts'][0]['answers'].append({'path': '/intranet/', 'source': 'robots', 'fingerprint': vhost_scan.fingerprint_of(self.site.table['/intranet/']),
+                                               'found': None})
+            out['hosts'][0]['probed'].append('/intranet/')
+            return out
+        self.subdir_report = with_robots_lead
         self.run_subdirs()
-        self.assertIn('/intranet/', self.site.paths())
-        self.assertIn('/crm/', self.site.paths())
         self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/intranet/').evidence['lead'], 'robots')
 
-    def test_archived_paths_are_asked_too(self):
+    def test_archived_paths_are_sent_to_the_scanner_as_leads(self):
         HostArchive.objects.create(project=self.project, domain=self.domain, host='www.example.test', technologies={'Java': {'count': 2, 'sample': ['/legacy/app.jsp']}})
         self.run_subdirs()
+        leads = {lead['path']: lead['source'] for lead in self.tasks[0]['target']['hosts'][0]['leads']}
+        self.assertEqual(leads.get('/legacy/'), 'archive')
         self.assertIn('/legacy/', self.site.paths())
 
     def test_running_it_again_inside_the_window_asks_nothing(self):
@@ -360,9 +409,10 @@ class SweepTests(SubdirFixture, TestCase):
         self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'hidden')
         del self.site.table['/phpmyadmin/']  # answers 404 now: that is an answer
         ServiceRun.objects.filter(service=subdir_apps.SERVICE).delete()
-        stopped = []
-        self.run_subdirs(stop=lambda: bool(stopped) or stopped.append(1) or False)  # paused after the first request
+        self.site.table['/jira/'] = page(429, 'Too Many Requests', 'slow down')  # a busy server ends the host before /phpmyadmin/ is reached
+        self.run_subdirs()
         self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'hidden')
+        del self.site.table['/jira/']
         ServiceRun.objects.filter(service=subdir_apps.SERVICE).delete()
         self.run_subdirs()
         self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE, url='/phpmyadmin/').outcome, 'absent')
@@ -411,11 +461,21 @@ class GateTests(SubdirFixture, TestCase):
         self.assertIn('automated testing', summary['skipped'])
         self.assertEqual(self.site.calls, [])
 
-    def test_a_pause_that_arrives_mid_sweep_stops_it_and_the_host_stays_due(self):
-        summary = self.run_subdirs(stop=lambda: len(self.site.calls) >= 5)
-        self.assertEqual(len(self.site.calls), 5)
+    def test_a_pause_that_arrives_while_the_scanner_works_records_nothing_and_the_host_stays_due(self):
+        summary = self.run_subdirs(stop=lambda: bool(self.site.calls))  # paused once the scanner has asked
         self.assertIn('paused', summary['skipped'])
         self.assertFalse(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE).exists())
+
+    def test_the_stage_waits_with_the_scanner_offline_and_the_host_stays_due(self):
+        self.run_subdirs()  # starts the fake
+        ServiceRun.objects.all().delete()
+        ProbeObservation.objects.all().delete()
+        self.fake.go_offline()
+        summary = self.run_subdirs()
+        self.assertIn('waiting for a scanner', summary['skipped'])
+        self.assertFalse(ServiceRun.objects.filter(service=subdir_apps.SERVICE).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=subdir_apps.PROBE).exists())
 
     def test_an_excluded_host_is_never_asked(self):
         HostExclusion.objects.create(org=self.org, host='www.example.test')
@@ -433,11 +493,6 @@ class GateTests(SubdirFixture, TestCase):
         self.run_subdirs()
         self.assertEqual(self.site.calls, [])
 
-    def test_a_host_that_resolves_to_a_prohibited_address_is_never_asked(self):
-        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=True):
-            self.run_subdirs()
-        self.assertEqual(self.site.calls, [])
-
     def test_at_most_max_hosts_are_asked_per_run(self):
         for n in range(4):
             other = IpAddress.objects.create(address=f'198.51.100.{20 + n}', org=self.org)
@@ -447,28 +502,29 @@ class GateTests(SubdirFixture, TestCase):
             summary = self.run_subdirs()
         self.assertEqual(summary['hosts'], 2)
 
-    def test_every_request_waits_for_the_pace(self):
-        counting = slow_web.Pace(sleep=lambda s: None, per_host=0, overall=0)
-        self.run_subdirs(pace=counting)
-        self.assertEqual(counting.requests, len(self.site.calls))
+    def test_the_task_carries_the_pace_the_scanner_keeps_between_requests(self):
+        self.run_subdirs()
+        self.assertGreaterEqual(self.tasks[0]['target']['gap'], 0.2)
+        self.assertLessEqual(self.tasks[0]['target']['gap'], 60.0)
 
     def test_a_challenge_is_recorded_and_never_retried_or_pushed_against(self):
         challenge = {**page(403, 'Attention Required! | Cloudflare', 'blocked', {'Server': 'cloudflare'}), 'challenge': 'Cloudflare'}
-        self.site.table[subdir_apps.BASELINE_PATH] = challenge
+        self.site.table[BASELINE_PATH] = challenge
         summary = self.run_subdirs()
         self.assertEqual(summary['challenged'], 1)
-        self.assertEqual(self.site.paths(), [subdir_apps.BASELINE_PATH])  # nothing else was asked of it
+        self.assertEqual(self.site.paths(), [BASELINE_PATH])  # nothing else was asked of it
         row = ProbeObservation.objects.get(probe=subdir_apps.PROBE)
         self.assertEqual((row.outcome, row.product, row.evidence['edge']), ('challenged', 'Cloudflare', 'Cloudflare'))
         self.assertIn('Allow the scanner', row.evidence['hint'])
         self.run_subdirs()
-        self.assertEqual(self.site.paths(), [subdir_apps.BASELINE_PATH])  # and not again before the window is over
+        self.assertEqual(self.site.paths(), [BASELINE_PATH])  # and not again before the window is over
 
     def test_a_challenge_midway_stops_the_host(self):
         self.site.table['/jira/'] = {**page(403, 'Just a moment...', '', {'cf-mitigated': 'challenge'}), 'challenge': 'Cloudflare'}
         self.run_subdirs()
         self.assertEqual(self.site.paths()[-1], '/jira/')
         self.assertNotIn('/grafana/', self.site.paths())
+        self.assertEqual(ProbeObservation.objects.get(probe=subdir_apps.PROBE).outcome, 'challenged')  # recorded as an edge, with nothing found after it
 
     def test_a_busy_server_ends_the_host_and_leaves_it_due(self):
         self.site.table['/confluence/'] = page(429, 'Too Many Requests', 'slow down')
@@ -491,7 +547,7 @@ class VirtualHostCarrierTests(SubdirFixture, TestCase):
     """A name the virtual host sweep added is asked at the address it was found on, with its own name: never at what its DNS says."""
 
     def test_a_distinct_virtual_host_is_asked_at_its_own_address_with_its_own_name(self):
-        vhost_scan.sweep(self.project.id, fetch=self.server, pace=pace())
+        self.run_sweep()
         self.site = Site({'/jenkins/': page(403, 'Authentication required', '', {'X-Jenkins': '2.400'}, url='https://portal.example.test/')})
         self.run_subdirs()
         portal_calls = [c for c in self.site.calls if c[0] == 'portal.example.test']
@@ -504,13 +560,13 @@ class VirtualHostCarrierTests(SubdirFixture, TestCase):
                          ['Jenkins:2.400', 'PHP:8.1.2', 'nginx:1.25.3'])
 
     def test_the_vetting_of_the_address_applies_to_a_virtual_host_too(self):
-        vhost_scan.sweep(self.project.id, fetch=self.server, pace=pace())
+        self.run_sweep()
         self.site = Site()
         self.run_subdirs(vet_ip=lambda address: False)
         self.assertEqual([c for c in self.site.calls if c[0] == 'portal.example.test'], [])
 
     def test_an_excluded_virtual_host_name_is_never_asked_even_though_its_address_is_fine(self):
-        vhost_scan.sweep(self.project.id, fetch=self.server, pace=pace())
+        self.run_sweep()
         HostExclusion.objects.create(org=self.org, host='portal.example.test')
         self.site = Site()
         self.run_subdirs()

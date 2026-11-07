@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 
 from agentapi import scanner_state, sentinel_broker, sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
+from reNgine import resources
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import auth_routes, probe_scope, route_auth as ra
@@ -35,9 +36,10 @@ class SignedRouteStageBase(Fixture):
         ip, _ = IpAddress.objects.get_or_create(address='203.0.113.10')
         sub.ip_addresses.add(ip)
         ip.ports.add(Port.objects.create(number=443, service_name='https', state='open'))
-        # the anonymous check ran first (injected probe: the anonymous routes are read here, never through a scanner), then a sign-in was stored
-        ra.run_route_auth(self.scan.id, probe=lambda url, **kw: {'url': url, 'status': 302, 'location': '/login', 'www_authenticate': '', 'cookies': [],
-                                                                 'content_type': 'text/html', 'body': '', 'title': ''})
+        # the anonymous check ran first (a Sentinel's, ``route_probe``): every route answered with a redirect to the login page; then a sign-in was stored
+        for path in ra.COMMON_PATHS:
+            RouteAuth.objects.create(project=self.project, domain=self.domain, host='app.example.test', path=path, url=f'https://app.example.test{path}',
+                                     auth_state='session_required', http_status=302, redirect_to='/login', checked_at=timezone.now())
         self.cred = self.make(host='app.example.test')
 
     def answer(self, task):
@@ -104,9 +106,10 @@ class DispatchTests(SignedRouteStageBase):
 
     def test_the_kind_has_no_local_path_whatever_the_fallback_says(self):
         self.assertIn(KIND, dispatch.NEVER_LOCAL)
-        with mock.patch.dict('os.environ', {dispatch.LOCAL_FALLBACK_ENV: 'all'}):
-            self.assertNotIn(KIND, dispatch.local_fallback_kinds())
-            self.assertFalse(dispatch.fallback_allowed(KIND))
+        with mock.patch.dict('os.environ', {'CVENGINE_LOCAL_FALLBACK': 'all'}):  # ignored since 1.4
+            self.assertIn(KIND, dispatch.NEVER_LOCAL)
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch._no_local(KIND, 'nothing took it')
         self.guard.assert_clean()
 
 
@@ -135,7 +138,8 @@ class GateTests(SignedRouteStageBase):
 
     def test_the_waiting_state_names_the_kind_without_a_builtin_scanner(self):
         self.external()
-        offered = scanner_state.state()
+        with mock.patch.object(dispatch, 'builtin_scanner_enrolled', return_value=True):  # the signal reads nothing before the built-in scanner has enrolled
+            offered = scanner_state.state()
         self.assertTrue(offered.get('offline'))
         self.assertIn(KIND, offered['kinds'])
 

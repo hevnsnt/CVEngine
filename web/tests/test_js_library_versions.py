@@ -361,6 +361,10 @@ class RouteCheckTests(NoCache, RouteFixture, TestCase):
                 return probe(url=url, content_type='application/javascript', body=bodies[path])
             return self.probe(url)
         scan = self.scan()
+        # the scanner reads the page's scripts (cvengine_scanner/tests/probes/test_routes.py); what it reports is stored here
+        from tests import route_scanner
+        self.scanner().responders['route_probe'] = lambda task: route_scanner.result(
+            task, fake, scripts={'project': self.project.id, 'target': self.domain, 'reader': js_libraries.Reader(self.project.id)})
         self.run_it(scan, probe=fake)
         root = RouteAuth.objects.get(path='/')
         self.assertNotIn('page_scripts', root.evidence)

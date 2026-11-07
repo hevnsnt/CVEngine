@@ -20,7 +20,7 @@ from reNgine.resources import ScannerUnavailable
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
-from tests.fake_scanner import LocalCapable, assert_ran_nowhere_locally
+from tests.fake_scanner import assert_ran_nowhere_locally
 
 FAST_XML = '''<?xml version="1.0"?>
 <nmaprun><host>
@@ -44,7 +44,6 @@ def _answer_queued_task(result, status='done'):
 
 class DispatchBase(TestCase):
     def setUp(self):
-        LocalCapable('openvas').apply(self)  # the generic dispatch tests use openvas as the kind that may still fall back locally; in production it has no local path (NEVER_LOCAL)
         self.org = Org.objects.create(name='D', slug='disp')
         self.project = Project.objects.create(name='D', slug='disp-p', insert_date=timezone.now(), org=self.org)
         self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
@@ -82,13 +81,14 @@ class NoScannerTests(DispatchBase):
         self.assertFalse(SentinelTask.objects.exists())
         self.assertFalse(IpAddress.objects.get(address='192.0.2.10').ports.exists())
 
-    def test_the_never_local_kinds_are_not_runnable_here_whatever_the_switch_says(self):
+    def test_the_never_local_kinds_wait_whatever_the_ignored_switch_says(self):
+        from reNgine.resources import ScannerUnavailable
         for kind in ('nmap', 'naabu', 'nmap_udp', 'nmap_full', 'nmap_verify', 'path_probe'):
             self.assertIn(kind, dispatch.NEVER_LOCAL)
-            with mock.patch.dict(os.environ, {dispatch.LOCAL_FALLBACK_ENV: 'all'}):
-                self.assertFalse(dispatch.fallback_allowed(kind), kind)
-            with mock.patch.dict(os.environ, {dispatch.LOCAL_FALLBACK_ENV: kind}):
-                self.assertFalse(dispatch.fallback_allowed(kind), kind)
+            for value in ('all', kind):
+                with mock.patch.dict(os.environ, {'CVENGINE_LOCAL_FALLBACK': value}):  # ignored since 1.4
+                    with self.assertRaises(ScannerUnavailable, msg=f'{kind} {value}'):
+                        dispatch.dispatch_or_none(self.project, kind, {'addresses': ['192.0.2.10']})
 
     def test_wrap_naabu_runner_try_nmap_and_dispatch_raise_scanner_unavailable(self):
         from reNgine.resources import ScannerUnavailable
@@ -262,24 +262,27 @@ class DispatchActivityLoggingTests(DispatchBase):
         self.make_sentinel(['openvas'])
         result = {'outcome': 'error', 'error': 'no resolver'}
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result, status='failed')):
-            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # the work stays due: it never runs here
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
         entries = self._entries()
         self.assertEqual(entries[-1].status, 'failed')
         self.assertIn('reported openvas failed for www.example.test', entries[-1].message)
 
-    def test_a_timeout_says_it_ran_locally_instead(self):
+    def test_a_timeout_says_the_targets_stay_due(self):
         # Never claimed within the (short) overall timeout, so this is the "nobody picked it up" message, not the
         # "claimed but didn't finish" one - see ClaimTimeoutTests for that distinction.
         self.make_sentinel(['openvas'])
-        dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
         entries = self._entries()
         self.assertEqual(entries[-1].status, 'expired')
-        self.assertIn('No Sentinel picked up openvas work for www.example.test in time; it ran locally instead', entries[-1].message)
+        self.assertIn('No Sentinel picked up openvas work for www.example.test in time; the targets stay due until a scanner can take the work', entries[-1].message)
+        self.assertNotIn('locally', entries[-1].message)
 
     def test_the_activity_line_carries_the_tasks_trace_id_from_hand_off_to_ending(self):
         self.make_sentinel(['openvas'])
-        dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
         task = SentinelTask.objects.get()
         entries = self._entries()
         self.assertEqual(len(entries), 1)
@@ -289,7 +292,8 @@ class DispatchActivityLoggingTests(DispatchBase):
     def test_no_eligible_sentinel_writes_no_activity_at_all(self):
         # any_scanner_for's own cheap existence check short-circuits before anything (including activity) is written,
         # so a project with no Sentinel pays for nothing beyond that one query - matching ZeroSentinelRegressionTests.
-        dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
+        with self.assertRaises(ScannerUnavailable):  # raised before anything is written
+            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=5)
         self.assertEqual(self._entries(), [])
 
 
@@ -306,9 +310,9 @@ class ClaimTimeoutTests(DispatchBase):
         self.make_sentinel(['openvas'])  # eligible, but nothing ever claims the task in this test
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             start = time.monotonic()
-            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=10)
+            with self.assertRaises(ScannerUnavailable):
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=10)
             elapsed = time.monotonic() - start
-        self.assertIsNone(out)
         self.assertLess(elapsed, 2)  # nowhere near the 10s completion timeout
         entries = self._entries()
         self.assertEqual(entries[-1].status, 'expired')
@@ -338,7 +342,8 @@ class ClaimTimeoutTests(DispatchBase):
         self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=90):
             start = time.monotonic()
-            dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
+            with self.assertRaises(ScannerUnavailable):
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
             elapsed = time.monotonic() - start
         self.assertLess(elapsed, 2)  # the overall timeout still wins even though the claim timeout is much larger
 
@@ -705,7 +710,7 @@ class CompletionCeilingTests(DispatchBase):
         with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
                 mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
             start = time.monotonic()
-            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['10.0.0.1']}, host='x')
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['10.0.0.1']}, host='x')
         self.assertLess(time.monotonic() - start, 5)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')

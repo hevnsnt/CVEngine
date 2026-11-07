@@ -40,9 +40,9 @@ of its own scenario (``fixture(kind, **changes)``, ``for_host``).
 Limits. A serve costs two ``claim`` calls of the broker's rate limit (60 a minute per token), so one fake serves about 30 tasks per test. A kind
 that fails ``FAIL_STREAK`` times running is withheld from the Sentinel for a while (``sentinel_broker.failing_kinds``), as for a real one.
 
-``assert_ran_nowhere_locally(testcase, kind)`` makes any local run of the kind a test failure, and ``LocalFallback('none')`` is the environment
-switch (``CVENGINE_LOCAL_FALLBACK``) that stops the server from running a kind itself. A delete PR for kind K is proven by: ``LocalFallback('none')``,
-``assert_ran_nowhere_locally(self, K)``, ``FakeScanner(kinds=[K])`` serving the K fixture, the real stage entry point, and an assertion on what the
+``assert_ran_nowhere_locally(testcase, kind)`` makes any local run of the kind a test failure. No kind runs on the server since 1.4 and
+``CVENGINE_LOCAL_FALLBACK`` is ignored, so nothing returns ``None`` for a stage to run itself: a task nobody finished is ``ScannerUnavailable``.
+(``LocalFallback`` below only forgets the cached scanner state now.) A kind K is proven by: ``assert_ran_nowhere_locally(self, K)``, ``FakeScanner(kinds=[K])`` serving the K fixture, the real stage entry point, and an assertion on what the
 stage stored; plus the same with ``mode='offline'``, where the stage must wait and leave its target due.
 """
 import contextlib
@@ -218,15 +218,13 @@ class FakeScanner:
 
     @staticmethod
     def _forget_scanner_state():
-        """``scanner_state`` keeps its answer in the cache for 15 seconds, per value of ``CVENGINE_LOCAL_FALLBACK``: an answer from the test before this
-        one, or from before the fake changed, would decide what a sweep does."""
+        """``scanner_state`` keeps its answer in the cache for 15 seconds: an answer from the test before this one, or from before the fake changed,
+        would decide what a sweep does."""
         from django.core.cache import cache
 
-        from agentapi import scanner_state, sentinel_dispatch
-        raw = os.environ.get(sentinel_dispatch.LOCAL_FALLBACK_ENV, '').strip().lower()
-        for key in {scanner_state.CACHE_KEY + raw, scanner_state.CACHE_KEY + 'none'}:
-            with contextlib.suppress(Exception):
-                cache.delete(key)
+        from agentapi import scanner_state
+        with contextlib.suppress(Exception):
+            cache.delete(scanner_state.CACHE_KEY + 'default')
 
     # -- presence
 
@@ -355,51 +353,18 @@ def _has_fixture(kind):
 # --- the guards ------------------------------------------------------------------------------------------------------------------------------
 
 class LocalFallback(contextlib.ContextDecorator):
-    """``with LocalFallback('none'):`` sets ``CVENGINE_LOCAL_FALLBACK`` (``'none'``, ``'all'``, a comma list of kinds, or ``None`` to unset it) for the
-    block, or for a whole test with ``LocalFallback('none').apply(self)`` in ``setUp``. Usable as a decorator too. It also drops
-    ``scanner_state``'s cached answer on the way in and out, which is keyed by the value."""
+    """``CVENGINE_LOCAL_FALLBACK`` is ignored since 1.4 (no kind runs on this server), so this sets nothing that changes behavior: it only drops
+    ``scanner_state``'s cached answer on the way in and out, which a test that changes the Sentinels it serves wants. ``with LocalFallback('none'):``
+    or ``LocalFallback('none').apply(self)`` in ``setUp``; the value is accepted for the call sites that name it and has no effect."""
 
     def __init__(self, value='none'):
-        self.value, self._patch = value, None
+        self.value = value
 
     def __enter__(self):
-        from agentapi.sentinel_dispatch import LOCAL_FALLBACK_ENV
-        self._patch = mock.patch.dict(os.environ, {} if self.value is None else {LOCAL_FALLBACK_ENV: self.value})
-        self._patch.start()
-        if self.value is None:
-            os.environ.pop(LOCAL_FALLBACK_ENV, None)
         FakeScanner._forget_scanner_state()
         return self
 
     def __exit__(self, *exc):
-        self._patch.stop()
-        FakeScanner._forget_scanner_state()
-        return False
-
-    def apply(self, testcase):
-        self.__enter__()
-        testcase.addCleanup(self.__exit__, None, None, None)
-        return self
-
-
-class LocalCapable(contextlib.ContextDecorator):
-    """``with LocalCapable('openvas'):`` takes the kinds out of ``sentinel_dispatch.NEVER_LOCAL`` for the block (or for a whole test with
-    ``LocalCapable('openvas').apply(self)`` in ``setUp``), so a test of the generic fallback machinery (the local-fallback list, the wording of a
-    run that falls back, the telemetry of the reason) has a kind that may still run here. No kind has a local path any more in production: this
-    exercises the policy code, not a scan. It drops ``scanner_state``'s cached answer on the way in and out, which is keyed by the policy."""
-
-    def __init__(self, *kinds):
-        self.kinds, self._patch = kinds, None
-
-    def __enter__(self):
-        from agentapi import sentinel_dispatch
-        self._patch = mock.patch.object(sentinel_dispatch, 'NEVER_LOCAL', tuple(k for k in sentinel_dispatch.NEVER_LOCAL if k not in self.kinds))
-        self._patch.start()
-        FakeScanner._forget_scanner_state()
-        return self
-
-    def __exit__(self, *exc):
-        self._patch.stop()
         FakeScanner._forget_scanner_state()
         return False
 
@@ -425,18 +390,18 @@ LOCAL_RUNNERS = {
     'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'wpscan_thorough': (),  # likewise
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
+    'http_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard. The re-test runners of cveFeed.validation (http_head, script_read) still GET from this server
     'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'alive_check': (),  # likewise
-    'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
+    'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
     'route_probe_signed': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'page_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'openvas': (),  # likewise: no GMP session is opened here (cveFeed.openvas_scan.tick hands the batch to a Sentinel)
     'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
-    'subdir_probe': ('cveFeed.slow_web.get',),
-    'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
+    'vhost_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'subdir_probe': (),  # likewise
+    'supplier_check': (),  # likewise
     'hygiene_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'dangling_dns_check': (),  # likewise
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
@@ -461,10 +426,10 @@ HEAVY_KINDS = {
     'wpscan': ('wpscan',),
     'wpscan_thorough': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
-    'http_probe': (),  # in-process requests: no heavy job
+    'http_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard. The re-test runners of cveFeed.validation (http_head, script_read) still GET from this server
     'dns_resolve': (),
     'alive_check': (),
-    'route_probe': (),
+    'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
     'route_probe_signed': (),
     'page_read': (),
     'openvas': (),

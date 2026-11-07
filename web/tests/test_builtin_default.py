@@ -20,8 +20,7 @@ from reNgine.resources import ScannerUnavailable
 from scanEngine.models import Proxy
 from tests.test_sentinel_secret_read import SECRETS, SecretBase
 
-BUILTIN_KINDS = set(sentinel_dispatch.BUILTIN_SCANNER_KINDS)
-EVERY_LOCAL = set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL)  # every kind that has a local path at all
+EVERY_KIND = set(SentinelTask.KINDS) - {'discover'}  # discover, the internal ranges, is Sentinel-only by design
 
 
 class Env:
@@ -42,27 +41,28 @@ class SwitchTests(Env, TestCase):
             self.env(CVENGINE_BUILTIN_SCANNER=value)
             self.assertFalse(builtin.enabled(), value)
 
-    def test_unset_every_kind_runs_here_until_the_builtin_scanner_has_enrolled(self):
+    def test_no_kind_runs_here_before_the_builtin_scanner_has_enrolled_either_and_nothing_is_reported_yet(self):
         self.env(CVENGINE_BUILTIN_SCANNER=None, CVENGINE_LOCAL_FALLBACK=None)
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
+        self.assertEqual(EVERY_KIND - set(sentinel_dispatch.NEVER_LOCAL), set())
+        self.assertFalse(sentinel_dispatch.builtin_scanner_enrolled())
         self.assertEqual(scanner_state.state(), {'offline': False, 'kinds': [], 'never_seen': []})
 
 
 class DefaultFallbackTests(Env, SecretBase):
     """SecretBase enrols a real built-in scanner (``CVENGINE_BUILTIN_SCANNER=1`` there)."""
 
-    def test_unset_the_builtin_scanners_kinds_never_run_here_once_it_has_enrolled(self):
+    def test_once_it_has_enrolled_every_kind_waits_for_a_scanner_and_none_runs_here(self):
         self.env(CVENGINE_LOCAL_FALLBACK=None)
-        allowed = sentinel_dispatch.local_fallback_kinds()
-        self.assertFalse(allowed & BUILTIN_KINDS)
-        self.assertEqual(allowed, EVERY_LOCAL - BUILTIN_KINDS)
-        self.assertNotIn('openvas', allowed)  # the built-in scanner has no OpenVAS, and this server runs none (NEVER_LOCAL): a Sentinel with its own GVM stack does
+        self.assertTrue(sentinel_dispatch.builtin_scanner_enrolled())
+        self.assertEqual(EVERY_KIND - set(sentinel_dispatch.NEVER_LOCAL), set())
+        self.assertIn('openvas', sentinel_dispatch.NEVER_LOCAL)  # the built-in scanner has no OpenVAS, and this server runs none: a Sentinel with its own GVM stack does
 
-    def test_all_is_the_escape_hatch_and_the_off_switch_restores_every_kind(self):
+    def test_the_ignored_variable_and_the_off_switch_bring_no_kind_back(self):
         self.env(CVENGINE_LOCAL_FALLBACK='all')
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
+        self.assertEqual(EVERY_KIND - set(sentinel_dispatch.NEVER_LOCAL), set())
         self.env(CVENGINE_LOCAL_FALLBACK=None, CVENGINE_BUILTIN_SCANNER='0')
-        self.assertEqual(sentinel_dispatch.local_fallback_kinds(), EVERY_LOCAL)
+        self.assertEqual(EVERY_KIND - set(sentinel_dispatch.NEVER_LOCAL), set())
+        self.assertFalse(sentinel_dispatch.builtin_scanner_enrolled())  # switched off: nothing is reported, and still nothing runs here
 
     def test_turning_it_off_revokes_its_token_and_removes_the_blob(self):
         task = self.task(status='claimed', ref=None)
@@ -122,14 +122,12 @@ class VantageTests(Env, SecretBase):
         self.proxy_on()
         self.assertNotEqual(sentinel_settings.reply(self.builtin)['rev'], before)
 
-    def test_no_warning_once_the_builtin_scanner_applies_them_and_one_for_an_older_image(self):
+    def test_an_older_image_is_sent_the_same_settings_and_the_server_has_no_warning_about_it(self):
         self.proxy_on()
-        self.env(CVENGINE_ALLOW_PRIVATE_TARGETS='1', COMPOSE_PROFILES='tailscale', CVENGINE_LOCAL_FALLBACK='none')  # every kind of the built-in scanner has no local path now, so only a list that takes the others off moves anything
-        self.assertEqual(scanner_state.vantage_warnings(), [])
+        self.env(CVENGINE_ALLOW_PRIVATE_TARGETS='1', COMPOSE_PROFILES='tailscale')
         Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True})
-        warnings = scanner_state.vantage_warnings()
-        self.assertEqual(len(warnings), 3)
-        self.assertTrue(all('whose image does not use' in w for w in warnings))
+        self.assertIn('vantage', sentinel_settings.reply(self.builtin)['values'])
+        self.assertFalse(hasattr(scanner_state, 'vantage_warnings'))
 
 
 class SignedInDispatchTests(Env, SecretBase):

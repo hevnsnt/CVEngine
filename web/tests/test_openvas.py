@@ -671,7 +671,7 @@ class NoLocalPathTests(Fixture, TestCase):
         self.assertIn('openvas', dispatch.NEVER_LOCAL)
         for value in ('all', 'openvas', 'none', 'openvas,hygiene_check'):
             with LocalFallback(value):
-                self.assertNotIn('openvas', dispatch.local_fallback_kinds(), value)
+                self.assertIn('openvas', dispatch.NEVER_LOCAL, value)
                 guard = assert_ran_nowhere_locally(self, 'openvas')
                 self.assertIn('skipped', self.tick(), value)
                 self.assertFalse(OpenvasRun.objects.exists(), value)
