@@ -1460,9 +1460,22 @@ def _host_heat(sub, reasons=None):
     if reasons:
         return max((r['temp'] for r in reasons), key=HEAT_RANK.get)
     from startScan.models import ScanActivity
-    nuclei_ran = bool(sub.vulnerability_set.all()) or (sub.scan_history_id and ScanActivity.objects.filter(
-        scan_of_id=sub.scan_history_id, name__in=NUCLEI_STAGES, status=2).exists())
-    return 'clean' if nuclei_ran else 'unscanned'
+    scan_ran = getattr(sub, '_nuclei_ran_scan', None)  # set for a whole page at once by ``_prime_nuclei``
+    if scan_ran is None:
+        scan_ran = bool(sub.scan_history_id and ScanActivity.objects.filter(scan_of_id=sub.scan_history_id, name__in=NUCLEI_STAGES, status=2).exists())
+    return 'clean' if bool(sub.vulnerability_set.all()) or scan_ran else 'unscanned'
+
+
+def _prime_nuclei(*groups):
+    """Read, for every host row of ``groups`` (lists of Subdomain rows) at once, whether a nuclei stage finished in the scan that wrote it: one query,
+    where ``_host_heat`` asked once per host with no finding (the dearest part of listing a few thousand clean hosts)."""
+    from startScan.models import ScanActivity
+    rows = [r for group in groups for r in group if r.scan_history_id]
+    if not rows:
+        return
+    done = set(ScanActivity.objects.filter(scan_of_id__in={r.scan_history_id for r in rows}, name__in=NUCLEI_STAGES, status=2).values_list('scan_of_id', flat=True).distinct())
+    for r in rows:
+        r._nuclei_ran_scan = r.scan_history_id in done
 
 
 def _host_names(sub):
@@ -1935,7 +1948,7 @@ def _one_per_host(qs, per_project=False):
     return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
 
 
-def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
+def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_extra=None):
     """Paginate hosts with each row's same-name copies folded in (one extra query per page). ``coverage=False`` leaves out ``check_coverage``
     (the PDF report does not print it). In the all-projects view each row
     also names its project, and everything folded in (copies, labels, asset info, exclusions) is looked up per (project, host)."""
@@ -1943,6 +1956,7 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
     page = paginate_by_ids(qs, params, load) if load else paginate(qs, params, lambda sub: sub)
     subs = page['results']
     others = _name_siblings(project, subs)
+    _prime_nuclei(subs, *others.values())
     labels = _labels_for(project, subs)
     profiles, excluded, tags = _profiles_for(project, subs, others)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
@@ -1950,6 +1964,8 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None):
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)
+    if page_extra:  # an ``extra`` that needs one lookup for the whole page: ``page_extra(subs, shared)`` returns the per-host function
+        extra = page_extra(subs, shared)
     rows = []
     for sub in subs:
         key = (_pid_of(project, sub), sub.name.lower())
@@ -2305,11 +2321,24 @@ def _port_evidence(p, v, field):
     return ''
 
 
-def _route_reasons(sub, v):
-    """What the host's live routes say it runs that holds ``v``: Server and X-Powered-By headers, fingerprints, cookie names."""
+def _routes_for(subs):
+    """``{(project id, host): up to 20 live RouteAuth rows}`` for a page of hosts: one query, where ``_route_reasons`` asked once per host."""
+    from cveFeed.models import RouteAuth
+    out = {}
+    for row in RouteAuth.objects.filter(project_id__in={s.target_domain.project_id for s in subs}, host__in={s.name for s in subs}, retired_at__isnull=True).order_by('id'):
+        rows = out.setdefault((row.project_id, row.host), [])
+        if len(rows) < 20:
+            rows.append(row)
+    return out
+
+
+def _route_reasons(sub, v, routes=None):
+    """What the host's live routes say it runs that holds ``v``: Server and X-Powered-By headers, fingerprints, cookie names. ``routes`` is the page's
+    ``_routes_for`` (without it the host's rows are read here, one query)."""
     from cveFeed.models import RouteAuth
     out = []
-    rows = RouteAuth.objects.filter(project_id=sub.target_domain.project_id, host=sub.name, retired_at__isnull=True)[:20]
+    key = (sub.target_domain.project_id, sub.name)
+    rows = routes.get(key, []) if routes is not None else RouteAuth.objects.filter(project_id=key[0], host=sub.name, retired_at__isnull=True)[:20]
     for route in rows:
         evidence = route.evidence or {}
         for key, label in (('server', 'Server header'), ('powered_by', 'X-Powered-By')):
@@ -2322,16 +2351,27 @@ def _route_reasons(sub, v):
     return out
 
 
-def _archive_reasons(sub, v):
-    """Technologies the web archive says the host ran at some point that hold ``v``. Historical, so labelled as such."""
+def _archive_reasons(sub, v, archive=None):
+    """Technologies the web archive says the host ran at some point that hold ``v``. Historical, so labelled as such. ``archive`` is the page's
+    ``{(project id, lowercase host): technologies}`` (``_shared_for``); without it the row is read here, one query."""
     from cveFeed.models import HostArchive
-    row = HostArchive.objects.filter(project_id=sub.target_domain.project_id, host=sub.name).first()
-    return [f'seen in web archive: {name} ({info.get("count", 0)} URLs)' for name, info in (row.technologies if row else {}).items()
-            if v in name.lower()]
+    if archive is not None:
+        technologies = archive.get((sub.target_domain.project_id, sub.name.lower())) or {}
+    else:
+        row = HostArchive.objects.filter(project_id=sub.target_domain.project_id, host=sub.name).first()
+        technologies = row.technologies if row else {}
+    return [f'seen in web archive: {name} ({info.get("count", 0)} URLs)' for name, info in technologies.items() if v in name.lower()]
 
 
-def _why_matched(sub, terms):
-    """What each positive term matched on this host, for the results list (read from the page's prefetched rows)."""
+def _matched_for_page(subs, shared, terms):
+    """The per-host ``matched`` function of a search page, with the route rows read once for the page when a term can match them."""
+    routes = _routes_for(subs) if any(not neg and field in (None, 'tech') for neg, field, _value, _quoted in terms) and subs else {}
+    return lambda sub: {'matched': _why_matched(sub, terms, routes, shared['archive'])}
+
+
+def _why_matched(sub, terms, routes=None, archive=None):
+    """What each positive term matched on this host, for the results list (read from the page's prefetched rows; ``routes`` and ``archive`` are the
+    page's lookups, see ``_routes_for`` and ``_shared_for``)."""
     from startScan.models import open_services
     reasons = []
     for neg, field, value, _quoted in terms:
@@ -2364,8 +2404,8 @@ def _why_matched(sub, terms):
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
             if has(sub.webserver):
                 reasons.append(f'web server {sub.webserver}')
-            reasons += _route_reasons(sub, v)
-            reasons += _archive_reasons(sub, v)
+            reasons += _route_reasons(sub, v, routes)
+            reasons += _archive_reasons(sub, v, archive)
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
@@ -2433,6 +2473,7 @@ def _heat_facets(project, qs):
         'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
     ).order_by('id')[:HEAT_FACET_CAP])
     others = _name_siblings(project, subs)
+    _prime_nuclei(subs, *others.values())
     counts = {v: 0 for v in HEAT_FACET_VALUES}
     heat_by_id = {}
     for sub in subs:
@@ -2584,7 +2625,7 @@ def search_hosts(ctx, slug, params):
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies').order_by(*_host_order(params))
-    page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
+    page = _mark_zombies(project, _hosts_page(project, qs, params, page_extra=lambda subs, shared: _matched_for_page(subs, shared, terms)))
     for row in page['results']:
         row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
     page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id),
