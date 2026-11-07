@@ -18,7 +18,7 @@ KIND_OF = {'nmap': 'nmap', 'naabu': 'naabu', 'nuclei_light': 'nuclei_light', 'te
            'discover': 'discover', 'openvas': 'openvas', 'waf': 'waf', 'bbot_discovery': 'bbot_discovery', 'http_probe': 'http_probe',
            'dns_resolve': 'dns_resolve', 'secrets_scan': 'secrets_scan', 'error': 'nmap', 'nmap_full': 'nmap_full', 'nmap_verify': 'nmap_verify', 'node2shell': 'node2shell',
            'rdp_shot': 'rdp_shot', 'db_probe': 'db_probe', 'path_probe': 'path_probe', 'nuclei_validate': 'nuclei_validate',
-           'alive_check': 'alive_check', 'bucket_check': 'bucket_check', 'vhost_probe': 'vhost_probe', 'subdir_probe': 'subdir_probe', 'supplier_check': 'supplier_check', 'hygiene_check': 'hygiene_check', 'dangling_dns_check': 'dangling_dns_check', 'route_probe': 'route_probe', 'identity_check': 'identity_check', 'web_screenshot': 'web_screenshot', 'wpscan_thorough': 'wpscan_thorough', 'route_probe_signed': 'route_probe_signed'}
+           'alive_check': 'alive_check', 'bucket_check': 'bucket_check', 'vhost_probe': 'vhost_probe', 'subdir_probe': 'subdir_probe', 'supplier_check': 'supplier_check', 'hygiene_check': 'hygiene_check', 'dangling_dns_check': 'dangling_dns_check', 'route_probe': 'route_probe', 'identity_check': 'identity_check', 'web_screenshot': 'web_screenshot', 'wpscan_thorough': 'wpscan_thorough', 'route_probe_signed': 'route_probe_signed', 'page_read': 'page_read'}
 
 
 V1_SHA256 = {

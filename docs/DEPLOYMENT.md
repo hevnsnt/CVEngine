@@ -221,7 +221,7 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
 | `make test` | Runs the test suite in the running `celery` container. |
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
-| `make openvas-up`, `make openvas-user`, `make openvas-down` | Start the optional OpenVAS add-on, save its generated login, stop it. The app does the same from Administration, OpenVAS ([OPENVAS.md](OPENVAS.md)). |
+| `make openvas-up`, `make openvas-down` | Start and stop the old in-stack Greenbone containers (no longer used by the app: a Sentinel runs OpenVAS, see [OPENVAS.md](OPENVAS.md)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the Sentinel commit `scanner.lock.json` pins (the fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |

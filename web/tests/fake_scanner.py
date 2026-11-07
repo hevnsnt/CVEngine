@@ -376,6 +376,33 @@ class LocalFallback(contextlib.ContextDecorator):
         return self
 
 
+class LocalCapable(contextlib.ContextDecorator):
+    """``with LocalCapable('openvas'):`` takes the kinds out of ``sentinel_dispatch.NEVER_LOCAL`` for the block (or for a whole test with
+    ``LocalCapable('openvas').apply(self)`` in ``setUp``), so a test of the generic fallback machinery (the local-fallback list, the wording of a
+    run that falls back, the telemetry of the reason) has a kind that may still run here. No kind has a local path any more in production: this
+    exercises the policy code, not a scan. It drops ``scanner_state``'s cached answer on the way in and out, which is keyed by the policy."""
+
+    def __init__(self, *kinds):
+        self.kinds, self._patch = kinds, None
+
+    def __enter__(self):
+        from agentapi import sentinel_dispatch
+        self._patch = mock.patch.object(sentinel_dispatch, 'NEVER_LOCAL', tuple(k for k in sentinel_dispatch.NEVER_LOCAL if k not in self.kinds))
+        self._patch.start()
+        FakeScanner._forget_scanner_state()
+        return self
+
+    def __exit__(self, *exc):
+        self._patch.stop()
+        FakeScanner._forget_scanner_state()
+        return False
+
+    def apply(self, testcase):
+        self.__enter__()
+        testcase.addCleanup(self.__exit__, None, None, None)
+        return self
+
+
 class LocalRunDetected(AssertionError):
     """A scan tool was about to run on this server in a test that says it must not."""
 
@@ -397,6 +424,8 @@ LOCAL_RUNNERS = {
     'alive_check': (),  # likewise
     'route_probe': ('cveFeed.route_auth.probe_url',),  # the GET every local route check makes
     'route_probe_signed': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'page_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'openvas': (),  # likewise: no GMP session is opened here (cveFeed.openvas_scan.tick hands the batch to a Sentinel)
     'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
@@ -431,6 +460,8 @@ HEAVY_KINDS = {
     'alive_check': (),
     'route_probe': (),
     'route_probe_signed': (),
+    'page_read': (),
+    'openvas': (),
     'web_screenshot': (),
     'bucket_check': (),
     'vhost_probe': (),

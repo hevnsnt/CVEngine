@@ -284,7 +284,6 @@ ALLOWED = {
         'cveFeed/heavy_process.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
-        'cveFeed/validation.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',
         'reNgine/time_limits.py',

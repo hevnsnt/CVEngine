@@ -1,18 +1,11 @@
-"""Settings > OpenVAS: the App Admin's switch for the optional Greenbone add-on, its GMP login, the per-project opt-in and the connection state.
+"""Settings > OpenVAS: the App Admin's switch for the optional Greenbone add-on and the per-project opt-in.
 
 Superuser only, like the rest of /cve/api/settings (the dispatcher enforces it, and so does the tenancy middleware). Switching the add-on on is
-the act that allows any scan by the sidecar at all, an instance-wide decision, so it is not delegated to project or organization roles, and the
-add-on is deliberately not part of the agent REST API or MCP. The GMP password is write-only: a response says whether it is set, never what
-it is, and a blank field on update keeps the stored value. The Test connection runs in a worker (the web container has no sidecar socket)
-and reads the saved login; no credential is put in a task message.
+an instance-wide decision, so it is not delegated to project or organization roles, and the add-on is deliberately not part of the agent REST API
+or MCP. The scan itself runs on a Sentinel's own GVM stack (``cveFeed.openvas_scan``): this server holds no GMP login and opens no GMP session.
 """
-import json
 import logging
-import os
 import re
-import time
-
-from django.conf import settings
 
 from cveFeed.tailscale_api import clean_text
 
@@ -100,12 +93,10 @@ def openvas_get(request):
     links = OpenvasProject.objects.select_related('project').order_by('project__name')
     linked = {link.project_id for link in links}
     return {
-        'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'username': row.gmp_username, 'password_set': bool(row.gmp_password),
-        'transport': openvas_scan.transport(),
-        'state': {} if row.sentinel_only else (row.state or {}),  # Sentinel-only never opens a local GMP session: a stale local-engine error says nothing
+        'enabled': row.enabled,
         'sentinels': sentinel_readiness(), 'last_run': latest_run(),
         'running': OpenvasRun.objects.filter(status='running').exists(),
-        'floor': {'min_available_mb': openvas_scan.min_available_mb(), 'max_hosts_per_task': openvas_scan.max_hosts(), 'max_hours': openvas_scan.max_hours(),
+        'floor': {'max_hosts_per_task': openvas_scan.max_hosts(), 'max_hours': openvas_scan.max_hours(),
                   'confirmed_qod': openvas_scan.CONFIRMED_QOD, 'excluded_families': list(openvas_scan.EXCLUDED_FAMILIES)},
         'links': [link_dict(link) for link in links],
         'projects': [{'id': p.id, 'name': p.name, 'slug': p.slug, 'org': p.org.name if p.org else ''}
@@ -131,26 +122,13 @@ def openvas_put(request):
     data = _body(request)
     row = OpenvasSettings.current()
     was = row.enabled
-    if 'gmp_username' in data:
-        row.gmp_username = clean_text(data['gmp_username'], 64)
-    password = data.get('gmp_password')
-    if isinstance(password, str) and password.strip():
-        if len(password) > 200:
-            raise _error(400, 'gmp_password is too long')
-        row.gmp_password = password.strip()
-    if data.get('clear_credentials'):
-        row.gmp_username, row.gmp_password = '', ''
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])
-    if 'sentinel_only' in data:
-        row.sentinel_only = bool(data['sentinel_only'])
-    if row.enabled and not (row.gmp_username and row.gmp_password):
-        raise _error(400, 'save the GMP login first (`make openvas-user` creates and saves one); the add-on cannot be switched on without it')
     row.updated_by = request.user
     row.save()
     set_schedule(row.enabled)
     audit(request.user, 'openvas.enable' if row.enabled and not was else 'openvas.disable' if was and not row.enabled else 'openvas.update',
-          'openvas', enabled=row.enabled, sentinel_only=row.sentinel_only, credentials=bool(row.gmp_username and row.gmp_password))
+          'openvas', enabled=row.enabled)
     return openvas_get(request)
 
 
@@ -241,127 +219,18 @@ def project_delete(request, project_id):
     return {'deleted': True}
 
 
-def openvas_test(request):
-    """Ask a worker to connect, authenticate and read the feed state, and say what it found. Never raises for a down sidecar: that is the answer."""
-    from cveFeed.models import OpenvasSettings
-    from cveFeed.tasks import openvas_check
-    row = OpenvasSettings.current()
-    if not (row.gmp_username and row.gmp_password):
-        return {'connected': False, 'error': 'no GMP login is saved yet', 'feed': None, 'guard': None, 'gmp_version': ''}
-    try:
-        return openvas_check.delay().get(timeout=40)
-    except Exception:  # noqa: BLE001 - no worker answered in time: say so, never fail the page
-        return {'connected': False, 'error': 'no worker answered; is the celery container running?', 'feed': None, 'guard': None, 'gmp_version': ''}
-
-
 # ----------------------------------------------------------------------------- the simple page: switch it on, choose what it looks at
 # App Admins and Org Admins use these (the ``/cve/api/admin`` routes). The instance-wide engine is switched on and off by an App Admin only;
-# once it is on, Org Admins choose their organizations and projects. Nothing is typed: the GMP login is made by the worker (``openvas_scan.ensure_login``) and
-# the containers are started by the host's watcher (``scripts/openvas-sync.sh``), which the web container asks through a flag file.
-
-WANTED = '.openvas-wanted'  # written here: "on" or "off"
-APPLIED = '.openvas-applied'  # written by scripts/openvas-sync.sh: {"want": "on", "ok": true, "error": "", "at": 1700000000}
-
-
-def _path(name):
-    return os.path.join(settings.BASE_DIR, name)
-
-
-def request_containers(on):
-    """Ask the host's watcher to start (or stop) the Greenbone containers: the web container has no Docker access on purpose. Returns whether the
-    request could be written."""
-    tmp = _path(WANTED + '.tmp')
-    try:
-        with open(tmp, 'w') as f:
-            f.write('on\n' if on else 'off\n')
-        os.replace(tmp, _path(WANTED))
-        return True
-    except OSError:
-        logger.warning('could not write %s', WANTED)
-        return False
-
-
-RESTART = '.openvas-restart'  # written here when gvmd must be restarted; scripts/openvas-sync.sh restart-gvmd answers with .openvas-restarted
-RESTART_EVERY_SECONDS = 6 * 3600  # at most one restart request this often, whatever number of runs find gvmd's NVT cache stale
-
-
-def request_gvmd_restart():
-    """Ask the host's watcher to restart gvmd, whose NVT cache is out of date (``openvas_scan.stale_cache_error``): gvmd 26.35 and later reload
-    that cache only after a restart. At most once every ``RESTART_EVERY_SECONDS``. An install without the watcher (``make openvas-up`` by hand,
-    Docker Desktop) gets the same advice in the run's own message. Returns whether a request was written."""
-    try:
-        if time.time() - os.stat(_path(RESTART)).st_mtime < RESTART_EVERY_SECONDS:
-            return False
-    except OSError:
-        pass
-    tmp = _path(RESTART + '.tmp')
-    try:
-        with open(tmp, 'w') as f:
-            f.write('gvmd\n')
-        os.replace(tmp, _path(RESTART))
-        logger.warning('gvmd\'s NVT cache is out of date: asked the host to restart openvas-gvmd')
-        return True
-    except OSError:
-        logger.warning('could not write %s', RESTART)
-        return False
-
-
-APPLYING_STALE_SECONDS = 1800  # a request still "applying" after this long means the script died midway
-AGENT_FIX = 'scripts/install-updater.sh'
-
-
-def host_report():
-    """What the host agent did with the last request: ``{want, state, error, at}`` where ``state`` is applying, ok or failed, or ``None`` when it
-    has not answered yet. An "applying" that stopped being updated long ago is reported as failed."""
-    try:
-        with open(_path(APPLIED)) as f:
-            data = json.loads(f.read(2000))
-        at = float(data.get('at') or 0)
-        state = data.get('state') or ('ok' if data.get('ok') else 'failed')
-        error = clean_text(data.get('error') or '', 200)
-        if state == 'applying' and time.time() - at > APPLYING_STALE_SECONDS:
-            state, error = 'failed', 'the host stopped halfway; see web/.openvas-log'
-        return {'want': 'on' if data.get('want') == 'on' else 'off', 'state': state if state in ('applying', 'ok', 'failed') else 'failed', 'error': error, 'at': at}
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None
+# once it is on, Org Admins choose their organizations and projects. Nothing is typed: the scan runs on a Sentinel that declares ``openvas``.
 
 
 def engine_status(row):
-    """One plain answer for the page: ``{state, headline, detail, fix}``. ``state`` is off, starting, loading, ready or problem; ``fix`` is a
-    command for an administrator to run on the host, or ``None``."""
-    from cveFeed import updater
+    """One plain answer for the page: ``{state, headline, detail, fix}``. ``state`` is off or ready; ``fix`` is always ``None`` (there is nothing to
+    run on this host: the work is a Sentinel's)."""
     if not row.enabled:
         return {'state': 'off', 'headline': 'Off', 'detail': '', 'fix': None}
-    if row.sentinel_only:
-        # The local containers are never asked for in this mode (_engine), so a stale host_report() from before
-        # sentinel_only was set - or a GMP connection this host was never going to make - says nothing useful here.
-        return {'state': 'ready', 'headline': 'Sentinel only', 'fix': None,
-                'detail': 'This host never runs OpenVAS itself. A due host with no eligible Sentinel stays due until one is.'}
-    seen = row.state or {}
-    if seen.get('connected'):
-        feed = seen.get('feed') or {}
-        guard = seen.get('guard') or {}
-        if not feed.get('ready'):
-            return {'state': 'loading', 'headline': 'Loading vulnerability tests', 'fix': None,
-                    'detail': 'The first load takes from several minutes to a few hours. Scans start by themselves when it ends. ' + clean_text(feed.get('reason') or '', 160)}
-        if guard and not guard.get('ok'):
-            return {'state': 'ready', 'headline': 'Ready, waiting for memory', 'detail': clean_text(guard.get('reason') or '', 200), 'fix': None}
-        return {'state': 'ready', 'headline': 'Ready', 'detail': 'Hosts are scanned a few at a time, each once a week.', 'fix': None}
-    report = host_report()
-    if report and report['want'] == 'on' and report['state'] == 'failed':
-        return {'state': 'problem', 'headline': 'The scanner could not be started', 'fix': None,
-                'detail': report['error'] or 'The host could not start the containers. See web/.openvas-log on the host.'}
-    error = seen.get('error') or ''
-    if 'default login' in error or 'refused' in error:
-        return {'state': 'problem', 'headline': 'The scanner login needs attention', 'detail': error, 'fix': None}
-    if report and report['want'] == 'on' and report['state'] == 'applying':
-        return {'state': 'starting', 'headline': 'Starting the scanner', 'fix': None,
-                'detail': 'The host is pulling and starting the containers. The first start downloads several GB.'}
-    if not updater.host_updater()['alive']:
-        return {'state': 'problem', 'headline': 'The host agent is not running', 'fix': AGENT_FIX,
-                'detail': 'The host agent is a small background job that carries out requests like this one, because the web application has no Docker access. '
-                          'An administrator installs it once on the host with the command below; this page continues by itself afterwards.'}
-    return {'state': 'starting', 'headline': 'Starting the scanner', 'detail': 'Waiting for the host to pick up the request.', 'fix': None}
+    return {'state': 'ready', 'headline': 'On, scanned by Sentinels', 'fix': None,
+            'detail': 'A Sentinel that declares OpenVAS scans the chosen hosts, each once a week. A due host with no eligible Sentinel stays due until one is.'}
 
 
 def _last_run(project_id):
@@ -390,32 +259,22 @@ def admin_get(request, actor):
                      and not (links.get(p.id) and links[p.id].excluded), 'excluded': bool(links.get(p.id) and links[p.id].excluded), 'last_run': _last_run(p.id)}
                     for p in Project.objects.filter(org_id=org.pk).order_by('name')]
         groups.append({'id': org.pk, 'name': org.name, 'enabled': covered, 'projects': projects})
-    return {'engine': {'enabled': row.enabled, 'sentinel_only': row.sentinel_only, 'can_switch': actor.is_superuser, **engine_status(row)},
+    return {'engine': {'enabled': row.enabled, 'can_switch': actor.is_superuser, **engine_status(row)},
             'orgs': groups, 'who': 'app_admin' if actor.is_superuser else 'org_admin'}
 
 
 def _engine(request, actor, on):
-    """Switch the whole add-on on or off: the sweep's beat entry, the containers (through the host's watcher, unless
-    ``sentinel_only`` says never to run them on this host) and, on, a first check that makes the login."""
+    """Switch the whole add-on on or off: the sweep's beat entry."""
     from cveFeed.admin_api import audit
     from cveFeed.models import OpenvasSettings
     row = OpenvasSettings.current()
     if row.enabled == on:
-        if on and not row.sentinel_only and not (row.state or {}).get('connected'):
-            request_containers(True)  # asking again is how a person retries after a failed start
         return
     row.enabled = on
     row.updated_by = actor
     row.save()
     set_schedule(on)
-    request_containers(on and not row.sentinel_only)  # sentinel_only: never ask the host to start the local containers
     audit(actor, 'openvas.enable' if on else 'openvas.disable', 'openvas', enabled=on)
-    if on:
-        try:
-            from cveFeed.tasks import openvas_check
-            openvas_check.delay()
-        except Exception:  # noqa: BLE001 - no broker right now: the sweep makes the login at its next step
-            logger.info('could not queue the first OpenVAS check')
 
 
 def _flags(value, what):
@@ -441,7 +300,7 @@ def admin_put(request, actor):
     managed = roles.managed_org_ids(actor)
     orgs = _flags(data.get('orgs', {}), 'orgs')
     projects = _flags(data.get('projects', {}), 'projects')
-    if ('enabled' in data or 'sentinel_only' in data) and not actor.is_superuser:
+    if 'enabled' in data and not actor.is_superuser:
         raise AdminError(403, 'only an App Admin switches OpenVAS on or off')
     from cveFeed.models import OpenvasSettings
     if not OpenvasSettings.current().enabled and not data.get('enabled') and (any(orgs.values()) or any(projects.values())):
@@ -465,31 +324,6 @@ def admin_put(request, actor):
         link.updated_by = actor
         link.save()
         audit(actor, 'openvas.project.update', project.slug, org=project.org_id, project=project.slug, enabled=link.enabled, excluded=link.excluded)
-    if 'sentinel_only' in data:
-        # Applied before _engine() below: a single request that both switches the engine on and sets sentinel_only
-        # must never ask the host to start the local containers, which it would if _engine() read the old value.
-        from cveFeed.admin_api import audit
-        row = OpenvasSettings.current()
-        row.sentinel_only, row.updated_by = bool(data['sentinel_only']), actor
-        row.save()
-        audit(actor, 'openvas.update', 'openvas', sentinel_only=row.sentinel_only)
     if 'enabled' in data:
         _engine(request, actor, bool(data['enabled']))
-    return admin_get(request, actor)
-
-
-def admin_check(request, actor):
-    """Look at the scanner now (the page asks while it is starting): makes the login when there is none and reads the feed. A worker does it, since
-    only a worker has gvmd's socket."""
-    from cveFeed.models import OpenvasSettings
-    row = OpenvasSettings.current()
-    if row.enabled:
-        report = host_report()
-        if report and report['want'] == 'on' and report['state'] == 'failed' and not row.sentinel_only:
-            request_containers(True)  # "Try again" after a failed start
-        from cveFeed.tasks import openvas_check
-        try:
-            openvas_check.delay().get(timeout=40)
-        except Exception:  # noqa: BLE001 - no worker answered in time: the status says what is known
-            logger.info('the OpenVAS check did not answer in time')
     return admin_get(request, actor)

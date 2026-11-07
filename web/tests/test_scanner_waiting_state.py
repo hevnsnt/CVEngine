@@ -20,6 +20,7 @@ from cveFeed.models import AgentActivity, ProbeObservation, ScanControl, Service
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from targetApp.models import Domain
+from tests.fake_scanner import LocalCapable
 from tests.test_route_auth import RouteFixture
 from tests.test_system_status import call, patched
 from tests.test_tls_audit import CLEAN
@@ -36,6 +37,7 @@ class FallbackEnv:
 
     def setUp(self):
         super().setUp()
+        LocalCapable('openvas').apply(self)  # the policy tests use openvas as a kind that may run here; in production it has no local path (NEVER_LOCAL)
         patcher = mock.patch.dict(os.environ, {}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)

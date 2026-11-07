@@ -20,6 +20,7 @@ from dashboard.models import Org, Project
 from startScan.models import IpAddress, Port, Subdomain, Technology
 from targetApp.models import Domain
 from tests.test_client_library_detection import JQUERY_11023
+from tests import page_read_double
 from tests import ai_queue
 
 RANGES = [e['ranges'] for e in JQUERY_11023 if e.get('product') == 'jQuery' or e.get('package') in ('jquery', 'jQuery', 'components/jquery',
@@ -322,7 +323,7 @@ class Base(TestCase):
 				calls.append(kind)
 				return {'status': 'observed', 'summary': kind}
 			return run
-		runners = {**{k: other(k) for k in validation.CHECK_KINDS}, 'script_read': lambda check: validation.run_script_read(check, get=site)}
+		runners = {**{k: other(k) for k in validation.CHECK_KINDS}, 'script_read': lambda check: page_read_double.run_script_read(check, site)}
 		with mock.patch.dict(os.environ, {'CVENGINE_VALIDATE_MAX_PER_RUN': '500', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY': '500',
 										  'CVENGINE_VALIDATE_MAX_PER_DAY': '500'}):
 			stats = validation.run_validation(self.project.id, [r.pk for r in rows], runners=runners,
@@ -503,7 +504,7 @@ class LibraryValidationTests(Base):
 											  row.signature)
 		self.assertNotEqual(CVEMatch.objects.get(pk=m.pk).ai_verdict, 'not_affected')  # still open before the read
 		self.sub('www.other.test')  # the alias target is one of the project's own hosts
-		result = validation.run_script_read(check, get=alias_site())
+		result = page_read_double.run_script_read(check, alias_site())
 		self.assertEqual(result['status'], 'version_changed')
 		verdicts = set(MatchVerdict.objects.values_list('pk', 'ai_verdict', 'ai_reason'))
 		validation.apply_validation(row, check, result)
@@ -551,20 +552,6 @@ class LibraryValidationTests(Base):
 		self.assertIn('not run from this server', self.step(row)['summary'])
 		self.assert_open(m)
 
-	def test_the_read_goes_through_the_egress_gate_of_the_pinned_transport(self):
-		from cveFeed import local_egress, probes
-		m = self.match()
-		from cveFeed import pinned_transport
-		answer = [(2, 1, 6, '', ('198.51.100.7', 443))]
-		with mock.patch('cveFeed.local_egress.check_connect', side_effect=local_egress.PortHeld(443, 'skipped')) as gate, \
-				mock.patch.object(pinned_transport.socket, 'getaddrinfo', return_value=answer), \
-				mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True), \
-				mock.patch.object(pinned_transport.socket, 'socket') as sock, \
-				mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-			reading = probes.read_host_libraries(self.project.id, m.subdomain, ['https://www.v.test'])
-		self.assertTrue(gate.called)
-		self.assertFalse(sock.called)  # held before any socket was opened
-		self.assertEqual(reading['pages'][0]['outcome'], 'held')
 
 	def test_a_failed_read_changes_nothing_and_is_retried(self):
 		m = self.match()
@@ -599,7 +586,7 @@ class HotLaneTests(Base):
 
 		def read(check):
 			ran.append(check['kind'])
-			return validation.run_script_read(check, get=site)
+			return page_read_double.run_script_read(check, site)
 		with mock.patch('cveFeed.validation_authority.require_authority'), \
 				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None), \
 				mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value=set(blocked)), \

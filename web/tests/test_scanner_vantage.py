@@ -19,6 +19,7 @@ from cveFeed import egress_proxy
 from cveFeed.models import InternalRange, ScanControl
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import Proxy
+from tests.fake_scanner import LocalCapable
 from tests.test_system_status import call, patched
 
 ENV = sentinel_dispatch.LOCAL_FALLBACK_ENV
@@ -65,6 +66,10 @@ class VantageBase(TestCase):
 
 
 class VantageWarningTests(VantageBase):
+    def setUp(self):
+        super().setUp()
+        LocalCapable('openvas').apply(self)  # openvas stands for a kind that may run here and would move to the built-in scanner; in production it has no local path
+
     def test_nothing_moved_nothing_to_warn_and_no_query(self):
         os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = '1'
         os.environ['COMPOSE_PROFILES'] = 'tailscale'

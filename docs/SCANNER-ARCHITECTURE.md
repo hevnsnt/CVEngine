@@ -38,7 +38,7 @@ rough sizes of the work.
 | `cveFeed/wpscan_scan.py` | WPScan | one task per site (`wpscan`, quick pass) and one per site for the hours-long thorough pass (`wpscan_thorough`); the server only stores what a Sentinel reports (T8: the local runner is deleted, both kinds are `NEVER_LOCAL`) |
 | `cveFeed/tls_audit.py` | testssl.sh | one task per host and port; the server's local run is deleted (`NEVER_LOCAL`), the module only picks targets and stores the report |
 | `cveFeed/udp_scan.py` (608) | nmap -sU | raw XML is the one result the server parses itself |
-| `cveFeed/openvas_scan.py` | GVM | opt-in; keeps its own compose profile |
+| `cveFeed/openvas_scan.py` | GVM | opt-in; a Sentinel runs it (NEVER_LOCAL), no GMP session here |
 | `cveFeed/internal_discovery.py` | nmap -sn | the `discover` kind, internal ranges only |
 
 ### B. Tool work that became Sentinel kinds in contract version 3
@@ -74,6 +74,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/dangling_dns.py` | rating bbot's baddns findings | moved: the `dangling_dns_check` kind (contract 3), a batch of findings per task with the server's provider lists (`cveFeed/data/takeover_providers.json`); the scanner walks the zone cut, asks the registry and sends the control request (`cvengine_scanner.probes.dangling_dns`); a finding it could not rate keeps baddns's rating; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
 | `cveFeed/pinned_transport.py`, `egress_proxy.py`, `legacy_tls.py` | admission, proxy and TLS 1.0 client for the above | copied into the library (`cvengine_scanner.probes.transport`, `egress_proxy`, `legacy_tls`), held to the task's scope policy; a Sentinel takes its probe proxy from its own `CVENGINE_SENTINEL_PROBE_PROXY`, never from the server; the server's copies stay for the local paths |
 | DNS resolution in `discovery.resolve_names` | names to addresses | moved: the `dns_resolve` kind (contract 3) for `run_host_pipeline` and the retire check's lookups; `NEVER_LOCAL`: `discovery.resolve_names` is deleted. The CNAME, NS, MX, PTR, A and certificate-name reads of `hosting.py`, `domain_ownership.py`, `discovery.discover_ip` and the archive reviews moved as the `identity_check` kind (contract 3, `NEVER_LOCAL`) |
+| `validation.run_http_head`, `run_script_read`, `run_fact_probe` | a validation re-test's HEAD, page and script re-read, version probe | moved: the `page_read` kind (contract 3: `head` and `libraries` reads under `probe_scope.for_page_read`) for the first two, `http_probe` and `nmap_verify` for the probe; `NEVER_LOCAL`: with no scanner the check is `failed` and retried, never read as clean. The reader of pages and scripts is `cvengine_scanner.probes.page_read` (Sentinel repo) |
 
 ### D. Pure code shared by both sides (becomes the library)
 

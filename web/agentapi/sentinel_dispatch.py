@@ -46,7 +46,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
-                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'identity_check': 300, 'web_screenshot': 900,
+                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'page_read': 600, 'identity_check': 300, 'web_screenshot': 900,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
@@ -85,12 +85,14 @@ NEVER_LOCAL = (
     'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
     'web_screenshot',
+    'page_read',  # a validation re-test's HEAD of a URL and re-read of a host's pages and scripts (cveFeed.validation): a Sentinel's, this server fetches nothing
+    'openvas',  # the Greenbone scan: a Sentinel's own GVM stack, this server opens no GMP session (cveFeed.openvas_scan)
     'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): built-in scanner only, this server sends no stored sign-in anywhere
 )
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added
 # here in the change that teaches the built-in scanner to run it (its client declares it and a stage dispatches it), never before: a kind listed here
-# that no scanner runs would only wait. ``openvas`` (the server's own sidecar runs it, and the built-in scanner has none), ``discover`` (internal
+# that no scanner runs would only wait. ``openvas`` (only a Sentinel that runs its own GVM stack takes it, and the built-in scanner has none), ``discover`` (internal
 # ranges, Sentinel-only already) and ``waf`` (no stage dispatches it yet) are not.
 BUILTIN_SCANNER_KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan')
 

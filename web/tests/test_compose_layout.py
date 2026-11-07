@@ -37,7 +37,7 @@ class ComposeLayoutTests(unittest.TestCase):
         (self.stub / 'docker').chmod(0o755)
         self.work = self.tmp / self.WORK
         (self.work / 'scripts').mkdir(parents=True)
-        for name in ('compose-layout.sh', 'enable-redis-auth.sh', 'rotate-field-key.sh', 'openvas-user.sh'):
+        for name in ('compose-layout.sh', 'enable-redis-auth.sh', 'rotate-field-key.sh'):
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
             (self.work / 'scripts' / name).chmod(0o755)
         (self.work / 'docker-compose.yml').write_text('services: {}\n')
@@ -107,9 +107,3 @@ class ComposeLayoutWithSpacesTests(ComposeLayoutTests):
     and every script that recreates or execs a service refused to run)."""
     WORK = 'My Disk/cv engine'
 
-    def test_make_openvas_user_runs_from_a_path_with_spaces(self):
-        (self.stub / 'running_config_files').write_text(f'{self.work}/docker-compose.yml,{self.work}/docker-compose.vps.yml\n')
-        result = self.run_script('openvas-user.sh')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('not a Compose file', result.stderr)
-        self.assertIn('docker compose -f docker-compose.yml -f docker-compose.vps.yml exec -T celery python3 manage.py openvas_bootstrap', self.calls())
