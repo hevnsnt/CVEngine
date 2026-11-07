@@ -157,6 +157,17 @@ def for_routes(project_id, scan, hosts, unattended=False):
     return {'hosts': listed, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_signed_routes(project_id, hosts):
+    """The policy of a route_probe_signed task: exactly the hosts the signed-in route plan chose, and nothing else (no same-site host, no library CDN: no
+    script is read signed in). A host that is excluded since the plan was made is dropped; the scanner holds every hop and address to the list, and the
+    stored sign-in goes only where this list, the credential's own origins and its host agree. Sorted, so the same task is the same task on every pass."""
+    from cveFeed.exclusions import is_excluded
+    names = sorted({(h or '').strip().lower().rstrip('.') for h in hosts} - {''})
+    listed = [name for name in names if not is_excluded(project_id, name)][:MAX_HOSTS]
+    excluded = sorted(set(names) - set(listed))
+    return {'hosts': listed, 'domains': [], 'excluded': excluded[:5000], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_addresses(project_id, addresses):
     """The policy of an alive_check task: the last known addresses it asks, each as itself (``zombie.endpoints`` already kept only the ones a
     scanner may touch, by this server's address rules, which travel along for the scanner to apply again)."""

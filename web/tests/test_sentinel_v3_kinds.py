@@ -120,7 +120,7 @@ class BuiltinOnlyKindTests(RouteFixture, TestCase):
                                     capabilities=capabilities, last_seen=timezone.now(), info={'contract_version': 3})
 
     def test_an_external_sentinel_is_never_offered_path_probe_or_nuclei_validate(self):
-        self.external(['path_probe', 'nuclei_validate', 'db_probe'])
+        self.external(['path_probe', 'nuclei_validate', 'route_probe_signed', 'db_probe'])
         self.assertTrue(dispatch.any_scanner_for(self.project, 'db_probe'))
         for kind in sentinel_broker.BUILTIN_KINDS:
             with self.subTest(kind=kind):
@@ -128,7 +128,7 @@ class BuiltinOnlyKindTests(RouteFixture, TestCase):
                 self.assertEqual(sentinel_broker.capacity_state(self.project, kind)['state'], 'none')
 
     def test_the_built_in_scanner_is(self):
-        with FakeScanner(kinds=['path_probe', 'nuclei_validate']):
+        with FakeScanner(kinds=list(sentinel_broker.BUILTIN_KINDS)):
             for kind in sentinel_broker.BUILTIN_KINDS:
                 self.assertTrue(dispatch.any_scanner_for(self.project, kind), kind)
 

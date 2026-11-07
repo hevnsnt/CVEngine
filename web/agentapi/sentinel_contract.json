@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3, "identity_check": 3, "web_screenshot": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3, "identity_check": 3, "web_screenshot": 3, "route_probe_signed": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -3563,6 +3563,158 @@
           }
         ]
       },
+      "route_probe_signed": {
+        "description": "The answer to each route asked signed in, in the shape route_probe gives (state, status, title, content type, evidence with no body); sensitive data is never searched for in a signed-in page, so sensitive is empty, sensitive_score 0 and credentials empty. A route the scanner could not ask carries an error and no state.",
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "routes": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000,
+                      "description": "the route's URL, as the task named it"
+                    },
+                    "status": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 999
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "content_type": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "state": {
+                      "enum": [
+                        "open",
+                        "login",
+                        "sso",
+                        "session_required",
+                        "redirect",
+                        "not_found",
+                        "error",
+                        "catch_all"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "object",
+                      "description": "markers, bytes, cookie names, the headers kept, fingerprints, the front page's scripts and the libraries their files state; never the body; at most 128 KB as JSON"
+                    },
+                    "sensitive": {
+                      "type": "object",
+                      "description": "per kind of sensitive data: its count and one masked sample"
+                    },
+                    "sensitive_score": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 25
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "credentials": {
+                      "type": "array",
+                      "maxItems": 0,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "type",
+                          "value"
+                        ],
+                        "properties": {
+                          "type": {
+                            "enum": [
+                              "aws_key",
+                              "google_key",
+                              "slack_token",
+                              "github_token",
+                              "stripe_key",
+                              "jwt",
+                              "private_key"
+                            ]
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 8192,
+                            "description": "the value itself, over the authenticated channel only: the server fingerprints and masks it for its secrets inventory and never stores it"
+                          }
+                        }
+                      },
+                      "description": "always empty: a signed-in page is never searched for credentials, and no value of the stored sign-in may come back"
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200,
+                      "description": "the route could not be asked: it carries no state, and the server reads it as unknown"
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "routes",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
       "identity_check": {
         "allOf": [
           {
@@ -5412,6 +5564,51 @@
         }
       },
       "route_probe": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hosts",
+          "scope"
+        ],
+        "properties": {
+          "hosts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "urls"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                },
+                "urls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "description": "the host's routes, asked one after another: each on that host, http or https"
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "route_probe_signed": {
+        "description": "Signed-in route check: the same hosts and routes as route_probe, asked once each with the stored sign-in the task names by reference (SentinelTask.secret_ref, never in this target). Only the built-in scanner takes it: it reads the credential once through POST sentinel/tasks/<id>/secret, sends it only to a route whose host, scheme and port that credential was stored for (and the scope policy allows), follows no redirect, and returns no value.",
         "type": "object",
         "additionalProperties": false,
         "required": [

@@ -624,6 +624,17 @@ def clean_route_probe(body):
     return {'routes': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 
+def clean_route_probe_signed(body):
+    """``clean_route_probe`` for a signed-in pass: the same rows, but a signed-in page is never searched for sensitive data and never yields a credential,
+    so whatever a Sentinel puts in ``sensitive`` or ``credentials`` is dropped here (the contract allows neither), and the evidence is cut to what a
+    signed-in answer keeps (``auth_routes.signed_evidence`` reads only the state, status, title, content type, redirect target and provider)."""
+    out = clean_route_probe(body)
+    for row in out['routes']:
+        if 'state' in row:
+            row.update({'sensitive': {}, 'sensitive_score': 0, 'credentials': []})
+    return out
+
+
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
@@ -657,9 +668,9 @@ def bind(kind, result, task):
         ratings = [r for r in result['ratings'] if r['id'] in asked]
         dropped = len(result['ratings']) - len(ratings)
         result = {**result, 'ratings': ratings}
-    elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe'):
-        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes'}[kind]
-        if kind == 'route_probe':  # the routes a task asked about are the urls of its hosts
+    elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe', 'route_probe_signed'):
+        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes', 'route_probe_signed': 'routes'}[kind]
+        if kind in ('route_probe', 'route_probe_signed'):  # the routes a task asked about are the urls of its hosts
             asked = {u for h in target.get('hosts') or [] if isinstance(h, dict) for u in h.get('urls') or [] if isinstance(u, str)}
         else:
             asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
