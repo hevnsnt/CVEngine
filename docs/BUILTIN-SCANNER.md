@@ -2,7 +2,7 @@
 
 Every install runs a scanner next to the server: the cvENGINE Sentinel, as the `scanner` compose service, shown as **CVEngine Scanner**. The server enrolls it with nobody typing a secret, and from then on the scan tools run in it, not on the server: the nmap fast scan, the naabu sweep, the nuclei light, targeted and deep passes (signed-in ones included), testssl, the UDP sweep and the WPScan quick pass. The design is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md); the variables are in [CONFIGURATION.md](CONFIGURATION.md#built-in-scanner).
 
-It needs nothing from you. A new install starts it (`sudo ./install.sh`), an update from 1.3 adds it, and every update after that replaces its image and checks it came up.
+It needs nothing from you. `sudo ./install.sh` asks on a terminal whether you will add external Sentinels as well, or only use this one (`--sentinels=internal|both|external`; `external` leaves it out entirely, nothing pulled or started, and scans wait until an external Sentinel is enrolled). A new install starts it (`sudo ./install.sh`), an update from 1.3 adds it, and every update after that replaces its image and checks it came up.
 
 ## What it is
 
@@ -88,4 +88,4 @@ for r in SentinelTask.objects.values('kind', 'status').annotate(n=Count('id')).o
 
 ## Turning it off
 
-`CVENGINE_BUILTIN_SCANNER=0` in `.env`, then `make up`. The server stops writing enrollments and revokes the scanner's token (its tasks go back to the queue and the card shows revoked), `make up` and the updates remove the container, and every scan kind may run on the server again. `sudo ./install.sh --no-builtin-scanner` installs without it. Remove the line (and `make up`) to turn it back on: it enrols again as a new Sentinel.
+`CVENGINE_BUILTIN_SCANNER=0` in `.env`, then `make up`. The server stops writing enrollments and revokes the scanner's token (its tasks go back to the queue and the card shows revoked), `make up` and the updates remove the container, and every scan kind may run on the server again. `sudo ./install.sh --sentinels=external` (or `--no-builtin-scanner`) installs without it. Remove the line (and `make up`) to turn it back on: it enrols again as a new Sentinel.
