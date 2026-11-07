@@ -433,7 +433,7 @@ class ScopeAndClaimTests(SentinelBase):
         task.refresh_from_db()
         self.assertEqual(task.status, 'expired')
 
-    def test_wpscan_result_accepted_and_classified_by_the_same_function_a_local_run_uses(self):
+    def test_wpscan_result_accepted_and_classified_by_the_one_classifier(self):
         task = self._queue('sen-a', kind='wpscan', target={'url': 'https://www.a.example/', 'token': 'secret-token'})
         call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
         call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')

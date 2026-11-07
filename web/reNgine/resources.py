@@ -46,7 +46,7 @@ BASE_COSTS_MB = {
     'naabu': 150,           # SYN port discovery over every TCP port, one process for many addresses
     'template-test': 600,   # one generated template against one host
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
-    'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
+    'wpscan': 400,          # the WordPress scan of one site
     'testssl': 150,         # a TLS audit of one port
     'screenshot': 450,      # the drain of the screenshot queue (cveFeed.web_shot); the browser itself runs on a Sentinel
 }

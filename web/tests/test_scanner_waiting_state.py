@@ -192,10 +192,10 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(scanner_state.state()['never_seen'], ALL_KINDS)
 
     def test_only_the_kinds_off_the_list_can_wait(self):
-        self.policy('openvas,wpscan')
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
+        self.policy('openvas,http_probe')
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'http_probe')])
         self.sentinel(['openvas'])  # a Sentinel for a kind that may run here anyway changes nothing about the others
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'http_probe')])
 
     def test_a_kind_the_sentinel_cannot_run_yet_is_still_waiting(self):
         self.policy('none')
@@ -593,7 +593,7 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
         _args, kwargs = again.call_args
         # asked again at the same attempt after the same delay, so a scanner coming back finds it without the tries having been spent
         self.assertEqual(kwargs['args'], [self.scan_obj.id, ['rt.test'], 2])
-        self.assertEqual((kwargs['countdown'], kwargs['queue']), (wpscan_scan.QUICK_DELAY * 2, wpscan_scan.THOROUGH_QUEUE))
+        self.assertEqual((kwargs['countdown'], kwargs['queue']), (wpscan_scan.QUICK_DELAY * 2, wpscan_scan.QUEUE))
 
     def test_a_broker_that_is_down_does_not_fail_it(self):
         self.policy('none')
@@ -608,12 +608,6 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
             out = self.run_quick()
         self.assertIn('paused', out['skipped'])
         again.assert_called_once()
-
-    def test_the_thorough_pass_never_goes_through_a_scanner_and_is_left_alone(self):
-        self.policy('none')
-        with mock.patch.object(scanner_state, 'skip_note') as note:
-            wpscan_scan.run_thorough(self.project.id, runner=self.runner, probe_get=self.probe_get, sleep=lambda s: None)
-        note.assert_not_called()
 
 
 class ConductorWaitingTests(FallbackEnv, TestCase):

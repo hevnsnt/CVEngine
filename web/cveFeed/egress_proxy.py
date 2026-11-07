@@ -7,7 +7,7 @@ robin over the valid lines the caller can use.
 
 What goes through it (traffic to SCANNED TARGETS sent from this server): the in-process probes (through ``cveFeed.pinned_transport``, which
 keeps vetting and pinning the numeric destination and sends that address to the proxy, never the name), ``db_exposure``'s HTTP checks
-(``requests``), and the external tool that takes a proxy: WPScan (``for_tool``). What does not: nmap, naabu,
+(``requests``). No external tool runs on this server any more, so none takes a proxy. What does not: nmap, naabu,
 the UDP sweeps, the raw database and RDP checks and OpenVAS use raw sockets and connect directly, a Sentinel keeps its own egress, and no call to a
 third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
 
@@ -232,42 +232,6 @@ def requests_proxies(host=None):
     built for it must not read the environment's proxy settings (``trust_env = False``) so no proxy is added behind the setting's back."""
     spec = pick(host)
     return {'http': spec.url, 'https': spec.url} if spec is not None else {}
-
-
-# ----------------------------------------------------------------------------- external tools
-
-# tool -> (schemes it can use, how it takes the proxy as arguments). Each lambda gets the ProxySpec.
-def _wpscan_args(spec):
-    return ['--proxy', spec.plain_url] + (['--proxy-auth', spec.credentials] if spec.credentials else [])
-
-
-TOOLS = {
-    'wpscan': (SCHEMES, _wpscan_args),
-}
-
-
-def hostname(target):
-    """The host of a tool target: a URL, ``host:port``, a bare host or an IP literal (IPv6 included)."""
-    text = str(target or '').strip()
-    if '://' in text:
-        return urlsplit(text).hostname or ''
-    if text.startswith('['):
-        return text[1:].split(']', 1)[0]
-    return text.rsplit(':', 1)[0] if text.count(':') == 1 else text
-
-
-def for_tool(tool, hosts=None):
-    """The command line arguments (a list, empty for a direct run) that send ``tool`` through the picked proxy. ``hosts`` are the destinations
-    of the run: when every one never goes through a proxy (loopback), the run stays direct. Raises ``ProxyUnavailable`` when the setting is on
-    and no configured proxy suits the tool."""
-    schemes, build = TOOLS[tool]
-    everything = configured()
-    if not everything or (hosts is not None and all(bypass(hostname(h)) for h in hosts)):
-        return []
-    specs = [s for s in everything if s.scheme in schemes]
-    if not specs:
-        raise ProxyUnavailable(f'Settings > Proxy is on, but {tool} cannot use any of its proxies (it takes ' + ', '.join(schemes) + ')')
-    return build(specs[next(_turn) % len(specs)])
 
 
 # ----------------------------------------------------------------------------- connecting through a proxy (in-process clients)

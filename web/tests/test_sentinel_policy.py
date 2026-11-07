@@ -210,6 +210,34 @@ class LeaseAndReportTests(SentinelBase):
         task.refresh_from_db()
         self.assertGreater(task.lease_expires_at, now)  # twenty hours into a thirty hour budget
 
+    def thorough(self, accepted_ago, **target):
+        _, out = register_sentinel(self.t['dana'], name='worker', capabilities=['wpscan_thorough'])
+        agent = Agent.objects.get(pk=out['id'])
+        now = timezone.now()
+        task = SentinelTask.objects.create(project=Project.objects.get(slug='sen-a'), kind='wpscan_thorough',
+                                           target={'url': 'https://example.com/', 'token': '', **target}, agent=agent, status='running',
+                                           accepted_at=now - accepted_ago, lease_expires_at=now + timedelta(minutes=1))
+        return agent, task, now
+
+    def test_a_thorough_wordpress_scan_runs_for_its_own_budget_and_no_longer(self):
+        agent, task, now = self.thorough(timedelta(hours=20), timeout_seconds=24 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertGreater(task.lease_expires_at, now)  # twenty hours into a day of budget: still alive
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=24 * 3600 + 600) + sb.RUN_GRACE)
+        agent, task, now = self.thorough(timedelta(hours=14), timeout_seconds=12 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertLess(task.lease_expires_at, now)  # past its twelve hours, the report grace and the run grace: left to expire
+        self.assertEqual(sb.reap_expired(), 1)
+
+    def test_a_thorough_wordpress_scan_without_a_limit_gets_the_kinds_ceiling_and_a_bogus_limit_is_held_to_the_contract(self):
+        from agentapi import sentinel_dispatch
+        _, task, _ = self.thorough(timedelta(hours=1))
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=sentinel_dispatch.COMPLETION_CEILING['wpscan_thorough']) + sb.RUN_GRACE)
+        _, task, _ = self.thorough(timedelta(hours=1), timeout_seconds=10 ** 9)
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=86400 + 600) + sb.RUN_GRACE)
+
     def test_a_report_sent_twice_is_answered_twice_and_stored_once(self):
         from tests.test_agentapi import call
         task = self.running(timedelta(minutes=1))

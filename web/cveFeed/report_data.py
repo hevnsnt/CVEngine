@@ -37,7 +37,7 @@ SERVICE_LABELS = {
     'nmap-fast': 'nmap service detection on the common ports', 'nmap-full': 'nmap on every one of the 65,535 ports',
     'nmap': 'nmap service detection', 'naabu': 'naabu full-port discovery', 'bbot': 'bbot discovery of hosts and subdomains',
     'bbot-deep': 'bbot deep discovery', 'nuclei': 'nuclei template checks', 'route_auth': 'web route authentication checks',
-    'hygiene': 'TLS, certificate and email checks', 'ct_watch': 'certificate transparency watch', 'wpscan': 'WPScan of WordPress sites',
+    'hygiene': 'TLS, certificate and email checks', 'ct_watch': 'certificate transparency watch', 'wpscan': 'WordPress scan of WordPress sites',
     'testssl': 'TLS protocol and cipher review',
 }
 

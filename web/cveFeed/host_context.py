@@ -237,7 +237,7 @@ def _probes(rows, names):
 
 
 def wordpress_summary(rows):
-    """Where WordPress stands on a host, from its probe rows (the WordPress probe and WPScan write them): ``status`` (see
+    """Where WordPress stands on a host, from its probe rows (the WordPress probe and the WordPress scan write them): ``status`` (see
     ``wpscan_scan.state_of``: detected how, scanned when or why not), the core version and the plugins and themes with versions. None when
     nothing suggests WordPress."""
     from cveFeed import wpscan_scan

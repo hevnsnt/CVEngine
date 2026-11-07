@@ -35,7 +35,7 @@ rough sizes of the work.
 |---|---|---|
 | `cveFeed/port_stage.py`, `cveFeed/port_inventory.py` | nmap, naabu | the tools run on a Sentinel only; the server stores the report (`port_inventory.persist_inventory`) and reads it with the library's `parse_xml` |
 | `cveFeed/nuclei_scan.py` (781), `nuclei_templates.py` (401) | nuclei | three kinds; flags and `host_of` are duplicated; signed-in passes never dispatch |
-| `cveFeed/wpscan_scan.py` (977) | WPScan | one task per site |
+| `cveFeed/wpscan_scan.py` | WPScan | one task per site (`wpscan`, quick pass) and one per site for the hours-long thorough pass (`wpscan_thorough`); the server only stores what a Sentinel reports (T8: the local runner is deleted, both kinds are `NEVER_LOCAL`) |
 | `cveFeed/tls_audit.py` | testssl.sh | one task per host and port; the server's local run is deleted (`NEVER_LOCAL`), the module only picks targets and stores the report |
 | `cveFeed/udp_scan.py` (608) | nmap -sU | raw XML is the one result the server parses itself |
 | `cveFeed/openvas_scan.py` | GVM | opt-in; keeps its own compose profile |
@@ -302,8 +302,7 @@ colour and wording of its own, never the scanning pause's. The sweeps that run o
 activity line every tick (the testssl sweep, the UDP sweep, the WPScan quick pass) return `{'skipped': 'no scanner is online for <kind>; the targets stay
 due'}` before doing any of that. The WPScan quick pass asks again at the same attempt, so a returning scanner finds it and its tries are not spent.
 It never writes `ScanControl`, never stops a running scan and never holds back local work: the CVE feed, the discovery start (the run is on a Sentinel, so the
-conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path and the thorough WPScan pass (never
-dispatched) are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
+conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
 for a cool-off and so also reads as waiting.
 
 A kind can also wait because it is **turned off**, not because a scanner is gone: a live Sentinel has it and its capability policy (the administrator's, the instance default of its class, or its own machine) denies it. `state()` then carries `disabled` (only when not empty): the waiting kinds that a live Sentinel has and denies, with no other active Sentinel that has them offline. The banner splits the two: "Scanner offline: ..." is only for kinds really waiting for a scanner (`offline_kinds()`), and "OpenVAS is turned off on every Sentinel that has it. Nothing has failed; the work stays due until one is turned back on" (`disabled_message`, also in `messages`) for the others; a sweep's skipped text says the same. `waiting_kinds()` is still every waiting kind, so the sweeps stay off both.

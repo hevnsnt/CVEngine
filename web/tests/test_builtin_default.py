@@ -124,7 +124,7 @@ class VantageTests(Env, SecretBase):
 
     def test_no_warning_once_the_builtin_scanner_applies_them_and_one_for_an_older_image(self):
         self.proxy_on()
-        self.env(CVENGINE_ALLOW_PRIVATE_TARGETS='1', COMPOSE_PROFILES='tailscale')
+        self.env(CVENGINE_ALLOW_PRIVATE_TARGETS='1', COMPOSE_PROFILES='tailscale', CVENGINE_LOCAL_FALLBACK='none')  # every kind of the built-in scanner has no local path now, so only a list that takes the others off moves anything
         self.assertEqual(scanner_state.vantage_warnings(), [])
         Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True})
         warnings = scanner_state.vantage_warnings()

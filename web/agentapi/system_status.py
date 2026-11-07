@@ -124,7 +124,7 @@ def _project_row(project):
                   'stalled': counts.stalled_scans(scans).count()},
         'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
         'cve_matches': snap['cve_matches'],
-        # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
+        # WordPress hosts: how many, how many the WordPress scan has covered, and why the rest were not (blocked by an edge, failed, waiting)
         'wordpress': wpscan_scan.status_counts([project.id]),
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
         'web_discovery': subdir_apps.status_counts([project.id]),
@@ -436,8 +436,7 @@ def _tools():
                                  'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
-            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner'))}}
+            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version'))}}
 
 
 def _runzero(problems):

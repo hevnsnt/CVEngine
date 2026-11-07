@@ -1,4 +1,3 @@
-import subprocess
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -8,6 +7,7 @@ from cveFeed.api_credentials import SERVICES, used_in_scans
 from cveFeed.models import ProbeObservation, RouteAuth, ServiceRun
 from dashboard.models import ApiCredential
 from startScan.models import ScanActivity, Subdomain, Technology, Vulnerability
+from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.port_stage_stub import port_double
 
@@ -54,53 +54,37 @@ class ReportTests(SimpleTestCase):
         self.assertIsNone(wpscan_scan.remaining_requests({}))
 
 
-class ProcessTests(SimpleTestCase):
-    def run_process(self, returncode=0, stderr='', token='tok-secret', stdout=''):
-        seen = {}
+class ClassifyTests(SimpleTestCase):
+    """What a Sentinel reports ({report, returncode, stderr_tail}) becomes a report or a classified failure; nothing runs here."""
 
-        def fake_run(kind, cmd, timeout, **kwargs):
-            seen['cmd'], seen['env'] = cmd, kwargs['env']
-            out = cmd[cmd.index('-o') + 1]
-            if returncode in (0, 5):
-                with open(out, 'w') as f:
-                    f.write('{"version": {"number": "6.0"}}')
-            seen['stdout'] = kwargs.get('stdout')
-            return mock.Mock(returncode=returncode, stderr=stderr, stdout=stdout)
-        with mock.patch('cveFeed.heavy_process.run', side_effect=fake_run):
-            try:
-                return wpscan_scan.run_wpscan_process('https://www.rt.test/', token), seen
-            except Exception as exc:  # noqa: BLE001
-                return exc, seen
+    def classify(self, returncode=0, stderr='', token='tok-secret', report=None):
+        try:
+            return wpscan_scan._classify(report, returncode, stderr, token)
+        except Exception as exc:  # noqa: BLE001
+            return exc
 
-    def test_the_token_is_in_the_environment_never_on_the_command_line(self):
-        report, seen = self.run_process()
-        self.assertEqual(report['version']['number'], '6.0')
-        self.assertEqual(seen['env']['WPSCAN_API_TOKEN'], 'tok-secret')
-        self.assertNotIn('tok-secret', ' '.join(seen['cmd']))
-        self.assertNotIn('--api-token', seen['cmd'])
-        self.assertIn('--enumerate', seen['cmd'])
-        self.assertEqual(wpscan_scan.run_wpscan_process.__name__, 'run_wpscan_process')
+    def test_a_report_is_returned_as_it_came_and_vulnerabilities_found_is_not_an_error(self):
+        self.assertEqual(self.classify(0, report={'version': {'number': '6.0'}})['version']['number'], '6.0')
+        self.assertIn('version', self.classify(5, report={'version': {'number': '6.0'}}))
+        self.assertIsInstance(self.classify(0, report=None), RuntimeError)  # a run that wrote nothing usable read nothing
 
-    def test_vulnerabilities_found_is_not_an_error(self):
-        report, _ = self.run_process(returncode=5)
-        self.assertIn('version', report)
+    def test_exit_code_4_without_a_report_is_a_failure_not_not_wordpress(self):
+        self.assertIsInstance(self.classify(4), RuntimeError)
+        self.assertNotIsInstance(self.classify(4), wpscan_scan.NotWordPress)
 
-    def test_not_wordpress_and_failures(self):
-        error, _ = self.run_process(returncode=4)  # no report was written: nothing was read, so it is a failure, not "not WordPress"
-        self.assertIsInstance(error, RuntimeError)
-        error, _ = self.run_process(returncode=2, stderr='boom tok-secret')
+    def test_failures_never_show_the_token(self):
+        error = self.classify(2, stderr='boom tok-secret')
         self.assertIsInstance(error, RuntimeError)
         self.assertNotIn('tok-secret', str(error))
 
     def test_a_refused_option_or_address_says_why_instead_of_exit_1(self):
-        error, seen = self.run_process(returncode=1, stdout='\nScan Aborted: --url Invalid scheme format: \'www.rt.test\'\n')
+        error = self.classify(1, stderr='Scan Aborted: --url Invalid scheme format')
         self.assertIsInstance(error, RuntimeError)
         self.assertIn('Scan Aborted: --url Invalid scheme format', str(error))
-        self.assertEqual(seen['stdout'], subprocess.PIPE)  # WPScan prints that line on stdout, which used to be thrown away
-        error, _ = self.run_process(returncode=1)
+        error = self.classify(1)
         self.assertIn('refused its options or the address', str(error))
         self.assertIn('(exit 1)', str(error))
-        error, _ = self.run_process(returncode=3, stdout='x' * 1000 + ' tok-secret')
+        error = self.classify(3, stderr='x' * 1000 + ' tok-secret')
         self.assertLessEqual(len(str(error)), 200)  # clipped, and the token never shows
         self.assertNotIn('tok-secret', str(error))
 
@@ -111,18 +95,6 @@ class ProcessTests(SimpleTestCase):
         except RuntimeError as exc:
             error = exc
         self.assertEqual(str(error), 'Scan Aborted: invalid option: --nope')
-
-    def test_the_child_gets_no_other_secret_of_the_worker(self):
-        with mock.patch.dict('os.environ', {'POSTGRES_PASSWORD': 'db-secret', 'FIELD_ENCRYPTION_KEY': 'key-secret', 'CELERY_BROKER': 'redis://x'}):
-            _, seen = self.run_process()
-        self.assertEqual(set(seen['env']) - {'WPSCAN_API_TOKEN'}, set(seen['env']) & set(wpscan_scan.CHILD_ENV_KEYS))
-        self.assertNotIn('db-secret', ' '.join(seen['env'].values()))
-        self.assertNotIn('key-secret', ' '.join(seen['env'].values()))
-
-    def test_no_token_means_no_variable(self):
-        with mock.patch.dict('os.environ', {'WPSCAN_API_TOKEN': 'leaked'}):
-            _, seen = self.run_process(token='')
-        self.assertNotIn('WPSCAN_API_TOKEN', seen['env'])
 
 
 class StageTests(RouteFixture, TestCase):
@@ -186,7 +158,7 @@ class StageTests(RouteFixture, TestCase):
 
     def test_every_site_failing_is_an_error_and_a_non_wordpress_site_is_not(self):
         out = self.go(runner=mock.Mock(side_effect=RuntimeError('boom')))
-        self.assertIn('WPScan failed', out['error'])
+        self.assertIn('the scan failed', out['error'])
         self.assertNotIn('boom', out['error'])  # the raw reason goes to the worker log and the host record, not into the activity feed
         ServiceRun.objects.all().delete()
         out = self.go(runner=mock.Mock(side_effect=ValueError('not running WordPress')))
@@ -207,10 +179,6 @@ class StageTests(RouteFixture, TestCase):
         state = wpscan_scan.state_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
         self.assertEqual(state['vulnerability_data'], 'not checked: API token budget exhausted')
         self.assertTrue(ServiceRun.objects.filter(service='wpscan-partial', asset='www.rt.test').exists())  # asked again soon, not in a week
-
-    def test_skipped_without_the_binary(self):
-        with mock.patch('cveFeed.wpscan_scan.installed', return_value=False):
-            self.assertEqual(self.go()['skipped'], 'wpscan is not installed')
 
     def test_the_pipeline_runs_the_stage_only_for_wordpress_sites(self):
         stages = []
@@ -234,8 +202,8 @@ class CredentialTests(SimpleTestCase):
 
 class SentinelDispatchTests(StageTests):
     """run_wpscan's own default runner, when none is passed in, is agentapi.sentinel_dispatch.wrap_wpscan_runner - not
-    run_wpscan_process directly. A live, eligible Sentinel's reported outcome must reach the exact same persistence
-    this module already has (findings, CVE links, the Technology row, the ServiceRun row), same as a local run does."""
+    the local tool (there is none). A live, eligible Sentinel's reported outcome must reach the persistence
+    this module has (findings, CVE links, the Technology row, the ServiceRun row), same as a local run does."""
 
     def make_sentinel(self):
         from django.contrib.auth.models import User
@@ -274,12 +242,15 @@ class SentinelDispatchTests(StageTests):
         self.assertEqual(task.status, 'done')
         self.assertEqual(task.target['token'], '***')  # the project's API token is scrubbed once the task is done
 
-    def test_no_runner_passed_in_falls_back_locally_when_no_sentinel_claims_in_time(self):
+    def test_no_runner_passed_in_waits_and_never_runs_locally_when_no_sentinel_claims_in_time(self):
         self.make_sentinel()
-        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '0.2'}):
-            out = self.go()  # nothing ever answers the task, so wrap_wpscan_runner's fallback runs run_wpscan_process
-        # wpscan is not installed in the test environment, so the real local fallback fails closed, same as it would
-        # for a local-only project with no Sentinel at all - this proves the fallback path actually ran, not the
-        # Sentinel one, without needing the wpscan binary.
+        LocalFallback('none').apply(self)
+        guard = assert_ran_nowhere_locally(self, 'wpscan')
+        with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '0.2'}), mock.patch('cveFeed.wpscan_scan.queue_quick', return_value=[]):  # the retry job would go to the real broker
+            out = self.go()  # nothing ever answers the task: the kind is NEVER_LOCAL, so the site waits instead of running here
         self.assertEqual(out['scanned'], 0)
-        self.assertIn('WPScan failed', out['error'])
+        self.assertNotIn('error', out)
+        self.assertFalse(ServiceRun.objects.filter(service='wpscan').exists())  # nothing is recorded as done: the site stays due
+        state = wpscan_scan.state_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
+        self.assertEqual(state['state'], 'waiting')
+        self.assertEqual(guard.calls, [])

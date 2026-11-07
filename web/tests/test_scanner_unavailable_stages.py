@@ -1,6 +1,6 @@
 """With ``CVENGINE_LOCAL_FALLBACK=none`` and no scanner that can take the work, every scan stage waits instead of failing: the local tool is never
 run, no ledger row says ``failed`` (nor ``done``: the target is still due), the stage returns without raising and its activity line names the
-scanner, not memory. nmap, naabu and nuclei had no such handler until now; testssl, UDP and WPScan are asserted here so a regression is caught."""
+scanner, not memory. nmap, naabu and nuclei had no such handler until now; testssl, UDP and the WordPress scan are asserted here so a regression is caught."""
 import os
 from unittest import mock
 
@@ -16,7 +16,6 @@ from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_udp_scan import UdpBase
-from tests.test_wpscan import REPORT
 
 ENV = dispatch.LOCAL_FALLBACK_ENV
 IP = '192.0.2.10'
@@ -218,27 +217,25 @@ class PipelineStageTests(FallbackOffBase):
     """No Sentinel is live at all, so the wrappers themselves raise before any stage body runs: the pipeline's own stage rows are not failed."""
 
     def test_the_nmap_nuclei_and_wpscan_stages_are_not_marked_failed(self):
-        wpscan = mock.Mock()
         assert_ran_nowhere_locally(self, 'nuclei_light')
         assert_ran_nowhere_locally(self, 'nuclei_targeted')
+        assert_ran_nowhere_locally(self, 'wpscan')
         scan = self.scan
         Subdomain.objects.filter(scan_history=scan).update(target_domain=self.domain)
-        Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name='WordPress'))  # a site for WPScan to wait on
-        with mock.patch('cveFeed.discovery.stopped', return_value=False), mock.patch('cveFeed.wpscan_scan.run_wpscan_process', wpscan):
+        Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name='WordPress'))  # a site for the WordPress scan to wait on
+        with mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
                 scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, db_exposure_checks={}, provider=None,
                 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})
-        for tool in (wpscan,):
-            tool.assert_not_called()
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=scan)}
         for name in ('nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan'):
             self.assertEqual(rows[name], discovery.SUCCESS, f'{name}: {rows}')
         self.assertEqual(out['failed_stages'], [])
         self.assertNothingRecorded('nmap-fast', 'naabu', 'nuclei', 'wpscan')
         self.assertTrue(any('nuclei' in m.lower() and 'no scanner could take this work' in m for m, _s in self.waiting_lines()))
-        self.assertTrue(any(m.startswith('WPScan') for m, _s in self.waiting_lines()))
+        self.assertTrue(any(m.startswith('WordPress scan') for m, _s in self.waiting_lines()))
         for message, _status in self.waiting_lines():
             self.assertNotIn('memory', message.lower())
 
@@ -308,10 +305,9 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         return wpscan_scan.run_wpscan(self.scan_obj.id, **kw)
 
     def test_with_no_sentinel_the_stage_waits_and_runs_no_local_wpscan(self):
-        local = mock.Mock(return_value=REPORT)
-        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local):
-            out = self.go()
-        local.assert_not_called()
+        guard = assert_ran_nowhere_locally(self, 'wpscan')
+        out = self.go()
+        self.assertEqual(guard.calls, [])
         self.assertNotIn('error', out)
         self.assertIn('no scanner could take this work (wpscan)', out['skipped'])
         self.assertNothingRecorded('wpscan')
@@ -326,11 +322,11 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         token, _raw = create_token(user, 'wpscan-wait-token')
         Agent.objects.create(token=token, name='live-wpscan-sentinel', kind='scanner', status='active',
                              scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []}, capabilities=['wpscan'], last_seen=timezone.now())
-        local = mock.Mock(return_value=REPORT)
-        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
+        guard = assert_ran_nowhere_locally(self, 'wpscan')
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
                 mock.patch('cveFeed.wpscan_scan.queue_quick', return_value=[]):  # the retry job would go to the real broker
             out = self.go()
-        local.assert_not_called()
+        self.assertEqual(guard.calls, [])
         self.assertNotIn('error', out)
         self.assertEqual(out['scanned'], 0)
         self.assertNothingRecorded('wpscan')
@@ -339,7 +335,7 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         self.assertEqual(state['state'], 'waiting')
         self.assertIn('no scanner could take this work (wpscan)', state['reason'])
         self.assertNotIn('memory', state['reason'])
-        message = AgentActivity.objects.filter(message__startswith='WPScan finished').latest('id').message
+        message = AgentActivity.objects.filter(message__startswith='WordPress scan finished').latest('id').message
         self.assertIn('no scanner could take the remaining sites (wpscan)', message)
         self.assertNotIn('memory', message)
 

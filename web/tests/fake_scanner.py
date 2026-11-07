@@ -389,7 +389,8 @@ LOCAL_RUNNERS = {
     'nuclei_deep': (),  # likewise
     'nmap_udp': (),  # likewise
     'testssl': (),  # likewise
-    'wpscan': ('cveFeed.wpscan_scan.run_wpscan_process',),
+    'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'wpscan_thorough': (),  # likewise
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'http_probe': ('cveFeed.route_auth.probe_url', 'cveFeed.probes.fetch'),  # the GET every local version probe makes
     'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
@@ -422,6 +423,7 @@ HEAVY_KINDS = {
     'nmap_udp': ('nmap-udp-bg',),
     'testssl': ('testssl',),
     'wpscan': ('wpscan',),
+    'wpscan_thorough': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'http_probe': (),  # in-process requests: no heavy job
     'dns_resolve': (),

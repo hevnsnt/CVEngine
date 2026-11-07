@@ -340,10 +340,10 @@ def match_heat_rank_expr(capped=True):
 
 # ----------------------------------------------------------------------------- scanner findings (startScan.Vulnerability)
 #
-# A scanner finding that names CVEs (a nuclei CVE template, the CVE template pass, OpenVAS, WPScan, node2shell) is a CVE on the host, so under the
+# A scanner finding that names CVEs (a nuclei CVE template, the CVE template pass, OpenVAS, the WordPress scan, node2shell) is a CVE on the host, so under the
 # ``kev`` policy it follows the CVE rule, not its severity: one of its CVEs on the KEV or with a known exploit and the finding confirmed is fire
 # (the finding itself is a behavioural check: the template or the active test matched the flaw on the host); hot but not confirmed (an OpenVAS
-# result below its quality bar, tagged qod-unconfirmed, or a WPScan finding, which reads a plugin's version) is smoke, fire once a validation
+# result below its quality bar, tagged qod-unconfirmed, or a WordPress scan finding, which reads a plugin's version) is smoke, fire once a validation
 # reproduced it; none of its CVEs hot (or none stored by this instance) is ice, whatever its severity. A finding that names no CVE (an exposure,
 # a misconfiguration, a default login) has no KEV listing to read and keeps its severity heat (critical and high fire, medium smoke, low ice).
 # Informational findings have no heat, as before. Under ``legacy`` every finding keeps its severity heat.
@@ -373,7 +373,7 @@ def hot_cve_names(names):
 
 def finding_confirmed(vuln):
     """Whether a scanner finding is a confirmation of its flaw: a validation reproduced it, or the scanner itself checked the flaw (not an
-    OpenVAS result below its quality bar, not a version-reading scanner such as WPScan). Reads prefetched ``tags`` and ``triage`` when loaded."""
+    OpenVAS result below its quality bar, not a version-reading scanner such as the WordPress scan). Reads prefetched ``tags`` and ``triage`` when loaded."""
     from cveFeed.match_policy import _validation_status
     if _validation_status(vuln) == "hit":
         return True

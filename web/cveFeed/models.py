@@ -646,7 +646,7 @@ class ProbeObservation(models.Model):
     url = models.CharField(max_length=500, blank=True, default="")  # the path or URL that answered, host name removed
     outcome = models.CharField(max_length=12, default="found")
     confidence = models.FloatField(default=0.0)
-    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV, wpscan ...
+    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV ...
     evidence = models.JSONField(default=dict, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)
     observed_at = models.DateTimeField(default=timezone.now)

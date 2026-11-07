@@ -14,7 +14,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import nuclei_scan, port_stage
-from cveFeed.wpscan_scan import Blocked, NotWordPress, run_wpscan_process
+from cveFeed.wpscan_scan import Blocked, NotWordPress
 from dashboard.models import Org, Project
 from reNgine.resources import ScannerUnavailable
 from scanEngine.models import EngineType
@@ -586,20 +586,19 @@ class ResolvableTargetsTests(DispatchBase):
 
 class WpscanDispatchTests(DispatchBase):
     """The Sentinel always reports the raw, unclassified process outcome ({report, returncode, stderr_tail}); every
-    test here checks that a dispatched run is classified by the exact same cveFeed.wpscan_scan._classify a local run's
-    own exit code and report go through - NotWordPress and Blocked included - never a duplicated client-side rule."""
+    test here checks that a dispatched run is classified by cveFeed.wpscan_scan._classify - NotWordPress and Blocked
+    included - never a duplicated client-side rule. The kind is NEVER_LOCAL: with no Sentinel finishing it, nothing runs here."""
 
-    def test_a_live_eligible_sentinel_returns_the_same_report_a_local_run_would(self):
+    def test_a_live_eligible_sentinel_returns_the_report(self):
         self.make_sentinel(['wpscan'])
         report = {'version': {'number': '6.4'}, 'plugins': {}, 'themes': {}, 'interesting_findings': []}
         result = {'outcome': 'done', 'report': report, 'returncode': 0, 'stderr_tail': ''}
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=5)
-            self.assertIsNot(runner, run_wpscan_process)
             out = runner('https://www.example.test/', 'secret-token')
         self.assertEqual(out, report)
 
-    def test_a_sentinel_reported_not_wordpress_raises_the_same_exception_a_local_run_would(self):
+    def test_a_sentinel_reported_not_wordpress_raises_not_wordpress(self):
         self.make_sentinel(['wpscan'])
         report = {'scan_aborted': 'The remote website is up, but does not seem to be running WordPress.'}
         result = {'outcome': 'done', 'report': report, 'returncode': 4, 'stderr_tail': ''}
@@ -618,18 +617,21 @@ class WpscanDispatchTests(DispatchBase):
                 runner('https://www.example.test/', 'secret-token')
         self.assertNotIn('secret-token', str(ctx.exception))
 
-    def test_timeout_falls_back_to_the_real_local_runner(self):
+    def test_a_timeout_never_runs_locally_the_stage_waits(self):
+        from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['wpscan'])
-        local = mock.Mock(return_value={'version': {'number': '6.4'}})
-        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local):
-            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
-            out = runner('https://www.example.test/', 'secret-token')
-        local.assert_called_once_with('https://www.example.test/', 'secret-token')
-        self.assertEqual(out, {'version': {'number': '6.4'}})
+        guard = assert_ran_nowhere_locally(self, 'wpscan')
+        runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
+        with self.assertRaises(ScannerUnavailable):
+            runner('https://www.example.test/', 'secret-token')
+        self.assertEqual(guard.calls, [])
 
-    def test_no_eligible_sentinel_returns_the_literal_unwrapped_function(self):
-        runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan)
-        self.assertIs(runner, run_wpscan_process)  # identity: wpscan_scan.py checks `runner is run_wpscan_process`
+    def test_no_eligible_sentinel_waits_instead_of_returning_a_local_runner(self):
+        from reNgine.resources import ScannerUnavailable
+        guard = assert_ran_nowhere_locally(self, 'wpscan')
+        with self.assertRaises(ScannerUnavailable):
+            dispatch.wrap_wpscan_runner(self.project, scan=self.scan)
+        self.assertEqual(guard.calls, [])
 
     def test_the_stored_task_target_is_scrubbed_of_the_token_once_the_task_is_done(self):
         # SentinelTask.target is a plaintext JSONField; the API token must not still be sitting in it once the task
@@ -646,10 +648,10 @@ class WpscanDispatchTests(DispatchBase):
         self.assertNotIn('secret-token', str(task.target))
 
     def test_an_expired_unclaimed_task_is_also_scrubbed_of_the_token(self):
+        from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['wpscan'])
-        local = mock.Mock(return_value={'version': {'number': '6.4'}})
-        with mock.patch('cveFeed.wpscan_scan.run_wpscan_process', local):
-            runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
+        runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
+        with self.assertRaises(ScannerUnavailable):
             runner('https://www.example.test/', 'secret-token')
         task = SentinelTask.objects.get(kind='wpscan')
         self.assertEqual(task.status, 'expired')
@@ -690,7 +692,7 @@ class CompletionCeilingTests(DispatchBase):
         self.assertEqual(SentinelTask.objects.get().status, 'done')  # never expired, so never also run locally
 
     def test_a_sentinel_that_stopped_heartbeating_is_let_go_when_its_lease_lapses_not_at_the_ceiling(self):
-        agent = self.make_sentinel(['wpscan'])
+        agent = self.make_sentinel(['openvas'])
         real_sleep = time.sleep
         state = {'n': 0}
 
@@ -702,7 +704,7 @@ class CompletionCeilingTests(DispatchBase):
         with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
                 mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
             start = time.monotonic()
-            out = dispatch.dispatch_or_none(self.project, 'wpscan', {'addresses': ['10.0.0.1']}, host='x')
+            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['10.0.0.1']}, host='x')
         self.assertIsNone(out)
         self.assertLess(time.monotonic() - start, 5)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')

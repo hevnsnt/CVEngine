@@ -44,7 +44,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
+                      'nmap_udp': 900, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
                       'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'identity_check': 300, 'web_screenshot': 900,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
@@ -62,6 +62,8 @@ LOCAL_FALLBACK_ENV = 'CVENGINE_LOCAL_FALLBACK'
 # kinds with no local path at all: whatever CVENGINE_LOCAL_FALLBACK says, they wait for a scanner (docs/SECRETS-PLAN.md 6.1); one entry per line
 NEVER_LOCAL = (
     'secrets_scan',
+    'wpscan',
+    'wpscan_thorough',
     'bbot_discovery',
     'rdp_shot',
     'testssl',
@@ -559,7 +561,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
 
     ``redact_target``, when given, is called with ``target`` once the task reaches a terminal state (done, failed or
     expired) and its return value replaces the stored ``target`` in the database - for a kind whose target carries a
-    secret the Sentinel needed only for this one run (today, only WPScan's API token), so the secret does not sit in
+    secret the Sentinel needed only for this one run (today, only the WordPress scan's API token), so the secret does not sit in
     the database for the rest of the task's retention window once nothing needs it there any more.
 
     ``outcome``, when given, is a dict that is told why a ``None`` came back: ``outcome['no_scanner']`` is True when no live, eligible Sentinel
@@ -1254,10 +1256,10 @@ def signed_in_stream(scan, kind, timeout=None):
     return run
 
 
-# --- wpscan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
+# --- WordPress scan: a wrapping runner(url, token) -> report, like cveFeed.wpscan_scan's own seam ------------------------------
 
 def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
-    """Inside a StageRun, send the WPScan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
+    """Inside a StageRun, send the WordPress scan task of every site in ``urls`` before the stage's loop over them (``prefetch``), with the target and host
     the runner of ``wrap_wpscan_runner`` gives each, so the loop finds every report in one pass. Outside a StageRun it does nothing."""
     from urllib.parse import urlsplit
     items = []
@@ -1271,40 +1273,63 @@ def prefetch_wpscan(project, scan, urls, token, internal=False, timeout=None):
 
 
 def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
-    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter, or the literal,
-    unwrapped ``run_wpscan_process`` when no Sentinel is eligible (so ``runner is run_wpscan_process`` identity checks,
-    and every other local behaviour, are unaffected). The project's WPScan API token travels with the dispatched task -
-    the same blast radius it already has today, since it already leaves this process into a subprocess's environment -
-    for this one run only: ``dispatch_or_none``'s ``redact_target`` scrubs it from the stored task once the task is
-    done, failed or expired, so it never sits in the database beyond that. A Sentinel's reported outcome is classified
-    by the exact same ``cveFeed.wpscan_scan._classify`` a local run's own exit code and report go through, so a
-    dispatched site ends up ``NotWordPress``/``Blocked``/a normal report exactly as a local one would."""
-    from cveFeed.wpscan_scan import run_wpscan_process
-    if internal:  # a site inside a declared internal network: only a Sentinel inside it may run WPScan, and there is no local fallback
+    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_wpscan``'s own ``runner`` parameter. The kind is in ``NEVER_LOCAL``: it runs on a
+    Sentinel or not at all, so with no scanner able to take it this raises ``resources.ScannerUnavailable`` (the stage waits and the sites stay due).
+    The project's vulnerability API token travels with the dispatched task for this one run only: ``dispatch_or_none``'s ``redact_target`` scrubs it
+    from the stored task once the task is done, failed or expired, so it never sits in the database beyond that. A Sentinel's reported outcome is
+    classified by ``cveFeed.wpscan_scan._classify``, so a dispatched site ends up ``NotWordPress``/``Blocked``/a normal report."""
+    from cveFeed.wpscan_scan import _classify
+
+    def redact(target):
+        return {**target, 'token': '***'} if target.get('token') else target
+    if internal:  # a site inside a declared internal network: only a Sentinel inside it may scan it
         from urllib.parse import urlsplit
 
         def internal_runner(url, token):
-            from cveFeed.wpscan_scan import _classify
             host = urlsplit(url).hostname or ''
             result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, host=host, ips=[host], scan=scan, timeout=timeout,
-                                      internal=True, redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+                                      internal=True, redact_target=redact)
             if result is None:
-                raise RuntimeError('no Sentinel inside the network ran WPScan (one must declare network:internal and wpscan and cover this project)')
+                raise RuntimeError('no Sentinel inside the network ran the WordPress scan (one must declare network:internal and wpscan and cover this project)')
             return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
         return internal_runner
     if not any_scanner_for(project, 'wpscan'):
-        _no_scanner('wpscan', project)
-        offline_fallback(project, 'wpscan')
-        return run_wpscan_process
+        _no_scanner('wpscan', project)  # NEVER_LOCAL: raises ScannerUnavailable
 
     def runner(url, token):
-        from cveFeed.wpscan_scan import _classify
-        result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout,
-                                  redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
-        if result is None:
-            return run_wpscan_process(url, token)
+        result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout, redact_target=redact)
+        if result is None:  # the task was not finished and the kind may not run here (dispatch_or_none raised already): nothing was read
+            raise RuntimeError('no Sentinel finished the WordPress scan')
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
     return runner
+
+
+def wrap_wpscan_thorough_runner(project, scan=None, timeout_seconds=None):
+    """A ``runner(url, token) -> report`` for ``wpscan_scan.run_thorough``: the thorough pass of one site as one ``wpscan_thorough`` task, which
+    runs for hours. The task carries its own time limit (``timeout_seconds``, the target's value, held to the contract's range); the wait for the
+    report is that limit plus ``sentinel_stream.REPORT_GRACE``, and the broker keeps the task's lease alive for the same time and no longer
+    (``sentinel_broker.max_runtime``), so a Sentinel that is alive but never finishes still frees its slot. The kind is in ``NEVER_LOCAL``: with no
+    scanner able to take it, or none finishing it, this raises ``resources.ScannerUnavailable`` (the host stays pending). The token is scrubbed from
+    the stored task as for the quick pass. The outcome is classified by ``cveFeed.wpscan_scan._classify``."""
+    from cveFeed import wpscan_scan
+    seconds = timeout_seconds or wpscan_scan.thorough_timeout()
+    seconds = min(wpscan_scan.MAX_THOROUGH_TIMEOUT, max(wpscan_scan.MIN_THOROUGH_TIMEOUT, int(seconds)))
+    if not any_scanner_for(project, 'wpscan_thorough'):
+        _no_scanner('wpscan_thorough', project)  # NEVER_LOCAL: raises ScannerUnavailable
+
+    def runner(url, token):
+        target = {'url': url, 'token': token, 'timeout_seconds': seconds}
+        result = dispatch_or_none(project, 'wpscan_thorough', target, scan=scan, timeout=seconds + _report_grace(),
+                                  redact_target=lambda t: {**t, 'token': '***'} if t.get('token') else t)
+        if result is None:  # the task was not finished and the kind may not run here (dispatch_or_none raised already): nothing was read
+            raise RuntimeError('no Sentinel finished the thorough WordPress scan')
+        return wpscan_scan._classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
+    return runner
+
+
+def _report_grace():
+    from agentapi import sentinel_stream
+    return sentinel_stream.REPORT_GRACE
 
 
 # --- the kinds of contract version 3: one task per item, several at once, through dispatch_many -----------------------------------------------

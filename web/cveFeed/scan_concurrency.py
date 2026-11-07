@@ -59,7 +59,7 @@ HEAVY_HELP = {
     'naabu': ('Fast port discovery (naabu)', 'SYN port discovery over every TCP port.'),
     'template-test': ('Generated template tests', 'One AI-generated template against one host.'),
     'route-probe': ('Route probes', 'Safe GET requests to find routes and logins. Light on memory.'),
-    'wpscan': ('WordPress scan (WPScan)', 'A thorough WordPress pass that can run for hours per site.'),
+    'wpscan': ('WordPress scan', 'The scan of one WordPress site.'),
     'testssl': ('TLS audit', 'One audit of one TLS port.'),
 }
 # Ceilings an App Admin may choose. Eight for the CPU bound kinds; lower for the sweeps that hit one address with a very wide probe or that

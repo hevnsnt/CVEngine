@@ -16,7 +16,7 @@ from unittest import mock
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import egress_proxy, pinned_transport as transport, route_auth, wpscan_scan
+from cveFeed import egress_proxy, pinned_transport as transport, route_auth
 from reNgine import crypto_fields
 from scanEngine.models import Proxy
 
@@ -175,54 +175,6 @@ class SelectionTests(ProxyOn, TestCase):
                 self.assertLogs('cveFeed.egress_proxy', level='WARNING') as logs:
             self.assertTrue(egress_proxy.enabled())
         self.assertNotIn('hunter2', '\n'.join(logs.output))
-
-
-class ToolFragmentTests(ProxyOn, TestCase):
-    def test_direct_when_off_or_when_every_destination_is_loopback(self):
-        for tool in egress_proxy.TOOLS:
-            self.assertEqual(egress_proxy.for_tool(tool), [])
-        self.turn_on(HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['127.0.0.1:8080', 'http://localhost:9']), [])
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['127.0.0.1:8080', 'www.example.com']), ['--proxy', HTTP_PROXY])
-
-    def test_each_tool_gets_its_own_arguments(self):
-        self.turn_on(LOGIN_PROXY)
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
-
-    def test_a_tool_that_cannot_use_any_proxy_fails_closed(self):
-        self.turn_on('socks5h://203.0.113.5:1080')
-        with mock.patch.dict(egress_proxy.TOOLS, {'plain-http-only': (('http',), lambda s: ['-x', s.url])}), \
-                self.assertRaises(egress_proxy.ProxyUnavailable) as raised:  # a tool that takes a plain HTTP proxy only
-            egress_proxy.for_tool('plain-http-only', ['www.example.com'])
-        self.assertNotIn('203.0.113.5', str(raised.exception))
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com'])[0], '--proxy')
-
-
-class IntegrationTests(ProxyOn, TestCase):
-    def test_argv_builders_add_the_proxy_only_when_given(self):
-        self.assertNotIn('--proxy', wpscan_scan.wpscan_args(600))
-        self.assertEqual(wpscan_scan.wpscan_args(600, proxy_args=['--proxy', HTTP_PROXY])[-2:], ['--proxy', HTTP_PROXY])
-
-    def test_wpscan_run_takes_the_proxy_login(self):
-        from cveFeed import heavy_process
-        seen = []
-
-        def fake_run(kind, argv, timeout, **kwargs):
-            seen.append(argv)
-            out = argv[argv.index('-o') + 1] if '-o' in argv else None
-            if out:
-                with open(out, 'w') as handle:
-                    handle.write('[]')
-            return mock.Mock(returncode=0, stderr='')
-
-        with mock.patch.object(heavy_process, 'run', fake_run):
-            self.turn_on(LOGIN_PROXY)
-            try:
-                wpscan_scan.run_wpscan_process('https://www.example.com/', '', timeout=120)
-            except Exception:  # the fake wrote no report: only the arguments matter here
-                pass
-            wp = seen[-1]
-            self.assertEqual((wp[wp.index('--proxy') + 1], wp[wp.index('--proxy-auth') + 1]), ('http://203.0.113.52:3128', 'bob:hunter2'))
 
 
 # ----------------------------------------------------------------------------- a tiny forward proxy that records what it is asked

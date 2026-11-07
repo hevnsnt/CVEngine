@@ -90,25 +90,25 @@ class ExpiryTests(AsyncBase):
 
     def one(self, ips=('192.0.2.10',)):
         def body(ctx=None):
-            return dispatch.dispatch_or_none(self.project, 'wpscan', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
+            return dispatch.dispatch_or_none(self.project, 'http_probe', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
         name = adapter('test.one', lambda ctx: body())
         return stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
 
     def test_unclaimed_where_local_is_allowed_returns_none_with_one_fallback_row(self):
         LocalFallback('all').apply(self)
-        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['http_probe'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results, [None])  # the caller runs it here, as before
         task = SentinelTask.objects.get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('wpscan', 'not_claimed_in_time')])
-        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up wpscan work').values_list('status', flat=True)),
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('http_probe', 'not_claimed_in_time')])
+        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up http_probe work').values_list('status', flat=True)),
                          ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
 
     def test_unclaimed_where_local_is_not_allowed_raises_scanner_unavailable_in_the_callback(self):
-        with FakeScanner(kinds=['wpscan'], mode='idle', async_stages=True) as fake:
+        with FakeScanner(kinds=['http_probe'], mode='idle', async_stages=True) as fake:
             self.assertTrue(stage_runs.is_waiting(self.one()))
             results = fake.drain()
         self.assertEqual(results[0]['status'], 'failed')

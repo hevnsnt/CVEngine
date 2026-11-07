@@ -1553,7 +1553,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     from cveFeed import internal_view
     network = internal_view.network_of(sub.target_domain.project_id if sub.target_domain else None, sub.name)
     row = {'id': sub.id, 'internal': network is not None, 'network': network,
-            # what version and identity probes and WPScan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
+            # what version and identity probes and the WordPress scan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
             'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
                         'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
                        for r in probe_rows if r.kind in ('version', 'identity', 'edge')][:40],

@@ -12,7 +12,7 @@ What it runs: the host record for the address (no network access), an nmap finge
 technology pass, CVE correlation, then the AI-targeted nuclei pass. Each stage is the external pipeline's own function (same
 parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target and makes
 every local scanner refuse to run, so a seam that was missed fails loudly. Stages that run from this server directly (route checks,
-probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. WPScan runs through a Sentinel on the sites the Sentinel-run technology
+probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. The WordPress scan runs through a Sentinel on the sites the Sentinel-run technology
 pass tagged as WordPress (this server sends no probe of its own), and OpenVAS has its own opt-in sweep (``cveFeed.openvas_scan.internal_batch``).
 """
 import logging
@@ -281,7 +281,7 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
             _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, org_id, dispatch), fallback={'open': 0})
             _stage(scan, 'Nuclei HTTP and technology pass (internal Sentinel)', 'nuclei_light_scan',
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
-            _stage(scan, 'WPScan of WordPress sites (internal Sentinel)', 'internal_wpscan',
+            _stage(scan, 'WordPress scan of WordPress sites (internal Sentinel)', 'internal_wpscan',
                    lambda: wpscan_scan.run_wpscan(scan.id, runner=wp_runner, internal=True), fallback={'sites': 0})
             from cveFeed.tasks import correlate_cves
             _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
