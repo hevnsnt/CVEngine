@@ -166,8 +166,9 @@ class TopUpBatchTests(Base):
 
     def test_an_excluded_host_is_left_out_and_the_rest_of_the_run_goes_on(self):
         subs = self.hosts(self.a1, 4)
-        with mock.patch('cveFeed.exclusions.is_excluded', side_effect=lambda project, host: host == subs[1].name):
-            result, many, _ = self.sweep(32)
+        from cveFeed.models import HostExclusion
+        HostExclusion.objects.create(org=self.project.org, host=subs[1].name)  # the organization's list, read once for the whole batch
+        result, many, _ = self.sweep(32)
         self.assertEqual((result['hosts_queued'], result['batches_queued']), (3, 1))
         self.assertFalse(HostAssessment.objects.filter(host=subs[1].name).exists())
 
