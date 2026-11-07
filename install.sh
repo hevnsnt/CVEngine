@@ -275,7 +275,7 @@ make migrate >/dev/null 2>&1 || make migrate || { show_logs; die "Database migra
 admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "Could not create the admin account. Try 'make admin' once the services are up."; }
 # the make command echo ("docker compose ... exec") is noise: keep only the account banner
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
-account='the account above'
+account='the account below'
 if [ -z "$admin_banner" ]; then
   # an account that already exists (a re-run) prints one sentence among the framework's start-up noise (logo, warnings): only that sentence is kept
   account='your existing admin account'
@@ -312,10 +312,10 @@ ca=$(pwd)/secrets/certs/ca.crt
 open_url="https://$address/"
 { [ "$https_port" = 443 ] || [[ $address == *:* ]]; } || open_url="https://$address:$https_port/"
 printf '\n%s\n' "$GREEN$BOLD  CVEngine is running (installed in $(((SECONDS - started) / 60))m$(printf '%02d' $(((SECONDS - started) % 60)))s).$RESET"
-printf '\n  Open:      %shttps://%s/%s\n' "$BOLD" "${open_url#https://}" "$RESET"
-printf '  Sign in:   %s\n' "$account"
+printf '\n  Open:      %shttps://%s%s\n' "$BOLD" "${open_url#https://}" "$RESET"
+if [ "$account" = 'the account below' ]; then printf '  Sign in:   with the account below; its generated password is shown only once, here\n'
+else printf '  Sign in:   with your existing admin account\n'; fi
 printf '%s\n' "$admin_banner" | sed 's/^/             /'
-printf '             (a generated password is shown only once; a lost one: make admin-password)\n'
 printf '\n  Open it: setup continues in the browser, the setup wizard does the rest.\n'
 case $plan in
   external) printf '  Scanners:  external Sentinels only, as chosen: the built-in scanner is not started; the wizard shows how to add a Sentinel.\n' ;;
