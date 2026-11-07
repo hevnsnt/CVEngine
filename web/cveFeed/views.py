@@ -1158,12 +1158,16 @@ def api_activity(request):
 
 
 def discovery_counts():
-    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see.
+
+    One walk over the hosts, then two queries over the link tables by id: the nested ``IN (subquery)`` of the hosts' collapsed window query was
+    planned three times (hosts, addresses, ports) and made the ports count over a quarter of a second at 3000 hosts."""
     from cveFeed.counts import LIVE_HOST_Q, host_reps
-    from startScan.models import IpAddress, Port
-    live_subs = host_reps().filter(LIVE_HOST_Q).distinct()
-    ips = IpAddress.objects.filter(ip_addresses__in=live_subs).distinct()
-    return {'hosts': live_subs.count(), 'ips': ips.count(), 'ports': Port.objects.filter(ports__in=ips, state__in=OPEN_PORT_STATES).distinct().count()}
+    from startScan.models import IpAddress, Subdomain
+    host_ids = list(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True).distinct())
+    ip_ids = list(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=host_ids).values_list('ipaddress_id', flat=True).distinct())
+    ports = IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values('port_id').distinct().count()
+    return {'hosts': len(host_ids), 'ips': len(ip_ids), 'ports': ports}
 
 
 def cached_discovery_counts(params=()):
