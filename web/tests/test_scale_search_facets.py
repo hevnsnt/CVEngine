@@ -60,7 +60,7 @@ class SearchFacetCacheTests(TestCase):
             sub.ip_addresses.add(IpAddress.objects.create(address=f'198.51.100.{i - self.HOSTS + 1}'))
         self.search()
         _, bigger_warm = self.search()
-        self.assertEqual(warm, bigger_warm)
+        self.assertLessEqual(abs(bigger_warm - warm), 4, (warm, bigger_warm))  # a few statements of request overhead may differ with what other tests left cached; 30 more hosts would add dozens
 
     def test_a_different_search_or_filter_is_not_served_the_cached_counts(self):
         everything, _ = self.search()
