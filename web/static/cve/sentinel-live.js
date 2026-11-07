@@ -113,7 +113,7 @@ function card(s, reload, detail, group) {
   const title = el("div", "sl-title");
   const state = el("p", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
-  if (s.builtin) state.append(" ", el("span", "chip sl-builtin", "Built-in", { title: "This install's own scanner" }));
+  if (s.builtin) state.append(" ", el("span", "chip sl-builtin", s.last_resort ? "Built-in, last resort" : "Built-in", { title: s.last_resort ? "This install's own scanner. It takes work only when no external Sentinel can." : "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
   head.append(title);
   const actions = el("div", "sl-actions");
@@ -209,6 +209,17 @@ function summary(data) {
   bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
   if (data.stage_runs) bar.append(cell(data.stage_runs.waiting, "stages waiting, no worker held"));
   return bar;
+}
+
+// GET sentinels/live `routing`: what the built-in scanner is for and how the last day's work was shared. One plain text, or "" when the server sent none.
+export function routingText(r) {
+  if (!r || !r.explanation) return "";
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const done = (r.builtin_24h || 0) + (r.external_24h || 0);
+  const share = done ? `In the last 24 hours the built-in scanner handled ${plural(r.builtin_24h, "task")} and external Sentinels handled ${plural(r.external_24h, "task")}.`
+    : "No task was finished by a Sentinel in the last 24 hours.";
+  const none = r.externals ? "" : " No external Sentinel is set up, so the built-in scanner does all the scanning.";
+  return `${r.explanation} ${share}${none}`;
 }
 
 const STAGE = { nmap_scan: "nmap", nuclei_light_scan: "nuclei (light)", nuclei_targeted_scan: "nuclei (targeted)", wpscan: "WPScan",
@@ -405,6 +416,8 @@ export function sentinelLive(mount) {
       if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
     } else {
       mount.append(summary(data));
+      const route = routingText(data.routing);
+      if (route) mount.append(el("p", "note sl-routing", route));
       const waits = stageRunsText(data.stage_runs);
       if (waits) mount.append(el("p", "note sl-stage-runs", waits));
     }
