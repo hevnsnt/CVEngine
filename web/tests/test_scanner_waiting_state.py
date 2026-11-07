@@ -192,10 +192,10 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertEqual(scanner_state.state()['never_seen'], ALL_KINDS)
 
     def test_only_the_kinds_off_the_list_can_wait(self):
-        self.policy('openvas,wpscan')
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
+        self.policy('openvas,http_probe')
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'http_probe')])
         self.sentinel(['openvas'])  # a Sentinel for a kind that may run here anyway changes nothing about the others
-        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'wpscan')])
+        self.assertEqual(scanner_state.waiting_kinds(), [k for k in ALL_KINDS if k not in ('openvas', 'http_probe')])
 
     def test_a_kind_the_sentinel_cannot_run_yet_is_still_waiting(self):
         self.policy('none')
