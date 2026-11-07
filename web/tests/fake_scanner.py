@@ -40,6 +40,11 @@ of its own scenario (``fixture(kind, **changes)``, ``for_host``).
 Limits. A serve costs two ``claim`` calls of the broker's rate limit (60 a minute per token), so one fake serves about 30 tasks per test. A kind
 that fails ``FAIL_STREAK`` times running is withheld from the Sentinel for a while (``sentinel_broker.failing_kinds``), as for a real one.
 
+``external=True`` makes the fake an ordinary external Sentinel instead of the install's own scanner (no built-in enrollment, ``is_builtin`` false, scope the whole
+instance unless ``scope=`` says otherwise, ``info.builtin`` absent): start the built-in fake and an external one in the same test to exercise the last-resort rule
+(``docs/SCANNER-ARCHITECTURE.md``, \"The built-in scanner is the last resort\"). While several fakes are started, a dispatcher's poll serves each of them in turn, the built-in one
+FIRST, so a test that sees an external win proves the built-in scanner stood back, not that it was slow.
+
 ``assert_ran_nowhere_locally(testcase, kind)`` makes any local run of the kind a test failure. No kind runs on the server since 1.4 and
 ``CVENGINE_LOCAL_FALLBACK`` is ignored, so nothing returns ``None`` for a stage to run itself: a task nobody finished is ``ScannerUnavailable``.
 (``LocalFallback`` below only forgets the cached scanner state now.) A kind K is proven by: ``assert_ran_nowhere_locally(self, K)``, ``FakeScanner(kinds=[K])`` serving the K fixture, the real stage entry point, and an assertion on what the
@@ -102,10 +107,14 @@ class _Clock:
 
     def sleep(self, seconds):
         self.offset += max(0.0, float(seconds))  # the budgets see the time pass; the test does not wait for it
-        self.fake.serve_once()
+        for fake in sorted(_ACTIVE, key=lambda f: f.external):  # the built-in one first: the worst case for the rule that it stands back
+            fake.serve_once()
 
     def __getattr__(self, name):
         return getattr(_real_time, name)
+
+
+_ACTIVE = []  # the fake scanners started now, for ``_Clock.sleep``
 
 
 # --- the fake scanner ------------------------------------------------------------------------------------------------------------------------
@@ -119,8 +128,9 @@ class FakeScanner:
     ``responders``: ``{kind: callable(task) -> dict | dict}``. ``max_concurrent``: its slots. ``error``: the text a ``fail`` task reports."""
 
     def __init__(self, kinds=None, contract_version=None, mode='ok', modes=None, responders=None, max_concurrent=4, error=DEFAULT_ERROR,
-                 async_stages=False):
+                 async_stages=False, external=False, scope=None, name=None):
         from agentapi import sentinel_contract
+        self.external, self.scope, self.name = external, scope, name or ('fake-external' if external else 'fake-scanner')
         self.kinds = list(kinds) if kinds is not None else [k for k in sentinel_contract.KINDS if _has_fixture(k)]
         self.contract_version = sentinel_contract.version() if contract_version is None else contract_version
         self.mode, self.modes = self._checked(mode), {k: self._checked(m) for k, m in (modes or {}).items()}
@@ -150,10 +160,12 @@ class FakeScanner:
             env = {name: '1' for name in ('CVENGINE_SENTINEL_CLAIM_TIMEOUT', 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT') if name not in os.environ}
             stack.enter_context(mock.patch.dict(os.environ, env))
             admin = self._admin()
-            ensured = builtin_scanner.ensure()
-            state = ensured['state']
             from agentapi.models import Agent
-            if state == 'enrolled':  # a fake scanner of this test enrolled earlier and stopped: the same built-in Sentinel serves again, with this one's kinds
+            ensured = {'state': 'external'} if self.external else builtin_scanner.ensure()
+            state = ensured['state']
+            if state == 'external':
+                out = {'id': self._external_agent(admin).pk}
+            elif state == 'enrolled':  # a fake scanner of this test enrolled earlier and stopped: the same built-in Sentinel serves again, with this one's kinds
                 from agentapi import agent_scope as scope_lib
                 Agent.objects.filter(pk=ensured['agent_id']).update(capabilities=scope_lib.clean_capabilities(self.kinds), max_concurrent=self.max_concurrent)
                 out = {'id': ensured['agent_id']}
@@ -171,6 +183,8 @@ class FakeScanner:
             # The test suite runs stages blocking (reNgine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
             # continues them with ``drain()``.
             stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_ASYNC_STAGES': '1' if self.async_stages else '0'}))
+            _ACTIVE.append(self)
+            stack.callback(lambda: _ACTIVE.remove(self) if self in _ACTIVE else None)
         except BaseException:
             stack.close()
             raise
@@ -210,6 +224,18 @@ class FakeScanner:
             raise AssertionError('the fake scanner could not serve a task: ' + '; '.join(errors))
         return False
 
+    def _external_agent(self, admin):
+        """An external Sentinel's Agent: its own token, the declared kinds, a scope that reaches every project unless ``scope`` narrows it."""
+        from django.utils import timezone
+
+        from agentapi import agent_scope as scope_lib
+        from agentapi.auth import SCOPE_SENTINEL, create_token
+        from agentapi.models import Agent
+        token, _ = create_token(admin, f'fake-external-{self.name}'[:100], scope=SCOPE_SENTINEL)
+        return Agent.objects.create(token=token, name=self.name, kind='scanner', status='active', capabilities=scope_lib.clean_capabilities(self.kinds),
+                                    max_concurrent=self.max_concurrent, last_seen=timezone.now(),
+                                    scope=self.scope or {'orgs': [], 'projects': [], 'hosts': [], 'instance': True})
+
     @staticmethod
     def _admin():
         from django.contrib.auth.models import User
@@ -236,8 +262,10 @@ class FakeScanner:
         """One real heartbeat: the fake is live (and has declared its contract version) from here until ``go_offline``."""
         from agentapi import sentinel_broker
         # what the built-in scanner image reports: it is the built-in one, it reads stored sign-ins and it applies the vantage settings
-        out = sentinel_broker.heartbeat(self._ctx(), {'info': {'contract_version': self.contract_version, 'builtin': True,
-                                                               'features': ['secret_read', 'vantage']}})
+        info = {'contract_version': self.contract_version}
+        if not self.external:
+            info.update(builtin=True, features=['secret_read', 'vantage'])
+        out = sentinel_broker.heartbeat(self._ctx(), {'info': info})
         self.agent.refresh_from_db()
         self._forget_scanner_state()
         return out

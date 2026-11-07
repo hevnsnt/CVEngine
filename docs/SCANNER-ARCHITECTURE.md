@@ -18,6 +18,7 @@ made on one side has to be carried across by hand.
 1. The Sentinel stays its own repository. Deploying one is "point Docker at the repo and it builds".
 2. The scanners leave cvENGINE. Every install runs a built-in Sentinel as a compose service, shown as "CVEngine Scanner".
    External Sentinels remain for networks the server cannot reach. There is one scanner code base.
+   External Sentinels take all scanning first; the built-in scanner is the path of last resort ([below](#the-built-in-scanner-is-the-last-resort)).
 3. bbot discovery and the HTTP probes move into the Sentinel too, not only the tool wrappers.
 4. Signed-in (authenticated) work is done only by the built-in Sentinel, through a secure read: the stored credential is never
    in a task row and never reaches an external Sentinel.
@@ -237,6 +238,22 @@ drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavaila
 Add about 2 GB of memory (`SCANNER_MEM_LIMIT`; 1 GB on a host under about 7 GB, [DEPLOYMENT.md](DEPLOYMENT.md#memory)) and 1.5 GB of disk. If the scanner is offline, the work that needs it waits with a strip on every page, is never marked failed, and is queued again for when it is back.
 Air-gapped installs get a release bundle with both image tarballs, the CVE seed and the template bundle, with the version
 check off for the built-in.
+
+## The built-in scanner is the last resort
+
+External Sentinels take all scanning first. The built-in scanner is the path of last resort, the one a task takes when no external Sentinel is there for it. A task is routed like this (`sentinel_broker._claim`, `_left_to_externals`, `builtin_fallback_for`):
+
+1. A Sentinel asks for work and the server offers it the queued tasks it is eligible for: its scope, its kinds (not denied by its capability policy, not cooling off after failures, a contract version that has the kind), its host and internal-network rules, a free slot and room under its per-kind cap.
+2. When the built-in scanner asks, a task that an external Sentinel could run is **left alone**. An external counts when it is active, heard from within the live window (3 minutes), in scope of the project and host, has the kind enabled, and is not updating itself. Its free slots are not asked: a full external frees one soon, and the grace below ends the wait if it does not.
+3. The built-in scanner takes the task anyway in three cases:
+   - **No external is there for it**: none exists, none is live, none has the kind on, none covers the project or the address (a Sentinel outside a private network never counts for work inside it). It takes the task at once, as before.
+   - **The task has waited longer than the grace**, `CVENGINE_BUILTIN_FALLBACK_SECONDS` (default `120`, `0` = at once, the old behavior): the externals are live and eligible but full or not claiming.
+   - **Only the built-in scanner can run the kind** (`BUILTIN_KINDS`: `path_probe`, `nuclei_validate`, `route_probe_signed`), signed-in work and secret validation: no external is offered them, so none is there for them.
+4. An administrator who sets the built-in scanner to **prefer** a kind (its capability policy) lifts the wait for that kind. Per-kind prefer between external Sentinels, and least-loaded balancing between them, work as before; the built-in scanner takes no part in either: an external is never held back for it, and once its own grace is over it takes the task without the prefer and balance holds.
+
+The grace never costs a stage its task. A dispatching stage waits for a Sentinel to claim its task for the claim window (`CVENGINE_SENTINEL_CLAIM_TIMEOUT`, 8 s); while the built-in scanner stands back, the stage's claim window is the grace plus one claim window, and never more than its queue budget (`CVENGINE_SENTINEL_QUEUE_TIMEOUT`, 300 s). The grace itself is cut to the queue budget less one claim window and two seconds, so the built-in scanner always has a window left to take the task before the stage gives up (a budget too small for any grace means no grace). OpenVAS tasks have no stage waiting and keep the whole grace, below their one hour in the queue.
+
+What the rest of the server says follows the same rule. `capacity_state` (what a stage asks before it hands work over) counts only the external Sentinels' slots while one is there for the kind, so a full external is `busy` (the stage queues and the built-in scanner takes the task after the grace) and not `free` because the built-in scanner has room. It reports `externals` and `fallback_seconds`. Every list that names Sentinels (the reasons a kind has nowhere to go, the Sentinels page) names the built-in scanner last. The Sentinels page marks its card **Built-in, last resort**, explains the rule in a sentence and counts the tasks the built-in scanner and the external Sentinels finished in the last 24 hours (`GET sentinels/live`, `routing`).
 
 ## The built-in scanner's enrollment (server half, built)
 
