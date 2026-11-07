@@ -114,6 +114,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **One Scanners page** shows scanner health (workers, scheduler, queues) without a Refresh click; Sentinels and API tokens and MCP are tabs of it.
 - **Settings is Essentials (AI model, Alerts, Reports, Updates) plus a collapsed Advanced group.** Notifications and Email are one Alerts pane; OpenVAS settings live only in Administration. Labels: Live is Overview, Hygiene is Config checks, Suppliers is Third parties, About is Help.
 - **The dashboard asks for its trend charts only when they are about to be seen**, instead of loading up to 1,000 findings and 1,000 changes on every visit, and the shell no longer repeats its scans request.
+- **The PDF renderer runs at a lower CPU priority** (`nice -n 10` on the report child process; skipped where `nice` is missing), so laying out a long report does not starve the web server and the database sharing the host.
 
 ### Fixed
 
