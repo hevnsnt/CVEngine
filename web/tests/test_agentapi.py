@@ -1316,6 +1316,9 @@ class LiveDashboardTests(TestCase):
 	def test_dashboard_redirects_to_welcome_until_onboarded(self):
 		root = User.objects.create_superuser('liveroot', 'l@x.io', 'x')
 		c = client_for(root)
+		self.assertEqual(c.get('/cve/').status_code, 200)  # this install already has targets: the wizard is not forced on it (cveFeed.setup_flow.needs_wizard)
+		from dashboard.models import SetupWizard
+		SetupWizard.objects.create(started_at=timezone.now())  # a wizard somebody started resumes
 		r = c.get('/cve/')
 		self.assertEqual((r.status_code, r['Location']), (302, '/cve/welcome/'))
 		self.assertEqual(c.get('/cve/welcome/').status_code, 200)
