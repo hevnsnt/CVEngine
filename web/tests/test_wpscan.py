@@ -9,6 +9,7 @@ from dashboard.models import ApiCredential
 from startScan.models import ScanActivity, Subdomain, Technology, Vulnerability
 from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
+from tests.port_stage_stub import port_double
 
 REPORT = {
     'version': {'number': '6.4.2', 'vulnerabilities': [
@@ -184,7 +185,7 @@ class StageTests(RouteFixture, TestCase):
         runner = lambda url, token: stages.append(url) or REPORT  # noqa: E731
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             discovery._run_stages(self.scan_obj.id, {'scan_id': self.scan_obj.id, 'status': discovery.SUCCESS}, hygiene=False,
-                                  nmap_runner=lambda targets, flags, timeout: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>', db_exposure_checks={}, provider=None,
+                                  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
                                   light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
                                   route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, wpscan_runner=runner,
                                   probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '', 'final_url': url, 'url': url})

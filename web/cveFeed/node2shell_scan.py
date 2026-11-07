@@ -1,6 +1,6 @@
 """Detection for CVE-2026-111497 ("node2shell", also "HTTP2Shell"), a flaw in the Brotli decoder that Node.js, Bun and Envoy compile into
-their runtimes. Uses Assetnote's own read-only detector (``cveFeed.vendor.node2shell``, MIT licensed, vendored with its own provenance header,
-https://github.com/assetnote/node2shell-scanner). By default it runs against hosts a technology row or a route fingerprint already names as one of
+their runtimes. Assetnote's own read-only detector (MIT licensed, https://github.com/assetnote/node2shell-scanner) runs on a Sentinel,
+vendored there with its own provenance header (``client/vendor``): this server carries no copy of it and sends nothing to the host. By default it runs against hosts a technology row or a route fingerprint already names as one of
 those runtimes (Node.js and its frameworks, Bun, Envoy); ``CVENGINE_NODE2SHELL_SCOPE=all`` runs it against every web host, for the cases a name
 cannot show (a Python service using Brotli, a container base image, a sidecar that hides what it is).
 
@@ -79,18 +79,6 @@ def node_sites(scan):
     return sites
 
 
-def run_check(url, timeout_s=None):
-    """Call the vendored detector for one URL. Returns its result dict; never raises (the vendored module already
-    catches its own network and protocol errors into an INCONCLUSIVE result, and anything else is folded the
-    same way here, as a last resort)."""
-    from cveFeed.vendor import node2shell
-    try:
-        return node2shell.check_vulnerability(url, timeout=timeout_s or check_timeout(), verify_ssl=True)
-    except Exception as exc:  # noqa: BLE001 - a bad target must never interrupt the scan
-        logger.warning('node2shell check failed for %s: %s', url, exc)
-        return {'vulnerable': None, 'verdict': 'ERROR', 'error': str(exc)[:200], 'reason': str(exc)[:200]}
-
-
 def run_for_scan(scan_id, checker=None, force=False):
     """Run the node2shell check against every Node.js or Express host this scan found, bounded per scan and
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
@@ -112,8 +100,7 @@ def run_for_scan(scan_id, checker=None, force=False):
     from agentapi import sentinel_dispatch
     try:
         sentinel = checker is None and sentinel_dispatch.scanner_or_local(project, 'node2shell')  # an injected checker (a test) is never second-guessed
-        checker = checker or run_check
-    except resources.ScannerUnavailable as exc:  # no scanner can take it and the detector may not run here: the hosts stay due
+    except resources.ScannerUnavailable as exc:  # no scanner can take it (the kind has no local path): the hosts stay due
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log('run_check', f'Checking {len(todo)} host(s) of {domain.name} for {CVE_ID} '
                            '(about 23 MB uploaded per host; read-only, no credential sent)',
@@ -128,22 +115,15 @@ def run_for_scan(scan_id, checker=None, force=False):
             _record_finding(scan, sub, url, result)
         elif result.get('vulnerable') is None:
             errors += 1
-    local = todo
     try:
-        if sentinel:  # the detector runs on a scanner (vendored there the way it is here); a host no Sentinel finished runs here when it may
-            local = []
+        if sentinel:  # the detector runs on a scanner; a host no Sentinel finished is not recorded (dispatch_each raises ScannerUnavailable once the others are in)
             for index, result in sentinel_dispatch.dispatch_each(project, 'node2shell', todo, lambda site: {'url': site[1]}, scan=scan,
                                                                  label_of=lambda site: site[0].name):
-                if result is None:
-                    local.append(todo[index])
-                else:
+                if result is not None:
                     note(*todo[index], sentinel_dispatch.node2shell_outcome(result))
-        if local:
-            # under the resource gate like the other scanner stages: a global pause or a stopped scan ends the loop between hosts
-            with resources.heavy_job('route-probe', label=domain.name) as job:
-                for sub, url in local:
-                    job.raise_if_killed()
-                    note(sub, url, checker(url))
+        else:  # an injected checker (tests only)
+            for sub, url in todo:
+                note(sub, url, checker(url))
     except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'node2shell check for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '

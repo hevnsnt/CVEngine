@@ -33,7 +33,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 		self.assertTrue(rows['nmap']['behind'])
 		self.assertEqual(rows['nmap']['latest'], '99.1')
 		self.assertTrue(rows['wpscan']['behind'])
-		for tool in ('nuclei', 'nuclei (CI smoke test)', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
+		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
 			self.assertTrue(rows[tool]['behind'], tool)
 		self.assertEqual((rows['naabu']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
 		self.assertEqual((rows['testssl.sh']['latest'], rows['testssl.sh']['behind']), ('99.1', True))  # a development tag is not a release
@@ -45,20 +45,6 @@ class ToolVersionCheckTests(SimpleTestCase):
 		rows = tools.collect(get)
 		self.assertTrue(all(r['latest'] is None and not r['behind'] for r in rows))
 		self.assertTrue(all(r['pinned'] for r in rows))  # the pins are still read from the repository
-
-	def test_the_bundled_chromium_against_chrome_stable_is_a_warning_never_a_gate(self):
-		def get(url, as_json=True):
-			if urlparse(url).hostname == 'versionhistory.googleapis.com':
-				return {'versions': [{'version': '999.0.1.2'}, {'version': '998.0.0.1'}]}
-			raise OSError('offline')
-		rows = {r['tool']: r for r in tools.collect(get)}
-		chromium = rows["chromium (Playwright's build) vs Chrome stable"]
-		self.assertRegex(chromium['pinned'], r'^\d+\.\d+\.\d+\.\d+$')  # PLAYWRIGHT_CHROMIUM_VERSION in web/Dockerfile
-		self.assertEqual((chromium['latest'], chromium['ahead'], chromium['behind']), ('999.0.1.2', True, False))
-		self.assertIn('warning only', tools.report([chromium]))
-		current = {'tool': 'x', 'pinned': '2', 'latest': '2', 'behind': False}
-		self.assertEqual(self.exit_status([current, chromium], '--fail-if-behind'), 0)
-		self.assertEqual(self.exit_status([current, {**chromium, 'latest': None}], '--fail-if-behind'), 0)
 
 	def test_versions_compare_numerically(self):
 		self.assertTrue(tools.version_key('3.10.1') > tools.version_key('3.9.9'))

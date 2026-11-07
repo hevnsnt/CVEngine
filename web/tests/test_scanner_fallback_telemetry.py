@@ -41,14 +41,14 @@ class FallbackBase(DispatchBase):
     def rows(self):
         return list(ScannerFallback.objects.order_by('id').values_list('kind', 'reason'))
 
-    def dispatch(self, kind='nmap', **kwargs):
+    def dispatch(self, kind='openvas', **kwargs):
         return dispatch.dispatch_or_none(self.project, kind, {'addresses': ADDR}, ips=ADDR, **kwargs)
 
 
 class RecordedReasonTests(FallbackBase):
     def test_no_scanner_at_all_is_recorded_with_kind_and_project_only(self):
         self.assertIsNone(self.dispatch())
-        self.assertEqual(self.rows(), [('nmap', 'no_scanner')])
+        self.assertEqual(self.rows(), [('openvas', 'no_scanner')])
         row = ScannerFallback.objects.get()
         self.assertEqual(row.project, self.project)
         self.assertIsNotNone(row.created_at)
@@ -56,129 +56,80 @@ class RecordedReasonTests(FallbackBase):
         self.assertNotIn('192.0.2', text)  # no address, no target name
         self.assertNotIn('example.test', text)
 
-    def test_every_wrapper_that_sees_no_scanner_records_its_kind(self):
-        dispatch.try_nmap(self.project, self.scan, ADDR)
-        dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443)
-        dispatch.try_nmap_udp(self.project, ADDR[0])
-        dispatch.wrap_naabu_runner(self.project, self.scan)
-        dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
-        self.assertEqual(self.rows(), [(k, 'no_scanner') for k in ('nmap', 'testssl', 'nmap_udp', 'naabu', 'nuclei_light')])
-
-    def test_a_never_local_kind_with_no_scanner_waits_and_records_no_fallback(self):
-        from reNgine.resources import ScannerUnavailable
-        with self.assertRaises(ScannerUnavailable):
-            dispatch.wrap_wpscan_runner(self.project)  # no local path exists: there is no fallback to count
-        self.assertEqual(self.rows(), [])
+    def test_the_kinds_with_no_local_path_wait_and_record_nothing(self):
+        for attempt in (lambda: dispatch.try_testssl(self.project, 'example.test', ADDR[0], 443),
+                        lambda: dispatch.try_nmap(self.project, self.scan, ADDR), lambda: dispatch.try_nmap_udp(self.project, ADDR[0]),
+                        lambda: dispatch.wrap_naabu_runner(self.project, self.scan), lambda: dispatch.wrap_wpscan_runner(self.project)):
+            with self.assertRaises(resources.ScannerUnavailable):
+                attempt()
+        self.assertEqual(self.rows(), [])  # a kind that never runs here has no fallback to count
 
     def test_a_task_nobody_claims_in_time(self):
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             self.assertIsNone(self.dispatch(timeout=5))
-        self.assertEqual(self.rows(), [('nmap', 'not_claimed_in_time')])
+        self.assertEqual(self.rows(), [('openvas', 'not_claimed_in_time')])
 
     def test_every_slot_busy_until_the_queue_budget_runs_out(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         for _ in range(agent.max_concurrent):
-            SentinelTask.objects.create(project=self.project, kind='nmap', agent=agent, status='running', target={'addresses': ADDR})
+            SentinelTask.objects.create(project=self.project, kind='openvas', agent=agent, status='running', target={'addresses': ADDR})
         with mock.patch('agentapi.sentinel_dispatch._queue_timeout', return_value=0.2):
             self.assertIsNone(self.dispatch(timeout=5))
-        self.assertEqual(self.rows(), [('nmap', 'slot_busy')])
+        self.assertEqual(self.rows(), [('openvas', 'slot_busy')])
 
     def test_a_sentinel_that_reports_failure(self):
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'error': 'boom'}, status='failed')):
             self.assertIsNone(self.dispatch(timeout=5))
-        self.assertEqual(self.rows(), [('nmap', 'failed_then_local')])
+        self.assertEqual(self.rows(), [('openvas', 'failed_then_local')])
 
     def test_a_claimed_task_that_never_reports_back(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
 
         def claim_then_wait(_seconds):
             SentinelTask.objects.filter(status='queued').update(status='claimed', agent=agent, claimed_at=timezone.now())
             REAL_SLEEP(0.05)
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=claim_then_wait):
             self.assertIsNone(self.dispatch(timeout=0.2))
-        self.assertEqual(self.rows(), [('nmap', 'completion_timeout')])
+        self.assertEqual(self.rows(), [('openvas', 'completion_timeout')])
 
     def test_the_last_sentinel_going_away_while_queued_reads_as_no_scanner(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
 
         def vanish(_seconds):
             Agent.objects.filter(pk=agent.pk).update(last_seen=timezone.now() - timedelta(hours=2))
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=vanish), mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0):
             self.assertIsNone(self.dispatch(timeout=30))
-        self.assertEqual(self.rows(), [('nmap', 'no_scanner')])
+        self.assertEqual(self.rows(), [('openvas', 'no_scanner')])
 
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop: one chunk task at a time
     def test_the_addresses_beyond_one_task_go_in_a_second_task_and_nothing_runs_here(self):
         self.make_sentinel(['naabu'])
         ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'outcome': 'done', 'ports': {}})), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'outcome': 'done', 'ports': {}})):
             dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        local.assert_not_called()
         self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 2)
         self.assertEqual(self.rows(), [])
 
-    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})
-    def test_a_chunk_never_sent_after_an_unclaimed_one_runs_here_and_is_recorded(self):
-        self.make_sentinel(['naabu'])
-        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
-            dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        self.assertEqual(local.call_args.args[0], ips)  # the unclaimed chunk and the one never sent after it
-        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 1)
-        self.assertEqual(self.rows(), [('naabu', 'not_claimed_in_time'), ('naabu', 'over_chunk')])
-
-    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})
-    def test_a_chunk_never_sent_because_the_last_sentinel_left_is_no_scanner_not_over_chunk(self):
-        agent = self.make_sentinel(['naabu'])
-        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-
-        def vanish(_seconds):
-            Agent.objects.filter(pk=agent.pk).update(last_seen=timezone.now() - timedelta(hours=2))
-        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=vanish), mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
-            dispatch.wrap_naabu_runner(self.project, self.scan, timeout=30)(ips)
-        self.assertEqual(local.call_args.args[0], ips)  # it still runs here: the kind may fall back
-        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 1)
-        self.assertEqual(self.rows(), [('naabu', 'no_scanner')] * 2)
-
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '4'})
-    def test_side_by_side_chunks_nobody_claims_each_record_their_own_reason(self):
-        agent = self.make_sentinel(['naabu'])
-        Agent.objects.filter(pk=agent.pk).update(max_concurrent=4)
-        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
-            dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        self.assertEqual(sorted(local.call_args.args[0]), sorted(ips))
-        self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 2)  # both chunks were sent at once
-        self.assertEqual(self.rows(), [('naabu', 'not_claimed_in_time')] * 2)
-
-    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '4', ENV: 'none'})
     def test_side_by_side_chunks_wait_when_the_kind_may_not_run_here(self):
         agent = self.make_sentinel(['naabu'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=4)
         ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             with self.assertRaises(resources.ScannerUnavailable):
                 dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        local.assert_not_called()
         self.assertEqual(self.rows(), [])
         self.assertFalse(SentinelTask.objects.filter(status__in=('queued', 'claimed', 'running')).exists())
 
-    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1', ENV: 'none'})
+    @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})
     def test_a_chunk_never_sent_waits_when_the_kind_may_not_run_here(self):
         self.make_sentinel(['naabu'])
         ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
-        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
-                mock.patch('cveFeed.naabu_scan.run_naabu', return_value={}) as local:
+        with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             with self.assertRaises(resources.ScannerUnavailable):
                 dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
-        local.assert_not_called()
         self.assertEqual(self.rows(), [])
 
     def test_every_reason_the_code_can_name_is_a_listed_reason(self):
@@ -190,8 +141,8 @@ class RecordedReasonTests(FallbackBase):
 
 
 class NmapPartialResultTests(FallbackBase):
-    """The addresses of an nmap chunk a Sentinel finished without covering them (no host row, or not every port naabu found) are a local
-    fallback like any other: they go through ``_no_local`` once, so a forbidden nmap leaves them due and never runs them here."""
+    """The addresses of an nmap chunk a Sentinel finished without covering them (no host row) are never fingerprinted here: they go through
+    ``_no_local`` once and stay due (``ScannerUnavailable``), and no fallback is recorded for a kind that has none."""
 
     def setUp(self):
         super().setUp()
@@ -205,38 +156,26 @@ class NmapPartialResultTests(FallbackBase):
                                                                                          'product': 'OpenSSH', 'version': '8.9'} for port in ports]}
                                              for ip, ports in hosts]}
 
-    def run_stage(self, answer, naabu):
-        from cveFeed import nmap_scan
-        local = mock.Mock(return_value='<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>')
-        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
-            result = nmap_scan.run_nmap_for_scan(self.scan.id, runner=local, naabu_runner=lambda ips: naabu)
-        return result, local
+    def run_stage(self, answer):
+        from cveFeed import port_stage
+        with mock.patch('cveFeed.port_stage.enabled', return_value=False), \
+                mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(answer)):
+            return port_stage.run_for_scan(self.scan.id)
 
     def fresh(self):
         from cveFeed import ledger
         return set(ledger.fresh('nmap-fast', ['192.0.2.10', '192.0.2.11'], self.project.id))
 
-    def test_a_forbidden_nmap_never_fingerprints_an_unreported_address_here_and_it_stays_due(self):
-        os.environ[ENV] = 'none'
-        result, local = self.run_stage(self.answer(('192.0.2.11', [22])), {'192.0.2.10': [22], '192.0.2.11': [22]})
-        local.assert_not_called()
+    def test_an_unreported_address_is_never_fingerprinted_here_and_it_stays_due(self):
+        result = self.run_stage(self.answer(('192.0.2.11', [22])))
         self.assertIn('no scanner could take this work (nmap)', result['skipped'])
         self.assertEqual(self.fresh(), {'192.0.2.11'})  # the Sentinel's address is done, the one it did not report stays due
         self.assertEqual(self.rows(), [])
         from cveFeed.models import AgentActivity
-        message = AgentActivity.objects.filter(message__startswith='nmap for').latest('id').message
+        message = AgentActivity.objects.filter(message__startswith='the port scan for').latest('id').message
         self.assertIn('the 1 IP stay due until one can (1 fingerprinted by a Sentinel)', message)
 
-    def test_a_forbidden_nmap_never_tops_up_the_ports_a_sentinel_missed_here(self):
-        os.environ[ENV] = 'naabu'  # nmap is off the list
-        result, local = self.run_stage(self.answer(('192.0.2.10', [22]), ('192.0.2.11', [22])), {'192.0.2.10': [22, 8443], '192.0.2.11': [22]})
-        local.assert_not_called()
-        self.assertIn('skipped', result)
-        self.assertEqual(self.fresh(), {'192.0.2.11'})
-        self.assertEqual(self.rows(), [])
-
     def test_try_nmap_names_what_a_sentinel_covered_when_it_must_wait(self):
-        os.environ[ENV] = 'none'
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(self.answer(('192.0.2.11', [22])))):
             with self.assertRaises(resources.ScannerUnavailable) as caught:
                 dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'], timeout=5)
@@ -244,40 +183,23 @@ class NmapPartialResultTests(FallbackBase):
         self.assertEqual(caught.exception.done, ['192.0.2.11'])
         self.assertEqual(self.rows(), [])
 
-    def test_allowed_the_leftovers_run_here_as_before_and_are_recorded_once(self):
-        result, local = self.run_stage(self.answer(('192.0.2.11', [22])), {'192.0.2.10': [22], '192.0.2.11': [22]})
-        local.assert_called_once()
-        self.assertEqual(local.call_args.args[0], ['192.0.2.10'])
-        self.assertNotIn('skipped', result)
-        self.assertEqual(self.fresh(), {'192.0.2.10', '192.0.2.11'})
-        self.assertEqual(self.rows(), [('nmap', 'partial_result')])
+    def test_a_sentinel_that_covers_everything_records_nothing(self):
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep',
+                        side_effect=_answer_queued_task(self.answer(('192.0.2.10', [22]), ('192.0.2.11', [22])))):
+            totals = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'], timeout=5)
+        self.assertEqual(totals['ports'], 2)
+        self.assertEqual(self.rows(), [])
 
-    def test_allowed_a_top_up_and_an_unreported_address_are_one_row(self):
-        result, local = self.run_stage(self.answer(('192.0.2.10', [22])), {'192.0.2.10': [22, 8443], '192.0.2.11': [22]})
-        self.assertEqual(sorted(ip for call in local.call_args_list for ip in call.args[0]), ['192.0.2.10', '192.0.2.11'])
-        self.assertEqual(self.rows(), [('nmap', 'partial_result')])
-
-    def test_a_sentinel_that_covers_everything_records_nothing_whatever_the_policy(self):
-        for policy in ('', 'none'):
-            os.environ[ENV] = policy
-            ScannerFallback.objects.all().delete()
-            with mock.patch('agentapi.sentinel_dispatch.time.sleep',
-                            side_effect=_answer_queued_task(self.answer(('192.0.2.10', [22]), ('192.0.2.11', [22])))):
-                remaining, _totals, _ports = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'], timeout=5,
-                                                               ports_by_ip={'192.0.2.10': [22]})
-            self.assertEqual(remaining, [])
-            self.assertEqual(self.rows(), [])
-
-    def test_a_chunk_no_sentinel_did_is_recorded_by_the_dispatch_not_again(self):
+    def test_a_chunk_no_sentinel_did_waits_and_records_nothing(self):
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
-            remaining, _totals, _ports = dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=5)
-        self.assertEqual(remaining, ['192.0.2.10'])
-        self.assertEqual(self.rows(), [('nmap', 'not_claimed_in_time')])
+            with self.assertRaises(resources.ScannerUnavailable):
+                dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=5)
+        self.assertEqual(self.rows(), [])
 
 
 class NothingRecordedTests(FallbackBase):
     def test_a_sentinel_that_answers_records_nothing(self):
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         result = {'outcome': 'done', 'hosts': []}
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
             self.assertEqual(self.dispatch(timeout=5), result)
@@ -287,7 +209,7 @@ class NothingRecordedTests(FallbackBase):
         os.environ[ENV] = 'none'
         with self.assertRaises(resources.ScannerUnavailable):
             self.dispatch()
-        self.make_sentinel(['nmap'])
+        self.make_sentinel(['openvas'])
         with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
             with self.assertRaises(resources.ScannerUnavailable):
                 self.dispatch(timeout=5)
@@ -297,11 +219,11 @@ class NothingRecordedTests(FallbackBase):
         self.assertEqual(self.rows(), [])
 
     def test_only_the_kinds_still_on_the_list_are_recorded(self):
-        os.environ[ENV] = 'nmap'
-        self.assertIsNone(self.dispatch('nmap'))
+        os.environ[ENV] = 'openvas'
+        self.assertIsNone(self.dispatch('openvas'))
         with self.assertRaises(resources.ScannerUnavailable):
             self.dispatch('naabu')
-        self.assertEqual(self.rows(), [('nmap', 'no_scanner')])
+        self.assertEqual(self.rows(), [('openvas', 'no_scanner')])
 
     def test_an_internal_task_never_had_a_local_run_so_it_records_nothing(self):
         self.assertIsNone(self.dispatch(internal=True))
@@ -312,12 +234,10 @@ class RecordingNeverBreaksDispatchTests(FallbackBase):
     def test_a_failing_insert_does_not_change_what_dispatch_returns(self):
         with mock.patch.object(ScannerFallback.objects, 'create', side_effect=RuntimeError('table gone')), self.assertLogs('agentapi.scanner_fallback', level='DEBUG'):
             self.assertIsNone(self.dispatch())
-            self.make_sentinel(['nmap'])
+            self.make_sentinel(['openvas'])
             with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2):
                 self.assertIsNone(self.dispatch(timeout=5))
-            runner = dispatch.wrap_naabu_runner(self.project, self.scan)
         self.assertEqual(self.rows(), [])
-        self.assertIsNone(runner)  # no naabu Sentinel: the wrapper steps aside as before, the failed insert changes nothing
         self.assertEqual(SentinelTask.objects.count(), 1)
 
     def test_a_real_database_error_is_contained_in_a_savepoint(self):

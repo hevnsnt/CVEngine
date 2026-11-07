@@ -73,20 +73,6 @@ jobs:
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
           python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0  # jsonschema checks the Sentinel result contract (web/agentapi/sentinel_contract.json) in the tests; tblib lets a failure in a parallel test worker show its real traceback
-      - name: Nuclei positive and negative loopback fixture smoke
-        working-directory: web
-        env:
-          XDG_CONFIG_HOME: ${{ runner.temp }}/cvengine-nuclei-config
-          XDG_CACHE_HOME: ${{ runner.temp }}/cvengine-nuclei-cache
-        run: |
-          nuclei_archive="$RUNNER_TEMP/nuclei_3.11.1_linux_amd64.zip"
-          curl --fail --location --retry 2 --max-time 120 \
-            --output "$nuclei_archive" \
-            https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip
-          printf '%s  %s\n' 'ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6' "$nuclei_archive" | sha256sum --check --status
-          unzip -p "$nuclei_archive" nuclei > "$RUNNER_TEMP/cvengine-nuclei"
-          chmod 700 "$RUNNER_TEMP/cvengine-nuclei"
-          CVENGINE_NUCLEI_SMOKE_BIN="$RUNNER_TEMP/cvengine-nuclei" python tests/nuclei_fixture_smoke.py
       - name: No model change without its migration
         working-directory: web
         env:
@@ -181,21 +167,6 @@ jobs:
           no-cache: ${{ github.event_name == 'schedule' }}
           cache-from: type=gha,scope=image-${{ matrix.arch }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=image-{0}', matrix.arch) || '' }}
-
-      # Chromium's sandbox for the web screenshots cannot be proven by the build (build steps run under the builder's default seccomp profile, which
-      # refuses user namespaces). Run the image the way the celery container runs the browser: as nobody with Playwright's seccomp profile the sandbox
-      # must engage (shot_worker.py --probe: the renderer in its own user and PID namespace, under its own seccomp filter); with Docker's default
-      # profile it must fail closed (engaged false, exit status 1), never fall back to running without it.
-      - name: 🧪 Screenshot browser sandbox
-        env:
-          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-        run: |
-          probe() { docker run --rm --user nobody -e HOME=/tmp "$@" --entrypoint python3 "$IMAGE" /usr/src/app/cveFeed/shot_worker.py --probe; }
-          probe --security-opt seccomp=config/seccomp/playwright-chromium.json | tee "$RUNNER_TEMP/sandbox-on.json"
-          grep -q '"engaged":true' "$RUNNER_TEMP/sandbox-on.json" || { echo "::error::Chromium's sandbox did not engage with the seccomp profile"; exit 1; }
-          status=0; probe > "$RUNNER_TEMP/sandbox-off.json" || status=$?  # no pipe: the probe's own exit status is what counts
-          cat "$RUNNER_TEMP/sandbox-off.json"
-          [ "$status" = 1 ] && grep -q '"engaged":false' "$RUNNER_TEMP/sandbox-off.json" || { echo "::error::without the profile the browser did not fail closed (status $status)"; exit 1; }
 
   reviewer-image:
     # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no

@@ -41,6 +41,7 @@ from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_stream
 from agentapi import sentinel_version
+from agentapi import web_screenshot_results
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -724,6 +725,8 @@ def task_hosts(task):
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
+    raw += [q.get('name') for q in target.get('dns') or [] if isinstance(q, dict)]  # an identity_check batch: the names and addresses asked about
+    raw += [q.get('host') for q in target.get('certs') or [] if isinstance(q, dict)]
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
         if isinstance(check, dict):
             raw += [v for v in (check.get('host'), check.get('ip')) if isinstance(v, str)]
@@ -1741,7 +1744,7 @@ def _stored_credential(credential_id, task, now):
 
 
 def _credential_payload(credential_id, project_id, now):
-    """The decrypted credential of one task, in the shape the authenticated nuclei pass consumes (``cveFeed.auth_checks.secrets_document``): the header
+    """The decrypted credential of one task, in the shape the authenticated scanner pass consumes: the header
     pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
     from cveFeed import auth_checks
     from cveFeed.models import AuthCredential
@@ -1900,8 +1903,8 @@ def _clean_naabu_result(body):
             continue
         if values is None or len(values) > MAX_OPEN_PER_IP:
             # an address with more open ports than that is a tarpit or a firewall that accepts everything: its list is no port list. It is kept
-            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and naabu_scan.discover then
-            # leaves the address to nmap's default ports.
+            # as None (not clipped to a list that looks real, not dropped, which would read as "nothing open"), and port_stage.discover then
+            # leaves the address to the fingerprint pass's default ports.
             out[ip] = None
             continue
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
@@ -1981,9 +1984,8 @@ _TESTSSL_SEVERITIES = ('INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'WARN', 'FAT
 
 
 def _clean_testssl_result(body):
-    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.testssl_scan.evaluate`` reads from a
-    locally-run report item (``id``, ``severity``, ``finding``, ``cve``): everything else testssl.sh's own JSON carries is
-    dropped, never stored or interpreted, so a Sentinel-reported item is no richer an attack surface than a local one."""
+    """A Sentinel's testssl.sh run, reshaped into exactly the four fields ``cveFeed.tls_audit.evaluate`` reads
+    (``id``, ``severity``, ``finding``, ``cve``): everything else the report's own JSON carries is dropped, never stored or interpreted."""
     items = body.get('items')
     if not isinstance(items, list) or len(items) > MAX_TESTSSL_ITEMS:
         raise ApiError(400, f'items must be a list of at most {MAX_TESTSSL_ITEMS} entries')
@@ -2004,8 +2006,8 @@ MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU repor
 def _clean_nmap_udp_result(body):
     """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
     (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
-    only by ``cveFeed.nmap_scan.parse_xml`` - the exact function a local run's own XML already goes through - so the
-    Sentinel's report is parsed by that same function (hardened against a custom ENTITY declaration) instead of
+    only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``) - so the
+    Sentinel's report is parsed by that one function (hardened against a custom ENTITY declaration) instead of
     duplicating its logic here. Only the size is bounded; parsing itself, and its safety against malicious XML, is
     parse_xml's job."""
     xml = body.get('xml')
@@ -2113,11 +2115,11 @@ def _clean_openvas_result(body):
 
 
 def _clean_waf_result(body):
-    """A Sentinel's wafw00f run on one web host, reshaped into what ``cveFeed.waf_scan.persist_waf_result`` stores: the products it named (``name``,
-    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else wafw00f prints is kept. The
-    bounds are ``cveFeed.waf_scan``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
-    left for ``persist_waf_result`` to drop, by the one rule a local run's output goes through."""
-    from cveFeed.waf_scan import MAX_PRODUCTS, NAME_LEN
+    """A Sentinel's WAF fingerprint of one web host, reshaped into what ``cveFeed.waf_fingerprint.persist_waf_result`` stores: the products it named (``name``,
+    and the manufacturer when it said one), and whether something blocked without a known product. Nothing else the tool prints is kept. The
+    bounds are ``cveFeed.waf_fingerprint``'s own (``MAX_PRODUCTS``, ``NAME_LEN``), the same the contract file states. A repeat or a generic name is
+    left for ``persist_waf_result`` to drop, by the one product rule."""
+    from cveFeed.waf_fingerprint import MAX_PRODUCTS, NAME_LEN
     products = body.get('products')
     if not isinstance(products, list) or len(products) > MAX_PRODUCTS:
         raise ApiError(400, f'products must be a list of at most {MAX_PRODUCTS} entries')
@@ -2134,8 +2136,8 @@ def _clean_waf_result(body):
 
 
 def _clean_nmap_report(body):
-    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.nmap_scan.parse_xml``, hardened
-    against a custom ENTITY declaration, is the one reader of an nmap report, local or not). Only the size is bounded here."""
+    """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.port_inventory.parse_xml``, hardened
+    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here."""
     return _clean_nmap_udp_result(body)
 
 
@@ -2143,7 +2145,7 @@ MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT
 
 
 def _clean_node2shell_result(body):
-    """The vendored node2shell detector's verdict on one URL (``cveFeed.node2shell_scan.run_check``'s shape): ``vulnerable`` is True, False or None
+    """The vendored node2shell detector's verdict on one URL (the detector's own result shape): ``vulnerable`` is True, False or None
     (inconclusive), and only the verdict, the reason, the status code and a bounded excerpt of the response are kept. A ``vulnerable`` that is not
     a boolean is read as inconclusive, never as a finding."""
     vulnerable = body.get('vulnerable')
@@ -2221,7 +2223,7 @@ MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most 
 
 
 def _clean_hit(hit):
-    """The first nuclei result line of a host, as ``cveFeed.templategen._trim_hit`` keeps it, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    """The first result line of a host, cut to the fields ``reNgine.tasks.parse_nuclei_result``
     and the validation record read. Anything else is dropped."""
     if not isinstance(hit, dict):
         return None
@@ -2244,7 +2246,7 @@ def _clean_hit(hit):
 
 def _clean_nuclei_validate_result(body):
     """An AI-written or approved template's check on the built-in scanner. Mode ``validate``: whether ``nuclei -validate`` accepted it, its output, and
-    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``cveFeed.templategen._run_template``'s shape), a
+    whether it stayed silent on a benign loopback fixture. Mode ``test``: one outcome per target (``{host, vulnerable, output, hit?}``), a
     hit counted only with its result line. Which mode it was is the task's, so both halves are cleaned and the caller reads its own."""
     out = {}
     if 'valid' in body:
@@ -2292,7 +2294,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
-             'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check}
+             'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
+             'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean}
 
 
 def _bind_to_task(kind, result, task):
@@ -2303,8 +2306,10 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe'):
+                                       'dangling_dns_check', 'route_probe', 'identity_check'):
         return probe_results.bind(kind, result, task)
+    if task is not None and kind == 'web_screenshot':
+        return web_screenshot_results.bind(result, task)
     if task is None or kind not in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'path_probe', 'nuclei_validate'):
         return result
     target = task.target if isinstance(task.target, dict) else {}

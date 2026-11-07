@@ -6,7 +6,6 @@ worker (the discovery itself runs on a Sentinel, never here), and every few seco
 IP and Port rows plus DiscoveryEvent rows, which the dashboard polls to draw the
 discovery graph and the live feed while it happens.
 """
-import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -74,7 +73,7 @@ def _active_filter():
 def running_discovery(domain):
     """A discovery of this domain that is queued or started in the last few minutes and still going, if any: a double click
     or a repeated bulk add."""
-    from startScan.models import ScanActivity, ScanHistory
+    from startScan.models import ScanHistory
     return ScanHistory.objects.filter(_active_filter(), domain=domain).order_by('-id').first()
 
 
@@ -466,40 +465,28 @@ def run_pipeline(scan_id, *args, **kwargs):
     return {'scan_id': scan_id, 'status': 'skipped', 'error': message}
 
 
-IP_LOOKUP_TIMEOUT = 3  # seconds for the PTR lookup and for the certificate connection
 
-
-def ptr_names(ip, timeout=IP_LOOKUP_TIMEOUT):
-    """The reverse-DNS name of ``ip`` (``[]`` when it has none or the lookup is slow). gethostbyaddr has no timeout of its own."""
-    import concurrent.futures
-    import socket
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return [pool.submit(socket.gethostbyaddr, ip).result(timeout=timeout)[0].lower().rstrip('.')]
-    except Exception:  # noqa: BLE001 - no PTR record, a resolver error or a timeout: nothing to record
-        return []
-    finally:
-        pool.shutdown(wait=False)
-
-
-def tls_names(ip, timeout=IP_LOOKUP_TIMEOUT, project=None):
-    """The hostnames on the certificate ``ip`` serves on 443: the subject name and the subject alternative names."""
-    from cveFeed import hygiene
-    info = hygiene._fetch_cert(ip, 443, timeout=timeout, project=project)
-    if not info:
-        return []
-    names = [info.get('subject') or ''] + list(info.get('sans') or [])
-    return list(dict.fromkeys(n.lower().lstrip('*.').rstrip('.') for n in names if n and '.' in n))
+def identity_names(scan, ip):
+    """``{'ptr': [names], 'tls-san': [names]}`` of an IP target: its reverse-DNS name and the names on the certificate it serves on 443, both read by
+    a Sentinel (``identity_check``; this server asks nothing of the address). The kind has no local path: ``ScannerUnavailable`` when no Sentinel can
+    take it. A read the Sentinel could not answer gives no names for that source, as a dead port always did."""
+    from agentapi import probe_dispatch
+    dns, certs = probe_dispatch.try_identity(scan.domain.project, scan, dns=[{'id': 'ptr', 'name': ip, 'type': 'PTR'}],
+                                             certs=[{'id': 'tls', 'host': ip, 'port': 443}])
+    ptr, tls = dns.get('ptr') or {}, certs.get('tls') or {}
+    ptr_found = [r.lower().rstrip('.') for r in ptr.get('records') or []] if ptr.get('status') == 'ok' else []
+    named = ([n for n in tls.get('names') or []] if tls.get('status') == 'ok' else [])
+    return {'ptr': ptr_found, 'tls-san': list(dict.fromkeys(n.lower().lstrip('*.').rstrip('.') for n in named if n and '.' in n))}
 
 
 def discover_ip(scan, ptr=None, certificate=None):
     """Stand in for the discovery on an IP target. The discovery finds subdomains, and an IP has none: all it could do here is a
-    reverse lookup and read the certificate, which is cheap to do directly. Creates the host for the IP, records the names
+    reverse lookup and read the certificate, which a Sentinel does (``identity_names``). Creates the host for the IP, records the names
     it answers to (PTR and certificate) as DNS events on it, and leaves them out of the targets: they may be out of scope.
     ``ptr`` and ``certificate`` (``ip -> [names]``) are injectable so tests need no network. Returns the discovery result."""
-    import concurrent.futures
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
+    from reNgine.resources import ScannerUnavailable
     from reNgine.tasks import persist_bbot_result
     from startScan.models import ScanActivity
     domain, ip = scan.domain, scan.domain.name
@@ -509,15 +496,21 @@ def discover_ip(scan, ptr=None, certificate=None):
     try:
         persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
                             ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
-        for module, lookup in (('ptr', ptr or ptr_names), ('tls-san', certificate or functools.partial(tls_names, project=domain.project_id))):
-            try:
-                found[module] = [n for n in lookup(ip) if n and n != ip]
-            except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
-                found[module] = []
+        if ptr is None and certificate is None:
+            found = {module: [n for n in names if n and n != ip] for module, names in identity_names(scan, ip).items()}
+        else:  # injected lookups (tests)
+            for module, lookup in (('ptr', ptr), ('tls-san', certificate)):
+                try:
+                    found[module] = [n for n in (lookup(ip) if lookup else []) if n and n != ip]
+                except Exception:  # noqa: BLE001 - a dead port or a refused connection is the normal case
+                    found[module] = []
         events = [DiscoveryEvent(scan=scan, domain=domain, type='DNS_NAME', label=n[:500], host=ip, parent_host=ip, module=module)
                   for module, names in found.items() for n in names]
         events.insert(0, DiscoveryEvent(scan=scan, domain=domain, type='IP_ADDRESS', label=ip, host=ip, module='target'))
         DiscoveryEvent.objects.bulk_create(events)
+    except ScannerUnavailable as exc:  # no Sentinel can take the lookup and it may not run here: nothing was read, the target stays due
+        status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
+        logger.warning('the IP lookup of scan %s is waiting for a scanner: %s', scan.id, exc)
     except Exception as exc:  # noqa: BLE001 - the scan ends in a visible state
         logger.exception('ip discovery failed for scan %s', scan.id)
         status, error = FAILED, str(exc)[:290]
@@ -642,7 +635,7 @@ def _waiting_for_scanner(scan, what, exc, result):
 
 
 def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, light_stream=None, targeted_stream=None,
-                  nmap_runner=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
+                  port_stage_run=None, db_exposure_checks=None, provider=False, cve_runner=None, ip_lookups=None, route_probe=None):
     """Discovery (a scanner's subdomain run for a domain; a reverse lookup and the certificate for a bare IP), then nmap (fingerprint + full port
     sweep, by IP), then a read-only unauthenticated-database exposure check, then a light nuclei technology pass, then CVE
     correlation for this scan, then the AI-targeted nuclei pass. The scan stays "running" until the whole pipeline is
@@ -685,7 +678,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, light_stream=None, target
             found = run_discovery(scan_id, mode, finalize=False)
             if found['status'] != SUCCESS:
                 return found
-    stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, nmap_runner=nmap_runner, db_exposure_checks=db_exposure_checks,
+    stage_kwargs = dict(light_stream=light_stream, targeted_stream=targeted_stream, port_stage_run=port_stage_run, db_exposure_checks=db_exposure_checks,
                         provider=provider, cve_runner=cve_runner, route_probe=route_probe)
     from agentapi import stage_runs
     # the stages wait on Sentinels without this worker when they can (agentapi.stage_runs): the callback continues them (``_resume_pipeline``)
@@ -712,10 +705,10 @@ def _resume_pipeline(context):
                 return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
 
 
-def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_runner=None, db_exposure_checks=None,
+def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_stage_run=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_reader=None,
-                node2shell_checker=None, waf_runner=None, probe_get=None, probe_nmap=None, by_person=False, screenshot_queuer=None):
+                node2shell_checker=None, probe_get=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -727,9 +720,9 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
         return gone
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
 
-    nmap_kwargs = {'runner': nmap_runner} if nmap_runner else {}
-    if force:
-        nmap_kwargs['force'] = True
+    nmap_kwargs = {'force': True} if force else {}
+    if port_stage_run:  # a stage double (tests): replaces the Sentinel-backed port stage
+        nmap_kwargs['run'] = port_stage_run
     nmap_result = _stage(scan, 'nmap scan', 'nmap_scan', lambda: service_intel.run_nmap_stage(scan_id, **nmap_kwargs),
                          fallback={'targets': 0})
     if stopped(scan_id):
@@ -748,7 +741,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
             return gone
     from cveFeed import web_shot
     shot_result = None
-    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by the screenshot worker (its own queue and memory gate)
+    if (screenshot_queuer or web_shot.has_work_for_scan(scan)):  # a web page to photograph: queued here, taken by a Sentinel (the screenshot drain hands it over; its own queue)
         shot_result = _stage(scan, 'Web screenshots', 'web_screenshot',
                              lambda: (screenshot_queuer or web_shot.queue_for_scan)(scan_id, by_person=by_person or scan.initiated_by_id is not None, force=retest or force),
                              fallback={'queued': 0})
@@ -759,9 +752,9 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
                        fallback={'checked': 0, 'exposed': 0})
     if stopped(scan_id):
         return gone
-    # A test that injects its own light_stream is never second-guessed; otherwise a registered Sentinel gets first refusal
-    # at the stage (agentapi.sentinel_dispatch), and wrap_nuclei_stream returns the real stream_nuclei, unwrapped, when
-    # none is eligible, so a project with no Sentinels runs exactly as before this existed.
+    # A test that injects its own light_stream is never second-guessed; otherwise the stream is a Sentinel's
+    # (agentapi.sentinel_dispatch.wrap_nuclei_stream), which raises ScannerUnavailable when none can take it: the stage
+    # waits and its targets stay due, nothing runs on this server.
     from agentapi import sentinel_dispatch
 
     def run_light():
@@ -776,13 +769,13 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
 
     if stopped(scan_id):
         return gone
-    from cveFeed import waf_scan
-    waf_kwargs = {'runner': waf_runner} if waf_runner else {}
+    from cveFeed import waf_fingerprint
+    waf_kwargs = {}
     if retest or force:
         waf_kwargs['force'] = True
     waf_result = None
-    if waf_scan.enabled() and (waf_runner or waf_scan.runnable(scan.domain.project_id)) and waf_scan.web_sites(scan):  # the product behind a host's firewall
-        waf_result = _stage(scan, 'WAF fingerprint (wafw00f)', 'wafw00f', lambda: waf_scan.run_for_scan(scan_id, **waf_kwargs),
+    if waf_fingerprint.enabled() and waf_fingerprint.web_sites(scan):  # the product behind a host's firewall
+        waf_result = _stage(scan, 'WAF fingerprint', 'wafw00f', lambda: waf_fingerprint.run_for_scan(scan_id, **waf_kwargs),
                             fallback={'checked': 0})
         if stopped(scan_id):
             return gone
@@ -805,7 +798,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     if stopped(scan_id):
         return gone
     from cveFeed import probes, wpscan_scan
-    probe_kwargs = {k: v for k, v in (('get', probe_get), ('nmap_runner', probe_nmap)) if v}
+    probe_kwargs = {k: v for k, v in (('get', probe_get),) if v}
     if retest or force:
         probe_kwargs['force'] = True
     probe_result = _stage(scan, 'Version and identity probes', 'version_probes', lambda: probes.run_for_scan(scan_id, **probe_kwargs),
@@ -836,8 +829,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, nmap_ru
     from cveFeed.tasks import correlate_cves, run_hygiene_task
     def correlate():
         result = correlate_cves(scan_history_id=scan.id)
-        from cveFeed import testssl_scan
-        testssl_scan.carry_forward(scan)  # the TLS vulnerabilities the background audit proved are evidence on this scan's host rows too
+        from cveFeed import tls_audit
+        tls_audit.carry_forward(scan)  # the TLS vulnerabilities the background audit proved are evidence on this scan's host rows too
         return result
     correlation = _stage(scan, 'CVE correlation', 'cve_correlation', correlate,
                          fallback={'subdomains': 0, 'matches': 0})  # run inline: the AI-targeted pass needs the matches
@@ -923,43 +916,6 @@ def _announce(scan, result, summary=True):
 
 # --- new hosts found between scans -------------------------------------------------------------------------------
 
-def _no_such_name(exc):
-    """True when a lookup error is the resolver's definitive answer that the name has no address (NXDOMAIN, or the name exists with no A or AAAA
-    record), as opposed to a resolver that could not answer (a timeout, a temporary failure, an unreachable server)."""
-    import socket
-    return isinstance(exc, socket.gaierror) and exc.errno in {code for code in (getattr(socket, 'EAI_NONAME', None), getattr(socket, 'EAI_NODATA', None))
-                                                              if code is not None}
-
-
-def resolve_names(names, timeout=IP_LOOKUP_TIMEOUT, workers=20, errors=None):
-    """{(name, ip)} for the names that resolve. getaddrinfo has no timeout of its own, so each lookup runs in a pool.
-
-    A name the resolver answers "no such name" for is simply absent. A lookup that could not be answered (a timeout, a temporary resolver
-    failure) is not an answer about the name: it is put in ``errors`` (``{name: reason}``) when the caller passes one, so it is never mistaken for
-    a host that has no address, and it is counted in the log either way."""
-    import concurrent.futures
-    import socket
-    pairs = set()
-    failed = errors if errors is not None else {}
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    try:
-        futures = {pool.submit(socket.getaddrinfo, name, None, 0, socket.SOCK_STREAM): name for name in names}
-        for future, name in futures.items():
-            try:
-                pairs.update((name, info[4][0]) for info in future.result(timeout=timeout))
-            except concurrent.futures.TimeoutError:
-                failed[name] = f'no answer within {timeout} seconds'
-            except Exception as exc:  # noqa: BLE001 - one lookup failing never stops the rest
-                if not _no_such_name(exc):
-                    failed[name] = f'{type(exc).__name__}: {exc}'[:120]
-    finally:
-        pool.shutdown(wait=False)
-    if failed:
-        logger.warning('DNS lookup could not be answered for %s of %s names (for example %s: %s)', len(failed), len(list(names)),
-                       next(iter(failed)), next(iter(failed.values())))
-    return pairs
-
-
 @scanner_wait.requeues(_named_hosts)
 def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=False, source_scan_id=None,
                       force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, then=None, **stage_kwargs):
@@ -1043,7 +999,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
             lookup_errors = {}
-            if resolver is None or resolver is resolve_names:  # through a Sentinel when one can take dns_resolve (agentapi.probe_dispatch), else here
+            if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
                 from agentapi import probe_dispatch
                 try:
                     pairs = probe_dispatch.resolve_for(domain, wanted, errors=lookup_errors, scan=scan)

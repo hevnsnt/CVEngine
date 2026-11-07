@@ -297,8 +297,8 @@ class ScopeAndClaimTests(SentinelBase):
         status, reported = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', result)
         self.assertEqual(status, 200)
         self.assertEqual(reported['task']['status'], 'done')
-        # Apply the same way sentinel_dispatch.try_nmap would: through the exact local persistence function.
-        from cveFeed.nmap_scan import persist_inventory
+        # Apply the same way sentinel_dispatch.try_nmap would: through the one persistence function.
+        from cveFeed.port_inventory import persist_inventory
         task.refresh_from_db()
         inventory = [{'ip': h['ip'], 'os_guess': h.get('os_guess', ''), 'os_accuracy': None, 'ports': h['ports']} for h in task.result['hosts']]
         persist_inventory(inventory)
@@ -680,7 +680,7 @@ class HeartbeatTests(SentinelBase):
 
 class TestsslResultCleanerTests(SimpleTestCase):
     """``sentinel_broker.clean_result('testssl', ...)``: a Sentinel's testssl.sh report, typed and clipped into exactly the
-    four fields ``cveFeed.testssl_scan.evaluate`` reads from a local report item."""
+    four fields ``cveFeed.tls_audit.evaluate`` reads from a local report item."""
 
     def _body(self, **over):
         item = {'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}
@@ -725,7 +725,7 @@ class TestsslResultCleanerTests(SimpleTestCase):
 
 class NmapUdpResultCleanerTests(SimpleTestCase):
     """``sentinel_broker.clean_result('nmap_udp', ...)``: unlike every other kind, the stored result is raw XML text,
-    bounded only by size - parsing it safely is ``cveFeed.nmap_scan.parse_xml``'s job, not the cleaner's."""
+    bounded only by size - parsing it safely is ``cveFeed.port_inventory.parse_xml``'s job, not the cleaner's."""
 
     def test_a_well_formed_report_round_trips_untouched(self):
         xml = '<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/></host></nmaprun>'
@@ -897,8 +897,8 @@ class NaabuResultTests(SimpleTestCase):
         self.assertEqual(clean['ports'], {'192.0.2.1': [22, 8443], '192.0.2.2': None, '192.0.2.3': None})  # nothing open is left out, as before
 
     def test_naabu_discover_hands_a_sentinel_tarpit_to_nmaps_default_ports(self):
-        from cveFeed import naabu_scan
-        self.assertTrue(all(ports is None or len(ports) <= naabu_scan.MAX_OPEN_PER_IP
+        from cveFeed import port_stage
+        self.assertTrue(all(ports is None or len(ports) <= port_stage.MAX_OPEN_PER_IP
                             for ports in sentinels.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.2': list(range(1, 601))}})['ports'].values()))
 
 

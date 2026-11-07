@@ -259,9 +259,9 @@ def display_for(probe_id, target):
 
 
 def nmap_argv(ip, port, service=''):
-    """The version probe's nmap command for one port: the reviewed scripts for ``service`` (cvengine_scanner.flags.probe_nmap_flags)."""
-    from cveFeed import nmap_scan
-    return [nmap_scan.NMAP_BIN, *probe_nmap_flags(port, service), str(ip)]
+    """The version probe's command line for one port, for a person to repeat (it is never run here: a scanner runs the probe): the reviewed scripts
+    for ``service`` (cvengine_scanner.flags.probe_nmap_flags)."""
+    return ['nmap', *probe_nmap_flags(port, service), str(ip)]
 
 
 # ----------------------------------------------------------------------------- fetching (one bounded GET, same gates as every probe)
@@ -841,7 +841,7 @@ def refetch_script(project_id, sub, url, get=None, sleep=time.sleep, page_url=No
 
 
 def observations_from_nmap(inventory, port):
-    """Observations of the nmap probe from ``nmap_scan.parse_xml`` output for one port: the product and version (``hidden`` when nmap
+    """Observations of the version probe from the parsed report of one port: the product and version (``hidden`` when nmap
     names the product only), the Server header the http-server-header script printed and every generator tag."""
     from cveFeed.correlation import parse_cpe
     record = next((p for host in inventory for p in host['ports'] if p['number'] == port), None)
@@ -867,25 +867,15 @@ def observations_from_nmap(inventory, port):
     return out
 
 
-def run_nmap_probe(ip, port, service='', runner=None):
-    """Run the nmap probe on one port. Returns ``(observations, inventory)``; ``inventory`` is what ``nmap_scan.persist_inventory`` stores."""
-    from cveFeed import nmap_scan
-    argv = nmap_argv(ip, port, service)
-    runner = runner or (lambda args: nmap_scan.run_nmap_args(args[1:], label=f'{ip}:{port}', timeout=NMAP_TIMEOUT))
-    inventory = nmap_scan.parse_xml(runner(argv))
-    return observations_from_nmap(inventory, int(port)), inventory
-
-
 def nmap_scripts(service=''):
-    """The reviewed scripts the nmap probe runs for ``service``, as a list of names: the ones ``probe_nmap_flags`` (cvengine_scanner.flags) gives a local run,
-    so a probe on the scanner runs the same set."""
+    """The reviewed scripts the version probe runs for ``service``, as a list of names (``probe_nmap_flags``, cvengine_scanner.flags)."""
     flags = probe_nmap_flags(1, service)
     return flags[flags.index('--script') + 1].split(',')
 
 
 def _sentinel_nmap_probe(project_id, target):
-    """The nmap probe of ``target`` on a scanner (an ``nmap_verify`` task: ``--version-all`` with the same safe scripts as ``nmap_argv``): the host
-    records cut to the probed address, or ``None`` to run it here. Raises ``ScannerUnavailable`` when it may not run here."""
+    """The version probe of ``target`` on a scanner (an ``nmap_verify`` task: ``--version-all`` with the same safe scripts as ``nmap_argv``): the host
+    records cut to the probed address. Raises ``ScannerUnavailable`` when no scanner can take it: the probe never runs here."""
     from agentapi import sentinel_dispatch
     task = sentinel_dispatch.nmap_verify_target(target['ip'], [target['port']], version_all=True, scripts=nmap_scripts(target.get('service', '')),
                                                 host_timeout=90)
@@ -1017,7 +1007,7 @@ def max_hosts():
     return _int_env('CVENGINE_PROBE_MAX_HOSTS', 60)
 
 
-def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep=time.sleep, reader=None, fresh=False):
+def run_one(project_id, domain_id, sub, entry, get=None, sleep=time.sleep, reader=None, fresh=False):
     """Run one planned probe (``plan_for_host`` entry) on ``sub``, store what it found, apply it, and return the observations."""
     probe_id, target = entry['probe'], entry['target']
     if BY_ID[probe_id]['family'] == 'nmap':
@@ -1027,13 +1017,10 @@ def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep
         if not is_scannable_ip(target['ip'], project=project_id):
             raise ValueError('probe destination is not allowed')
 
-        from cveFeed import nmap_scan
-        inventory = _sentinel_nmap_probe(project_id, target) if nmap_runner is None else None  # an injected runner (a test) is never second-guessed
-        if inventory is not None:
-            found = observations_from_nmap(inventory, int(target['port']))
-        else:
-            found, inventory = run_nmap_probe(target['ip'], target['port'], target.get('service', ''), runner=nmap_runner)
-        nmap_scan.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
+        from cveFeed import port_inventory
+        inventory = _sentinel_nmap_probe(project_id, target)
+        found = observations_from_nmap(inventory, int(target['port']))
+        port_inventory.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
     else:
         reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
         found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id, reader=reader,
@@ -1062,7 +1049,7 @@ def summarize(found):
     return '; '.join(dict.fromkeys(parts))[:300] or 'nothing the probe could read'
 
 
-def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sleep):
+def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
     """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
     (at most MAX_PROBES_PER_HOST that are due), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
@@ -1116,7 +1103,7 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
                         raise found
                     found = apply_remote(project, domain.id, sub, entry, found)
                 else:
-                    found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
+                    found = run_one(project, domain.id, sub, entry, get=get, sleep=sleep, reader=reader)
             except (local_egress.PortHeld, resources.ScannerUnavailable) as exc:  # held here, or waiting for a scanner: not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1

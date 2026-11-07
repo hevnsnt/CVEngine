@@ -49,17 +49,11 @@ class ComposeEnvTests(unittest.TestCase):
             self.assertIs(celery.get('init'), True, name)
             self.assertEqual(celery.get('stop_grace_period'), '60s', name)
 
-    def test_the_celery_container_can_give_chromium_its_sandbox(self):
-        # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1
-        import hashlib
-        import json
-        path = 'config/seccomp/playwright-chromium.json'
+    def test_the_celery_container_carries_no_browser_profile(self):
+        # the screenshot browser runs on a Sentinel (kind web_screenshot): the server's own containers keep Docker's default seccomp profile
         for name in FILES:
-            self.assertIn(f'seccomp=./{path}', load(name)['celery'].get('security_opt', []), name)
-        data = (ROOT / path).read_bytes()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849')
-        rule = json.loads(data)['syscalls'][0]
-        self.assertEqual((sorted(rule['names']), rule['action']), (['clone', 'setns', 'unshare'], 'SCMP_ACT_ALLOW'))
+            for svc in APP_SERVICES:
+                self.assertEqual([o for o in load(name)[svc].get('security_opt', []) if 'seccomp' in o], [], f'{name} {svc}')
 
     def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
         services = load('docker-compose.yml')
@@ -99,6 +93,18 @@ class BuiltinScannerComposeTests(unittest.TestCase):
     def test_it_has_its_raw_socket_capabilities_and_nothing_that_would_block_them(self):
         self.assertEqual(sorted(self.scanner['cap_add']), ['NET_ADMIN', 'NET_RAW'])
         self.assertFalse([o for o in self.scanner.get('security_opt', []) if 'no-new-privileges' in o])
+
+    def test_the_built_in_scanner_can_give_chromium_its_sandbox(self):
+        # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1: the web_screenshot
+        # kind runs Chromium in this container, and it proves the sandbox engaged before it opens a page
+        import hashlib
+        import json
+        path = 'config/seccomp/playwright-chromium.json'
+        self.assertIn(f'seccomp=./{path}', self.scanner.get('security_opt', []))
+        data = (ROOT / path).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849')
+        rule = json.loads(data)['syscalls'][0]
+        self.assertEqual((sorted(rule['names']), rule['action']), (['clone', 'setns', 'unshare'], 'SCMP_ACT_ALLOW'))
 
     def test_it_is_built_in_mode_reading_its_enrollment_from_the_shared_volume(self):
         env = self.scanner['environment']

@@ -1,56 +1,45 @@
-"""Outbound connections from THIS server's own scanners: count them, pace the ports a hosting provider watches, and say so.
+"""Outbound connections from THIS server's own probes: count them, pace the ports a hosting provider watches, and say so.
 
 A cloud VPS provider (Contabo, AWS, GCP, Azure, DigitalOcean, Hetzner and others) watches the outbound connections of a server, port 25 above
 all: a burst of SYNs to port 25 on many addresses looks like a spam bot, and the provider warns, throttles or blocks the port. cvENGINE's
-scanners are meant to run on Sentinels, but a stage no Sentinel takes runs here (the local fallback), and a local nmap or naabu pass touches
-port 25 on every address it scans. This module is the server-side safeguard. It never changes what a Sentinel does: Sentinels run on other
-networks, and the dispatch payloads they receive are untouched.
+port and TLS scanners run on Sentinels, which this module never changes (they run on other networks, and the dispatch payloads they receive are
+untouched); what still leaves this server directly is its own in-process probes and the few tools that have no scanner kind yet. This module is the
+server-side safeguard for those.
 
-Five parts, all state in Redis (no table, no migration):
+Four parts, all state in Redis (no table, no migration):
 
 * **The egress ledger** (``record``, ``snapshot``): new outbound TCP connection attempts from this server, per hour, kept for seven days.
   Counted per watched port (``CVENGINE_LOCAL_WATCH_PORTS``, default 25, 465, 587, 23, 3389) and in total for every port, and per source (the
   scan kind and the project) for the watched ports. In-process probes (``cveFeed.pinned_transport``, the database checks) are counted exactly,
-  one per connection attempt. nmap, naabu, testssl.sh and nuclei are black boxes: they are counted from their probe plan (one attempt per
+  one per connection attempt. The external scanners are black boxes: they are counted from their probe plan (one attempt per
   address and port in the plan, before retries), so those numbers are an estimate, said so on every surface that shows them.
-* **The connection log** (``log_connections``, ``connection_log``, ``connection_log_csv``): one record per outbound connection this server's
-  scanners open (or hold back) to a logged port (the app's own mail through Settings, Email is not a scan and is not logged) (``CVENGINE_EGRESS_LOG_PORTS``, default 25, 465, 587): time, destination address and port, sent, paced or skipped, the tool,
-  project and scan, and whether the record is exact (this process opened, or refused to open, that very connection) or estimated (an
-  external tool was handed that address and port). A Redis stream, kept 14 days and at most 200,000 records (``CVENGINE_EGRESS_LOG_DAYS``,
-  ``CVENGINE_EGRESS_LOG_MAX``), the oldest dropped first; App Admins read it over REST and MCP (``agentapi.egress``) or as CSV.
-* **The governor** (``plan``, ``take``, ``owe``, ``catch_up``): a shared sliding window per budgeted port (``CVENGINE_LOCAL_PORT_BUDGETS``,
+* **The connection log** (``log_connections``, ``connection_log``, ``connection_log_csv``): one record per outbound connection this server
+  opens (or holds back) to a logged port (the app's own mail through Settings, Email is not a scan and is not logged) (``CVENGINE_EGRESS_LOG_PORTS``,
+  default 25, 465, 587): time, destination address and port, sent, paced or skipped, the tool, project and scan, and whether the record is exact (this
+  process opened, or refused to open, that very connection) or estimated (an external tool was handed that address and port). A Redis stream, kept
+  14 days and at most 200,000 records (``CVENGINE_EGRESS_LOG_DAYS``, ``CVENGINE_EGRESS_LOG_MAX``), the oldest dropped first; App Admins read it
+  over REST and MCP (``agentapi.egress``) or as CSV.
+* **The governor** (``take``, ``admit_one``): a shared sliding window per budgeted port (``CVENGINE_LOCAL_PORT_BUDGETS``,
   default ``25:400/hour``; the port-25 number is also on Settings, configMaxxing): never more than the budget granted in any 60 minutes, and
-  never more than a quarter of it in any 15, or a single testssl.sh run and nothing else (a run is charged TESTSSL_CONNECTIONS, as measured,
-  which is more than a quarter of 400: it is granted only into 15 minutes that hold nothing else, and nothing else is granted in the 15
-  after it; one that has waited ALONE_PRIORITY_AFTER gets priority over ordinary grants, see ``wait_alone``). A nuclei ``host:25`` target is
-  charged NUCLEI_TARGET_CONNECTIONS, an estimate, least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared by
-  every worker. A local pass asks it when it is planned (``plan``), and every process of the pass asks again when it starts, after its memory
-  wait (``launch``: the planned grant is given back and the tokens taken in the minute the process starts; no room, and that process runs
-  without the port, which is owed): the window counts what STARTED. Addresses it grants are scanned as before.
-  Addresses over the budget are scanned now WITHOUT that port, and the port is owed: the catch-up pass (``catch_up``, queued every ten minutes
-  by the background sweep's firing, one pass at a time) probes owed ports, paced by the same window, until every one is done. Nothing in
-  scope is dropped (an owed entry leaves, with a log line, only when it is out of scope or 30 days old); port 25 is still scanned for every
-  host from this server, spread over time. A fallback in the meaning of the cap below includes a
-  stage that runs here because every Sentinel the project has for it is offline (``agentapi.sentinel_dispatch.offline_fallback``).
+  never more than a quarter of it in any 15, or a single whole run larger than that quarter and nothing else (such a run is granted only into 15
+  minutes that hold nothing else, and nothing else is granted in the 15 after it; one that has waited ALONE_PRIORITY_AFTER gets priority over
+  ordinary grants). Single targets that share a run are admitted least recently admitted first (``last_admitted``). One window on the Redis server's clock, shared
+  by every worker. A connection the window has no room for is not made.
 * **The fallback cap** (``admit_fallback``, ``note_fallback``): how many stage runs in each UTC clock hour may fall back from a Sentinel to local
-  execution (nmap 30, naabu 10 by default; 0 is unlimited). Over the cap the addresses are not scanned here and stay due for the next run. A warning in
-  the activity log and a problem in ``get_system_status`` say when tasks keep falling back, and name the Sentinels that are offline or full.
-* **The opt-in skip list** (``CVENGINE_LOCAL_SKIP_PORTS``, default empty): ports this server never connects to at all. Every local nmap and
-  naabu run excludes them, testssl.sh STARTTLS, the nmap probes and validation checks on them are not run here, and in-process connections to
-  them are refused. A Sentinel still scans them.
+  execution. A warning in the activity log and a problem in ``get_system_status`` say when tasks keep falling back, and name the Sentinels that
+  are offline or full.
+* **The opt-in skip list** (``CVENGINE_LOCAL_SKIP_PORTS``, default empty): ports this server never connects to at all. The version probes and
+  validation checks on them are not run here, and in-process connections to them are refused. A Sentinel still scans them.
 
 Every function here fails open: when Redis cannot be read, the scan runs as it did before this module existed (a server whose Redis is down has
 no broker either, so nothing is being dispatched).
 """
 import contextlib
 import contextvars
-import json
 import logging
 import os
 import re
 import time
-
-from cvengine_scanner.flags import NSE_FLAGS, port_argument
 
 logger = logging.getLogger(__name__)
 
@@ -62,28 +51,14 @@ DEFAULT_FALLBACK_NAABU_PER_HOUR = 10
 HOUR = 3600
 KEEP_HOURS = 7 * 24  # the ledger's window
 BUCKET_TTL = (KEEP_HOURS + 2) * HOUR
-OWED_DAYS = 30  # an owed port nobody could probe for this long is forgotten, entry by entry, with a log line (its host is rescanned long before)
-OWED_TTL = 2 * OWED_DAYS * 24 * HOUR  # only a backstop for the whole list; each entry ages out on its own after OWED_DAYS
 BURST_SHARE = 4  # at most a quarter of an hour's budget in any 15 minutes: an hour's allowance is never spent in one burst
-# One testssl.sh run with this app's arguments (-p -s -S -U -f, --starttls smtp) opened 159 connections against a modern TLS mail server and
-# 231 against a legacy one (testssl.sh 3.2.4, counted at the server): charged 240, rounded up, all or nothing; being more than a quarter of the
-# default budget, a run goes alone in its 15 minutes (see _TAKE).
-TESTSSL_CONNECTIONS = 240
-# A nuclei target host:25: an estimate, not a measurement. nuclei's HTTP probe of a host:port (http and https), plus the ssl and tcp templates
-# that run against the port the input names, about ten here, each retried at most once (-retries 1): about 24, rounded up to 25.
-NUCLEI_TARGET_CONNECTIONS = 25
-# A testssl.sh run on port 25 (more than the 15-minute quarter) needs 15 minutes with no other port-25 start. One that has waited this long
+# A whole run on port 25 larger than the 15-minute quarter needs 15 minutes with no other port-25 start. One that has waited this long
 # for them gets priority: ordinary port-25 grants are held (paced: owed or due) until it starts, which the window then allows within another
-# 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked (it asks every ALONE_ASK_EVERY while it waits).
+# 61 minutes at most. The mark lapses ALONE_WAIT_TTL seconds after the run last asked.
 ALONE_PRIORITY_AFTER = 60 * 60
 ALONE_WAIT_TTL = 10 * 60
-ALONE_ASK_EVERY = 60
-ALONE_WAIT_MAX = ALONE_PRIORITY_AFTER + 62 * 60  # the longest a run waits before it gives up for this sweep (stays due)
 ALERT_STEPS = (50, 80, 100)  # percent of a port's hourly budget at which the activity log says so, once per hour
 FALLBACK_WARN_AT = 5  # Sentinel tasks falling back to local execution in one hour before the warning and the system problem
-CATCH_UP_BATCH = 64  # owed addresses one catch-up pass takes per port (one nmap chunk)
-TOP_PORTS_WATCHED = frozenset({21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 465, 587, 993, 995, 3306, 3389, 5432, 5900, 8080})
-ALL_TCP = 65535
 PREFIX = 'cvengine:egress'
 SKIP_REASON = 'CVENGINE_LOCAL_SKIP_PORTS'
 
@@ -185,88 +160,6 @@ def fallback_cap(kind):
 
 # --- port lists on command lines --------------------------------------------------------------------------------------
 
-def _expand(argument):
-    """The ports of an nmap ``-p`` argument with no protocol prefixes (``"22,80,8000-8010"``), or None when it has prefixes or is ``-``."""
-    if not argument or argument == '-' or ':' in argument:
-        return None
-    ports = set()
-    for part in argument.split(','):
-        part = part.strip()
-        if not part:
-            continue
-        low, _, high = part.partition('-')
-        try:
-            low = int(low) if low else 1
-            high = int(high) if high else (low if not _ else 65535)
-        except ValueError:
-            return None
-        ports.update(range(min(low, high), max(low, high) + 1))
-    return ports
-
-
-def _udp_only(flags):
-    return '-sU' in flags and not any(f in flags for f in ('-sS', '-sT', '-sA', '-sW', '-sM', '-sN', '-sF', '-sX'))
-
-
-def nmap_exclude(flags, ports):
-    """``flags`` (an nmap argument list) that never touch ``ports`` over TCP: each removed from a ``-p`` list and named in ``--exclude-ports``.
-    Unchanged when ``ports`` is empty or the run is UDP only. None when the ``-p`` list held nothing else (nothing is left to scan)."""
-    flags = list(flags)
-    ports = {int(p) for p in ports or ()}
-    if not ports or _udp_only(flags):
-        return flags
-    if '-p' in flags and flags.index('-p') + 1 < len(flags):
-        i = flags.index('-p')
-        listed = _expand(flags[i + 1])
-        if listed is not None:
-            kept = listed - ports
-            if not kept:
-                return None
-            if kept != listed:
-                flags[i + 1] = port_argument(kept)
-    if '--exclude-ports' in flags and flags.index('--exclude-ports') + 1 < len(flags):
-        i = flags.index('--exclude-ports')
-        flags[i + 1] = port_argument((_expand(flags[i + 1]) or set()) | ports)
-    else:
-        flags += ['--exclude-ports', port_argument(ports)]
-    return flags
-
-
-def naabu_exclude(command, ports):
-    """A naabu command line that never probes ``ports`` (naabu's ``-exclude-ports``); unchanged when ``ports`` is empty."""
-    command = list(command)
-    if not ports:
-        return command
-    return command + ['-exclude-ports', port_argument(ports)]
-
-
-def nmap_plan_ports(flags):
-    """``(count, watched)`` of a TCP nmap run's plan: how many ports per address it probes and which watched or budgeted ports are among them.
-    ``--top-ports`` is taken to include the watched ports in nmap's top thousand (25, 465, 587, 23 and 3389 all are)."""
-    flags = list(flags)
-    if _udp_only(flags):
-        return 0, set()
-    excluded = set()
-    if '--exclude-ports' in flags and flags.index('--exclude-ports') + 1 < len(flags):
-        excluded = _expand(flags[flags.index('--exclude-ports') + 1]) or set()
-    watch = set(watched_ports())
-    if '-p-' in flags or ('-p' in flags and flags[flags.index('-p') + 1:flags.index('-p') + 2] == ['-']):
-        return ALL_TCP - len(excluded), watch - excluded
-    if '-p' in flags and flags.index('-p') + 1 < len(flags):
-        listed = _expand(flags[flags.index('-p') + 1])
-        if listed is None:  # protocol prefixes: count the TCP part roughly as the whole list
-            listed = _expand(re.sub(r'[TU]:', '', flags[flags.index('-p') + 1]).replace(',,', ',')) or set()
-        listed -= excluded
-        return len(listed), watch & listed
-    top = 1000
-    if '--top-ports' in flags:
-        try:
-            top = int(flags[flags.index('--top-ports') + 1])
-        except (ValueError, IndexError):
-            top = 1000
-    return max(0, top - len(excluded)), (watch & TOP_PORTS_WATCHED) - excluded if top >= 1000 else set()
-
-
 # --- the run's context: who is scanning, for the ledger and for owed ports ------------------------------------------------
 
 @contextlib.contextmanager
@@ -340,26 +233,6 @@ def record_one(port, kind=None, project=None, address=None):
     record(kind, 1, {int(port): 1}, project=project)
     if address:
         log_connections([address], [port], kind, mode=EXACT, project=project)
-
-
-def record_nmap(flags, addresses, kind='nmap'):
-    """Count an nmap run from its plan: addresses x ports (an estimate: retries of unanswered probes are not counted). The logged ports in
-    the plan get one estimated record per address."""
-    count, watched = nmap_plan_ports(flags)
-    n = len(addresses or ())
-    kind = current().get('kind') or kind
-    if count and n:
-        record(kind, count * n, {port: n for port in watched})
-        log_connections(addresses, watched, kind, mode=ESTIMATED)
-
-
-def record_naabu(addresses, excluded=()):
-    """Count a naabu full sweep from its plan: addresses x 65,535 ports, less what it excluded (an estimate, before retries)."""
-    n = len(addresses or ())
-    if n:
-        excluded = set(excluded or ())
-        record('naabu', n * (ALL_TCP - len(excluded)), {port: n for port in watched_ports() if port not in excluded})
-        log_connections(addresses, [p for p in log_ports() if p not in excluded], 'naabu', mode=ESTIMATED)
 
 
 # --- the connection log: one record per connection (or planned probe) to a logged port --------------------------------------
@@ -530,8 +403,8 @@ def snapshot(now=None, hours=24):
 # A sliding window over minute buckets: what was granted in the current minute and the 60 before it may never exceed the hourly budget, and
 # what was granted in the current minute and the 15 before it never a quarter of it. Any 3600 seconds span at most 61 minute buckets (any 900
 # seconds at most 16), so "never more than N in any hour, never more than N/4 in any 15 minutes" holds exactly, not just on average, and the
-# whole budget stays usable hour after hour. ``whole`` grants all of ``want`` or nothing (one testssl.sh run is many connections, not a few).
-# ``alone`` (ARGV[7] = 0) is the one exception to the quarter: a whole run larger than the quarter (one testssl.sh run, 240 of 400) is granted
+# whole budget stays usable hour after hour. ``whole`` grants all of ``want`` or nothing (one run can be many connections, not a few).
+# ``alone`` (ARGV[7] = 0) is the one exception to the quarter: a whole run larger than the quarter (240 of 400, say) is granted
 # only when nothing was granted in the current minute and the 15 before it, and then fills that quarter by itself, so nothing else is granted
 # in the 15 minutes after it either: any 15 minutes hold at most a quarter of the budget, or that one run and nothing else.
 _TAKE = """
@@ -546,7 +419,7 @@ local cap_burst = tonumber(ARGV[4])
 local whole = tonumber(ARGV[5])
 local use_burst = tonumber(ARGV[7])
 local m = math.floor(now / 60)
-local wait_key = ARGV[9]  -- a testssl.sh run waiting for its quiet 15 minutes: the time it first asked (see ALONE_PRIORITY_AFTER)
+local wait_key = ARGV[9]  -- a whole run waiting for its quiet 15 minutes: the time it first asked (see ALONE_PRIORITY_AFTER)
 local dry = tonumber(ARGV[12])  -- 1: only say whether it would be granted (and keep the waiting mark), take nothing
 -- refunds (ARGV[13] pairs of minute, count from ARGV[14]): grants made when a pass was planned, moved now to the minute its process starts
 local nref = tonumber(ARGV[13] or '0')
@@ -617,7 +490,7 @@ def take(port, want, now=None, whole=False, burst=True):
 
 def _take(port, want, now=None, whole=False, burst=True, refund=None, dry=False):
     """Up to ``want`` new connections to ``port`` (all or none with ``whole``): never more than the port's hourly budget in any 60 minutes, and
-    never more than a quarter of it in any 15. ``burst=False`` (one testssl.sh run, with ``whole``) lets a run larger than the quarter go, but
+    never more than a quarter of it in any 15. ``burst=False`` (a whole run larger than the quarter, with ``whole``) lets a run larger than the quarter go, but
     only alone: when nothing was granted in its 15 minutes, and nothing else is then granted in the 15 after it. The window runs on the Redis
     server's clock (``now`` replaces it in tests), so workers whose clocks differ share one window. Returns how many were granted: ``want``
     for a port with no budget, and when Redis cannot be read (fail open).
@@ -674,79 +547,12 @@ def _alert(port, used, per_hour, granted, now):
                      + ('; the rest are paced to the next hour' if step >= 100 else ''), project=current().get('project'))
 
 
-def plan(addresses, touches, kind, now=None, log=True):
-    """Ask the governor for each budgeted port the run would probe. ``touches(address) -> ports`` (or a set of ports for every address).
-    Returns ``{address: frozenset(ports held back)}`` for the addresses over budget (empty when everything was granted, which is the common
-    case: then the run is exactly as before). Held ports are owed (``owe``) to the catch-up pass and one activity line says how many were
-    paced."""
-    addresses = list(dict.fromkeys(addresses or ()))
-    rules = budgets()
-    if not addresses or not rules:
-        return {}
-    plan_of = touches if callable(touches) else (lambda _a, ports=frozenset(touches or ()): ports)
-    held = {}
-    for port in sorted(rules):
-        wanting = [a for a in addresses if port in set(plan_of(a) or ())]
-        if not wanting:
-            continue
-        granted, minute = _take(port, len(wanting), now=now)
-        _reserve(port, wanting[:granted], minute)
-        paced = wanting[granted:]
-        for address in paced:
-            held.setdefault(address, set()).add(port)
-        if paced:
-            owe(port, paced)
-            log_connections(paced, [port], kind, mode=EXACT, outcome=PACED, now=now)
-            if log:
-                from cveFeed import activity
-                ctx = current()
-                activity.log('run_check', f'port {port} paced: {granted} of {len(wanting)} hosts this hour ({kind}); the other '
-                             f'{len(paced)} are scanned now without port {port}, which is probed later from this server',
-                             project=ctx.get('project'), scan_id=ctx.get('scan_id'))
-    return {a: frozenset(p) for a, p in held.items()}
-
-
-# --- charged when the process starts ---------------------------------------------------------------------------------------
-# A pass is planned (``plan``: which addresses get port 25 now, which are owed) before its processes queue for memory, and a pass of many
-# chunks starts them one after another. The window must count what is STARTED, so every process start asks again: ``launch`` takes back
-# (refunds) the grant its addresses got when the pass was planned and takes the tokens again in the minute the process starts, in one
-# atomic step. With room, the process runs as planned, counted where it starts. Without, it leaves the port out (nmap ``--exclude-ports``,
-# naabu ``-exclude-ports``; a run of that port alone is not started) and the port is owed and logged ``paced``, like any over-budget address.
-# The planned grants live in this process (``_RESERVED``): planning and starting happen in the same task.
-
-_RESERVED = {}  # (port, address) -> [minute of each grant made for it when planned and not yet started]
-_RESERVED_LOCK = __import__('threading').Lock()
-
-
-def _reserve(port, addresses, minute):
-    if minute is None or not addresses:
-        return
-    with _RESERVED_LOCK:
-        for key in [k for k, minutes in _RESERVED.items() if minutes[-1] < minute - 61]:  # out of every window: nothing left to take back
-            del _RESERVED[key]
-        for address in addresses:
-            _RESERVED.setdefault((int(port), address), []).append(int(minute))
-
-
-def _unreserve(port, addresses):
-    refund = {}
-    with _RESERVED_LOCK:
-        for address in addresses:
-            minutes = _RESERVED.get((int(port), address))
-            if minutes:
-                minute = minutes.pop(0)
-                refund[minute] = refund.get(minute, 0) + 1
-                if not minutes:
-                    del _RESERVED[(int(port), address)]
-    return refund
-
-
 ROTATION_DAYS = 30
 
 
 def last_admitted(kind, targets):
-    """``{target: time it was last admitted}`` for ``targets`` of ``kind`` (absent: never). Single targets that share a run (nuclei's
-    ``host:25`` targets) are admitted oldest first by it, so none waits behind the same others run after run."""
+    """``{target: time it was last admitted}`` for ``targets`` of ``kind`` (absent: never). Single targets that share a run
+    are admitted oldest first by it, so none waits behind the same others run after run."""
     client = _client()
     targets = list(targets or ())
     if client is None or not targets:
@@ -775,84 +581,13 @@ def note_admitted(kind, targets):
         pass
 
 
-def _sleep(seconds):
-    time.sleep(seconds)
-
-
-def wait_alone(port, weight):
-    """Wait, without holding a memory slot, until a whole run of ``weight`` larger than the 15-minute quarter (one testssl.sh run) would be
-    granted on ``port``: asked every ALONE_ASK_EVERY seconds, with priority over ordinary grants after ALONE_PRIORITY_AFTER, for at most
-    ALONE_WAIT_MAX. True when it would be granted now (the run then takes its tokens when it starts); False when the budget cannot hold it,
-    scanning was paused, or the wait ran out (the target stays due)."""
-    per_hour = budgets().get(int(port))
-    if not per_hour or int(weight) <= bucket_size(per_hour):
-        return True
-    if int(weight) > per_hour:
-        return False
-    from reNgine import resources
-    waited = 0
-    while True:
-        granted, _minute = _take(port, weight, now=launch_now(), whole=True, burst=False, dry=True)
-        if granted:
-            return True
-        if waited >= ALONE_WAIT_MAX or resources.global_pause_requested(fail_closed=True):
-            return False
-        _sleep(ALONE_ASK_EVERY)
-        waited += ALONE_ASK_EVERY
-
-
 def launch_now():
     """The window's clock at a process start: None, the Redis server's clock (tests replace it)."""
     return None
 
 
-def launch(port, addresses, kind=None, weight=1, burst=True):
-    """At the start of a process that probes ``port`` on ``addresses`` (after its memory wait): take ``weight`` tokens per address, all or
-    nothing, in the minute it starts, giving back what they were granted when their pass was planned. False when the window has no room:
-    the caller leaves the port out of this process; the addresses are then owed (``owe``) and logged ``paced`` here."""
-    addresses = list(dict.fromkeys(addresses or ()))
-    if not addresses or int(port) not in budgets():
-        return True
-    granted, _minute = _take(port, len(addresses) * max(1, int(weight)), now=launch_now(), whole=True, burst=burst,
-                             refund=_unreserve(port, addresses))
-    if granted:
-        return True
-    owe(port, addresses)
-    log_connections(addresses, [port], kind, mode=EXACT, outcome=PACED)
-    from cveFeed import activity
-    ctx = current()
-    activity.log('run_check', f'port {port} paced at start: {len(addresses)} host(s) ({kind or ctx.get("kind") or "local"}) run now without '
-                 f'port {port}, which is probed later from this server', project=ctx.get('project'), scan_id=ctx.get('scan_id'))
-    return False
-
-
-def launch_nmap(flags, targets, kind='nmap'):
-    """An nmap command's ``flags`` at its start: every budgeted port its plan probes is charged for ``targets`` now (``launch``); a port with
-    no room is left out (``--exclude-ports``). Raises ``PortHeld`` when nothing else is left to run."""
-    rules = budgets()
-    if not rules or not targets or flags is None:
-        return flags
-    _count, planned = nmap_plan_ports(flags)
-    for port in sorted(set(rules) & set(planned)):
-        if not launch(port, targets, current().get('kind') or kind):
-            flags = nmap_exclude(flags, {port})
-            if flags is None:
-                raise PortHeld(port, PACED)
-    return flags
-
-
-def launch_naabu(addresses, excluded=()):
-    """naabu's ``-exclude-ports`` at its start: every budgeted port it would sweep is charged for ``addresses`` now; one with no room is
-    added to the exclusions."""
-    excluded = set(excluded or ())
-    for port in sorted(set(budgets()) - excluded):
-        if not launch(port, addresses, 'naabu'):
-            excluded.add(port)
-    return excluded
-
-
 def admit_one(port, kind=None, address=None, weight=1, now=None, burst=True):
-    """For a single connection, or one run of a tool against one host and port (a probe, a validation check, testssl.sh, which counts as
+    """For a single connection, or one run of a tool against one host and port (a probe, a validation check, a tool that counts as
     ``weight`` connections, all granted or none): ``None`` when it may go ahead, else the reason it is held (``'skipped'`` or ``'paced'``,
     logged with ``address`` when given). The caller counts what it then sends."""
     port = int(port)
@@ -872,208 +607,6 @@ def check_connect(port, kind=None, address=None):
     if reason:
         raise PortHeld(port, reason)
     record_one(port, kind, address=address)
-
-
-# --- owed ports and the catch-up pass -----------------------------------------------------------------------------------
-
-def owe(port, addresses, org_id=None, project=None):
-    """Remember that ``port`` was held back on ``addresses`` (for the organization of the current context), for the catch-up pass."""
-    ctx = current()
-    org_id = org_id if org_id is not None else ctx.get('org_id')
-    project = project if project is not None else ctx.get('project')
-    client = _client()
-    if client is None or not addresses:
-        return
-    try:
-        key = f'{PREFIX}:owed:{int(port)}'
-        value = json.dumps({'project': project, 'since': time.time()})
-        pipe = client.pipeline()
-        for address in addresses:
-            pipe.hsetnx(key, f'{org_id or ""}|{address}', value)
-        pipe.expire(key, OWED_TTL)
-        pipe.execute()
-    except Exception:  # noqa: BLE001
-        logger.warning('egress governor: could not remember the owed port %s for %s address(es)', port, len(addresses))
-
-
-def owed_entries(port):
-    """``[(since, org_id or None, address, project)]`` owed for ``port``, oldest first. ``since`` is when it was first owed: owing it again
-    keeps that time (``owe`` writes only a new entry)."""
-    client = _client()
-    if client is None:
-        return []
-    try:
-        rows = client.hgetall(f'{PREFIX}:owed:{int(port)}') or {}
-    except Exception:  # noqa: BLE001
-        return []
-    out = []
-    for field, value in rows.items():
-        org, _, address = field.partition('|')
-        try:
-            meta = json.loads(value)
-        except ValueError:
-            meta = {}
-        project = meta.get('project')
-        out.append((float(meta.get('since') or 0), int(org) if org.isdigit() else None, address,
-                    int(project) if str(project or '').isdigit() else None))
-    out.sort(key=lambda e: (e[0], e[2]))
-    return out
-
-
-def owed(port, limit=None):
-    """``[(org_id or None, address, project)]`` owed for ``port``, oldest first."""
-    return [(org, address, project) for _since, org, address, project in owed_entries(port)[:limit]]
-
-
-def settle_owed(port, entries):
-    client = _client()
-    if client is None or not entries:
-        return
-    try:
-        client.hdel(f'{PREFIX}:owed:{int(port)}', *[f'{org or ""}|{address}' for org, address, _p in entries])
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def catch_up_flags(port):
-    """The paced pass over one port: the fingerprinting pass's own service detection and scripts, on that port alone."""
-    return ['-sV', '--version-intensity', '7', '-Pn', '-T4', '--max-retries', '2', *NSE_FLAGS, '-p', str(int(port))]
-
-
-CATCH_UP_LOCK = f'{PREFIX}:catch-up-lock'
-CATCH_UP_LOCK_TTL = 600  # refreshed while the pass runs (reNgine.resources.redis_claim); a crashed worker frees it within ten minutes
-
-
-def _excluded(project, addresses):
-    """The ``addresses`` the project's organization excluded for good or archived since: out of scope, never to be probed."""
-    if not project:
-        return set()
-    from cveFeed.archive_rediscovery import archived_names
-    from cveFeed.exclusions import excluded_names, normalize
-    banned = excluded_names(project) | archived_names(project)
-    return {a for a in addresses if normalize(a) in banned or a in banned}
-
-
-def _scope_recheck(targets, project):
-    """The ``before_launch`` check of a catch-up run: after the memory wait, right before nmap starts, every address must still be in scope
-    for its project (``scannable_hosts`` with the project: exclusions, archived names, the bug bounty gate, a tailnet device of the project)."""
-    def check():
-        from targetApp.target_types import scannable_hosts
-        allowed = set(scannable_hosts(list(targets), project=project or None))
-        if any(t not in allowed for t in targets):
-            raise ValueError('a catch-up target is no longer in scope')
-    return check
-
-
-def catch_up(runner=None, now=None, batch=CATCH_UP_BATCH):
-    """Probe the owed ports, paced by the same budgets: per budgeted port, the oldest owed addresses the governor grants now, in one local nmap
-    pass on that port alone per project, stored like any other pass. Scope is judged per project (``scannable_hosts(project=...)``) and again
-    right before launch: an address its organization excluded or archived since leaves the owed list (with a log line); one that is merely
-    not scannable right now (the bug bounty gate, a name that resolves somewhere blocked today) stays owed. One pass at a time across all
-    workers (a claim refreshed while it runs). Returns ``{port: {'probed', 'left'}}``, or ``{'skipped': ...}`` when another pass runs."""
-    import os as _os
-
-    from reNgine import resources
-    with resources.redis_claim(CATCH_UP_LOCK, f'catch-up-{_os.getpid()}-{id(runner)}', CATCH_UP_LOCK_TTL) as held:
-        if held is not True:
-            return {'skipped': 'another catch-up pass is running'}
-        return _catch_up(runner, now, batch)
-
-
-def _attached(project, addresses):
-    """The ``addresses`` that are still on a host of ``project`` (a name of one of its targets or scans resolves there)."""
-    from django.db.models import Q
-
-    from startScan.models import Subdomain
-    rows = (Subdomain.objects.filter(Q(target_domain__project_id=project) | Q(scan_history__domain__project_id=project),
-                                     ip_addresses__address__in=list(addresses)).values_list('ip_addresses__address', flat=True))
-    return set(rows) & set(addresses)
-
-
-def _drop(port, entries, why, project=None):
-    """Settle owed ``entries`` that will never be probed, with one activity line saying why."""
-    if not entries:
-        return
-    from cveFeed import activity
-    settle_owed(port, [(org, address, proj) for _s, org, address, proj in entries])
-    names = ', '.join(sorted({address for _s, _o, address, _p in entries})[:10])
-    activity.log('run_check', f'port {port}: {names} left the paced pass: {why}', project=project)
-
-
-def _catch_up(runner, now, batch):
-    from targetApp.target_types import scannable_hosts
-
-    from cveFeed import activity, nmap_scan
-    from dashboard.models import Project
-    out = {}
-    clock = time.time()  # entries age on the real clock (``now`` only moves the budget window, in tests)
-    for port in sorted(budgets()):
-        entries = owed_entries(port)
-        if not entries:
-            continue
-        # every entry is judged first, the oldest batch of those that can run now is taken after: an entry that cannot be probed today never
-        # holds back a newer one, and each entry ages out on its own
-        aged = [e for e in entries if e[0] and clock - e[0] > OWED_DAYS * 86400]
-        _drop(port, aged, f'owed for more than {OWED_DAYS} days, forgotten (the address is probed again at its next regular rescan)')
-        entries = [e for e in entries if e not in aged]
-        live = set(Project.objects.filter(pk__in={e[3] for e in entries if e[3]}).values_list('pk', flat=True))
-        _drop(port, [e for e in entries if e[3] is None], 'no project was recorded with it, so its scope cannot be checked')
-        _drop(port, [e for e in entries if e[3] is not None and e[3] not in live], 'its project no longer exists, so it is out of scope')
-        ready = []
-        by_project = {}
-        for entry in entries:
-            if entry[3] in live:
-                by_project.setdefault(entry[3], []).append(entry)
-        for project, group in by_project.items():
-            addresses = sorted({e[2] for e in group})
-            attached = _attached(project, addresses)
-            _drop(port, [e for e in group if e[2] not in attached], 'no longer on a host of its project, so out of scope', project)
-            gone = _excluded(project, attached)
-            _drop(port, [e for e in group if e[2] in gone], 'excluded or archived since, so out of scope', project)
-            allowed = set(scannable_hosts(sorted(attached - gone), project=project))
-            ready += [e for e in group if e[2] in allowed]  # the rest stay owed: not scannable right now
-        ready.sort(key=lambda e: (e[0], e[2]))
-        ready = ready[:batch]
-        granted, minute = _take(port, len(ready), now=now)
-        todo, done = ready[:granted], []
-        _reserve(port, [e[2] for e in todo], minute)  # each group is charged again when its nmap starts (launch_nmap)
-        groups = {}
-        for entry in todo:
-            groups.setdefault((entry[1], entry[3]), []).append(entry)
-        for (org, project), group in groups.items():
-            targets = sorted({address for _s, _o, address, _p in group})
-            run = runner or (lambda t, flags, host_timeout, project=project: nmap_scan.run_nmap_xml(
-                t, flags, host_timeout, before_launch=_scope_recheck(t, project)))
-            try:
-                with context(kind='catch-up', project=project, org_id=org):
-                    xml = run(targets, catch_up_flags(port), nmap_scan.HOST_TIMEOUT_FAST)
-                    nmap_scan.persist_inventory(nmap_scan.parse_xml(xml, strict=True), source='nmap', org_id=org)
-            except Exception:  # noqa: BLE001 - the addresses stay owed for the next pass
-                logger.warning('egress catch-up: the paced pass on port %s failed for %s address(es)', port, len(targets), exc_info=True)
-                continue
-            done += [(org_, address, proj) for _s, org_, address, proj in group]
-        settle_owed(port, done)
-        out[port] = {'probed': len(done), 'left': len(owed_entries(port))}
-        if done:
-            activity.log('run_check', f'port {port}: the paced pass probed {len(done)} owed host(s) from this server; '
-                         f'{out[port]["left"]} still owed')
-    return out
-
-
-def kick_catch_up():
-    """Called by every firing of the background sweep: queue one catch-up pass when something is owed (at most one per five minutes)."""
-    from cveFeed import ledger
-    if not budgets() or not any(owed(port, limit=1) for port in budgets()):
-        return False
-    if not ledger.sweep_claim('egress-catch-up', 5 * 60):
-        return False
-    try:
-        from cveFeed.tasks import egress_catch_up
-        egress_catch_up.apply_async(expires=15 * 60)
-        return True
-    except Exception:
-        logger.warning('could not queue the egress catch-up pass', exc_info=True)
-        return False
 
 
 # --- the local fallback cap and its warning --------------------------------------------------------------------------------
@@ -1219,13 +752,13 @@ def status(problems=None, now=None):
     for port in watch:
         ports.append({'port': port, 'last_hour': snap['hour'].get(f'p{port}', 0), 'last_24h': snap['day'].get(f'p{port}', 0),
                       'last_7d': snap['week'].get(f'p{port}', 0), 'budget_per_hour': rules.get(port),
-                      'used_this_hour': used_this_hour(port, now) if port in rules else None, 'owed': len(owed(port)) if port in rules else 0,
+                      'used_this_hour': used_this_hour(port, now) if port in rules else None,
                       'skipped': port in skipped_ports()})
     sources = sorted(((k, v) for k, v in snap['sources'].items() if not k.endswith('|all')), key=lambda kv: -kv[1])[:10]
     fallbacks = fallbacks_last_hour(now)
     if problems is not None and fallbacks >= FALLBACK_WARN_AT:
         problems.append(f'egress: {fallback_warning(fallbacks)}')
-    return {'estimate_note': 'nmap, naabu, testssl.sh and nuclei are counted from their probe plan (addresses x ports, before retries): an '
+    return {'estimate_note': 'nmap and naabu are counted from their probe plan (addresses x ports, before retries): an '
                              'estimate; in-process probes are counted exactly',
             'all_ports': {'last_hour': snap['hour'].get('all', 0), 'last_24h': snap['day'].get('all', 0), 'last_7d': snap['week'].get('all', 0)},
             'watched': ports, 'skip_ports': sorted(skipped_ports()),

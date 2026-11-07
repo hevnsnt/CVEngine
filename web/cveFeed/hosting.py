@@ -1,13 +1,16 @@
-"""Who hosts a name, from what is already recorded about it: its CNAME, the Server header, the CDN flag, and reverse DNS.
+"""Who hosts a name, from what is already recorded about it: its CNAME, the Server header, the CDN flag, and reverse DNS. A CNAME that was never
+stored is read by a Sentinel (``identity_check``), never by this server.
 
 A name on a multi-tenant platform (Netlify, Vercel, GitHub Pages, Heroku, a CDN edge) shares its IP addresses with thousands of
 other customers. Those addresses are the platform's, not the target's: another customer's site answers on them, and port-scanning
 them is scanning a third party. ``classify`` says so (``shared_ip``) and ``shared_by_address`` finds such addresses so the port
 scans can leave them alone."""
+import logging
 import re
-import socket
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 
 # (CNAME suffix, provider, kind). kind: paas, cdn, storage and saas are shared edges; cloud is one tenant's own machine.
 PLATFORM_SUFFIXES = (
@@ -126,7 +129,7 @@ def classify(name="", cname="", webserver="", reverse_pointers=(), cdn_name="", 
             "shared_ip": kind in SHARED_KINDS, "infrastructure": infrastructure, "evidence": evidence[:4]}
 
 
-# ----------------------------------------------------------------------------- DNS (cached, bounded)
+# ----------------------------------------------------------------------------- DNS (cached, bounded, read by a Sentinel)
 
 CANON_TTL = 3600
 CANON_MAX = 4096
@@ -134,34 +137,70 @@ MAX_LOOKUPS = 25
 _canon, _canon_lock = {}, threading.Lock()
 
 
-def canonical_name(name):
-    """The name a hostname's CNAME chain ends at ('' when it is not an alias or does not resolve), cached for an hour. One
-    ``getaddrinfo`` call, the same lookup the target checks already make."""
-    key = _host(name)
-    if not key:
-        return ""
-    now = time.monotonic()
+def _cached(key, now):
     with _canon_lock:
         hit = _canon.get(key)
-        if hit and now - hit[1] < CANON_TTL:
-            return hit[0]
+    return hit[0] if hit and now - hit[1] < CANON_TTL else None
+
+
+def canonical_names(names, scan=None):
+    """``{name: canonical}`` for hostnames (``''`` when a name is not an alias), cached for an hour. The lookup is made by a Sentinel
+    (``identity_check``, ``agentapi.probe_dispatch.try_identity``): this server sends nothing. A name that is not asked (no project holds it, or
+    its policy leaves it out), a lookup the Sentinel could not answer, or no Sentinel able to take the kind (it has no local path) is simply
+    missing from the answer and is not cached: unknown, never \"not an alias\". Never raises."""
+    now = time.monotonic()
+    found, wanted = {}, []
+    for name in dict.fromkeys(_host(n) for n in names):
+        if not name:
+            continue
+        hit = _cached(name, now)
+        if hit is not None:
+            found[name] = hit
+        else:
+            wanted.append(name)
+    if not wanted:
+        return found
     try:
-        info = socket.getaddrinfo(key, None, type=socket.SOCK_STREAM, flags=socket.AI_CANONNAME)
-        canon = _host(info[0][3]) if info else ""
-    except (OSError, UnicodeError):
-        canon = ""
-    canon = "" if canon == key else canon
-    with _canon_lock:
-        if len(_canon) >= CANON_MAX:
-            _canon.clear()
-        _canon[key] = (canon, now)
-    return canon
+        from agentapi import probe_dispatch
+        from startScan.models import Subdomain
+        projects = {}
+        for name, project in Subdomain.objects.filter(name__in=wanted, target_domain__isnull=False).values_list('name', 'target_domain__project_id').distinct():
+            projects.setdefault(project, []).append(_host(name))
+        from dashboard.models import Project
+        for project_id, held in projects.items():
+            from agentapi import sentinel_dispatch
+            project = Project.objects.get(pk=project_id)
+            if not sentinel_dispatch.any_scanner_for(project, 'identity_check'):  # a best-effort read: with no scanner for it nothing waits, the stored data classifies
+                continue
+            queries = [{'id': name, 'name': name, 'type': 'CNAME'} for name in dict.fromkeys(held) if name in wanted]
+            answers, _certs = probe_dispatch.try_identity(project, scan, dns=queries)
+            for query in queries:
+                row = answers.get(query['id'])
+                if not row or row.get('status') == 'unknown' or query['name'] in found:
+                    continue
+                canon = _host(row.get('canonical') or '')
+                canon = '' if canon == query['name'] else canon
+                found[query['name']] = canon
+                with _canon_lock:
+                    if len(_canon) >= CANON_MAX:
+                        _canon.clear()
+                    _canon[query['name']] = (canon, now)
+    except Exception as exc:  # noqa: BLE001 - ScannerUnavailable and every other failure: no answer, the classification uses what is stored
+        logger.info('live CNAME lookups were not answered (%s): the stored data classifies these names', exc)
+    return found
 
 
-def shared_by_address(addresses, lookup=canonical_name):
+def canonical_name(name):
+    """The name a hostname's CNAME chain ends at ('' when it is not an alias or nothing answered), through ``canonical_names``."""
+    key = _host(name)
+    return canonical_names([key]).get(key, "") if key else ""
+
+
+def shared_by_address(addresses, lookup=None):
     """``{address: classification}`` for the addresses that belong to a shared platform: some name recorded on the address has a
     platform CNAME, Server header or CDN flag. A name with no recorded CNAME is resolved once (cached, at most MAX_LOOKUPS names
-    per call) so a host whose CNAME was never stored is still recognised."""
+    per call, all in one ``identity_check`` task) so a host whose CNAME was never stored is still recognised. ``lookup(name)`` replaces
+    that read (tests)."""
     from startScan.models import Subdomain
     wanted = sorted({a for a in addresses if a})
     if not wanted:
@@ -171,8 +210,17 @@ def shared_by_address(addresses, lookup=canonical_name):
         known = provider_range(address)
         if known:
             found[address] = {"provider": known[0], "kind": known[1], "shared_ip": True, "infrastructure": "", "evidence": [f"in {known[0]}'s published address range"]}
-    rows = Subdomain.objects.filter(ip_addresses__address__in=wanted).values_list(
-        "ip_addresses__address", "name", "cname", "webserver", "cdn_name", "is_cdn", "ip_addresses__is_cdn").distinct()
+    rows = list(Subdomain.objects.filter(ip_addresses__address__in=wanted).values_list(
+        "ip_addresses__address", "name", "cname", "webserver", "cdn_name", "is_cdn", "ip_addresses__is_cdn").distinct())
+    if lookup is None:
+        asking = []
+        for address, name, cname, webserver, cdn_name, sub_cdn, ip_cdn in rows:
+            if address in found or (cname or "").strip() or len(asking) >= MAX_LOOKUPS:
+                continue
+            if not classify(name=name, cname="", webserver=webserver or "", cdn_name=cdn_name or "", is_cdn=bool(sub_cdn or ip_cdn))["shared_ip"]:
+                asking.append(name)
+        read = canonical_names(asking)
+        lookup = lambda name: read.get(_host(name), "")  # noqa: E731
     for address, name, cname, webserver, cdn_name, sub_cdn, ip_cdn in rows:
         if address in found:
             continue

@@ -333,7 +333,7 @@ def version_proven(match, validation_status=None):
     a match fire (``threat.match_heat`` needs hard evidence of the flaw, ``has_hard_evidence``): it is shown (``version_proven`` in the API, the
     heat reason) and orders work. The one definition, with its database form ``version_proven_q``:
 
-      * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, testssl), the distribution
+      * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, a TLS audit result), the distribution
         tracker listing the package as vulnerable, the host's own inventory report, runZero reporting the CVE, a validation hit; or
       * the version read from the component itself at high confidence (``version_read_from_component``): a version-class template hit, a
         JavaScript library's own file (banner 0.9 or code signature 0.8, the copy that runs), or a service banner nmap's probe read from a

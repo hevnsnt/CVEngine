@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, TestCase
 
 from cvengine_scanner import flags as scan_flags
 
-from cveFeed import probes
+from cveFeed import port_inventory, probes
 from cveFeed.models import ProbeObservation, ServiceRun
 from startScan.models import IpAddress, Port, Subdomain, Technology
 from tests.test_route_auth import RouteFixture
@@ -192,7 +192,8 @@ class NmapProbeTests(SimpleTestCase):
         self.assertEqual(argv[-1], '203.0.113.5')
 
     def test_the_probe_reads_the_service_the_server_header_and_the_generator(self):
-        found, inventory = probes.run_nmap_probe('203.0.113.5', 443, 'https', runner=lambda argv: NMAP_PROBE_XML)
+        inventory = port_inventory.parse_xml(NMAP_PROBE_XML)
+        found = probes.observations_from_nmap(inventory, 443)
         got = {(o['product'], o['version'], o['source']) for o in found}
         self.assertIn(('nginx', '1.24.0', 'nmap:-sV --version-all'), got)
         self.assertIn(('nginx', '1.24.0', 'nmap:http-server-header'), got)
@@ -201,11 +202,11 @@ class NmapProbeTests(SimpleTestCase):
 
     def test_a_service_that_names_no_version_is_hidden(self):
         xml = NMAP_PROBE_XML.replace(' version="1.24.0"', '').replace('<cpe>cpe:/a:igor_sysoev:nginx:1.24.0</cpe>', '')
-        found, _ = probes.run_nmap_probe('203.0.113.5', 443, 'https', runner=lambda argv: xml)
+        found = probes.observations_from_nmap(port_inventory.parse_xml(xml), 443)
         self.assertEqual([(o['outcome'], o['version']) for o in found if o['source'] == 'nmap:-sV --version-all'], [('hidden', '')])
 
     def test_a_closed_port_gives_nothing(self):
-        found, _ = probes.run_nmap_probe('203.0.113.5', 80, 'http', runner=lambda argv: NMAP_PROBE_XML)
+        found = probes.observations_from_nmap(port_inventory.parse_xml(NMAP_PROBE_XML), 80)
         self.assertEqual(found, [])
 
 
@@ -452,15 +453,15 @@ class UnidentifiedPortStageTests(RouteFixture, TestCase):
         ip.ports.add(port)
         self.nmap_asked = []
 
-    def nmap(self, argv):
-        self.nmap_asked.append(argv[argv.index('-p') + 1])
-        return BIND_XML
+    def nmap(self, project_id, target):  # the scanner's report, in place of the Sentinel task (probes._sentinel_nmap_probe)
+        self.nmap_asked.append(str(target['port']))
+        return port_inventory.parse_xml(BIND_XML)
 
     def stage(self):
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
-                mock.patch('targetApp.target_types.is_scannable_ip', return_value=True):
-            return probes.run_for_scan(self.scan_obj.id, get=answers({probes.PROBE_PATH: page(404, body=NGINX_404_HIDDEN)}),
-                                       nmap_runner=self.nmap, sleep=lambda s: None)
+                mock.patch('targetApp.target_types.is_scannable_ip', return_value=True), \
+                mock.patch('cveFeed.probes._sentinel_nmap_probe', self.nmap):
+            return probes.run_for_scan(self.scan_obj.id, get=answers({probes.PROBE_PATH: page(404, body=NGINX_404_HIDDEN)}), sleep=lambda s: None)
 
     def test_the_port_is_probed_once_the_products_probes_are_fresh_and_bind_is_stored(self):
         first = self.stage()

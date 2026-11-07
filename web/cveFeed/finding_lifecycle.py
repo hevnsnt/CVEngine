@@ -384,7 +384,7 @@ def dedupe_hygiene(project, apply=False):
     note naming it. Returns ``{'groups', 'closed', 'conflicts'}``; nothing is written unless ``apply``."""
     from cveFeed.models import HygieneFinding
     groups = {}
-    # the tailnet, testssl.sh, cloud storage and UDP checks file under a target of their own choosing (cveFeed.hygiene.store_findings)
+    # the tailnet, the TLS audit, cloud storage and UDP checks file under a target of their own choosing (cveFeed.hygiene.store_findings)
     for row in HygieneFinding.objects.filter(domain__project=project).exclude(check_name__regex=r'^(ts|tlsa|bkt|udp)_').order_by('id').only(
             'id', 'host', 'check_name', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'remediation_updated_at',
             'assignee', 'first_seen'):

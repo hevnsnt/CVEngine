@@ -140,7 +140,7 @@ def sweep():
 def _nmap(scan, project, ip, org_id, dispatch):
     """Fingerprint ``ip`` through an internal Sentinel and store what it found; an ``error`` when none answered."""
     from cveFeed import ledger
-    from cveFeed.nmap_scan import persist_inventory
+    from cveFeed.port_inventory import persist_inventory
     result = dispatch(project, 'nmap', {'addresses': [ip]}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered (one must declare network:internal and cover this project)'}
@@ -156,27 +156,27 @@ def _nmap(scan, project, ip, org_id, dispatch):
 def _testssl(scan, project, domain, ip, org_id, dispatch):
     """A TLS audit of each TLS port nmap found open on ``ip``, through an internal Sentinel; findings and CVE evidence are stored by the
     same functions the external sweep uses."""
-    from cveFeed import ledger, testssl_scan
+    from cveFeed import ledger, tls_audit
     from startScan.models import IpAddress, Subdomain, open_ports
     sub = Subdomain.objects.filter(scan_history=scan, name=ip).select_related('target_domain').first()
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     ports = {p.number: p for p in open_ports(ip_obj)} if ip_obj else {}
     tested = failed = issues = 0
-    for number, starttls in testssl_scan.tls_ports(ports):
+    for number, starttls in tls_audit.tls_ports(ports):
         where = f'{ip}:{number}'
         result = dispatch(project, 'testssl', {'host': ip, 'ip': ip, 'port': number, 'starttls': starttls or ''}, host=ip, ips=[ip],
                           scan=scan, internal=True)
-        evaluated = testssl_scan.evaluate((result or {}).get('items') or [], where) if result is not None else None
+        evaluated = tls_audit.evaluate((result or {}).get('items') or [], where) if result is not None else None
         if evaluated is None or not evaluated.tested:
             if result is not None:  # a Sentinel answered and the test did not complete: a failed run; no answer at all is not a run
-                ledger.record(testssl_scan.FAILED_SERVICE, [where], project.id, scan)
+                ledger.record(tls_audit.FAILED_SERVICE, [where], project.id, scan)
             failed += 1
             continue
-        testssl_scan.record_observations(project.id, domain.id, ip, number, evaluated, ip)
-        testssl_scan.store(domain, ip, number, evaluated, where)
+        tls_audit.record_observations(project.id, domain.id, ip, number, evaluated, ip)
+        tls_audit.store(domain, ip, number, evaluated, where)
         if sub is not None:
-            testssl_scan.run_for_host(sub)
-        ledger.record(testssl_scan.SERVICE, [where], project.id, scan)
+            tls_audit.run_for_host(sub)
+        ledger.record(tls_audit.SERVICE, [where], project.id, scan)
         tested += 1
         issues += len(evaluated.findings)
     out = {'tested': tested, 'failed': failed, 'issues': issues}
@@ -186,13 +186,13 @@ def _testssl(scan, project, domain, ip, org_id, dispatch):
 
 
 def _udp(scan, project, ip, org_id, dispatch):
-    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw nmap XML is parsed and stored by the external sweep's own functions."""
-    from cveFeed import ledger, nmap_scan, udp_scan
+    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw report is parsed and stored by the external sweep's own functions."""
+    from cveFeed import ledger, port_inventory, udp_scan
     from startScan.models import IpAddress
     result = dispatch(project, 'nmap_udp', {'address': ip}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered'}
-    host = next((h for h in nmap_scan.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
+    host = next((h for h in port_inventory.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     if host is None or ip_obj is None:
         if ip_obj is not None:

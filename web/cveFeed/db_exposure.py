@@ -3,18 +3,17 @@ ONE read-only connection attempt with NO credentials and see whether the server 
 never tries a second username/password combination (credential guessing is out of scope here) and
 never reads, lists or modifies real data once connected - the single fact recorded is "no credential
 was required to reach this service", which is itself the vulnerability for a network-exposed datastore.
+
+A Sentinel makes the attempt (the ``db_probe`` kind, ``client/dbprobe.py`` there): this server carries no database client and opens no
+connection. It decides which services to ask (the table below), keeps the scope, and files the finding from what the Sentinel reports.
 """
 import logging
-import socket
 
 from cveFeed import local_egress
 
 logger = logging.getLogger(__name__)
 
-CONNECT_TIMEOUT = 3
-MAX_BODY_BYTES = 65536  # a status page or a list of database names; a server that sends more is not answering this question
-TOTAL_SECONDS = 10  # the whole request, so a server that drips one byte at a time cannot hold the worker
-# What the server said when it let the attempt through, kept as the finding's evidence: (host, port) -> short text. A checker notes
+# What the server said when it let the attempt through, kept as the finding's evidence: (host, port) -> short text. A test's injected checker notes
 # it just before returning True and run_db_exposure_checks takes it; runs are sequential, so one table is enough.
 EVIDENCE = {}
 
@@ -23,195 +22,19 @@ def _note(host, port, text):
     EVIDENCE[(host, port)] = str(text)[:300]
 
 
-def check_redis(host, port):
-    """A single PING with no password: open iff the server answers instead of demanding auth."""
-    try:
-        import redis
-    except ImportError:
-        return None
-    client = None
-    try:
-        client = redis.Redis(host=host, port=port, socket_connect_timeout=CONNECT_TIMEOUT,
-                             socket_timeout=CONNECT_TIMEOUT)
-        if not client.ping():
-            return False
-        reply = 'PONG'
-        try:
-            reply += f' (redis {client.info("server").get("redis_version", "?")})'
-        except Exception:  # noqa: BLE001 - the version is a nicety; the PONG is the evidence
-            pass
-        _note(host, port, reply)
-        return True
-    except redis.AuthenticationError:
-        return False
-    except redis.ResponseError:  # NOAUTH, WRONGPASS, a protected-mode DENIED, LOADING: the server did not let the PING through
-        return False
-    except Exception:  # noqa: BLE001 - refused/timeout/reset: simply "not exposed", not a crash
-        return False
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-
-def check_memcached(host, port):
-    """Memcached has no authentication mechanism at all, so any instance that answers a read-only
-    "version" command is, by definition, reachable with none."""
-    try:
-        with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as sock:
-            sock.sendall(b'version\r\n')
-            reply = sock.recv(256)
-        if reply.startswith(b'VERSION'):
-            _note(host, port, reply.decode('ascii', 'replace').strip().splitlines()[0])
-            return True
-        return False
-    except OSError:
-        return False
-
-
-def check_postgres(host, port):
-    """A single attempt to connect to the default "postgres" database as the default "postgres" role
-    with no password: open iff the server's access policy trusts this connection outright."""
-    try:
-        import psycopg2
-    except ImportError:
-        return None
-    conn = None
-    try:
-        conn = psycopg2.connect(host=host, port=port, dbname='postgres', user='postgres', password='',
-                                connect_timeout=CONNECT_TIMEOUT)
-        version = getattr(conn, 'server_version', None)
-        _note(host, port, f'PostgreSQL {version // 10000}.{version % 10000}' if isinstance(version, int) else 'connected as postgres, no password')
-        return True
-    except Exception:  # noqa: BLE001 - OperationalError covers auth failure, refused, no such db, etc.
-        return False
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def _netloc(host, port):
-    """``host:port`` for a URL, an IPv6 literal in brackets."""
-    return f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
-
-
-def _bounded_json(url):
-    """GET ``url`` (no redirects) and parse its JSON body, reading at most MAX_BODY_BYTES within TOTAL_SECONDS. None unless the answer
-    is a 200 with JSON inside those bounds. The scanned server controls how much it sends and how slowly, so neither is trusted."""
-    import json
-    import time
-
-    from urllib.parse import urlsplit
-
-    import requests
-
-    from cveFeed import egress_proxy
-    deadline = time.monotonic() + TOTAL_SECONDS
-    with requests.Session() as session:
-        session.trust_env = False  # scanner traffic never takes the environment's proxy or .netrc; Settings > Proxy is the only one
-        with session.get(url, timeout=CONNECT_TIMEOUT, allow_redirects=False, stream=True,
-                         proxies=egress_proxy.requests_proxies(urlsplit(url).hostname)) as resp:
-            if resp.status_code != 200:
-                return None
-            body, size = [], 0
-            # one byte per read: a read of n bytes blocks until n arrive, so a server dripping a byte just inside the socket timeout would
-            # hold a larger read (and the deadline check after it) for n times that timeout
-            for chunk in resp.iter_content(1):
-                body.append(chunk)
-                size += len(chunk)
-                if size > MAX_BODY_BYTES or time.monotonic() > deadline:
-                    return None
-            return json.loads(b''.join(body)) if body else None
-
-
-def check_elasticsearch(host, port):
-    """A plain GET /: Elasticsearch with no security plugin configured answers with cluster info and no
-    auth challenge at all."""
-    try:
-        info = _bounded_json(f'http://{_netloc(host, port)}/')
-        if not isinstance(info, dict) or 'cluster_name' not in info:
-            return False
-        _note(host, port, f'cluster {info.get("cluster_name")}, version {(info.get("version") or {}).get("number", "?")}')
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def check_couchdb(host, port):
-    """GET /_all_dbs: lists database NAMES only, never document content. CouchDB's "admin party" mode
-    (no admin user ever configured) answers this with no credential at all."""
-    try:
-        names = _bounded_json(f'http://{_netloc(host, port)}/_all_dbs')
-        if not isinstance(names, list):
-            return False
-        _note(host, port, f'/_all_dbs answered with {len(names)} database name(s)')  # a count, never the names
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def check_mysql(host, port):
-    """A single connection attempt as root with no password: open iff the server lets it straight through. Like
-    check_postgres above, this tries one specific likely-default account, never a second username or password."""
-    try:
-        import pymysql
-    except ImportError:
-        return None
-    conn = None
-    try:
-        conn = pymysql.connect(host=host, port=port, user='root', password='', connect_timeout=CONNECT_TIMEOUT,
-                               read_timeout=CONNECT_TIMEOUT, write_timeout=CONNECT_TIMEOUT)
-        version = conn.get_server_info()
-        _note(host, port, f'connected as root with no password (MySQL {version})' if version else 'connected as root with no password')
-        return True
-    except Exception:  # noqa: BLE001 - access denied, refused, reset: simply "not exposed", not a crash
-        return False
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-
-def check_mongodb(host, port):
-    """A single listDatabases command sent with no prior authentication: open iff the server lets it through. Only
-    database NAMES are read, the same care check_couchdb above takes - never a document's content. On a server
-    with access control enabled this fails with Unauthorized, which is exactly the point: it is the standard way
-    to tell a wide-open MongoDB apart from a secured one without sending any credential at all."""
-    try:
-        import pymongo
-    except ImportError:
-        return None
-    client = None
-    try:
-        client = pymongo.MongoClient(host=host, port=port, serverSelectionTimeoutMS=int(CONNECT_TIMEOUT * 1000),
-                                     connectTimeoutMS=int(CONNECT_TIMEOUT * 1000), socketTimeoutMS=int(CONNECT_TIMEOUT * 1000),
-                                     directConnection=True)
-        result = client.admin.command('listDatabases', 1, nameOnly=True)
-        names = [str(d.get('name', '')) for d in result.get('databases', [])]
-        _note(host, port, f'listDatabases answered with {len(names)} database name(s)')  # a count, never the names
-        return True
-    except Exception:  # noqa: BLE001 - Unauthorized, refused, timeout: simply "not exposed"
-        return False
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+def _remote_only(host, port):
+    """The table's entry for a check that a Sentinel runs: this server carries no database client and opens no connection."""
+    raise RuntimeError('a database exposure check runs on a Sentinel only')
 
 
 CHECKS = {
-    'redis': ('Redis', check_redis),
-    'memcached': ('Memcached', check_memcached),
-    'postgres': ('PostgreSQL', check_postgres), 'postgresql': ('PostgreSQL', check_postgres),
-    'elastic': ('Elasticsearch', check_elasticsearch),
-    'couchdb': ('CouchDB', check_couchdb),
-    'mysql': ('MySQL', check_mysql), 'mariadb': ('MySQL', check_mysql),
-    'mongodb': ('MongoDB', check_mongodb), 'mongo': ('MongoDB', check_mongodb),
+    'redis': ('Redis', _remote_only),
+    'memcached': ('Memcached', _remote_only),
+    'postgres': ('PostgreSQL', _remote_only), 'postgresql': ('PostgreSQL', _remote_only),
+    'elastic': ('Elasticsearch', _remote_only),
+    'couchdb': ('CouchDB', _remote_only),
+    'mysql': ('MySQL', _remote_only), 'mariadb': ('MySQL', _remote_only),
+    'mongodb': ('MongoDB', _remote_only), 'mongo': ('MongoDB', _remote_only),
 }
 
 
@@ -276,7 +99,7 @@ def run_db_exposure_checks(scan_id, checks=None):
     try:
         # the probes go to a scanner (the table is the real one: a test's own checkers are never second-guessed); the findings are made here
         sentinel = checks is None and sentinel_dispatch.scanner_or_local(domain.project, 'db_probe')
-    except resources.ScannerUnavailable as exc:  # no scanner can take it and no connection may be opened from here: the services stay due
+    except resources.ScannerUnavailable as exc:  # no scanner can take it (the kind has no local path): the services stay due
         return {'checked': 0, 'exposed': 0, 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log(
         'run_check', f'Checking {len(targets)} database service(s) on {domain.name} for missing authentication',
@@ -313,26 +136,20 @@ def run_db_exposure_checks(scan_id, checks=None):
 
     # Names that share an address share the service: one probe per (address, port), and the finding goes to every host that
     # answers on it, each with the same evidence (one critical per host stays visible on each host's page).
-    local = list(groups.items())
+    local = list(groups.items()) if checks is not None else []  # an injected checker (tests only) runs here; the real table never does
     try:
         if sentinel:
             due = [(key, value) for key, value in groups.items() if in_scope(key[0], value[1]) and key[2] in DB_KEYS]
-            local = [(key, value) for key, value in groups.items() if (key, value) not in due and in_scope(key[0], value[1])]  # a checker no scanner has
-            left = []
             for index, result in sentinel_dispatch.dispatch_each(
                     domain.project, 'db_probe', due, lambda item: ({'address': item[0][0], 'port': item[0][1], 'db': DB_KEYS[item[0][2]]}
                                                                    if in_scope(item[0][0], item[1][1]) else None), scan=scan,
                     label_of=lambda item: f'{item[0][2]} on {item[0][0]}:{item[0][1]}', ips_of=lambda item: [item[0][0]]):
                 (host, number, label), (_fn, subs) = due[index]
                 if result is None or result.get('open') is None:
-                    left.append(due[index])  # no Sentinel did it, or it has no client for this database: here, when the kind may run here
-                    continue
+                    continue  # no Sentinel did it, or it has no client for this database: unknown, the service stays due (it never runs here)
                 checked += 1
                 if result.get('open') is True:
                     found_open(host, number, label, subs, result.get('evidence') or '')
-            local += left
-            if local and not sentinel_dispatch.fallback_allowed('db_probe'):
-                local = []  # a checker no scanner has may not run here either: it stays due
         if local:
             # under the resource gate like the other scanner stages: a pause or a stopped scan ends the stage between connections
             with resources.heavy_job('route-probe', label=domain.name) as job:

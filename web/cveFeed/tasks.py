@@ -67,10 +67,10 @@ def wpscan_quick(scan_id, hosts, attempt=1):
 
 @app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
 def testssl_sweep():
-    """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so
-    a minute-per-port test never holds up the feed workers."""
-    from cveFeed import testssl_scan
-    return testssl_scan.sweep_all()
+    """Daily: the TLS audit of the targets that are due, on a Sentinel, one at a time (see ``cveFeed.tls_audit``). It has a queue of its own so
+    a sweep that waits on a scanner never holds up the feed workers."""
+    from cveFeed import tls_audit
+    return tls_audit.sweep_all()
 
 
 @app.task(name='secrets_validate_hosts', bind=False, queue='vhost_queue')
@@ -105,8 +105,9 @@ def subdir_apps_sweep():
 
 @app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
 def drain_screenshots():
-    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
-    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    """Hand the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``) to Sentinels (kind ``web_screenshot``) and store the
+    pictures they send back, one drain at a time: see ``cveFeed.web_shot``. No browser runs here. Kicked by a scan stage, the Take screenshot button and the hourly
+    sweep; a second call while one runs returns at once, and with no scanner able to take the kind the pages stay queued."""
     from cveFeed import web_shot
     return web_shot.drain()
 
@@ -1880,19 +1881,10 @@ _register_weekly()
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan, local_egress, udp_scan
+    from cveFeed import fullscan, udp_scan
     result = fullscan.run()
     udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
-    local_egress.kick_catch_up()  # and so does the paced pass over ports the egress governor held back (only when one is owed)
     return result
-
-
-@app.task(name='egress_catch_up', bind=False, queue='cve_feed_queue')
-def egress_catch_up():
-    """Queued by the background full scan's firing when a port is owed: probe the ports the egress governor held back (port 25 over its
-    hourly budget, by default), paced by the same budget (see ``cveFeed.local_egress``)."""
-    from cveFeed import local_egress
-    return local_egress.catch_up()
 
 
 @app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')
@@ -2349,9 +2341,9 @@ def prune_scan_history():
 
 @app.task(name='check_os_path', bind=False, queue='cve_feed_queue', time_limit=300, soft_time_limit=240)
 def check_os_path():
-    """Daily: measure whether the network path this worker scans from loses nmap's malformed OS-detection probes (cveFeed.path_probe), and
-    keep the verdict where operating system detection reads it (cveFeed.os_detection). Runs in the scanning container, so it measures the
-    path the scans take. Two packets to each of at most eight hosts the scans already reach; waits while scanning is paused."""
+    """Daily: measure whether the network path the built-in scanner scans from loses a scanner's malformed OS-detection probes (cveFeed.path_probe, a
+    ``path_probe`` task on the built-in scanner), and keep the verdict where operating system detection reads it (cveFeed.os_detection). Two
+    packets to each of at most eight hosts the scans already reach; waits for the scanner when it cannot take the work."""
     from cveFeed import os_detection, path_probe
     return os_detection.record_path(path_probe.check())
 

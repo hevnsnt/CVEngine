@@ -9,7 +9,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import bounty_gate, conductor, discovery, openvas_scan, testssl_scan, web_shot, wpscan_scan
+from cveFeed import bounty_gate, conductor, discovery, openvas_scan, tls_audit, web_shot, wpscan_scan
 from cveFeed.models import HostScreenshot, ProbeObservation
 from dashboard.models import Org, Project
 from startScan.models import IpAddress, ScanHistory, Subdomain
@@ -55,7 +55,7 @@ def openvas_automatic(self, w):
 
 
 def testssl_targets(self, w):
-    return any(t[0] == w.host for t in testssl_scan.targets(w.project.id))
+    return any(t[0] == w.host for t in tls_audit.targets(w.project.id))
 
 
 def thorough_state(self, w):
@@ -216,16 +216,15 @@ class ScreenshotTests(test_web_shot.ShotFixture, TestCase):
     def test_a_page_queued_before_the_target_was_made_manual_only_is_blocked_unless_a_person_asked(self):
         self.host(ports=((443, 'https'),))
         Domain.objects.filter(pk=self.domain.pk).update(discovery_mode=MANUAL)
-        for by_person, outcome in ((False, 'blocked'), (True, 'ok')):
-            HostScreenshot.objects.all().delete()
-            self.make_row(by_person=by_person)
-            test_web_shot.FakeProxy.instances = []
-            with mock.patch('cveFeed.web_shot._resolve', mock.Mock(return_value='203.0.113.5')):
-                web_shot.drain(runner=test_web_shot.runner_for({}), proxy_factory=test_web_shot.FakeProxy)
-            row = HostScreenshot.objects.get()
-            self.assertEqual(row.outcome, outcome, by_person)
-            if not by_person:
-                self.assertIn('manual only', row.reason)
+        with test_web_shot.Scanner():
+            for by_person, outcome in ((False, 'blocked'), (True, 'ok')):
+                HostScreenshot.objects.all().delete()
+                self.make_row(by_person=by_person)
+                web_shot.drain()
+                row = HostScreenshot.objects.get()
+                self.assertEqual(row.outcome, outcome, by_person)
+                if not by_person:
+                    self.assertIn('manual only', row.reason)
 
 
 class SharedHostTests(PlainWorld):
@@ -271,12 +270,12 @@ class SharedHostTests(PlainWorld):
 
     def test_the_tls_audit_and_wpscan_use_the_row_of_the_target_that_may_be_scanned(self):
         w = self.shared()
-        self.assertEqual(testssl_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
+        self.assertEqual(tls_audit._latest_row(w.project.id, self.HOST).target_domain, w.std)
         self.assertEqual(wpscan_scan._latest_row(w.project.id, self.HOST).target_domain, w.std)
         with mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)):
-            self.assertEqual({t[0] for t in testssl_scan.targets(w.project.id)}, {self.HOST})
+            self.assertEqual({t[0] for t in tls_audit.targets(w.project.id)}, {self.HOST})
             Domain.objects.filter(pk=w.std.pk).update(discovery_mode=MANUAL)
-            self.assertEqual(testssl_scan.targets(w.project.id), [])
+            self.assertEqual(tls_audit.targets(w.project.id), [])
         self.assertIsNone(wpscan_scan._latest_row(w.project.id, self.HOST))
 
     def test_an_automatic_assessment_of_the_manual_only_row_goes_to_the_standard_target(self):
@@ -343,9 +342,8 @@ class SharedHostScreenshotTests(test_web_shot.ShotFixture, TestCase):
         self.shared()
         HostScreenshot.objects.all().delete()
         self.make_row(host='www.rt.test', by_person=False)
-        test_web_shot.FakeProxy.instances = []
-        with mock.patch('cveFeed.web_shot._resolve', mock.Mock(return_value='203.0.113.5')):
-            web_shot.drain(runner=test_web_shot.runner_for({}), proxy_factory=test_web_shot.FakeProxy)
+        with test_web_shot.Scanner():
+            web_shot.drain()
         self.assertEqual(HostScreenshot.objects.get().outcome, 'ok')
 
 

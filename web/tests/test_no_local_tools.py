@@ -67,7 +67,6 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
         'cveFeed/egress_proxy.py',
-        'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
@@ -79,14 +78,12 @@ ALLOWED = {
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',
         'cveFeed/models.py',
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): reads the stored nmap service name of a port (echo), runs nothing
-        'cveFeed/nuclei_scan.py',
         'cveFeed/nuclei_templates.py',
         'cveFeed/os_detection.py',
-        'cveFeed/path_probe.py',
         'cveFeed/performance_review.py',
+        'cveFeed/port_inventory.py',  # the scanner library's parser module name and the stored Port source / OS source values: data, runs nothing
+        'cveFeed/port_stage.py',  # the fingerprint ledger service name 'nmap-fast' (a stored data value) and kind names: runs nothing
         'cveFeed/probes.py',
         'cveFeed/rdp_shot.py',
         'cveFeed/report_data.py',
@@ -97,13 +94,11 @@ ALLOWED = {
         'cveFeed/settings_api.py',  # 1.3.2 settings API (develop): setting help text, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
-        'cveFeed/testssl_scan.py',
         'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',
         'reNgine/definitions.py',
@@ -117,14 +112,13 @@ ALLOWED = {
         'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
-        'agentapi/sentinel_dispatch.py',
         'agentapi/services.py',
         'agentapi/system_status.py',
         'agentapi/template_bundle.py',
         'celery-entrypoint.sh',
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
-        'cveFeed/auth_nuclei.py',
+        'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
@@ -136,24 +130,21 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/fullscan.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
         'cveFeed/migrations/0079_nuclei_templates_every_six_hours.py',
         'cveFeed/models.py',
-        'cveFeed/nmap_scan.py',
         'cveFeed/notify.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
-        'cveFeed/nuclei_scan.py',
+        'cveFeed/nuclei_scan.py',  # T8 nuclei: ledger service keys (nuclei-light, nuclei-cve) and the finding source/module value, stored data, plus activity text naming the pass; runs nothing
         'cveFeed/nuclei_templates.py',
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
@@ -167,15 +158,13 @@ ALLOWED = {
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
-        'cveFeed/template_fixtures.py',
         'cveFeed/template_gates.py',  # 1.3.5 template gates (develop): holds back a nuclei template's hit on a patched version, runs nothing
-        'cveFeed/templategen.py',
+        'cveFeed/templategen.py',  # T8 nuclei: the AI prompt that asks for a nuclei template, the template library path and the nuclei-cve finding source; runs nothing
         'cveFeed/threat.py',  # 1.3.3 heat policy (develop): names the scanners whose findings carry CVEs, runs nothing
         'cveFeed/triage.py',
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
-        'cveFeed/validation.py',
+        'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
-        'cveFeed/waf_scan.py',
         'reNgine/ai_providers.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
@@ -198,12 +187,10 @@ ALLOWED = {
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
+        'cveFeed/port_stage.py',  # the ledger service and Port source of the discovery pass, and the discovery pass's own activity text: data values, runs nothing
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/resources.py',
     ],
     'wpscan': [
@@ -232,33 +219,19 @@ ALLOWED = {
     ],
     'testssl': [
         'Dockerfile',
-        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
-        'agentapi/system_status.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
-        'cveFeed/egress_proxy.py',
-        'cveFeed/finding_lifecycle.py',  # 1.3.5 lifecycle (develop): folds stored testssl findings of redirect aliases, runs nothing
-        'cveFeed/heavy_process.py',
-        'cveFeed/hygiene.py',
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
-        'cveFeed/match_policy.py',  # 1.3.3 heat policy (develop): docstring naming evidence sources, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
-        'cveFeed/tasks.py',
-        'cveFeed/templategen.py',  # 1.3.3 template confirmations (develop): docstring naming evidence sources, runs nothing
-        'cveFeed/testssl_scan.py',
-        'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names testssl among the scanners whose checks confirm a flaw, runs nothing
-        'cveFeed/tunables.py',  # 1.3.4 port budget tunable (develop): help text about what one run is charged, runs nothing
-        'reNgine/input_guard.py',
+        'cveFeed/tls_audit.py',  # 1.4 TLS audit on a Sentinel: the kind name, the ledger key and the finding source are stored data values, runs nothing
         'reNgine/resources.py',
     ],
     'bbot': [
@@ -281,8 +254,6 @@ ALLOWED = {
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
         'cveFeed/models.py',  # 1.4 T8: finding kind and source values 'bbot' (stored data values), runs nothing
-        'cveFeed/nmap_scan.py',  # 1.4 T8: comment shared with other tool words, runs nothing
-        'cveFeed/nuclei_scan.py',  # 1.4 T8: comments shared with other tool words, runs nothing
         'cveFeed/nuclei_templates.py',  # 1.4 T8: technology source key 'bbot' in the host profile (a data value), runs nothing
         'cveFeed/report_data.py',  # 1.4 T8: report labels for the ledger keys 'bbot' and 'bbot-deep' (data values), runs nothing
         'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing
@@ -298,13 +269,10 @@ ALLOWED = {
         'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
     ],
     'wafw00f': [
-        'agentapi/scanner_state.py',  # names the waf kind's tool to read whether it takes the egress proxy (vantage warning); runs nothing
-        'agentapi/sentinel_broker.py',
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/ledger.py',
-        'cveFeed/waf_scan.py',
+        'cveFeed/waf_fingerprint.py',  # 1.4 WAF fingerprint on a Sentinel: the ledger key is a stored data value, runs nothing
     ],
     'gowitness': [
         'Dockerfile',
@@ -315,34 +283,16 @@ ALLOWED = {
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',
         'cveFeed/heavy_process.py',
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
-        'cveFeed/template_fixtures.py',
-        'cveFeed/templategen.py',
-        'cveFeed/testssl_scan.py',
         'cveFeed/validation.py',
-        'cveFeed/waf_scan.py',
-        'cveFeed/web_shot.py',  # 1.3.2 screenshot worker (develop): runs the headless browser here; a Sentinel kind for it is 1.4 follow-up work
         'reNgine/resources.py',
         'reNgine/tasks.py',
         'reNgine/time_limits.py',
     ],
     'heavy_process.run': [
-        'cveFeed/testssl_scan.py',
-        'cveFeed/waf_scan.py',
     ],
     '_BIN': [
-        'cveFeed/naabu_scan.py',
-        'cveFeed/nmap_scan.py',
-        'cveFeed/nuclei_scan.py',
-        'cveFeed/probes.py',
-        'cveFeed/template_fixtures.py',
-        'cveFeed/templategen.py',
-        'cveFeed/testssl_scan.py',
-        'cveFeed/validation.py',
     ],
 }
 

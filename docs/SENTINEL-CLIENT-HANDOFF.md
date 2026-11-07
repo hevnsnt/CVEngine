@@ -177,7 +177,7 @@ fingerprinted. naabu on is the default, so this affected nearly every install.
 
 ### What the server does now
 
-`cveFeed/naabu_scan.py`:
+`cveFeed/port_stage.py` (the server never runs naabu or nmap itself now; this is what it did when it did):
 
 ```python
 CLOSED_PROBE_PORTS = (1, 3)   # nearly always closed
@@ -213,7 +213,7 @@ Say so if the Sentinel wants that and the server will add it.
 
 An address that answers on every port (a tarpit, or a firewall that accepts everything) yields thousands of "open" ports.
 Storing them is wrong, and dropping the address reads as "nothing open". The server's limit is
-`naabu_scan.MAX_OPEN_PER_IP = 500`. Above it the address is handed to nmap's default ports instead.
+`MAX_OPEN_PER_IP = 500` (the scanner library's, read in `cveFeed/port_stage.py`). Above it the address is handed to nmap's default ports instead.
 
 Before the fix in #242, the server clipped a Sentinel's list to 500 first, so a 65535-port tarpit arrived as a believable 500-port list
 and the check never fired.

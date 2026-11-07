@@ -166,19 +166,11 @@ class SignedInDispatchTests(Env, SecretBase):
         self.assertEqual(lines[0]['template-id'], 't-1')
         self.assertEqual(dispatch.call_args.kwargs['secret_ref'], sentinels.secret_ref_for(self.cred.pk))
 
-    def test_without_a_builtin_scanner_it_runs_here_when_nuclei_may(self):
-        self.env(CVENGINE_LOCAL_FALLBACK='all')
+    def test_without_a_builtin_scanner_that_reads_sign_ins_it_waits_even_with_every_kind_allowed_here(self):
+        self.env(CVENGINE_LOCAL_FALLBACK='all')  # the nuclei kinds have no local path whatever this says (NEVER_LOCAL)
         Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True})  # an image that cannot read sign-ins
-        seen = {}
-
-        def local(path, secret_file=None, **kwargs):
-            with open(secret_file, encoding='utf-8') as handle:
-                seen['secrets'] = handle.read()
-            yield {'template-id': 'local'}
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', side_effect=local):
-            lines = list(sentinel_dispatch.signed_in_stream(self.scan, 'nuclei_targeted')(self.items, tags=['cve']))
-        self.assertEqual(lines, [{'template-id': 'local'}])
-        self.assertIn('www.a.example', seen['secrets'])
+        with self.assertRaises(ScannerUnavailable):
+            list(sentinel_dispatch.signed_in_stream(self.scan, 'nuclei_targeted')(self.items, tags=['cve']))
         self.assertFalse(SentinelTask.objects.exists())
 
     def test_the_wrapped_stream_carries_the_signed_in_runner(self):

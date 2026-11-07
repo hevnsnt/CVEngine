@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3, "identity_check": 3, "web_screenshot": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -3562,6 +3562,275 @@
             }
           }
         ]
+      },
+      "identity_check": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "dns": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "none",
+                        "unknown"
+                      ]
+                    },
+                    "records": {
+                      "type": "array",
+                      "maxItems": 50,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 260
+                      }
+                    },
+                    "canonical": {
+                      "type": "string",
+                      "maxLength": 260,
+                      "description": "CNAME: the name the alias chain ends at, empty when the name is not an alias"
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  }
+                }
+              },
+              "certs": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "status"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "unknown"
+                      ]
+                    },
+                    "names": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 260
+                      }
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "dns",
+                "certs",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
+      "web_screenshot": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "pages": {
+                "type": "array",
+                "maxItems": 6,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "outcome"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "description": "the page's id, as the task named it"
+                    },
+                    "outcome": {
+                      "enum": [
+                        "ok",
+                        "timeout",
+                        "unreachable",
+                        "tls_error",
+                        "error",
+                        "blank",
+                        "blocked",
+                        "too_big",
+                        "unavailable"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "final_url": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "status": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 999
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 300
+                    },
+                    "image": {
+                      "type": "string",
+                      "maxLength": 2796204,
+                      "contentEncoding": "base64",
+                      "contentMediaType": "image/png",
+                      "description": "the page as a PNG of at most 2 MiB and 4096 pixels a side; only with outcome ok. The server checks the signature, the sides and the size, and that it shows something"
+                    }
+                  }
+                }
+              },
+              "sandbox": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "engaged"
+                ],
+                "properties": {
+                  "engaged": {
+                    "type": "boolean",
+                    "description": "Chromium's own sandbox was proven to engage (renderer in its own user and PID namespace, under a seccomp filter of its own, no --no-sandbox) before any page was opened; false: nothing was opened"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 400
+                  },
+                  "version": {
+                    "type": "string",
+                    "maxLength": 60
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "dropped_requests": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "sub-resource requests the scope refused"
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "pages",
+                "sandbox"
+              ]
+            }
+          }
+        ]
       }
     },
     "targets": {
@@ -5183,6 +5452,155 @@
           },
           "scope": {
             "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "identity_check": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "dns"
+            ]
+          },
+          {
+            "required": [
+              "certs"
+            ]
+          }
+        ],
+        "properties": {
+          "dns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "name",
+                "type"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260,
+                  "description": "the name asked about, or for a PTR the address"
+                },
+                "type": {
+                  "enum": [
+                    "A",
+                    "CNAME",
+                    "NS",
+                    "MX",
+                    "PTR"
+                  ],
+                  "description": "A: the addresses of a name (A and AAAA records); CNAME: the canonical name of a name that has an address; NS and MX: the record texts; PTR: the reverse name of an address"
+                }
+              }
+            }
+          },
+          "certs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "host",
+                "port"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260,
+                  "description": "a name or an address: the names on the certificate it serves are read, nothing is verified"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "web_screenshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pages",
+          "scope",
+          "open_web"
+        ],
+        "properties": {
+          "pages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "url"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 40
+                },
+                "url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "description": "an http or https URL of one host of the project; the scanner opens exactly this page"
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          },
+          "open_web": {
+            "type": "boolean",
+            "description": "true: the page may load its sub-resources and follow redirects to any public host the scope does not exclude (a project with no bug bounty program); false: only the hosts the scope lists"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 60,
+            "description": "the whole of one page: navigation, settling and the picture (default 20)"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 65536,
+            "maximum": 2097152,
+            "description": "the most bytes of one picture (default 2 MiB)"
           }
         }
       }

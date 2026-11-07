@@ -544,7 +544,7 @@ def _finding_validation(obj):
 
 def _flaw_shown(obj):
     """Whether a check already showed the flaw itself, which a pending or needs_validation triage does not hold back: a template hit on a CVE
-    match (nuclei, a confirmed OpenVAS test, testssl). A scanner finding's own confirmed check is passed by its caller."""
+    match (nuclei, a confirmed OpenVAS test, a TLS audit result). A scanner finding's own confirmed check is passed by its caller."""
     return (getattr(obj, "template_result", "") or "") == "vulnerable"
 
 

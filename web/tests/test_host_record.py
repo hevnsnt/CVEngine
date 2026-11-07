@@ -5,7 +5,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import fullscan, hosting, nmap_scan, route_auth
+from cveFeed import fullscan, hosting, port_stage, route_auth
 from cveFeed.models import RouteAuth
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -54,30 +54,6 @@ class ClassifyTests(unittest.TestCase):
 	def test_odd_input_does_not_raise(self):
 		self.assertFalse(hosting.classify(name=None, cname=None, webserver=None, reverse_pointers=None)['shared_ip'])
 		self.assertFalse(hosting.classify(name='\u202e\x00', cname='\n')['shared_ip'])
-
-
-class CanonicalNameTests(unittest.TestCase):
-	def setUp(self):
-		hosting._canon.clear()
-		self.addCleanup(hosting._canon.clear)
-
-	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'acme-website.netlify.app', ('1.2.3.4', 0))]) as lookup:
-			self.assertEqual(hosting.canonical_name('archive.acme-example.org'), 'acme-website.netlify.app')
-			self.assertEqual(hosting.canonical_name('ARCHIVE.acme-example.org.'), 'acme-website.netlify.app')
-		self.assertEqual(lookup.call_count, 1)
-
-	def test_a_plain_host_and_a_failed_lookup_have_no_canonical_name(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'www.example.org', ('1.2.3.4', 0))]):
-			self.assertEqual(hosting.canonical_name('www.example.org'), '')
-		with mock.patch('socket.getaddrinfo', side_effect=OSError('nope')):
-			self.assertEqual(hosting.canonical_name('gone.example.org'), '')
-
-	def test_the_cache_is_bounded(self):
-		with mock.patch('socket.getaddrinfo', return_value=[]), mock.patch.object(hosting, 'CANON_MAX', 5):
-			for i in range(40):
-				hosting.canonical_name(f'h{i}.example.org')
-		self.assertLessEqual(len(hosting._canon), 5)
 
 
 class Fixture(TestCase):
@@ -129,6 +105,68 @@ class SharedAddressTests(Fixture):
 		self.assertEqual(hosting.shared_by_address([None, '']), {})
 
 
+class CanonicalNameTests(Fixture):
+	"""``hosting.canonical_names``: the CNAME of a name is read by a Sentinel (``identity_check``); this server asks no DNS question."""
+
+	def setUp(self):
+		super().setUp()
+		hosting._canon.clear()
+		self.addCleanup(hosting._canon.clear)
+		self.host('archive.acme.test', '198.51.100.7')
+		self.asked = []
+		live = mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True)
+		live.start()
+
+	def answers(self, rows):
+		def try_identity(project, scan, dns=(), certs=(), unattended=True):
+			self.asked.append([q['name'] for q in dns])
+			return {q['id']: rows[q['name']] for q in dns if q['name'] in rows}, {}
+		return mock.patch('agentapi.probe_dispatch.try_identity', side_effect=try_identity)
+
+	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': 'acme-website.netlify.app'})
+			self.assertEqual(hosting.canonical_names(['ARCHIVE.acme.test.']), {'archive.acme.test': 'acme-website.netlify.app'})
+		self.assertEqual(self.asked, [['archive.acme.test']])  # the second and third read came from the cache
+
+	def test_a_plain_host_has_an_empty_canonical_name_that_is_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': ''}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': ''})
+		self.assertEqual(len(self.asked), 1)
+
+	def test_a_lookup_nobody_answered_is_missing_and_not_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'unknown', 'records': [], 'error': 'Timeout'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(len(self.asked), 2)  # asked again: unknown is not "not an alias"
+
+	def test_no_scanner_for_the_kind_asks_nothing(self):
+		with mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=False), self.answers({}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_a_name_no_project_holds_is_not_asked(self):
+		with self.answers({}):
+			self.assertEqual(hosting.canonical_names(['nobody.example.org']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_the_cache_is_bounded(self):
+		rows = {f'h{i}.acme.test': {'id': f'h{i}.acme.test', 'status': 'ok', 'records': [], 'canonical': ''} for i in range(40)}
+		for i in range(40):
+			self.host(f'h{i}.acme.test', f'198.51.100.{i + 10}')
+		with self.answers(rows), mock.patch.object(hosting, 'CANON_MAX', 5):
+			for name in rows:
+				hosting.canonical_names([name])
+		self.assertLessEqual(len(hosting._canon), 5)
+
+	def test_shared_by_address_reads_every_missing_cname_in_one_task(self):
+		rows = {'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}
+		with self.answers(rows):
+			found = hosting.shared_by_address(['198.51.100.7'])
+		self.assertEqual(found['198.51.100.7']['provider'], 'Netlify')
+		self.assertEqual(self.asked, [['archive.acme.test']])
+
+
 class PortScanGuardTests(Fixture):
 	def setUp(self):
 		super().setUp()
@@ -146,9 +184,9 @@ class PortScanGuardTests(Fixture):
 
 	def test_the_host_nmap_pass_leaves_a_shared_platform_address_alone(self):
 		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
-		runner = mock.Mock()
-		out = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-		runner.assert_not_called()
+		with mock.patch('agentapi.sentinel_dispatch.try_nmap') as sent:
+			out = port_stage.run_for_scan(self.scan.id)
+		sent.assert_not_called()
 		self.assertEqual(out, {'targets': 0, 'shared': 1})
 		self.assertTrue(IpAddress.objects.get(address='192.0.2.50').is_cdn)
 
@@ -157,11 +195,11 @@ class PortScanGuardTests(Fixture):
 		self.host('www.own.test', '192.0.2.51')
 		seen = []
 
-		def runner(targets, flags, host_timeout):
+		def sent(project, scan, targets, **kwargs):
 			seen.append(list(targets))
-			return '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		with mock.patch('cveFeed.naabu_scan.discover', return_value=None):
-			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
+			return {'ports': 0, 'hosts_with_os': 0}
+		with mock.patch('cveFeed.port_stage.enabled', return_value=False), mock.patch('agentapi.sentinel_dispatch.try_nmap', sent):
+			port_stage.run_for_scan(self.scan.id)
 		self.assertEqual(seen, [['192.0.2.51']])
 
 

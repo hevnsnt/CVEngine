@@ -72,15 +72,13 @@ def _compute(now):
     return out
 
 
-TOOL_OF = {'waf': 'wafw00f'}  # a kind whose tool goes by another name than the kind
-IN_PROCESS_PROXIED = ('http_probe', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check', 'dangling_dns_check', 'route_probe')  # the in-process requests (version probes, retired-name checks, bucket checks, supplier checks, virtual host, subdirectory and route checks) go through cveFeed.pinned_transport, which takes the egress proxy
+IN_PROCESS_PROXIED = ('http_probe', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'identity_check', 'web_screenshot')  # the in-process requests (version probes, retired-name checks, bucket checks, supplier checks, virtual host, subdirectory and route checks) go through cveFeed.pinned_transport, which takes the egress proxy
 
 
-def _uses_proxy(kind, tools):
-    """Whether a run of ``kind`` takes the egress proxy: its tool (``TOOL_OF``, else the kind's name or the part before the first underscore) is one of
-    ``egress_proxy.TOOLS``, or it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw sockets, or only asks
-    a resolver, never did, so the proxy is no part of its vantage point."""
-    return TOOL_OF.get(kind, kind) in tools or kind.split('_')[0] in tools or kind in IN_PROCESS_PROXIED
+def _uses_proxy(kind):
+    """Whether a run of ``kind`` takes the egress proxy: it is an in-process probe that goes through it (``IN_PROCESS_PROXIED``). A kind that runs on raw
+    sockets, or only asks a resolver, never did, so the proxy is no part of its vantage point."""
+    return kind in IN_PROCESS_PROXIED
 
 
 def tailscale_enabled():
@@ -126,7 +124,7 @@ def vantage_warnings():
     from cveFeed import egress_proxy
     from targetApp import target_types
     out = []
-    proxied = [k for k in off if _uses_proxy(k, egress_proxy.TOOLS)]
+    proxied = [k for k in off if _uses_proxy(k)]
     if proxied and probe(egress_proxy.configured):
         out.append(sentence(proxied, "this server's egress proxy"))
     if probe(tailscale_enabled):

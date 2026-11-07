@@ -2,7 +2,6 @@
 keeping its own row, outcome, bookkeeping and gates, with the caps counted in pipeline runs and the reaper and time limits sized for a batch."""
 import contextlib
 import os
-import socket
 import uuid
 from datetime import timedelta
 from unittest import mock
@@ -19,6 +18,7 @@ from cveFeed.host_assessment import BATCH_STOPPED, batch_size, batches, enqueue,
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
+from reNgine.resources import ScannerUnavailable
 from startScan.models import ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
@@ -393,19 +393,16 @@ class ExecuteBatchTests(Base):
     def test_a_lookup_that_is_not_answered_for_one_host_does_not_fail_the_others(self):
         jobs = self.queue(self.a1, ['ok1.a1.example', 'slow.a1.example', 'ok2.a1.example'])
 
-        real_lookup = socket.getaddrinfo
-
-        def lookup(name, *args, **kwargs):
-            if not str(name).endswith('.a1.example'):
-                return real_lookup(name, *args, **kwargs)  # the database and Redis are not the test's to break
-            if name.startswith('slow'):
-                raise socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (f'8.8.4.{len(name) % 200 + 1}', 0))]
+        def lookup(_domain, wanted, errors=None, scan=None):  # a Sentinel's answer: the names it resolved, and the lookups it could not answer
+            names = set(wanted)
+            if errors is not None:
+                errors.update({n: 'Temporary failure in name resolution' for n in names if n.startswith('slow')})
+            return {(n, f'8.8.4.{len(n) % 200 + 1}') for n in names if n.endswith('.a1.example') and not n.startswith('slow')}
         nmap, kwargs = _stages()
-        del kwargs['resolver']  # the real resolver, so a lookup that is not answered is told from a name with no address
+        del kwargs['resolver']  # a Sentinel's resolver (below): it reports a lookup it could not answer, told from a name with no address
         real = discovery.run_host_pipeline
         with mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=lambda *a, **k: real(*a, **{**k, **kwargs})), \
-                mock.patch('socket.getaddrinfo', side_effect=lookup), \
+                mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lookup), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
                 mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
                 mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}):
@@ -638,13 +635,12 @@ class SentinelChunkTests(SimpleTestCase):
             return {'hosts': [{'ip': ip, 'ports': []} for ip in ips]}
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
                 mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch), \
-                mock.patch('cveFeed.nmap_scan.persist_inventory', return_value={'ports': 1, 'hosts_with_os': 0}):
-            remaining, totals, _ = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
+                mock.patch('cveFeed.port_inventory.persist_inventory', return_value={'ports': 1, 'hosts_with_os': 0}):
+            totals = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
         self.assertEqual([len(ips) for _, ips in sent], [64, 64, 22])
-        self.assertEqual(totals, {'ports': 3, 'hosts_with_os': 0})
-        self.assertEqual(remaining, [])  # every address was reported by a Sentinel, in whichever chunk
+        self.assertEqual(totals, {'ports': 3, 'hosts_with_os': 0})  # every address was reported by a Sentinel, in whichever chunk
 
-    def test_the_first_chunk_no_sentinel_takes_ends_the_dispatching_and_the_rest_runs_here(self):
+    def test_the_first_chunk_no_sentinel_takes_ends_the_dispatching_and_the_rest_waits(self):
         targets = [f'198.51.100.{i}' for i in range(1, 101)]
         calls = []
 
@@ -653,18 +649,16 @@ class SentinelChunkTests(SimpleTestCase):
             return None
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
                 mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch):
-            remaining, totals, _ = sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
+            with self.assertRaises(ScannerUnavailable) as caught:
+                sentinel_dispatch.try_nmap(mock.Mock(), mock.Mock(), targets)
         self.assertEqual(calls, [64])  # not a wait for each remaining chunk
-        self.assertEqual((remaining, totals), (targets, {'ports': 0, 'hosts_with_os': 0}))
+        self.assertEqual(caught.exception.done, [])
 
-    def test_naabu_sends_every_chunk_and_runs_what_no_sentinel_took_here(self):
+    def test_naabu_sends_every_chunk_and_waits_for_what_no_sentinel_took(self):
         ips = [f'198.51.100.{i}' for i in range(1, 151)]
         answers = [{'ports': {ips[0]: [22]}}, None]
-        local = mock.Mock(return_value={ips[70]: [443]})
         with mock.patch.object(sentinel_dispatch, 'any_scanner_for', return_value=True), \
-                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=answers) as sent, \
-                mock.patch('cveFeed.naabu_scan.run_naabu', local):
-            found = sentinel_dispatch.wrap_naabu_runner(mock.Mock(), mock.Mock())(ips)
+                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=answers) as sent:
+            with self.assertRaises(ScannerUnavailable):  # the chunk no Sentinel took, and everything after it, is not scanned here
+                sentinel_dispatch.wrap_naabu_runner(mock.Mock(), mock.Mock())(ips)
         self.assertEqual(sent.call_count, 2)
-        local.assert_called_once_with(ips[64:])  # the chunk no Sentinel took and everything after it
-        self.assertEqual(found, {ips[0]: [22], ips[70]: [443]})

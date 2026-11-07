@@ -77,12 +77,19 @@ class VantageWarningTests(VantageBase):
             with self.assertNumQueries(0):
                 self.assertEqual(scanner_state.vantage_warnings(), [], value)
 
-    def test_unset_the_builtin_scanners_kinds_are_moved_and_an_older_image_is_warned_about(self):
+    def test_unset_every_kind_the_builtin_scanner_has_is_a_never_local_kind_so_nothing_is_moved_to_warn_about(self):
         os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = '1'
         os.environ.pop(ENV, None)
+        self.assertEqual(scanner_state.vantage_warnings(), [])
+
+    def test_none_moves_the_kinds_that_still_have_a_local_path_and_an_older_image_is_warned_about(self):
+        os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = '1'
+        os.environ[ENV] = 'none'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp to the built-in scanner', out[0])
+        self.assertIn('moves http_probe', out[0])
+        for gone in sentinel_dispatch.NEVER_LOCAL:
+            self.assertNotIn(f' {gone},', out[0])  # a kind with no local path never ran here, so it is never \"moved\"
 
     def test_an_image_that_applies_them_or_no_builtin_scanner_is_quiet(self):
         os.environ[ENV] = 'none'
@@ -110,18 +117,17 @@ class VantageWarningTests(VantageBase):
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
         proxied = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'wpscan', 'waf', 'bbot_discovery', 'http_probe',
-                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe']
+                   'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'web_screenshot']
         moved = ', '.join(k for k in proxied if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertEqual(out[0], f"CVENGINE_LOCAL_FALLBACK moves {moved} to the built-in scanner, whose image "
                                  "does not use this server's egress proxy; update it (the server's updater pulls the image this release pins).")
 
     def test_a_proxy_is_quiet_when_every_proxied_kind_still_runs_here(self):
-        # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
-        # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); wafw00f (waf), bbot, the version
-        # probes (http_probe), the bucket checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check), the supplier checks (supplier_check), the route checks (route_probe), the TLS reads and
-        # MTA-STS fetches of the hygiene sweep (hygiene_check), the takeover control request (dangling_dns_check) and nuclei (nuclei_validate's test) do
-        os.environ[ENV] = ('nuclei_light,nuclei_targeted,nuclei_deep,testssl,wpscan,waf,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,supplier_check,nuclei_validate,'
-                           'hygiene_check,dangling_dns_check,route_probe')
+        # nmap, naabu, udp and the other raw-socket kinds never took the proxy, nor dns_resolve (a resolver); the version probes (http_probe), the bucket
+        # checks (bucket_check), the virtual host and subdirectory checks (vhost_probe, subdir_probe), the retired-name checks (alive_check), the supplier
+        # checks (supplier_check), the route checks (route_probe), the TLS reads and
+        # MTA-STS fetches of the hygiene sweep (hygiene_check) and the takeover control request (dangling_dns_check) do
+        os.environ[ENV] = 'wpscan,bbot_discovery,http_probe,bucket_check,vhost_probe,subdir_probe,alive_check,supplier_check,hygiene_check,dangling_dns_check,route_probe,web_screenshot'
         self.proxy_on()
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
@@ -135,13 +141,13 @@ class VantageWarningTests(VantageBase):
         self.assertEqual(scanner_state.vantage_warnings(), [])
 
     def test_the_tailscale_profile_warns_for_every_kind_taken_off(self):
-        os.environ[ENV] = 'nmap,naabu'
+        os.environ[ENV] = 'secrets_scan,nmap,naabu'  # kinds with no local path are never part of the list
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
         taken_off = ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'waf', 'bbot_discovery', 'http_probe', 'dns_resolve',
                      'bucket_check', 'vhost_probe', 'subdir_probe', 'alive_check', 'supplier_check', 'nmap_full', 'nmap_verify', 'node2shell', 'rdp_shot', 'db_probe',
-                     'path_probe', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe']
+                     'path_probe', 'nuclei_validate', 'hygiene_check', 'dangling_dns_check', 'route_probe', 'web_screenshot']
         moved = ', '.join(k for k in taken_off if k not in sentinel_dispatch.NEVER_LOCAL)  # a kind with no local path is never "moved": it never ran here
         self.assertIn(f'moves {moved} to the built-in scanner, whose image does not use '
                       'the private Tailscale addresses this server may scan; update it', out[0])
@@ -154,12 +160,12 @@ class VantageWarningTests(VantageBase):
 
     def test_a_published_node_status_file_is_tailscale_too(self):
         import tempfile
-        os.environ[ENV] = all_but('testssl')
+        os.environ[ENV] = all_but('wpscan')
         with tempfile.NamedTemporaryFile() as handle:
             os.environ['CVENGINE_TAILSCALE_STATUS_FILE'] = handle.name
             out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves testssl to the built-in scanner, whose image does not use the private Tailscale addresses', out[0])
+        self.assertIn('moves wpscan to the built-in scanner, whose image does not use the private Tailscale addresses', out[0])
 
     def test_private_targets_allowed_warns(self):
         os.environ[ENV] = all_but('testssl')

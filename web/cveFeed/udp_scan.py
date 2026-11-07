@@ -1,17 +1,21 @@
-"""Background UDP exposure sweep: a slow, polite look at a short list of UDP ports of ONE in-scope IP at a time.
+"""Background UDP exposure sweep: a slow, polite look at a short list of UDP ports of ONE in-scope IP at a time, run by a Sentinel.
 
 The TCP sweep (cveFeed.fullscan) never touches UDP, and the services that matter most for exposure there (DNS, NTP, SNMP, IKE, IPMI,
-SSDP, memcached) all speak it. This module scans a small curated list (``DEFAULT_PORTS``; ``CVENGINE_UDPSCAN_PORTS`` replaces it)
-with ``nmap -sU -sV`` at a low rate, one IP at a time, each IP at most once a week (the ledger service ``udp-scan``). It rides the same
-celery-beat firing as the TCP sweep (``background_full_scan`` calls ``kick``) but runs on a queue of its own (``udp_queue``) under its
-own heavy job (``nmap-udp-bg``), and has its own switch (``CVENGINE_UDPSCAN``, on by default). Like the other slow sweeps it stops
-while scanning is paused, scans no address an organization excluded or that is not scannable, and skips a project whose bug bounty
+SSDP, memcached) all speak it. A scanner scans a small curated list (``DEFAULT_PORTS``, the scanner library's) at a low rate, one IP at a time, each
+IP at most once a week (the ledger service ``udp-scan``). It rides the same celery-beat firing as the TCP sweep (``background_full_scan`` calls
+``kick``) but runs on a queue of its own (``udp_queue``), and has its own switch (``CVENGINE_UDPSCAN``, on by default). Like the other slow sweeps it
+stops while scanning is paused, scans no address an organization excluded or that is not scannable, and skips a project whose bug bounty
 engagement has not confirmed automated testing. Like the TCP full-port sweep, it also defers its whole firing, instance-wide,
 while any project still has a host missing core first-pass coverage (see cveFeed.coverage_topup.backlog_exists): a deep UDP
 sweep of one address is never worth more than a first pass over every host.
 
+Nothing runs on this server. Each address goes to a live, eligible Sentinel (``agentapi.sentinel_dispatch.try_nmap_udp``); with none able to take it
+the address stays due (``ScannerUnavailable``) and is never scanned here. A Sentinel's UDP report travels as the scanner's own raw XML, not pre-parsed
+JSON: UDP's state vocabulary and script output are read correctly only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``),
+so that one function, hardened against hostile XML, is the sole place a report is ever turned into a record.
+
 What a UDP answer means. UDP has no handshake: a port that replies is ``open``; one that sends an ICMP port-unreachable is ``closed``;
-silence is ``open|filtered`` (open but quiet, or dropped by a firewall), which nmap cannot tell apart. ``-sV`` sends its service
+silence is ``open|filtered`` (open but quiet, or dropped by a firewall), which a scanner cannot tell apart. ``-sV`` sends its service
 probes to the ``open|filtered`` ports and promotes the ones that answer to ``open``, so only a port that answered is ever stored as
 ``open`` (and so in the exposure, the heat, the CVE evidence and the search). A port that stayed silent is stored as ``open|filtered``
 only on a host that answered other probes with a port-unreachable (so the silence is selective, not a firewall dropping everything),
@@ -23,22 +27,11 @@ TCP services, keyed by number and protocol, so UDP 161 and TCP 161 are two rows)
 named none (SNMP sysDescr, SSDP server string, NTP readvar); and findings for the services that should not answer the internet
 (memcached, SNMP with the public community, NTP control queries, SSDP, IPMI). Findings are derived from the stored ports of each
 host, never from one run, so a host with two addresses keeps what the other address showed.
-
-It needs raw sockets (nmap -sU does). ``raw_sockets_available`` checks, and when the worker cannot open one the sweep does not run and
-says so: in the activity feed, in the system status, and in ``status()``, never silently.
-
-Before running nmap -sU itself, each address is offered to a live, eligible Sentinel first (``agentapi.sentinel_dispatch.try_nmap_udp``);
-a project with none registered pays one cheap existence check and runs exactly as before. Unlike every other dispatched tool, a
-Sentinel's UDP report travels as nmap's own raw XML, not pre-parsed JSON: UDP's state vocabulary and NSE script output are read
-correctly only by ``cveFeed.nmap_scan.parse_xml``, so that one function - hardened against hostile XML - is the sole place either a
-local or a dispatched run's XML is ever turned into a record.
 """
 import json
 import logging
 import os
 import re
-import shutil
-import socket
 import time
 from datetime import timedelta
 
@@ -55,7 +48,6 @@ CLAIM_KEY = 'cvengine:udpscan'
 CLAIM_TTL = 3 * 3600
 STATUS_KEY = 'cvengine:udpscan:status'
 STATUS_TTL = 30 * 24 * 3600
-WAIT_SECONDS = 2 * 3600  # the longest a sweep waits for memory
 RUN_BUDGET_SECONDS = 8 * 60  # a firing starts no new IP after this, so it ends before the next one
 MAX_ELIGIBLE = 5000  # in-scope addresses looked at per pick
 MAX_CHECKED = 50  # scope checks (they resolve names) per pick
@@ -123,58 +115,9 @@ def enabled():
     return _truthy(os.environ.get('CVENGINE_UDPSCAN', '1'))
 
 
-def _int_env(name, default, low, high):
-    try:
-        return min(high, max(low, int(os.environ.get(name, default))))
-    except ValueError:
-        return default
-
-
-def max_rate():
-    """Packets per second nmap may send for the port scan (CVENGINE_UDPSCAN_MAX_RATE, default 20)."""
-    return _int_env('CVENGINE_UDPSCAN_MAX_RATE', 20, 1, 1000)
-
-
-def host_timeout():
-    """Minutes before nmap gives up on one address (CVENGINE_UDPSCAN_HOST_TIMEOUT_MIN, default 20), as nmap's ``20m``."""
-    return f'{_int_env("CVENGINE_UDPSCAN_HOST_TIMEOUT_MIN", 20, 1, 120)}m'
-
-
 def ports():
-    """The UDP ports to scan: CVENGINE_UDPSCAN_PORTS (comma separated numbers, at most MAX_PORTS) or DEFAULT_PORTS. A list that is
-    empty, not numbers or out of range is ignored with a warning, never half used."""
-    raw = os.environ.get('CVENGINE_UDPSCAN_PORTS', '').strip()
-    if not raw:
-        return list(DEFAULT_PORTS)
-    try:
-        wanted = sorted({int(part) for part in raw.split(',') if part.strip()})
-    except ValueError:
-        wanted = []
-    if not wanted or len(wanted) > MAX_PORTS or wanted[0] < 1 or wanted[-1] > 65535:
-        logger.warning('CVENGINE_UDPSCAN_PORTS is not a list of 1 to %s port numbers (1-65535); using the default list', MAX_PORTS)
-        return list(DEFAULT_PORTS)
-    return wanted
-
-
-def nmap_flags():
-    """The sweep's nmap options (cvengine_scanner.flags.udp_nmap_flags, which a Sentinel's sweep runs too): UDP scan, service detection at a low
-    intensity, no host discovery and no DNS, one retry, a low packet rate and only the reviewed scripts, over this install's ports and rate."""
-    return scan_flags.udp_nmap_flags(ports(), max_rate())
-
-
-# ----------------------------------------------------------------------------- can this worker do it
-
-def raw_sockets_available(opener=socket.socket):
-    """``(True, '')`` when this process can open a raw socket, which nmap -sU needs, else ``(False, reason)``. The reason is for
-    people: it names the missing capability and what grants it."""
-    try:
-        opener(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP).close()
-        return True, ''
-    except PermissionError:
-        return False, ('the worker cannot open a raw socket (CAP_NET_RAW is missing, or the container does not run as root), so '
-                       'nmap -sU cannot run. Run the celery container as root with the default capabilities, or add NET_RAW.')
-    except OSError as exc:
-        return False, f'the worker cannot open a raw socket ({type(exc).__name__}), so nmap -sU cannot run'
+    """The UDP ports a scanner sweeps: the scanner library's curated list (``DEFAULT_PORTS``)."""
+    return list(DEFAULT_PORTS)
 
 
 def _store():
@@ -308,7 +251,7 @@ def identify(rec):
 
 
 def classify(host):
-    """What one nmap -sU report says per UDP port: ``{number: state}`` for every port the run probed (a port nmap summarised in
+    """What one UDP scan report says per UDP port: ``{number: state}`` for every port the run probed (a port the scanner summarised in
     ``extraports`` takes that state), and whether the host answered anything (an ``open`` reply or a ``closed`` port-unreachable)."""
     states = {r['number']: r.get('state') or '' for r in host.get('ports', []) if r.get('protocol') == 'udp' and r.get('number')}
     summarised = [s for s in (host.get('extraports') or ()) if s]
@@ -324,10 +267,10 @@ def _signature(ip):
 
 
 def record_run(ip, host, now=None):
-    """Store one nmap -sU report for ``ip``. Returns ``{'open': [...], 'unanswered': [...], 'closed': [...], 'changed': [...]}`` (port
+    """Store one UDP scan report for ``ip``. Returns ``{'open': [...], 'unanswered': [...], 'closed': [...], 'changed': [...]}`` (port
     numbers; ``changed`` are open ports that are new or whose product or version changed). A silent port gets a row only when it has
     none and the host answered something else (see the module note); an existing row is judged by the rules below."""
-    from cveFeed import nmap_scan
+    from cveFeed import port_inventory
     now = now or timezone.now()
     states, answered = classify(host)
     existing = {p.number: p for p in ip.ports.filter(protocol='udp')}
@@ -345,7 +288,7 @@ def record_run(ip, host, now=None):
             keep.append(rec)
         elif rec.get('state') == OPEN_FILTERED and answered and rec['number'] not in existing:
             keep.append({**rec, 'scripts': {}, 'banner': '', 'product': '', 'version': ''})
-    nmap_scan.persist_inventory([{**host, 'ports': keep, 'scanned': None, 'scanned_udp': None, 'os_guess': ''}], org_id=ip.org_id)
+    port_inventory.persist_inventory([{**host, 'ports': keep, 'scanned': None, 'scanned_udp': None, 'os_guess': ''}], org_id=ip.org_id)
     stored = {p.number: p for p in ip.ports.filter(protocol='udp')}
     open_now = []
     for number, port in stored.items():
@@ -469,12 +412,6 @@ def store_findings(ip):
 
 # ----------------------------------------------------------------------------- the sweep
 
-def _runner(targets, flags, timeout, org_id=None):
-    from cveFeed import fullscan, nmap_scan
-    return nmap_scan.run_nmap_xml(targets, flags, timeout, kind='nmap-udp-bg', wait_timeout=WAIT_SECONDS,
-                                 before_launch=lambda: fullscan._require_current_scope(targets, org_id))
-
-
 def queue_retests(ip, numbers, project, pipeline=None):
     """The hosts on ``ip`` go through the re-test pipeline (cveFeed.retest) once after a UDP service appeared or changed, so the new
     evidence is correlated, triaged and diffed like a TCP one. One re-test per host per day (the retest ledger). Returns the names."""
@@ -501,38 +438,26 @@ def queue_retests(ip, numbers, project, pipeline=None):
     return queued
 
 
-def scan_ip(ip, runner=None, pipeline=None):
-    """Scan one IpAddress and record it. Returns the result dict (``ok`` False with an ``error`` when the scan failed). ``runner(targets,
-    flags, host_timeout) -> xml`` replaces nmap in tests; ``pipeline(domain_id, names)`` runs the re-test inline."""
-    import functools
-
-    from cveFeed import activity, fullscan, ledger, nmap_scan
+def scan_ip(ip, pipeline=None):
+    """Scan one IpAddress on a scanner and record it. Returns the result dict (``ok`` False with an ``error`` when the scan failed).
+    ``pipeline(domain_id, names)`` runs the re-test inline. Nothing runs on this server: with no scanner able to take it the address stays due."""
+    from cveFeed import activity, fullscan, ledger
     from reNgine.resources import MemoryBusy, ScanAborted, ScannerUnavailable
     address, asset = ip.address, asset_of(ip)
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
         'target_domain__project_id', flat=True).first()
-    run = runner or functools.partial(_runner, org_id=ip.org_id)
     running = activity.log('run_check', f'Background UDP scan of {address} ({len(ports())} ports: DNS, NTP, SNMP, IKE and the like)',
                            project=project, status='running')
     try:
-        host = None
-        if project:
-            from agentapi import sentinel_dispatch
-            from dashboard.models import Project
-            project_obj = Project.objects.filter(pk=project).first()
-            if project_obj is not None:
-                host = sentinel_dispatch.try_nmap_udp(project_obj, address)
-        if host is None:
-            from agentapi import sentinel_dispatch
-            if not sentinel_dispatch.fallback_allowed('nmap_udp'):  # an address no project scans (or one with no Sentinel path) never runs -sU here
-                raise ScannerUnavailable('nmap_udp', 'nmap -sU may not run on this server (CVENGINE_LOCAL_FALLBACK)')
-            xml = run([address], nmap_flags(), host_timeout())
-            host = next((h for h in nmap_scan.parse_xml(xml) if h.get('ip') == address), None)
-        if host is None:
-            raise UdpScanError('nmap reported nothing for the address')
+        from agentapi import sentinel_dispatch
+        from dashboard.models import Project
+        project_obj = Project.objects.filter(pk=project).first() if project else None
+        if project_obj is None:  # an address no project scans has no scanner to take it
+            raise ScannerUnavailable('nmap_udp', 'the address is attached to no project a scanner could take it for')
+        host = sentinel_dispatch.try_nmap_udp(project_obj, address)
         outcome = record_run(ip, host)
-    except ScannerUnavailable as exc:  # no scanner could take it and nmap -sU may not run here: not the address's failure, and it stays due
+    except ScannerUnavailable as exc:  # no scanner could take it and it never runs here: not the address's failure, and it stays due
         logger.warning('background UDP scan of %s is waiting for a scanner: %s', address, exc)
         activity.settle(running, 'done', message=f'Background UDP scan of {address} is waiting: no scanner could take this work ({exc.kind}); '
                         'the address stays due until one can')
@@ -560,50 +485,40 @@ def scan_ip(ip, runner=None, pipeline=None):
     return result
 
 
-def run(runner=None, pipeline=None, raw_check=None, clock=time.monotonic):
-    """One firing: IPs one at a time until the time budget is spent, under one Redis claim, never while scanning is paused. Does
-    nothing, and says why, when the sweep is off or this worker cannot do raw-socket scans.
+def run(pipeline=None, clock=time.monotonic):
+    """One firing: IPs one at a time until the time budget is spent, under one Redis claim, never while scanning is paused.
 
     Also skips the whole firing, instance-wide, while any project (not bounty-blocked) still has a host missing
     core first-pass coverage (see cveFeed.coverage_topup.backlog_exists): every host gets a first look before any
     one address gets a UDP exposure sweep. The next firing checks again.
     """
-    from cveFeed import activity, coverage_topup, ledger
+    from cveFeed import coverage_topup
     from reNgine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_UDPSCAN is off'}
     from agentapi import scanner_state
-    waiting = scanner_state.skip_note('nmap_udp')  # no scanner can run it and this server may not: nothing is dispatched, raised or logged
+    waiting = scanner_state.skip_note('nmap_udp')  # no scanner can run it and this server never does: nothing is dispatched, raised or logged
     if waiting:
         return {'skipped': waiting}
     if coverage_topup.backlog_exists():
         coverage_topup.log_deferral('UDP scan')
         return {'skipped': 'coverage backlog: first-pass hosts are still outstanding'}
-    if runner is None:  # a real run needs the binary and raw sockets; an injected runner stands in for both
-        ok, reason = (raw_check or raw_sockets_available)()
-        if ok and shutil.which('nmap') is None:
-            ok, reason = False, 'nmap is not installed on this worker'
-        if not ok:
-            record_status('unavailable', reason)
-            if ledger.sweep_claim('udp-unavailable-note', 24 * 3600):  # one line a day in the feed, not one per firing
-                activity.log('run_check', f'UDP scanning is off on this worker: {reason}')
-            return {'skipped': reason}
     if resources.global_pause_requested(fail_closed=True):
         return {'skipped': 'scanning is paused'}
     from agentapi import stage_runs
-    if runner is None and pipeline is None:
+    if pipeline is None:
         # an address a Sentinel scans is waited for without holding the worker (agentapi.stage_runs): the callback goes on with the next one
         if stage_runs.enabled() and stage_runs.busy('sweep.udp'):
             return {'skipped': 'another UDP sweep is running (it waits on a Sentinel)'}
-        return stage_runs.run('sweep.udp', {}, first=lambda: _sweep(None, None, clock))
-    return _sweep(runner, pipeline, clock)
+        return stage_runs.run('sweep.udp', {}, first=lambda: _sweep(None, clock))
+    return _sweep(pipeline, clock)
 
 
 def _resume_sweep(context):
-    return _sweep(None, None, time.monotonic)
+    return _sweep(None, time.monotonic)
 
 
-def _sweep(runner, pipeline, clock):
+def _sweep(pipeline, clock):
     from agentapi import stage_runs
     from reNgine import resources
     from startScan.models import IpAddress
@@ -629,7 +544,7 @@ def _sweep(runner, pipeline, clock):
             if ip is None:
                 break
             stage_runs.remember('udp:current', ip.pk)  # the address a later pass continues with, if this one waits on a Sentinel
-            outcome = scan_ip(ip, runner=runner, pipeline=pipeline)
+            outcome = scan_ip(ip, pipeline=pipeline)
             stage_runs.remember('udp:current', None)
             scanned.append(outcome)
             if outcome.get('waiting'):  # no scanner could take it, so it is still due: not picked again by this firing (it would fail at once, over and over)
