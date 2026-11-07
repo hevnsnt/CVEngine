@@ -545,18 +545,3 @@ class OpenvasQueuedTaskTests(Fixture, TestCase):
         self.age(run, minutes=45)
         self.assertEqual(self.tick()['sentinel_status'], 'queued')
 
-    def test_a_local_run_gvmd_cannot_answer_for_is_failed_once_past_its_budget(self):
-        self.assertEqual(self.tick()['status'], 'running')
-        run = OpenvasRun.objects.get()
-        self.assertIsNone(run.sentinel_task_id)
-
-        def down():
-            raise ov.OpenvasError('gvmd could not be reached')
-        young = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual(young, {'error': 'gvmd could not be reached'})  # inside its budget it is left alone
-        self.assertEqual(OpenvasRun.objects.get().status, 'running')
-        OpenvasRun.objects.filter(pk=run.pk).update(started_at=timezone.now() - timedelta(hours=ov.budget_hours(2) + 1))
-        out = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual((out['run'], out['status']), (run.pk, 'failed'))
-        self.assertEqual(OpenvasRun.objects.get(pk=run.pk).status, 'failed')
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())

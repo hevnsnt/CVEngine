@@ -5,7 +5,7 @@
   "description": "Both halves of the exchange between cvENGINE and a Sentinel. $defs/targets is what the server hands a Sentinel for each task kind (the task's target); $defs/results is what a Sentinel sends to POST /api/v1/sentinel/tasks/{id}/result; $defs/partials is what a streamed kind (bbot_discovery) sends to POST /api/v1/sentinel/tasks/{id}/partial while it runs, before the result that closes it. The server clips and validates every result anyway (agentapi.sentinel_broker.clean_result); this file is what a correct client keeps to, so the server never has to. Bounds are asserted equal to the server's own limits, and every target the server builds is validated against it, by tests/test_sentinel_contract.py. Bump contract_version (and say so in CHANGELOG) for any change a client must follow.",
   "contract_version": 3,
   "min_supported_contract_version": 1,
-  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3, "identity_check": 3, "web_screenshot": 3, "route_probe_signed": 3},
+  "kind_since": {"nmap": 1, "naabu": 1, "nuclei_light": 1, "nuclei_targeted": 1, "nuclei_deep": 1, "testssl": 1, "nmap_udp": 1, "wpscan": 1, "discover": 1, "openvas": 1, "waf": 2, "bbot_discovery": 3, "http_probe": 3, "dns_resolve": 3, "bucket_check": 3, "vhost_probe": 3, "subdir_probe": 3, "alive_check": 3, "supplier_check": 3, "secrets_scan": 3, "nmap_full": 3, "nmap_verify": 3, "node2shell": 3, "rdp_shot": 3, "db_probe": 3, "path_probe": 3, "nuclei_validate": 3, "hygiene_check": 3, "dangling_dns_check": 3, "route_probe": 3, "wpscan_thorough": 3, "identity_check": 3, "web_screenshot": 3, "route_probe_signed": 3, "page_read": 3},
   "$defs": {
     "envelope": {
       "type": "object",
@@ -3715,6 +3715,288 @@
           }
         ]
       },
+      "page_read": {
+        "description": "Per read: head (status, method, server, powered_by, title) or reading (pages, scanned, extra, budget_left), or an error (the read could not be made: unknown, never a state). A reading has one page per web base asked; scanned and extra map a script URL to what searching it whole found.",
+        "allOf": [
+          {
+            "$ref": "#/$defs/envelope"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "outcome": true,
+              "error": true,
+              "summary": true,
+              "reads": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "error": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "head": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 999
+                        },
+                        "method": {
+                          "enum": [
+                            "HEAD",
+                            "GET"
+                          ]
+                        },
+                        "server": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "powered_by": {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 300
+                        }
+                      }
+                    },
+                    "reading": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "pages"
+                      ],
+                      "properties": {
+                        "pages": {
+                          "type": "array",
+                          "maxItems": 6,
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "outcome"
+                            ],
+                            "properties": {
+                              "base": {
+                                "type": "string",
+                                "maxLength": 300
+                              },
+                              "outcome": {
+                                "enum": [
+                                  "",
+                                  "read",
+                                  "redirect",
+                                  "challenged",
+                                  "error_page",
+                                  "unanswered",
+                                  "refused",
+                                  "held"
+                                ]
+                              },
+                              "status": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 999
+                              },
+                              "final_url": {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              "location": {
+                                "type": "string",
+                                "maxLength": 500
+                              },
+                              "challenge": {
+                                "type": "string",
+                                "maxLength": 60
+                              },
+                              "error": {
+                                "type": "string",
+                                "maxLength": 200
+                              },
+                              "records": {
+                                "type": "object",
+                                "maxProperties": 30,
+                                "description": "library key to its record (product, version, where it was stated, every copy and its state): at most 32 KB as JSON each"
+                              },
+                              "skipped": {
+                                "type": "array",
+                                "maxItems": 40,
+                                "items": {
+                                  "type": "array",
+                                  "minItems": 2,
+                                  "maxItems": 2,
+                                  "items": {
+                                    "type": "string",
+                                    "maxLength": 500
+                                  }
+                                }
+                              },
+                              "truncated": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "items": {
+                                  "type": "string",
+                                  "maxLength": 500
+                                }
+                              },
+                              "lazy": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "items": {
+                                  "type": "string",
+                                  "maxLength": 60
+                                }
+                              },
+                              "inline": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "items": {
+                                  "type": "array",
+                                  "minItems": 2,
+                                  "maxItems": 2,
+                                  "items": {
+                                    "type": "string",
+                                    "maxLength": 100
+                                  }
+                                }
+                              },
+                              "entries": {
+                                "type": "array",
+                                "maxItems": 80,
+                                "items": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "url": {
+                                      "type": "string",
+                                      "maxLength": 500
+                                    },
+                                    "kind": {
+                                      "type": "string",
+                                      "maxLength": 30
+                                    },
+                                    "library": {
+                                      "type": "string",
+                                      "maxLength": 60
+                                    },
+                                    "fallback": {
+                                      "type": "boolean"
+                                    }
+                                  }
+                                }
+                              },
+                              "scripts": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100000
+                              },
+                              "read_whole": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100000
+                              },
+                              "inline_unread": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100000
+                              },
+                              "capped": {
+                                "type": "boolean"
+                              },
+                              "page_truncated": {
+                                "type": "boolean"
+                              },
+                              "page_scan": {
+                                "type": "object",
+                                "description": "the page's own text searched whole: versions, unplaceable, blocks, loaders; at most 32 KB as JSON"
+                              }
+                            }
+                          }
+                        },
+                        "scanned": {
+                          "type": "object",
+                          "maxProperties": 120,
+                          "additionalProperties": {
+                            "type": "object",
+                            "description": "what one script said, searched whole: status, whole, truncated, error and, for a whole body, versions, unplaceable, blocks, loaders and overflow; at most 32 KB as JSON"
+                          }
+                        },
+                        "extra": {
+                          "type": "object",
+                          "maxProperties": 120,
+                          "additionalProperties": {
+                            "type": "object",
+                            "description": "what one script said, searched whole: status, whole, truncated, error and, for a whole body, versions, unplaceable, blocks, loaders and overflow; at most 32 KB as JSON"
+                          }
+                        },
+                        "budget_left": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "touched": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 2000,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "done"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "required": [
+                "reads",
+                "touched"
+              ]
+            }
+          }
+        ]
+      },
       "identity_check": {
         "allOf": [
           {
@@ -5643,6 +5925,85 @@
                     "maxLength": 2000
                   },
                   "description": "the host's routes, asked one after another: each on that host, http or https"
+                }
+              }
+            }
+          },
+          "scope": {
+            "$ref": "#/$defs/probe_scope"
+          }
+        }
+      },
+      "page_read": {
+        "description": "A validation re-test's read of one page or host, asked of a Sentinel instead of this server: op head (one HEAD of url, a GET only when the server answers 405; the status, Server, X-Powered-By and title are kept, never a body) or op libraries (the front page of each web base of the host and the scripts it loads, searched whole, past every cache; the files the host was seen to load library from, seen_urls, are fetched too within the same script budget). Read under the scope policy, which lists every host any hop or script read may ask.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reads",
+          "scope"
+        ],
+        "properties": {
+          "reads": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "op",
+                "host"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "op": {
+                  "enum": [
+                    "head",
+                    "libraries"
+                  ]
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 260,
+                  "description": "the host the read is about; every url and base is on it"
+                },
+                "url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "description": "op head: the URL asked, http or https, on host"
+                },
+                "bases": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 6,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "description": "op libraries: scheme://host[:port] of each web base of the host"
+                },
+                "library": {
+                  "type": "string",
+                  "maxLength": 60,
+                  "description": "op libraries: the library key the match is about; the seen_urls are fetched only when a page shows it"
+                },
+                "seen_urls": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "description": "op libraries: files the host was seen to load the library from"
                 }
               }
             }

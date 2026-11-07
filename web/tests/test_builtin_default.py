@@ -56,7 +56,7 @@ class DefaultFallbackTests(Env, SecretBase):
         allowed = sentinel_dispatch.local_fallback_kinds()
         self.assertFalse(allowed & BUILTIN_KINDS)
         self.assertEqual(allowed, EVERY_LOCAL - BUILTIN_KINDS)
-        self.assertIn('openvas', allowed)  # the built-in scanner has no OpenVAS: the server's own sidecar still runs it
+        self.assertNotIn('openvas', allowed)  # the built-in scanner has no OpenVAS, and this server runs none (NEVER_LOCAL): a Sentinel with its own GVM stack does
 
     def test_all_is_the_escape_hatch_and_the_off_switch_restores_every_kind(self):
         self.env(CVENGINE_LOCAL_FALLBACK='all')

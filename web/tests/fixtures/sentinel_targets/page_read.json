@@ -1,0 +1,35 @@
+{
+  "reads": [
+    {
+      "id": "head:https://www.example.com/",
+      "op": "head",
+      "host": "www.example.com",
+      "url": "https://www.example.com/"
+    },
+    {
+      "id": "libraries:www.example.com",
+      "op": "libraries",
+      "host": "www.example.com",
+      "bases": [
+        "https://www.example.com"
+      ],
+      "library": "jquery",
+      "seen_urls": [
+        "https://www.example.com/static/jquery.min.js"
+      ]
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "www.example.com",
+      "example.com",
+      "code.jquery.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}
