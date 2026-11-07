@@ -2444,6 +2444,26 @@ def _heat_facets(project, qs):
     return counts, heat_by_id, total > HEAT_FACET_CAP
 
 
+HEAT_FACET_SECONDS = 15  # how long the whole-match counts of a search (heat chips, facets, coverage) are served from the shared snapshot cache
+
+
+def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable):
+    """What a search counts over its whole match (heat per host, the unscannable split, the other facets): walking up to HEAT_FACET_CAP hosts with
+    everything their heat reads is the dearest thing the Hosts page and the dashboard's coverage tile ask for, and they ask every few seconds. It is a
+    shared snapshot (``cveFeed.snapshot_cache``) keyed by who may see the rows (the project ids, the caller's allowed projects) and by the search
+    itself, fresh for HEAT_FACET_SECONDS and dropped at once by a revision bump (a finding was closed)."""
+    from cveFeed import snapshot_cache
+
+    def compute():
+        counts, by_id, truncated = _heat_facets(project, qs)
+        return {'heat': counts, 'by_id': by_id, 'truncated': truncated,
+                'unscannable': _unscannable_facet(qs, by_id) if with_unscannable else None,
+                'facets': _search_facets(by_id.keys(), facet_names, facet_size) if facet_names else {}}
+    ids = sorted(project.ids) if _is_all(project) else [project.pk]
+    scope = snapshot_cache.scope_hash('search-facets', ids, [list(t) for t in terms], str(params.get('internal', '')).strip().lower(), facet_names, facet_size, with_unscannable)
+    return snapshot_cache.snapshot('search-facets', scope, compute, HEAT_FACET_SECONDS)['payload']
+
+
 def _unscannable_facet(qs, heat_by_id):
     """``{count, private, no_dns, unknown}``: the hosts counted as ``unscanned`` that have no address a scanner can use, so "never scanned" can say
     which are waiting their turn and which have nothing to scan. ``private`` points inside a private network (only a Sentinel inside it can scan
@@ -2577,9 +2597,12 @@ def search_hosts(ctx, slug, params):
         facet_names = []
     if counts_only and not heat:
         return {'count': qs.count(), 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
-    heat_counts, heat_by_id, heat_truncated = _heat_facets(project, qs) if heat or not no_facets else ({}, {}, False)
     qs_all = qs  # the whole match of q, before the heat filter narrows it
-    search_facets = _search_facets(heat_by_id.keys(), facet_names, facet_size) if facet_names else {}
+    if heat or not no_facets:
+        bundle = _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable=not no_facets)
+        heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = bundle['heat'], bundle['by_id'], bundle['truncated'], bundle['unscannable'], bundle['facets']
+    else:
+        heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = {}, {}, False, None, {}
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
     qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
@@ -2587,7 +2610,7 @@ def search_hosts(ctx, slug, params):
     page = _mark_zombies(project, _hosts_page(project, qs, params, lambda sub: {'matched': _why_matched(sub, terms)}))
     for row in page['results']:
         row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
-    page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': _unscannable_facet(qs_all, heat_by_id),
+    page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': unscannable,
                                              **search_facets}
     page['has_internal'] = _any_internal()  # a project the caller sees declared an internal network: the page offers the scope filter
     return page
