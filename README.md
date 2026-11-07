@@ -142,7 +142,7 @@ cd CVEngine
 sudo ./install.sh
 ```
 
-It asks one question on a terminal (will you add external Sentinels, or use only the built-in scanner? Enter takes the built-in scanner; `--sentinels=internal|both|external` answers it ahead of time and `-n` never asks). Then it installs what is missing, generates every secret, creates the HTTPS certificate, starts cvENGINE, and prints the address, where your admin password is, and whether the scanner is live. OpenVAS is never installed by it. Open the address, sign in, and add a domain. The setup wizard does the rest. Your browser will warn about the private certificate until you trust `secrets/certs/ca.crt`.
+It is a thin bootstrap: it installs what is missing, generates every secret, creates the HTTPS certificate, starts cvENGINE, waits until it answers, and prints the address and where your generated admin password is. Open the address and sign in: the setup wizard in the browser does the rest (your first target, scanners, Sentinels). Automation can pass `--sentinels=internal|both|external` and `-n`; on a terminal one optional question offers the same choice. OpenVAS is never installed by it. Your browser will warn about the private certificate until you trust `secrets/certs/ca.crt`.
 
 Step-by-step install, a public name with a trusted certificate, and Mac and Windows are in [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md).
 

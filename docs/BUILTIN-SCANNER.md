@@ -2,7 +2,7 @@
 
 Every install runs a scanner next to the server: the cvENGINE Sentinel, as the `scanner` compose service, shown as **CVEngine Scanner**. The server enrolls it with nobody typing a secret, and from then on the scan tools run in it, not on the server: the nmap fast scan, the naabu sweep, the nuclei light, targeted and deep passes (signed-in ones included), testssl, the UDP sweep and the WPScan quick pass. The design is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md); the variables are in [CONFIGURATION.md](CONFIGURATION.md#built-in-scanner).
 
-It needs nothing from you. `sudo ./install.sh` asks on a terminal whether you will add external Sentinels as well, or only use this one (`--sentinels=internal|both|external`; `external` leaves it out entirely, nothing pulled or started, and scans wait until an external Sentinel is enrolled). A new install starts it (`sudo ./install.sh`), an update from 1.3 adds it, and every update after that replaces its image and checks it came up.
+It needs nothing from you. `sudo ./install.sh` takes `--sentinels=internal|both|external` for automation (on a terminal one optional question offers the same choice; the setup wizard in the browser covers the rest; `external` leaves it out entirely, nothing pulled or started, and scans wait until an external Sentinel is enrolled). A new install starts it (`sudo ./install.sh`), an update from 1.3 adds it, and every update after that replaces its image and checks it came up.
 
 ## What it is
 
