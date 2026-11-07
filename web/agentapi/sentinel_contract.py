@@ -66,6 +66,23 @@ def state(reported):
     return 'previous' if reported >= min_supported() else 'unsupported'
 
 
+def describe(reported):
+    """``{state, label, reason}`` for the Sentinels page and the API: the state of ``state(reported)`` in plain words. This is display only: what a
+    Sentinel is offered is decided by ``can_run`` (the floor, ``min_supported``) and nothing else, and a release number never enters into it."""
+    st = state(reported)
+    if st == 'unsupported':
+        return {'state': st, 'label': 'update required',
+                'reason': f'This Sentinel speaks contract {reported}; this server needs at least {min_supported()}. It is offered no work until it is updated.'}
+    if st == 'newer':
+        return {'state': st, 'label': 'newer than this server (fine)',
+                'reason': f'This Sentinel speaks contract {reported}, this server {version()}. It is offered the kinds this server knows and nothing else.'}
+    if st == 'previous':
+        return {'state': st, 'label': 'one release behind (works)', 'reason': f'This Sentinel speaks contract {reported}; the server still supports it, and it is offered the kinds that version can run.'}
+    if st == 'unreported':
+        return {'state': st, 'label': 'not reported', 'reason': 'An older client that does not say which contract it speaks; it is taken to speak version 1.'}
+    return {'state': st, 'label': 'current', 'reason': ''}
+
+
 def reply():
     """What a Sentinel is told in a register or heartbeat answer, so it can tell for itself whether it is behind."""
     return {'version': version(), 'min_supported': min_supported()}

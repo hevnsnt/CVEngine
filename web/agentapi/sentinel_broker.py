@@ -2744,10 +2744,12 @@ def _live_overview(ctx):
             'withheld_kinds': {k: {'failures': v['failures'], 'retry_at': svc._iso(v['retry_at'])} for k, v in eff.withheld.items()},
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'contract_version': (agent.info or {}).get('contract_version'), 'contract_state': sentinel_contract.state((agent.info or {}).get('contract_version')),
+            'contract_note': sentinel_contract.describe((agent.info or {}).get('contract_version')),
+            'release': (agent.info or {}).get('release'), 'release_label': (agent.info or {}).get('release') or 'not reported',
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
             # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
-            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'))),
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('release'), (agent.info or {}).get('contract_version'))),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
                         for t in mine],
             'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),
