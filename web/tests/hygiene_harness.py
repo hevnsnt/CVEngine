@@ -9,7 +9,12 @@ what the server stores from a Sentinel's report. Nothing in the sweep runs on th
 import datetime
 from unittest import mock
 
+from cvengine_scanner.probes import hygiene as scanner_hygiene
+
 from tests.fake_scanner import FakeScanner
+
+# the mail review a Sentinel makes (the library's, the code the built-in scanner runs): a test that needs the findings of a zone passes this as ``emailer``
+email_findings = scanner_hygiene.email_findings
 
 
 def _iso(value):

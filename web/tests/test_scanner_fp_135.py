@@ -33,6 +33,18 @@ def http_line(template_id, response, matched='http://lb.example.test/', severity
             'request': request, 'response': response, 'info': {'name': template_id.replace('-', ' ').title(), 'severity': severity, 'tags': ['proxy']}}
 
 
+def answer(status, body, location=''):
+    """What a Sentinel's control read of a path no site serves reports (``page_read`` op ``control``): the status, the redirect and the digest of the body."""
+    return (status, location, nuclei_fp.body_digest(body))
+
+
+def controls(**by_host):
+    """A ``control_get`` that answers each control URL of ``host`` with ``answer(...)`` (None: the read could not be made)."""
+    def get(urls, project=None, scan=None):
+        return {url: next((v for host, v in by_host.items() if f'//{host}.example.test/' in url), None) for url in urls}
+    return mock.Mock(side_effect=get)
+
+
 def raw_http(status, reason, body, headers=''):
     return f'HTTP/1.1 {status} {reason}\r\nContent-Type: text/html\r\n{headers}\r\n{body}'
 
@@ -53,7 +65,7 @@ class NucleiBase(TestCase):
     def run_lines(self, lines, control=None):
         def stream(_path, **_kwargs):
             return iter(lines)
-        with mock.patch.object(nuclei_fp, 'control_get', control or mock.Mock(return_value=None)) as got:
+        with mock.patch.object(nuclei_fp, 'control_get', control or mock.Mock(return_value={})) as got:
             out = nuclei_scan._run_nuclei(self.scan.id, stream=stream, targets=['app.example.test:1000', 'lb.example.test'], force=True)
         if control is None:
             self.assertFalse(got.called, 'no control request was expected')
@@ -113,30 +125,64 @@ class SameBodyTests(NucleiBase):
     """Item 12: an open-proxy template fired on a load balancer with no backend; every request returns the same 503 page."""
 
     def test_an_error_page_the_host_returns_for_any_path_is_not_a_finding(self):
-        control = mock.Mock(return_value=(503, '', HAPROXY_503))
+        control = controls(lb=answer(503, HAPROXY_503))
         out, got = self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
         self.assertEqual(self.templates(), [])
         self.assertEqual(out['set_aside'], {nuclei_fp.SAME_BODY: 1})
-        url = got.call_args[0][0]
-        self.assertTrue(url.startswith('http://lb.example.test/.cvengine-control-'))
+        (urls, project, _scan), _kw = got.call_args
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(urls[0].startswith('http://lb.example.test/.cvengine-control-'))
+        self.assertEqual(project, self.project.id)
+
+    def test_the_control_path_of_an_origin_is_the_same_on_every_pass(self):
+        """An asynchronous stage runs again after each wait: a random path would be a new task every pass."""
+        self.assertEqual(nuclei_fp.control_url('http://lb.example.test/a'), nuclei_fp.control_url('http://lb.example.test/b?x=1'))
+        self.assertNotEqual(nuclei_fp.control_url('http://lb.example.test/a'), nuclei_fp.control_url('http://other.example.test/a'))
 
     def test_a_different_control_answer_keeps_the_finding(self):
-        control = mock.Mock(return_value=(404, '', '<h1>Not Found</h1>'))
-        self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
+        control = controls(lb=answer(404, '<h1>Not Found</h1>'))
+        out, _ = self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
         self.assertEqual(self.templates(), ['open-proxy-localhost'])
+        self.assertNotIn('unscreened', out)
+        self.assertFalse(Vulnerability.objects.get().tags.filter(name=nuclei_fp.UNSCREENED_TAG).exists())
+
+    def test_whitespace_alone_does_not_make_the_control_a_different_page(self):
+        body = HAPROXY_503.replace('\n', '\r\n  ')
+        self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=controls(lb=answer(503, body)))
+        self.assertEqual(self.templates(), [])
 
     def test_every_recorded_response_with_the_same_body_needs_no_control(self):
         both = raw_http(503, 'Service Unavailable', HAPROXY_503) + raw_http(503, 'Service Unavailable', HAPROXY_503)
         self.run_lines([http_line('open-proxy-localhost', both)])
         self.assertEqual(self.templates(), [])
 
-    def test_a_success_page_an_info_match_and_a_failed_control_are_left_alone(self):
-        control = mock.Mock(side_effect=OSError('refused'))
+    def test_a_success_page_and_an_info_match_are_left_alone_and_one_control_read_serves_every_match_of_an_origin(self):
+        control = controls(lb=answer(404, 'not found'))
         self.run_lines([http_line('exposed-config', raw_http(200, 'OK', 'secret=1'), matched='http://lb.example.test/.env'),
                         http_line('waf-detect', raw_http(403, 'Forbidden', 'denied'), severity='info'),
-                        http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
-        self.assertEqual(self.templates(), ['exposed-config', 'open-proxy-localhost', 'waf-detect'])
-        self.assertEqual(control.call_count, 1)  # only the error page of the medium-and-up match was checked
+                        http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503)),
+                        http_line('other-proxy', raw_http(502, 'Bad Gateway', 'bad gateway'), matched='http://lb.example.test/x')], control=control)
+        self.assertEqual(self.templates(), ['exposed-config', 'open-proxy-localhost', 'other-proxy', 'waf-detect'])
+        self.assertEqual(control.call_count, 1)  # one task for the chunk, only the error pages of the medium-and-up matches, the origin once
+        self.assertEqual(len(control.call_args[0][0]), 1)
+
+    def test_a_control_read_that_could_not_be_made_keeps_the_finding_marked_unscreened_never_as_a_checked_one(self):
+        """An unanswered control decides nothing: the match is kept (it may be real) and says so, and is not counted as screened."""
+        out, _ = self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503)),
+                                 http_line('exposed-config', raw_http(200, 'OK', 'secret=1'), matched='http://lb.example.test/.env')], control=controls())
+        self.assertEqual(self.templates(), ['exposed-config', 'open-proxy-localhost'])
+        self.assertEqual(out['unscreened'], 1)
+        tagged = {v.template_id: v.tags.filter(name=nuclei_fp.UNSCREENED_TAG).exists() for v in Vulnerability.objects.all()}
+        self.assertEqual(tagged, {'open-proxy-localhost': True, 'exposed-config': False})
+
+    def test_no_scanner_for_the_control_read_leaves_the_chunk_waiting_and_saves_nothing(self):
+        from reNgine.resources import ScannerUnavailable
+        control = mock.Mock(side_effect=ScannerUnavailable('page_read', 'no scanner'))
+        out, _ = self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
+        self.assertEqual(self.templates(), [])
+        self.assertIn('skipped', out)
+        from cveFeed import ledger
+        self.assertEqual(ledger.fresh('nuclei', ['app.example.test:1000', 'lb.example.test'], self.project.id), set())  # nothing is recorded as done
 
     def test_a_match_without_a_recorded_response_is_not_re_requested(self):
         self.run_lines([http_line('open-proxy-localhost', None)])
@@ -291,16 +337,12 @@ class LegacyEvidenceTests(SimpleTestCase):
     """Item 16: the legacy-protocol finding stored "protocol: TLSv1.3" (the modern handshake); it now names the TLS 1.0 / 1.1 handshake."""
 
     def test_the_finding_stores_the_legacy_handshake_not_the_modern_one(self):
-        addresses = ((2, ('203.0.113.10', 443)),)
-        modern = {'host': 'legacy.example.test', 'port': 443, 'protocol': 'TLSv1.3', 'cipher': 'TLS_AES_128_GCM_SHA256',
-                  'not_after': datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc), 'sans': ['legacy.example.test'],
-                  'subject': 'legacy.example.test', 'signature_algorithm': 'sha256', 'key_description': 'RSA 2048'}
-        with mock.patch.object(hygiene.pinned_transport, 'resolve', return_value=addresses), \
-                mock.patch.object(hygiene, '_fetch_cert', return_value=dict(modern)), \
-                mock.patch.object(hygiene, '_chain_error', return_value=''), \
-                mock.patch.object(hygiene.legacy_tls, 'handshake', return_value=(b'der', 'TLSv1', 'ECDHE-RSA-AES128-SHA')):
-            info = hygiene.probe_tls('legacy.example.test', 443)
-        self.assertTrue(info['legacy_tls'])
+        # the shape a Sentinel's TLS read reports for a server that still accepts TLS 1.0 beside its modern handshake (the library's probe_tls,
+        # tested in cvENGINE-sentinel): the modern handshake's fields and the legacy one's
+        info = {'host': 'legacy.example.test', 'port': 443, 'protocol': 'TLSv1.3', 'cipher': 'TLS_AES_128_GCM_SHA256',
+                'not_after': datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc), 'sans': ['legacy.example.test'],
+                'subject': 'legacy.example.test', 'signature_algorithm': 'sha256', 'key_description': 'RSA 2048', 'chain_error': '',
+                'legacy_tls': True, 'legacy_handshake': {'protocol': 'TLSv1', 'cipher': 'ECDHE-RSA-AES128-SHA'}}
         found = [f for f in hygiene.evaluate_cert(hygiene.clip_certificate(info)) if f.check == 'tls_legacy_protocol']
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].evidence, {'protocol': 'TLSv1', 'cipher': 'ECDHE-RSA-AES128-SHA',
@@ -313,7 +355,3 @@ class LegacyEvidenceTests(SimpleTestCase):
         self.assertEqual(found[0].evidence['protocol'], 'TLSv1.1')
         self.assertNotIn('modern_protocol', found[0].evidence)
 
-    def test_a_refused_legacy_handshake_is_no_finding(self):
-        with mock.patch.object(hygiene.legacy_tls, 'handshake', return_value=(b'der', 'TLSv1.2', 'X')):
-            self.assertIsNone(hygiene.legacy_tls.negotiated('a.example.test', 443, 5))
-            self.assertFalse(hygiene.legacy_tls.accepts('a.example.test', 443, 5))

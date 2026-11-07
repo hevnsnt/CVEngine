@@ -636,6 +636,10 @@ def clean_route_probe_signed(body):
 
 
 MAX_READS = 10
+MAX_README_TITLES = 8
+_DIGEST = re.compile(r'^[0-9a-f]{64}$')
+_SLUG = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+_TITLE_JUNK = re.compile(r'[^A-Za-z0-9 ._+&()-]')
 MAX_READ_PAGES = 6
 MAX_READ_SCRIPTS = 80  # js_libraries.MAX_ENTRIES: scripts read from one page
 MAX_READ_SCANS = 120   # scripts read in one read: the per-host limit and the files a match was seen to load from
@@ -662,6 +666,32 @@ def _head(raw):
     return {'status': status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else None,
             'method': raw.get('method') if raw.get('method') in ('HEAD', 'GET') else 'HEAD',
             'server': _text(raw.get('server'), 300), 'powered_by': _text(raw.get('powered_by'), 300), 'title': _text(raw.get('title'), 300)}
+
+
+def _control(raw):
+    """What one control GET answered: the status, the redirect target, the length and the digest of the body (never a body). ``None`` when it is not one."""
+    if not isinstance(raw, dict):
+        return None
+    digest = raw.get('digest')
+    status, length = raw.get('status'), raw.get('length')
+    if not isinstance(digest, str) or not _DIGEST.match(digest):
+        return None
+    return {'status': status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else 0, 'location': _text(raw.get('location'), 500),
+            'length': length if isinstance(length, int) and not isinstance(length, bool) and 0 <= length <= 300 * 1024 else 0, 'digest': digest}
+
+
+def _readme(raw):
+    """The titles a Sentinel read from plugin readmes, each clipped to what a title may hold (``cveFeed.wpscan_scan``'s own alphabet), at most eight."""
+    if not isinstance(raw, dict) or not isinstance(raw.get('titles'), dict):
+        return None
+    titles = {}
+    for slug, title in list(raw['titles'].items())[:MAX_README_TITLES]:
+        if isinstance(slug, str) and _SLUG.match(slug) and isinstance(title, str):
+            clean = _TITLE_JUNK.sub('', title)[:120]
+            if clean:
+                titles[slug] = clean
+    count = lambda key: raw[key] if isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool) and 0 <= raw[key] <= MAX_README_TITLES else 0  # noqa: E731
+    return {'titles': titles, 'asked': count('asked'), 'unread': count('unread')}
 
 
 def _read_scan(raw):
@@ -744,6 +774,12 @@ def clean_page_read(body):
             row['error'] = _text(item['error'], 200)
         elif isinstance(item.get('head'), dict):
             row['head'] = _head(item['head'])
+        elif isinstance(item.get('control'), dict) or isinstance(item.get('readme'), dict):
+            kept = _control(item.get('control')) if isinstance(item.get('control'), dict) else _readme(item.get('readme'))
+            if kept is None:
+                row['error'] = 'the scanner reported neither an answer nor an error for this read'
+            else:
+                row['control' if isinstance(item.get('control'), dict) else 'readme'] = kept
         else:
             reading = _reading(item.get('reading'))
             if reading is None:

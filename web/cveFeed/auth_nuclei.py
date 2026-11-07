@@ -129,6 +129,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
             running = activity.log('run_check', f'Authenticated nuclei is checking {len(won_assets)} signed-in target(s) of {domain.name}, '
                                    f'scan #{scan.id}', project=project, status='running', scan_id=scan.id)
             counts, scanned = {'findings': 0, 'only_signed_in': 0}, []
+            same_body = nuclei_fp.SameBody(project, scan)
             try:
                 for start in range(0, len(won_assets), CHUNK):
                     chunk = won_assets[start:start + CHUNK]
@@ -138,15 +139,17 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                         kwargs['tags'] = tags
                     if severities:
                         kwargs['severities'] = severities
-                    for line in dispatched(items, **kwargs):
-                        line = auth_checks.redact_obj(line, values)
-                        if isinstance(line, dict) and nuclei_fp.same_body_artefact(line, project):
+                    lines = [auth_checks.redact_obj(line, values) for line in dispatched(items, **kwargs)]
+                    same_body.prefetch(lines)  # the control reads the chunk's error pages need, by a Sentinel (ScannerUnavailable: the chunk stays due)
+                    for line in lines:
+                        verdict = same_body.judge(line) if isinstance(line, dict) else nuclei_fp.CLEAN
+                        if verdict == nuclei_fp.ARTEFACT:
                             continue  # the host answers anything with this error page (cveFeed.nuclei_fp)
                         try:
                             data = parse_nuclei_result(line)
                         except (KeyError, TypeError):
                             continue
-                        data['tags'] = [*(data.get('tags') or []), auth_checks.SEEN_TAG]
+                        data['tags'] = [*(data.get('tags') or []), auth_checks.SEEN_TAG, *([nuclei_fp.UNSCREENED_TAG] if verdict == nuclei_fp.UNSCREENED else [])]
                         host = scan_flags.host_of(line)
                         if template_gates.held_back(line, by_name.get(host)):
                             continue  # a template that matches patched releases too, on a patched host

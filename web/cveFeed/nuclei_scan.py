@@ -339,7 +339,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         by_name.setdefault(sub.name, sub)
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
-    screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project)
+    screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project, scan=scan)
 
     def save(line):
         nonlocal new
@@ -347,6 +347,8 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
             data = parse_nuclei_result(line)
         except (KeyError, TypeError):
             return
+        if screen.is_unscreened(line):  # its control read could not be made: kept, and not claimed to be a real answer rather than a catch-all page
+            data['tags'] = [*(data.get('tags') or []), nuclei_fp.UNSCREENED_TAG]
         host = host_of(line)
         sub = by_name.get(host) or by_ip.get(host)
         if template_gates.held_back(line, sub):
@@ -389,9 +391,9 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
                     if severities:
                         kwargs['severities'] = severities
                     screen.reset()  # a retried chunk sends its protocol matches again
-                    for line in stream(path, **kwargs):
-                        if not isinstance(line, dict):
-                            continue
+                    lines = [line for line in stream(path, **kwargs) if isinstance(line, dict)]
+                    screen.prefetch(lines)  # the control reads the chunk's error pages need, by a Sentinel (ScannerUnavailable: the chunk stays due)
+                    for line in lines:
                         if screen.offer(line) == 'keep':  # an echo or a catch-all answer is set aside (cveFeed.nuclei_fp)
                             save(line)
                     for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
@@ -414,10 +416,13 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
     activity.settle(running, 'done', message=(
         f"Nuclei finished {domain.name}: {new} finding{'s' if new != 1 else ''} "
         f"({counts['critical']} critical, {counts['high']} high, {counts['medium']} medium, "
-        f"{counts['low']} low, {counts['info']} info)" + (f'; set aside as scanner artefacts: {set_aside}' if set_aside else '')), **counts)
+        f"{counts['low']} low, {counts['info']} info)" + (f'; set aside as scanner artefacts: {set_aside}' if set_aside else '')
+        + (f'; {screen.unscreened} kept unscreened (the control read for a catch-all page could not be made)' if screen.unscreened else '')), **counts)
     out = {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
     if screen.dropped:
         out['set_aside'] = dict(screen.dropped)
+    if screen.unscreened:
+        out['unscreened'] = screen.unscreened
     return out
 
 

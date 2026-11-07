@@ -431,25 +431,65 @@ def try_signed_routes(project, scan, credential, by_host):
     return answered
 
 
+def try_page_reads(project, reads, scope, scan=None):
+    """The rows of a Sentinel's answer to a ``page_read`` task of ``reads`` (at most ``probe_results.MAX_READS``; ``scope`` is a ``probe_scope`` policy
+    naming every host of the reads), in the order of ``reads``: ``{'id', 'head' | 'reading' | 'control' | 'readme'}``, or ``{'id', 'error'}`` for a read
+    the Sentinel could not make (unknown, never a state). The kind is in ``NEVER_LOCAL`` and has no local path: with no scanner able to take the work this
+    raises ``ScannerUnavailable`` (nothing was read, nothing is recorded), and so does a task that ended with no result. A read the Sentinel did not
+    report is an error row too."""
+    from reNgine.resources import ScannerUnavailable
+    target = {'reads': list(reads), 'scope': scope}
+    label = _hosts_label(read['host'] for read in reads)
+    result = sentinel_dispatch.dispatch_or_none(project, 'page_read', target, host=label, scan=scan)
+    if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
+        raise ScannerUnavailable('page_read', 'the scanner returned no result for a page read')
+    if result.get('refused'):
+        logger.info('page_read task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    by_id = {r.get('id'): r for r in result.get('reads') or []}
+    return [by_id.get(read['id']) or {'id': read['id'], 'error': 'the scanner did not report this read'} for read in reads]
+
+
 def try_page_read(project, read, scope, scan=None):
     """The answer of a Sentinel to one ``page_read`` (``read`` is ``{'id', 'op', 'host', ...}``: ``op`` is ``head`` with a ``url``, or ``libraries`` with the
     ``bases`` of the host, the ``library`` a match is about and the ``seen_urls`` the host was seen to load it from; ``scope`` is
-    ``probe_scope.for_page_read``): the row of the result, ``{'id', 'head'}`` or ``{'id', 'reading'}``. The kind is in ``NEVER_LOCAL`` and has no local path:
-    with no scanner able to take the work this raises ``ScannerUnavailable`` (nothing was read, nothing is recorded), and so does a task that ended with no
-    result. A read the Sentinel could not make is a ``RuntimeError`` carrying its reason: the check is unknown, never a state."""
-    from reNgine.resources import ScannerUnavailable
-    target = {'reads': [read], 'scope': scope}
-    result = sentinel_dispatch.dispatch_or_none(project, 'page_read', target, host=read['host'], scan=scan)
-    if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
-        raise ScannerUnavailable('page_read', 'the scanner returned no result for a page read')
-    row = next((r for r in result.get('reads') or [] if r.get('id') == read['id']), None)
-    if row is None:
-        raise RuntimeError('the scanner did not report this read')
+    ``probe_scope.for_page_read``): the row of the result, ``{'id', 'head'}`` or ``{'id', 'reading'}``. ``ScannerUnavailable`` as ``try_page_reads``
+    says; a read the Sentinel could not make is a ``RuntimeError`` carrying its reason: the check is unknown, never a state."""
+    (row,) = try_page_reads(project, [read], scope, scan=scan)
     if row.get('error'):
         raise RuntimeError(row['error'])
-    if result.get('refused'):
-        logger.info('page_read task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
     return row
+
+
+def control_reads(project, scan, urls, unattended=False):
+    """``{url: (status, location, digest) or None}`` for ``urls``, control paths (``nuclei_fp.control_url``) of hosts a template match was made on, each one GET
+    of a path no site serves made by a Sentinel (``page_read``, op ``control``): the status, the redirect target and the SHA-256 of the body with its
+    whitespace collapsed, never the body. ``None`` for a URL the Sentinel could not read (refused by the scope policy, no answer): an unanswered control
+    decides nothing, and the caller must not treat it as a host that does not answer everything. ``ScannerUnavailable`` when no Sentinel can take the
+    work: the stage waits and its targets stay due. At most ``probe_results.MAX_READS`` URLs make one task."""
+    from urllib.parse import urlsplit
+
+    from cveFeed import probe_scope
+    from agentapi import probe_results
+    urls = list(dict.fromkeys(urls))
+    out = {}
+    for start in range(0, len(urls), probe_results.MAX_READS):
+        chunk = urls[start:start + probe_results.MAX_READS]
+        reads = [{'id': f'control:{url}'[:200], 'op': 'control', 'host': (urlsplit(url).hostname or '').lower().rstrip('.'), 'url': url} for url in chunk]
+        scope = probe_scope.for_hosts(project.pk, [r['host'] for r in reads], unattended=unattended)
+        for url, row in zip(chunk, try_page_reads(project, reads, scope, scan=scan)):
+            got = row.get('control') if not row.get('error') else None
+            out[url] = (got['status'] or 0, got['location'], got['digest']) if got else None
+    return out
+
+
+def readme_titles(project, scan, sub, base, slugs, unattended=True):
+    """``{slug: title}`` the plugins of the WordPress site ``base`` of the host ``sub`` give in their ``readme.txt`` (``=== Plugin Name ===``), read by a
+    Sentinel (``page_read``, op ``readme``; the policy is the host's own, ``probe_scope.for_page_read``). A plugin whose readme gave no title is absent.
+    ``ScannerUnavailable`` when no Sentinel can take the work; a read the Sentinel could not make is a ``RuntimeError``: the titles are unknown."""
+    from cveFeed import probe_scope
+    read = {'id': f'readme:{sub.name.lower()}'[:200], 'op': 'readme', 'host': sub.name.lower().rstrip('.'), 'base': base.rstrip('/'), 'slugs': list(slugs)}
+    row = try_page_read(project, read, probe_scope.for_page_read(project.pk, sub, unattended=unattended), scan=scan)
+    return dict(row.get('readme', {}).get('titles') or {})
 
 
 def resolve_for(domain, names, errors=None, scan=None):

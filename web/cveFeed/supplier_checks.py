@@ -9,7 +9,7 @@ all read-only:
 
 * ``tls``: the certificate and protocol of the supplier's name on port 443 (expiry, name match, chain, weak signature or key, TLS 1.0/1.1),
   through the evaluator the owned-host hygiene checks use (``hygiene.evaluate_cert``);
-* ``email``: SPF, DKIM, DMARC and MTA-STS of the name (``hygiene.email_findings`` and the MailFail checks), DNS only;
+* ``email``: SPF, DKIM, DMARC and MTA-STS of the name (a Sentinel reads them, ``supplier_check``; ``hygiene`` and the MailFail evaluators judge them), DNS only;
 * ``web`` and ``exposed``: HTTP security headers of the front page, and whether a short fixed list of well-known administration and login
   pages answers (one plain GET each, never a guessed path);
 * ``cve`` (secondary, informational): the versions the card shows, matched against the CVE catalog by the rules owned hosts use
@@ -115,7 +115,7 @@ def _from_hygiene(found, domain, category):
 
 
 def tls_postures(domain, info, now=None):
-    """The certificate findings of ``domain:443`` at LOW or worse, from the probed ``info`` (``hygiene.probe_tls``)."""
+    """The certificate findings of ``domain:443`` at LOW or worse, from the ``info`` a Sentinel read (``supplier_check``)."""
     return [_from_hygiene(f, domain, 'tls') for f in hygiene.evaluate_cert({**info, 'host': domain, 'port': 443}, now=now) if f.severity >= LOW]
 
 
