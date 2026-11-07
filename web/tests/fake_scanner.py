@@ -438,6 +438,7 @@ LOCAL_RUNNERS = {
     'nmap_verify': (),  # likewise
     'node2shell': (),  # likewise
     'identity_check': (),  # likewise
+    'ssh_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': (),  # likewise
     'path_probe': (),  # likewise
@@ -477,6 +478,7 @@ HEAVY_KINDS = {
     'db_probe': ('route-probe',),
     'path_probe': (),
     'identity_check': (),
+    'ssh_probe': (),
     'nuclei_validate': ('template-test',),
 }
 

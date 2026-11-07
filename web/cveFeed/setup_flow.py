@@ -54,6 +54,8 @@ FAMILIES = (
     ('network', 'Open ports and services', 'Which ports answer and which service and version is behind them. Includes the heavy full-port and UDP sweeps.',
      ('nmap', 'naabu', 'nmap_full', 'nmap_verify', 'nmap_udp', 'db_probe')),
     ('tls_mail', 'Certificates and email', 'TLS configuration, expiring certificates, SPF, DKIM and DMARC.', ('testssl', 'hygiene_check')),
+    ('ssh', 'SSH', 'A read-only look at the SSH services that answer: their software version, key types and sizes, and whether a host key is on the list of compromised keys. No login is ever attempted.',
+     ('ssh_probe',)),
     ('secrets', 'Exposed secrets (Kingfisher)', 'Looks for keys and tokens left in public files and repositories.', ('secrets_scan',)),
     ('screenshots', 'Screenshots', 'A picture of each web page and remote desktop login. Needs a browser, so it is the hungriest of the light checks.',
      ('web_screenshot', 'rdp_shot')),

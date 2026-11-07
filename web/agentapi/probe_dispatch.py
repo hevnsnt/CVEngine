@@ -362,6 +362,27 @@ def try_dangling(project, checks, providers):
     return answered
 
 
+MAX_SSH_TARGETS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.ssh_probe.MAX_TARGETS)
+
+
+def try_ssh_probe(project, keys, scan=None):
+    """``{(address, port): host row}`` for the SSH endpoints (``keys``: ``[(address, port)]``, at most ``MAX_SSH_TARGETS_PER_TASK``) a Sentinel inspected
+    (``probe_results.clean_ssh_probe``, cut to the endpoints asked). The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable``
+    when no Sentinel can take it. A task that ended without a result, and an endpoint the result has no row for, are missing from the answer: unknown, the
+    caller leaves them due and never reads a missing one as a clean host."""
+    from cveFeed import probe_scope
+    keys = list(dict.fromkeys(keys))[:MAX_SSH_TARGETS_PER_TASK]
+    if not keys or not _offered(project, 'ssh_probe'):
+        return {}
+    target = {'targets': [{'address': a, 'port': p} for a, p in keys], 'scope': probe_scope.for_ssh(project.pk, [a for a, _p in keys])}
+    result = sentinel_dispatch.dispatch_or_none(project, 'ssh_probe', target, host=_hosts_label(a for a, _p in keys), ips=[a for a, _p in keys])
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('ssh_probe task for %s: the scanner refused %s endpoint(s) outside the scope policy', project.pk, len(result['refused']))
+    return {(row['address'], row['port']): row for row in result.get('hosts') or []}
+
+
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)
 
 
