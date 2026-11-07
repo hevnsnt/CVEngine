@@ -23,6 +23,10 @@
         );
       })();
     </script>
+    <script>
+      // ?scene=1: only the two engineers and the status line, for the setup wizard's building screen (static/cve/welcome.js frames this page)
+      if (/[?&]scene=1(&|$)/.test(location.search)) document.documentElement.setAttribute("data-scene", "1");
+    </script>
     <style>
       /* One self-contained file: the application is the thing that is down, so nothing here is fetched from it or anywhere else. */
       :root {
@@ -113,6 +117,10 @@
       * {
         box-sizing: border-box;
       }
+      :root[data-scene] body { display: block; padding: 0; background: transparent; min-height: 0; }
+      :root[data-scene] main { border: 0; box-shadow: none; border-radius: 0; max-width: none; background: transparent; }
+      :root[data-scene] main::before, :root[data-scene] .head, :root[data-scene] .track { display: none; }
+      :root[data-scene] .foot { padding: 12px 18px 14px; }
       html,
       body {
         height: 100%;

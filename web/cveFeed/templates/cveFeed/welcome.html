@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0a0b'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial Black,Helvetica,sans-serif' font-weight='900' font-style='italic' font-size='15' fill='white'%3Ecv%3C/text%3E%3Crect x='23' y='6' width='3' height='4' fill='%23ff5a00'/%3E%3C/svg%3E">
-<title>Welcome to CVEngine</title>
+<title>Set up cvENGINE</title>
 <link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
 <script src="{% asset 'cve/theme.js' %}"></script>
 <link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
@@ -13,7 +13,7 @@
 <style>
   body{padding-bottom:0;min-height:100vh;display:flex;flex-direction:column}
   .wiz{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 16px;position:relative}
-  .wiz-card{width:100%;max-width:520px}
+  .wiz-card{width:100%;max-width:640px}
   .wiz .brand{margin-bottom:26px;font-size:20px}
   .wiz .mark{width:32px;height:32px}
   .dots{display:flex;gap:6px;margin-bottom:24px}
@@ -28,6 +28,35 @@
   .points b{display:grid;place-items:center;width:30px;height:30px;border-radius:6px;background:var(--ink);color:#fff;font:700 13px var(--mono)}
   .points span{color:var(--muted);font-size:14.5px}
   .points span strong{display:block;color:var(--ink);font-size:15px}
+  .wiz h1{font-size:30px}
+  .disc{display:none;align-items:center;gap:10px;margin:-8px 0 18px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);font-size:13.5px;color:var(--muted)}
+  .disc.on{display:flex}.disc .t{flex:1;min-width:0}
+  .choice{display:grid;gap:10px;margin:0 0 16px}
+  .choice label{display:grid;grid-template-columns:22px 1fr;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);cursor:pointer}
+  .choice label:has(input:checked){border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+  .choice label.off{opacity:.5;cursor:not-allowed}
+  .choice b{display:block;font-size:15px;margin-bottom:2px}.choice span{color:var(--muted);font-size:14px}
+  .panel{border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);padding:14px;margin:0 0 16px}
+  .panel h3{margin:0 0 6px;font-size:15px}
+  .cmd{width:100%;min-height:92px;font:12.5px/1.45 var(--mono);padding:10px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--sunk);color:var(--ink);resize:vertical}
+  .fam{border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);margin:0 0 10px;padding:12px 14px}
+  .fam header{display:flex;gap:10px;align-items:center}.fam header b{font-size:15px}.fam p{margin:4px 0 8px;color:var(--muted);font-size:13.5px}
+  .fam ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 14px}
+  .fam li label{display:flex;gap:8px;align-items:center;font-size:13.5px}.fam li .tag{font:600 10px var(--mono);text-transform:uppercase;color:var(--muted)}
+  .fam.vas{border-style:dashed}
+  .extra{border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);padding:14px;margin:0 0 12px}
+  .extra h3{margin:0 0 4px;font-size:15px;display:flex;justify-content:space-between;gap:8px}.extra h3 .st{font:600 11px var(--mono);text-transform:uppercase;color:var(--muted)}
+  .extra h3 .st.done{color:var(--ok-ink)}
+  .steps-list{list-style:none;margin:0 0 14px;padding:0;display:grid;gap:8px}
+  .steps-list li{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;font-size:14.5px}
+  .steps-list .g{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line-2);font:700 11px var(--mono);color:var(--muted)}
+  .steps-list li.ok .g{background:var(--ok);border-color:var(--ok);color:#fff}
+  .steps-list li.run .g{border-color:var(--brand);color:var(--brand)}
+  .steps-list small{display:block;color:var(--muted);font-size:13px}
+  .scene{width:100%;height:340px;border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);margin:0 0 14px}
+  .recent{font:12.5px var(--mono);color:var(--muted);margin:6px 0 0;word-break:break-all}
+  .foot-skip{margin-top:22px;text-align:center;font-size:13px}
+  .stepname{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 6px}
   .live-hint{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted);margin-top:14px}
 </style>
 </head>
@@ -36,7 +65,9 @@
   <div class="wiz-card">
     <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
     <div class="dots" id="dots" aria-hidden="true"></div>
+    <div class="disc" id="disc" role="status" aria-live="polite"><span class="live">live</span><span class="t" id="disc-text"></span></div>
     <div id="wizard">{% csrf_token %}<div id="step"></div></div>
+    <p class="foot-skip"><button class="skip" id="skip-all" type="button">Skip the rest and open the dashboard</button></p>
   </div>
 </main>
 <script type="module" src="{% asset 'cve/welcome.js' %}"></script>
