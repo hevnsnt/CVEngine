@@ -72,6 +72,7 @@ ALLOWED = {
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nmap' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',
         'cveFeed/models.py',
@@ -134,6 +135,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nuclei' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
@@ -181,6 +183,7 @@ ALLOWED = {
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'naabu' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/port_stage.py',  # the ledger service and Port source of the discovery pass, and the discovery pass's own activity text: data values, runs nothing
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
@@ -240,6 +243,7 @@ ALLOWED = {
         'cveFeed/ledger.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' (stored data values), runs nothing
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/management/commands/rerate_dangling_dns.py',  # 1.3.5 backfill (develop): re-rates stored bbot/baddns findings, runs no tool
+        'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'bbot' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/migrations/0040_hostlabel.py',
         'cveFeed/migrations/0041_bbot_info_to_labels.py',
         'cveFeed/models.py',  # 1.4 T8: finding kind and source values 'bbot' (stored data values), runs nothing
@@ -261,6 +265,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'wafw00f' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/waf_fingerprint.py',  # 1.4 WAF fingerprint on a Sentinel: the ledger key is a stored data value, runs nothing
     ],
     'gowitness': [
