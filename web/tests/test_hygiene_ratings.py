@@ -380,6 +380,17 @@ class OrganizationalDomainTests(Base):
 		self.assertNotIn('spf_missing', checks(found))
 		self.assertIn('spf_softfail', checks(found))
 
+	def test_the_names_a_parent_finding_shows_do_not_depend_on_the_order_they_were_found_in(self):
+		from cveFeed.hygiene import Finding, merge_findings
+		names = [f'm{i}.example.com' for i in range(20)]
+		def run(order):
+			found = [Finding('dmarc_none', 2, 'DMARC policy none', 'p=none', 'example.com', {'inherited_from': 'example.com', 'covers': [n]}) for n in order]
+			return merge_findings(found)[0]
+		forward, backward = run(names), run(list(reversed(names)))
+		self.assertEqual(forward.detail, backward.detail)
+		self.assertEqual(forward.evidence['covers'], backward.evidence['covers'])
+		self.assertIn('m0.example.com', forward.detail)
+
 	def test_a_p_none_parent_is_one_finding_not_one_per_subdomain(self):
 		zone = {'_dmarc.example.com': ['v=DMARC1; p=none; rua=mailto:d@example.com'], 'example.com': ['v=spf1 -all']}
 		names = [f'm{i}.example.com' for i in range(20)]
