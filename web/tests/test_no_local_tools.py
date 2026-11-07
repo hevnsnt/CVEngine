@@ -280,7 +280,6 @@ ALLOWED = {
     'aardwolf': [
     ],
     'subprocess': [
-        'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',
         'cveFeed/heavy_process.py',
         'cveFeed/report_pdf.py',

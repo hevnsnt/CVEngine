@@ -87,7 +87,7 @@ class VantageWarningTests(VantageBase):
         os.environ[ENV] = 'none'
         out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves http_probe', out[0])
+        self.assertIn('moves openvas, ', out[0])
         for gone in sentinel_dispatch.NEVER_LOCAL:
             self.assertNotIn(f' {gone},', out[0])  # a kind with no local path never ran here, so it is never \"moved\"
 
@@ -160,20 +160,20 @@ class VantageWarningTests(VantageBase):
 
     def test_a_published_node_status_file_is_tailscale_too(self):
         import tempfile
-        os.environ[ENV] = all_but('wpscan')
+        os.environ[ENV] = all_but('openvas')
         with tempfile.NamedTemporaryFile() as handle:
             os.environ['CVENGINE_TAILSCALE_STATUS_FILE'] = handle.name
             out = scanner_state.vantage_warnings()
         self.assertEqual(len(out), 1)
-        self.assertIn('moves wpscan to the built-in scanner, whose image does not use the private Tailscale addresses', out[0])
+        self.assertIn('moves openvas to the built-in scanner, whose image does not use the private Tailscale addresses', out[0])
 
     def test_private_targets_allowed_warns(self):
-        os.environ[ENV] = all_but('testssl')
+        os.environ[ENV] = all_but('openvas')
         for value in ('1', 'true', 'YES'):
             os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = value
             out = scanner_state.vantage_warnings()
             self.assertEqual(len(out), 1, value)
-            self.assertIn('moves testssl to the built-in scanner, whose image does not use the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)', out[0])
+            self.assertIn('moves openvas to the built-in scanner, whose image does not use the private-target setting (CVENGINE_ALLOW_PRIVATE_TARGETS)', out[0])
         for value in ('0', '', 'no'):
             os.environ['CVENGINE_ALLOW_PRIVATE_TARGETS'] = value
             self.assertEqual(scanner_state.vantage_warnings(), [], value)

@@ -692,7 +692,7 @@ class CompletionCeilingTests(DispatchBase):
         self.assertEqual(SentinelTask.objects.get().status, 'done')  # never expired, so never also run locally
 
     def test_a_sentinel_that_stopped_heartbeating_is_let_go_when_its_lease_lapses_not_at_the_ceiling(self):
-        agent = self.make_sentinel(['wpscan'])
+        agent = self.make_sentinel(['openvas'])
         real_sleep = time.sleep
         state = {'n': 0}
 
@@ -704,7 +704,7 @@ class CompletionCeilingTests(DispatchBase):
         with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
                 mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
             start = time.monotonic()
-            out = dispatch.dispatch_or_none(self.project, 'wpscan', {'addresses': ['10.0.0.1']}, host='x')
+            out = dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['10.0.0.1']}, host='x')
         self.assertIsNone(out)
         self.assertLess(time.monotonic() - start, 5)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')

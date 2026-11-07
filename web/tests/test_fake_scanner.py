@@ -150,9 +150,9 @@ class HarnessModeTests(NoRealSleep, DispatchBase):
         self.assertIn('the Sentinel reported it failed', str(caught.exception))
 
     def test_fail_where_local_is_allowed_returns_none_so_the_stage_falls_back(self):
-        with LocalFallback('wpscan'), FakeScanner(kinds=['wpscan'], mode='fail'):
-            self.assertIsNone(self.go('wpscan'))
-        self.assertEqual(SentinelTask.objects.get(kind='wpscan').status, 'failed')
+        with LocalFallback('http_probe'), FakeScanner(kinds=['http_probe'], mode='fail'):
+            self.assertIsNone(self.go('http_probe'))
+        self.assertEqual(SentinelTask.objects.get(kind='http_probe').status, 'failed')
 
     def test_the_kinds_with_no_local_path_wait_whatever_the_list_says(self):
         with LocalFallback('all'), FakeScanner(kinds=['nmap'], mode='fail'):
@@ -282,8 +282,8 @@ class HarnessGuardTests(TestCase):
         before = os.environ.get(ENV)
         with LocalFallback('none'):
             self.assertEqual(dispatch.local_fallback_kinds(), set())
-            with LocalFallback('openvas,wpscan'):
-                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'wpscan'})
+            with LocalFallback('openvas,http_probe'):
+                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'http_probe'})
             with LocalFallback(None):
                 self.assertIn('openvas', dispatch.local_fallback_kinds())
         self.assertEqual(os.environ.get(ENV), before)
