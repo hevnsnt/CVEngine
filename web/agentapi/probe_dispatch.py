@@ -236,6 +236,12 @@ def try_identity(project, scan, dns=(), certs=(), unattended=True, allow_archive
         return {}, {}
     if not _offered(project, 'identity_check'):  # unreachable while the kind is in NEVER_LOCAL (_offered raises); never let a missing answer read as none
         return {}, {}
+    # A Sentinel refuses a whole identity_check task when one question is malformed, and a question about an address that is not a PTR is: an IP-only
+    # host (a Subdomain named by its address) has no CNAME, NS or MX to read, and nothing to look up for an A question. Such a question is never sent,
+    # so it is missing from the answer (no answer, never "none") instead of failing the 200 others sent with it.
+    dns = [q for q in dns if (q.get('type') == 'PTR') == _is_address(q.get('name'))]
+    if not dns and not certs:
+        return {}, {}
     ungated = [q['name'] for q in dns if q.get('ungated')]  # an internal key: a name the server made up, never sent as such
     dns = [{k: v for k, v in q.items() if k != 'ungated'} for q in dns]
     scope = probe_scope.for_identity(project.pk, [*(q['name'] for q in dns), *(c['host'] for c in certs)], unattended=unattended,

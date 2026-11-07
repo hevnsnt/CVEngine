@@ -231,6 +231,20 @@ if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && ! grep -qE '^SCANNER
   printf 'SCANNER_MEM_LIMIT=1g\n' >> .env
   ok "SCANNER_MEM_LIMIT=1g for this host's memory"
 fi
+# A host port chosen for this run (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in the environment, for a machine where something else holds 443) is
+# written to .env: make, docker compose and the update watcher run later without this environment and would otherwise publish the defaults, move the
+# proxy back to 443 (or fail on it) and leave the address printed above wrong. Without a value given here, what .env already says stays.
+for port_var in CVENGINE_HTTPS_PORT CVENGINE_HTTP_PORT; do
+  port_given=${!port_var:-}
+  [ -n "$port_given" ] || continue
+  if ! [[ $port_given =~ ^[0-9]+$ ]] || [ "$port_given" -lt 1 ] || [ "$port_given" -gt 65535 ]; then die "$port_var=$port_given is not a port number (1 to 65535)."; fi
+  if grep -qE "^#? ?$port_var=" .env; then
+    sed -i -E "s|^#? ?$port_var=.*|$port_var=$port_given|" .env
+  else
+    printf '%s=%s\n' "$port_var" "$port_given" >> .env
+  fi
+  ok "$port_var=$port_given saved in .env (later make, compose and update runs keep it)"
+done
 # The proxy's workers (an unprivileged user) read config/nginx at run time. A checkout made with umask 027 or 077 (hardened servers, some root shells)
 # leaves it unreadable to them and every page then answers 403: the files are made readable again here.
 chmod -R a+rX config 2>/dev/null || true

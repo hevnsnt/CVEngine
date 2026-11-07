@@ -272,8 +272,13 @@ def start_discovery(row, project, domain):
     if target is None:
         return False
     disc = (row.data or {}).get('discovery') or {}
-    if disc.get('domain') == domain and disc.get('scan_id') and ScanHistory._base_manager.filter(pk=disc['scan_id'], domain=target).exists():
-        return False
+    if disc.get('domain') == domain and disc.get('scan_id'):
+        previous = ScanHistory._base_manager.filter(pk=disc['scan_id'], domain=target).only('scan_status').first()
+        if previous is not None and not _produced_nothing(previous):
+            return False
+        # the same step sent again after a discovery that ended with no host (refused, failed, stopped, or finished empty): it starts again, with a
+        # fresh wait, instead of leaving the person on a screen that can only say it found nothing
+        disc = {**disc, 'started_at': None, 'tries': 0}
     try:
         scans = discovery.start_in_stored_modes([target])  # the mode stored on the target; the same call the dashboard's own discovery uses
     except RuntimeError:  # no scan engine yet: a fresh install is still finishing its first start
@@ -285,6 +290,15 @@ def start_discovery(row, project, domain):
     _store(row, discovery={'domain': domain, 'scan_id': scan.id, 'started_at': disc.get('started_at') if disc.get('domain') == domain and disc.get('started_at') else now,
                            'tries': int(disc.get('tries') or 0) if disc.get('domain') == domain else 0, 'last_try': now})
     return True
+
+
+def _produced_nothing(scan):
+    """Whether a seed discovery has ended and found no host: nothing is running or queued for it and no name was stored under it."""
+    from cveFeed import discovery
+    from startScan.models import Subdomain
+    if scan.scan_status in (discovery.QUEUED, discovery.RUNNING):
+        return False
+    return not Subdomain.objects.filter(scan_history_id=scan.pk).exists()
 
 
 def resume_discovery(row, now=None):
@@ -656,7 +670,8 @@ def progress(request, now=None):
                      else 'done' if scan.scan_status == discovery.SUCCESS else 'waiting' if waiting else 'ended')
             out['discovery'] = {'scan_id': scan.pk, 'domain': scan.domain.name, 'state': state, 'hosts': found, 'recent': [h for h in recent if h],
                                 'queue_position': discovery.queue_position(scan.pk) if state == 'queued' else None,
-                                'text': discovery_text(state, scan.domain.name, found, live['live'])}
+                                'error': (scan.error_message or '')[:290] if state == 'ended' else '',
+                                'text': discovery_text(state, scan.domain.name, found, live['live'], scan.error_message if state == 'ended' else '')}
     over = elapsed is None or elapsed >= out['dwell']['min_seconds']
     finished = bool(out['discovery'] and out['discovery']['state'] in ('done', 'ended'))
     ready = over or found >= ENOUGH_HOSTS or finished
@@ -668,7 +683,7 @@ def progress(request, now=None):
     return out
 
 
-def discovery_text(state, domain, found, live):
+def discovery_text(state, domain, found, live, reason=''):
     hosts = f'{found} host{"s" if found != 1 else ""}'
     if state == 'queued':
         return (f'Discovery of {domain} is queued and starts the moment a Sentinel takes it.' if live
@@ -680,6 +695,9 @@ def discovery_text(state, domain, found, live):
     if state == 'waiting':
         return (f'No Sentinel took the discovery of {domain} in time. It is queued again as soon as one is connected.' if not live
                 else f'Queueing the discovery of {domain} again now that a Sentinel is connected.')
+    reason = ' '.join(str(reason or '').split()).rstrip('. ')[:290]
+    if reason:  # what the scanner or the server's own check said (for example that the name resolves to an internal address): shown, not guessed at
+        return f'Discovery of {domain} ended early with {hosts} found: {reason}. You can start it again from Targets.'
     return f'Discovery of {domain} ended early with {hosts} found. You can start it again from Targets.'
 
 
