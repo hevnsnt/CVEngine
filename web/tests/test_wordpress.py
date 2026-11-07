@@ -8,6 +8,7 @@ from cveFeed import host_context, wp_correlation, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, HostArchive, ProbeObservation, RouteAuth, ServiceRun
 from dashboard.models import ApiCredential
 from startScan.models import Subdomain, Technology
+from tests.fake_scanner import FakeScanner
 from tests.test_probes import answers, page
 from tests.test_route_auth import RouteFixture
 from tests.test_wpscan import REPORT
@@ -174,9 +175,23 @@ class ComponentTests(WordPressFixture, TestCase):
         super().setUp()
         Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test').technologies.add(Technology.objects.create(name='WordPress'))
 
+    def readmes(self, titles):
+        """A Sentinel that reads plugin readmes (``page_read`` op ``readme``): ``titles`` is what the readmes say, by slug."""
+        def answer(task):
+            (read,) = task['target']['reads']
+            return {'outcome': 'done', 'touched': [read['host']], 'refused': [], 'reads': [
+                {'id': read['id'], 'readme': {'titles': {s: titles[s] for s in read['slugs'] if s in titles}, 'asked': len(read['slugs']), 'unread': 0}}]}
+        return FakeScanner(kinds=['page_read'], responders={'page_read': answer})
+
     def test_a_tokenless_run_still_records_plugin_versions_and_titles(self):
-        self.table = {'/wp-content/plugins/cf-image-resizing/readme.txt': page(200, body='=== Cloudflare Image Resizing ===\nContributors: x')}
-        self.go()
+        with self.readmes({'cf-image-resizing': 'Cloudflare Image Resizing'}) as fake:
+            self.go()
+        (served,) = fake.served  # one task for the host: this server asked the site for no readme itself
+        (read,) = served['target']['reads']
+        self.assertEqual((served['kind'], read['op'], read['host'], read['base'], read['slugs']),
+                         ('page_read', 'readme', 'www.rt.test', 'https://www.rt.test', ['akismet', 'cf-image-resizing']))
+        self.assertEqual(served['target']['scope']['hosts'][0], 'www.rt.test')
+        self.assertEqual([u for u in self.asked if 'readme' in u], [])
         row = ProbeObservation.objects.get(host='www.rt.test', probe='wpscan-plugin', product='cf-image-resizing')
         self.assertEqual((row.version, row.kind, row.source), ('1.5.5', 'wp-plugin', 'wpscan'))
         self.assertEqual(row.evidence['title'], 'Cloudflare Image Resizing')
@@ -184,6 +199,23 @@ class ComponentTests(WordPressFixture, TestCase):
         self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', probe='wpscan-plugin', product='akismet').outcome, 'hidden')
         self.assertEqual(self.calls[0][1], '')  # no token configured
         self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', probe='wpscan-core').version, '6.4.2')
+
+    def test_titles_that_could_not_be_read_keep_the_ones_already_held_and_the_scan_is_saved(self):
+        """A readme read that no scanner can take (or that failed) is unknown, never \"this plugin has no title\": the scan just made is kept."""
+        with self.readmes({'cf-image-resizing': 'Cloudflare Image Resizing'}):
+            self.go()
+        self.go(force=True)  # no scanner takes page_read now
+        row = ProbeObservation.objects.get(host='www.rt.test', probe='wpscan-plugin', product='cf-image-resizing')
+        self.assertEqual((row.evidence['title'], row.version), ('Cloudflare Image Resizing', '1.5.5'))
+        self.assertEqual(self.state('www.rt.test')['state'], 'scanned')
+
+    def test_a_readme_that_gave_no_title_is_no_title(self):
+        with self.readmes({'cf-image-resizing': 'Cloudflare Image Resizing'}):
+            self.go()
+        with self.readmes({}):  # the scanner answered: the readmes have no title line
+            self.go(force=True)
+        row = ProbeObservation.objects.get(host='www.rt.test', probe='wpscan-plugin', product='cf-image-resizing')
+        self.assertNotIn('title', row.evidence)
 
     def test_a_plugin_that_is_no_longer_reported_is_removed(self):
         self.go()

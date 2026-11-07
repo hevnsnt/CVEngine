@@ -9,7 +9,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
 
-from agentapi import probe_results, sentinel_broker
+from agentapi import probe_dispatch, probe_results, sentinel_broker
 from agentapi.services import ApiError
 from cveFeed import probe_scope, validation
 from cveFeed.models import CVEMatch
@@ -27,10 +27,12 @@ class CleanResultTests(SimpleTestCase):
 
     def test_the_contract_fixture_is_kept_whole(self):
         got = self.clean(fixture('page_read'))
-        (head, libraries) = got['reads']
+        (head, libraries, control, readme) = got['reads']
         self.assertEqual(head['head'], {'status': 200, 'method': 'HEAD', 'server': 'nginx/1.24.0', 'powered_by': '', 'title': ''})
         (page,) = libraries['reading']['pages']
         self.assertEqual((page['outcome'], page['records']['jquery']['version'], page['read_whole']), ('read', '3.6.0', 1))
+        self.assertEqual(control['control'], {'status': 404, 'location': '', 'length': 146, 'digest': 'a' * 8 + '0' * 56})
+        self.assertEqual(readme['readme'], {'titles': {'akismet': 'Akismet Anti-Spam'}, 'asked': 2, 'unread': 1})
         self.assertEqual((got['touched'], got['refused']), (['www.example.com'], []))
 
     def test_a_read_with_neither_an_answer_nor_an_error_is_an_error_not_a_state(self):
@@ -52,6 +54,30 @@ class CleanResultTests(SimpleTestCase):
         (row,) = self.clean({'reads': [{'id': 'x', 'head': {'status': 'ok', 'method': 'POST', 'server': 's' * 1000, 'cookie': 'secret', 'body': '<html>'}}]})['reads']
         self.assertEqual(row['head']['status'], None)
         self.assertEqual((row['head']['method'], len(row['head']['server']), set(row['head'])), ('HEAD', 300, {'status', 'method', 'server', 'powered_by', 'title'}))
+
+    def test_a_control_answer_keeps_a_digest_and_never_a_body(self):
+        digest = 'f' * 64
+        (row,) = self.clean({'reads': [{'id': 'c', 'control': {'status': 503, 'location': '/x' * 400, 'length': 99, 'digest': digest, 'body': '<html>secret</html>'}}]})['reads']
+        self.assertEqual(set(row['control']), {'status', 'location', 'length', 'digest'})
+        self.assertEqual((row['control']['status'], len(row['control']['location']), row['control']['digest']), (503, 500, digest))
+        (row,) = self.clean({'reads': [{'id': 'c', 'control': {'status': 'ok', 'length': -4, 'digest': digest}}]})['reads']
+        self.assertEqual((row['control']['status'], row['control']['length']), (0, 0))
+
+    def test_a_control_answer_without_a_digest_is_an_error_not_a_state(self):
+        for bad in ({'status': 404}, {'status': 404, 'digest': 'abc'}, {'digest': 'F' * 64}):
+            (row,) = self.clean({'reads': [{'id': 'c', 'control': bad}]})['reads']
+            self.assertIn('neither an answer nor an error', row['error'])
+            self.assertNotIn('control', row)
+
+    def test_readme_titles_are_clipped_to_the_alphabet_a_title_may_hold_and_to_eight(self):
+        titles = {f'plugin-{n}': f'Title {n}' for n in range(12)}
+        titles.update({'../evil': 'x', 'ok-slug': '<b>Bold</b> \u202eTitle ' + 'y' * 300, 'empty': '<>'})
+        (row,) = self.clean({'reads': [{'id': 'r', 'readme': {'titles': titles, 'asked': 8, 'unread': 99}}]})['reads']
+        got = row['readme']['titles']
+        self.assertLessEqual(len(got), 8)
+        self.assertTrue(all(len(t) <= 120 and not set(t) & set('<>\u202e') for t in got.values()))
+        self.assertNotIn('../evil', got)
+        self.assertEqual((row['readme']['asked'], row['readme']['unread']), (8, 0))
 
     def test_more_reads_than_the_contract_allows_is_refused(self):
         with self.assertRaises(ApiError):
@@ -105,6 +131,65 @@ class PolicyTests(Base):
             scope = self.scope(m)
         self.assertNotIn('www.v.test', scope['hosts'])
         self.assertIn('www.v.test', scope['excluded'])
+
+
+class HostsPolicyTests(Base):
+    """``probe_scope.for_hosts``: the policy of a read of named hosts only (the result screen's control read)."""
+
+    def test_each_named_host_is_listed_as_itself_and_nothing_else(self):
+        scope = probe_scope.for_hosts(self.project.id, ['Lb.V.test.', 'www.v.test', 'lb.v.test', ''])
+        self.assertEqual((scope['hosts'], scope['excluded']), (['lb.v.test', 'www.v.test'], []))
+        self.assertNotIn('cdnjs.cloudflare.com', scope['hosts'])  # a control read is never sent to a public CDN, and no twin name is added
+
+    def test_a_host_a_gate_refuses_is_excluded_not_listed(self):
+        with mock.patch('cveFeed.bounty_gate.Gate.refusal', lambda _self, project_id, host=None, unattended=True, derived=False: 'not in scope' if host == 'lb.v.test' else ''):
+            scope = probe_scope.for_hosts(self.project.id, ['lb.v.test', 'www.v.test'])
+        self.assertEqual((scope['hosts'], scope['excluded']), (['www.v.test'], ['lb.v.test']))
+
+
+class ControlReadTests(Base):
+    """``probe_dispatch.control_reads`` through the fake built-in scanner: the task a Sentinel gets and what an unanswered read means."""
+
+    URLS = ['https://www.v.test/.cvengine-control-0123456789ab', 'https://lb.v.test/.cvengine-control-ba9876543210']
+
+    def setUp(self):
+        super().setUp()
+        LocalFallback('none').apply(self)
+        self.guard = assert_ran_nowhere_locally(self, 'page_read')
+
+    def answer(self, rows):
+        def respond(task):
+            return {'outcome': 'done', 'touched': [], 'refused': [], 'reads': [{'id': r['id'], **rows.get(r['url'], {'error': 'OSError: refused'})} for r in task['target']['reads']]}
+        return respond
+
+    def test_one_task_names_each_url_and_its_host_and_the_answers_come_back_by_url(self):
+        digest = 'c' * 64
+        rows = {self.URLS[0]: {'control': {'status': 404, 'location': '', 'length': 9, 'digest': digest}}}
+        with FakeScanner(kinds=['page_read'], responders={'page_read': self.answer(rows)}) as fake:
+            got = probe_dispatch.control_reads(self.project, None, self.URLS)
+        (served,) = fake.served
+        self.assertEqual([(r['op'], r['host'], r['url']) for r in served['target']['reads']], [('control', 'www.v.test', self.URLS[0]), ('control', 'lb.v.test', self.URLS[1])])
+        self.assertEqual(served['target']['scope']['hosts'], ['lb.v.test', 'www.v.test'])
+        self.assertEqual(got, {self.URLS[0]: (404, '', digest), self.URLS[1]: None})  # the read that failed is None, never an answer
+        self.assertEqual(self.guard.calls, [])
+
+    def test_more_than_ten_urls_make_more_than_one_task(self):
+        urls = [f'https://h{n}.v.test/.cvengine-control-0123456789ab' for n in range(12)]
+        with FakeScanner(kinds=['page_read'], responders={'page_read': self.answer({})}) as fake:
+            got = probe_dispatch.control_reads(self.project, None, urls)
+        self.assertEqual(([len(t['target']['reads']) for t in fake.served], len(got)), ([10, 2], 12))
+
+    def test_with_no_scanner_able_to_take_it_nothing_is_decided(self):
+        from reNgine.resources import ScannerUnavailable
+        with self.assertRaises(ScannerUnavailable):
+            probe_dispatch.control_reads(self.project, None, self.URLS)
+        with FakeScanner(kinds=['page_read'], mode='offline'), self.assertRaises(ScannerUnavailable):
+            probe_dispatch.control_reads(self.project, None, self.URLS)
+        self.assertEqual(self.guard.calls, [])
+
+    def test_a_read_the_scanner_did_not_report_is_none(self):
+        with FakeScanner(kinds=['page_read'], responders={'page_read': lambda task: {'outcome': 'done', 'touched': [], 'refused': [], 'reads': []}}):
+            self.assertEqual(probe_dispatch.control_reads(self.project, None, self.URLS[:1]), {self.URLS[0]: None})
 
 
 class EndToEndTests(Base):

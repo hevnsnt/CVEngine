@@ -161,6 +161,21 @@ def for_page_read(project_id, sub, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_hosts(project_id, hosts, unattended=False):
+    """The policy of a page_read task that reads the named hosts and nothing else (the result screen's control read of a finding's origin): each
+    host as itself, unless a gate refuses it now (excluded, archived, outside the bug bounty program's scope), in which case it is named in ``excluded``
+    and the scanner says why a read of it was not made. No redirect is followed to another name, so no apex, ``www`` twin or library CDN is listed.
+    Sorted, so the same task is the same task on every pass of an asynchronous stage."""
+    gate = _Gate(project_id, unattended=unattended)
+    hosts_ok, excluded = [], []
+    for name in sorted({(h or '').strip().lower().rstrip('.') for h in hosts} - {''}):
+        if gate.refusal(name):
+            excluded.append(name)
+        elif len(hosts_ok) < MAX_HOSTS:
+            hosts_ok.append(name)
+    return {'hosts': hosts_ok, 'domains': [], 'excluded': excluded[:MAX_EXCLUDED], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_routes(project_id, scan, hosts, unattended=False):
     """The policy of a route_probe task: the hosts the route plan chose (``route_auth._plan`` already applied the exclusions and the bug bounty gate;
     an exclusion made since is applied again here), then, for the scripts of their front pages, the other hosts of the same site this project holds

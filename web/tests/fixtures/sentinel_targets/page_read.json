@@ -17,6 +17,22 @@
       "seen_urls": [
         "https://www.example.com/static/jquery.min.js"
       ]
+    },
+    {
+      "id": "control:https://www.example.com/.cvengine-control-0123456789ab",
+      "op": "control",
+      "host": "www.example.com",
+      "url": "https://www.example.com/.cvengine-control-0123456789ab"
+    },
+    {
+      "id": "readme:www.example.com",
+      "op": "readme",
+      "host": "www.example.com",
+      "base": "https://www.example.com",
+      "slugs": [
+        "akismet",
+        "hello-dolly"
+      ]
     }
   ],
   "scope": {

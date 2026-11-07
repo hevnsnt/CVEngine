@@ -376,42 +376,43 @@ def persist_report(scan, sub, url, report):
     return new, added
 
 
-README_TITLE = re.compile(r'^===\s*(.{1,120}?)\s*===', re.M)
 MAX_TITLE_LOOKUPS = 8
 
 
-def plugin_titles(base, report, allowed, get=None, sleep=None, project=None):
-    """``{slug: title}`` read from each plugin's own readme.txt (``=== Plugin Name ===``, one small GET, at most MAX_TITLE_LOOKUPS per host): an
-    advisory names a plugin by its title, and a slug alone often differs from it. A plugin whose readme cannot be read has no title."""
-    import time
-
-    from cveFeed import probes
-    get = get or (lambda url: probes.fetch(url, allowed=allowed, project=project))
-    out = {}
-    for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]:
-        slug = re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80]
-        if not slug:
-            continue
-        (sleep or time.sleep)(probes.REQUEST_GAP)
-        try:
-            found = README_TITLE.search((get(f'{base.rstrip("/")}/wp-content/plugins/{slug}/readme.txt') or {}).get('body') or '')
-        except (OSError, ValueError):
-            continue
-        if found:
-            out[slug] = re.sub(r'[^A-Za-z0-9 ._+&()-]', '', found.group(1))[:120]
-    return out
+def plugin_titles(scan, sub, base, report):
+    """``{slug: title}`` read from each plugin's own readme.txt (``=== Plugin Name ===``, one small GET each, at most MAX_TITLE_LOOKUPS per host, made by
+    a Sentinel: ``page_read``, op ``readme``; this server sends nothing to the site): an advisory names a plugin by its title, and a slug alone often
+    differs from it. A plugin whose readme cannot be read has no title. Returns None when the titles are unknown (the read could not be made, or no
+    Sentinel could take it): ``record_components`` keeps the titles it already holds. A title is an enrichment, not a verdict, so an unanswered read
+    never discards the scan that was just made, and never turns into \"this plugin has no title\"."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    slugs = [re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80] for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]]
+    slugs = [slug for slug in dict.fromkeys(slugs) if slug and slug[0].isalnum() and '..' not in slug]
+    if not slugs:
+        return {}
+    try:
+        return probe_dispatch.readme_titles(scan.domain.project, scan, sub, base, slugs)
+    except (RuntimeError, ScannerUnavailable) as exc:  # the scanner could not make the read, or none could take it: unknown, never "no titles"
+        logger.info('plugin titles of %s were not read: %s', sub.name, exc)
+        return None
 
 
 def record_components(project_id, domain_id, host, report, titles=None):
     """Store the core, plugin and theme versions the scan read as sightings the CVE correlation uses (with the plugin title when a readme gave
     one); a plugin that is no longer reported is removed. Returns the number of plugins and themes with a version."""
     from cveFeed.models import ProbeObservation
+    keep_known = titles is None  # the titles could not be read this time: the title each plugin row already holds stays
     titles = titles or {}
     now = timezone.now()
     keep = {'wpscan-plugin': set(), 'wpscan-theme': set()}
     versioned = 0
     for kind, slug, version, extra in components(report):
         probe = {'core': 'wpscan-core', 'wp-plugin': 'wpscan-plugin', 'wp-theme': 'wpscan-theme'}[kind]
+        if keep_known and kind == 'wp-plugin':
+            known = ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe=probe, product=slug).first()
+            if known and (known.evidence or {}).get('title'):
+                titles = {**titles, slug: known.evidence['title']}
         ProbeObservation.objects.update_or_create(
             project_id=project_id, host=host.lower(), probe=probe, port=0, kind='version' if kind == 'core' else kind, product=slug,
             defaults={'domain_id': domain_id, 'version': version[:100],
@@ -703,8 +704,8 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
             activity.diagnostic(f'WordPress scan on {host}', _redact(str(exc), token))  # the raw text goes to the worker log, not the feed
             errors.append(f'{host}: the scan failed (see the host page)')
             continue
+        titles = {} if internal else plugin_titles(scan, sub, url, report)  # before the report is saved: a wait for a scanner repeats this pass
         new, techs = persist_report(scan, sub, url, report)
-        titles = {} if internal else plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
         versioned = record_components(project, domain.id, host, report, titles)
         data = 'exhausted' if token and not use else vulnerability_data(report, use)  # a site run after the budget ran out has no vulnerability data
         left = remaining_requests(report)
@@ -919,8 +920,8 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
                 summary['failed'] += 1
                 activity.settle(running, 'failed', message=activity.diagnostic(f'Thorough WordPress scan pass on {host}', reason))
                 continue
+            titles = plugin_titles(scan, sub, url, report)  # before the report is saved: a wait for a scanner repeats this pass
             new, _techs = persist_report(scan, sub, url, report)
-            titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project_id)
             versioned = record_components(project_id, domain_id, host, report, titles)
             wp_correlation.run_for_host(sub)
             cut = report.get('cvengine_partial') or ''

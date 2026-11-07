@@ -9,7 +9,7 @@ targets is refused here.
 What is checked is passive and polite, from the outside, for each listed name and nothing else (no wildcard, no neighbouring name, no other
 port than 443 and 80):
 
-* TLS and certificate health of the name on port 443 (``hygiene.probe_tls``: expiry, name match, chain, weak signature or key, TLS 1.0/1.1);
+* TLS and certificate health of the name on port 443 (read by a Sentinel, judged by ``hygiene.evaluate_cert``: expiry, name match, chain, weak signature or key, TLS 1.0/1.1);
 * email authentication (SPF, DKIM, DMARC, MTA-STS and the MailFail checks, DNS only, plus the one MTA-STS policy file over verified HTTPS);
 * HTTP security headers and a short fixed list of well-known administration and login pages: the front page over HTTPS and over HTTP, then
   one plain GET per path of ``supplier_checks.WELL_KNOWN`` at the Sentinel's slow, polite pace, never a guessed path;

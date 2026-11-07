@@ -1,1 +1,122 @@
-{"outcome": "done", "reads": [{"id": "head:https://www.example.com/", "head": {"status": 200, "method": "HEAD", "server": "nginx/1.24.0", "powered_by": "", "title": ""}}, {"id": "libraries:www.example.com", "reading": {"pages": [{"base": "https://www.example.com", "outcome": "read", "status": 200, "final_url": "https://www.example.com/", "records": {"jquery": {"product": "jQuery", "version": "3.6.0", "version_source": "body", "version_confidence": 0.95, "how": "banner", "script_url": "https://www.example.com/static/jquery.min.js", "script_sha256": "", "copies_unresolved": false, "tech_names": ["jQuery:3.6.0"], "copies": [{"url": "https://www.example.com/static/jquery.min.js", "version": "3.6.0", "source": "body", "state": "effective", "how": "banner", "order": 0}]}}, "skipped": [], "truncated": [], "lazy": [], "inline": [], "entries": [{"url": "https://www.example.com/static/jquery.min.js", "kind": "local", "library": "jquery", "fallback": false}], "scripts": 1, "read_whole": 1, "inline_unread": 0, "capped": false, "page_truncated": false, "page_scan": {"status": 200, "whole": true, "versions": [], "unplaceable": [], "blocks": [], "loaders": [], "overflow": false}}], "scanned": {"https://www.example.com/static/jquery.min.js": {"status": 200, "truncated": false, "whole": true, "versions": [["jquery", "3.6.0", "banner"]], "unplaceable": [], "blocks": [], "loaders": [], "overflow": false}}, "extra": {}, "budget_left": 5}}], "touched": ["www.example.com"], "refused": []}
+{
+  "outcome": "done",
+  "reads": [
+    {
+      "id": "head:https://www.example.com/",
+      "head": {
+        "status": 200,
+        "method": "HEAD",
+        "server": "nginx/1.24.0",
+        "powered_by": "",
+        "title": ""
+      }
+    },
+    {
+      "id": "libraries:www.example.com",
+      "reading": {
+        "pages": [
+          {
+            "base": "https://www.example.com",
+            "outcome": "read",
+            "status": 200,
+            "final_url": "https://www.example.com/",
+            "records": {
+              "jquery": {
+                "product": "jQuery",
+                "version": "3.6.0",
+                "version_source": "body",
+                "version_confidence": 0.95,
+                "how": "banner",
+                "script_url": "https://www.example.com/static/jquery.min.js",
+                "script_sha256": "",
+                "copies_unresolved": false,
+                "tech_names": [
+                  "jQuery:3.6.0"
+                ],
+                "copies": [
+                  {
+                    "url": "https://www.example.com/static/jquery.min.js",
+                    "version": "3.6.0",
+                    "source": "body",
+                    "state": "effective",
+                    "how": "banner",
+                    "order": 0
+                  }
+                ]
+              }
+            },
+            "skipped": [],
+            "truncated": [],
+            "lazy": [],
+            "inline": [],
+            "entries": [
+              {
+                "url": "https://www.example.com/static/jquery.min.js",
+                "kind": "local",
+                "library": "jquery",
+                "fallback": false
+              }
+            ],
+            "scripts": 1,
+            "read_whole": 1,
+            "inline_unread": 0,
+            "capped": false,
+            "page_truncated": false,
+            "page_scan": {
+              "status": 200,
+              "whole": true,
+              "versions": [],
+              "unplaceable": [],
+              "blocks": [],
+              "loaders": [],
+              "overflow": false
+            }
+          }
+        ],
+        "scanned": {
+          "https://www.example.com/static/jquery.min.js": {
+            "status": 200,
+            "truncated": false,
+            "whole": true,
+            "versions": [
+              [
+                "jquery",
+                "3.6.0",
+                "banner"
+              ]
+            ],
+            "unplaceable": [],
+            "blocks": [],
+            "loaders": [],
+            "overflow": false
+          }
+        },
+        "extra": {},
+        "budget_left": 5
+      }
+    },
+    {
+      "id": "control:https://www.example.com/.cvengine-control-0123456789ab",
+      "control": {
+        "status": 404,
+        "location": "",
+        "length": 146,
+        "digest": "aaaaaaaa00000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "readme:www.example.com",
+      "readme": {
+        "titles": {
+          "akismet": "Akismet Anti-Spam"
+        },
+        "asked": 2,
+        "unread": 1
+      }
+    }
+  ],
+  "touched": [
+    "www.example.com"
+  ],
+  "refused": []
+}
