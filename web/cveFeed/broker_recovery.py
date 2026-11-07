@@ -40,7 +40,9 @@ def requeue_unacked(app=None):
 # reserved, scheduled or running inside a worker. A worker that acknowledges on receipt and is killed takes its reserved tasks with it
 # and leaves nothing in the broker, so the rows they belonged to are orphans.
 import json
+import threading
 import time
+from contextlib import contextmanager
 
 MAX_QUEUE_SCAN = 20000  # a queue longer than this is not read: "unknown" is safer than a slow or partial answer
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
@@ -91,7 +93,35 @@ def _scan_refs(raw):
     return [r for r in (_scan_ref(i) for i in (found if isinstance(found, list) else [found])) if r is not None]
 
 
+_probe = threading.local()
+
+
+@contextmanager
+def shared_probe():
+    """Within this block the answer of ``live_tasks`` is asked for once and reused: the reaper makes three decisions from it (orphaned running rows, lost host
+    assessments, lost scans) and each used to ask the broker and every worker again, 3 seconds a question and 9 or more a run. Meant for one short run in one
+    thread (a periodic task), never a request: the answer is not refreshed until the block ends. Nested uses share the outer one."""
+    if getattr(_probe, 'memo', None) is not None:
+        yield
+        return
+    _probe.memo = {}
+    try:
+        yield
+    finally:
+        _probe.memo = None
+
+
 def live_tasks(app=None, inspect_timeout=3):
+    memo = getattr(_probe, 'memo', None)
+    if memo is not None and 'live' in memo:
+        return memo['live']
+    found = _live_tasks(app, inspect_timeout)
+    if memo is not None:
+        memo['live'] = found
+    return found
+
+
+def _live_tasks(app=None, inspect_timeout=3):
     """``(task ids, scan ids)`` of the Celery tasks that still exist - in a queue, held unacknowledged, or reserved, scheduled or active in
     a worker - the scan ids being the ScanHistory ids the discovery and internal-scan tasks among them are for, or None when that cannot
     be told (no Redis broker, a long queue, no worker answered). Never raises."""
@@ -116,13 +146,17 @@ def live_tasks(app=None, inspect_timeout=3):
             for raw in client.hvals(channel.unacked_key):
                 ids.update(_task_ids(raw))
                 scans.update(_scan_refs(raw))
-        inspector = app.control.inspect(timeout=inspect_timeout)
-        answered = False
-        for call in (inspector.reserved, inspector.active, inspector.scheduled):
-            found = call()
+        # the first question waits the whole timeout (Celery does not know how many workers will answer); the other two name the workers that
+        # answered and return as soon as they all have, so the probe costs one timeout, not three
+        answered, names = False, None
+        for call in ('active', 'reserved', 'scheduled'):
+            inspector = app.control.inspect(timeout=inspect_timeout, destination=names)
+            found = getattr(inspector, call)()
             if found is None:
                 continue
             answered = True
+            if names is None:
+                names = list(found) or None
             for tasks in found.values():
                 for task in tasks:
                     task = task.get('request', task)  # scheduled() wraps the task request
