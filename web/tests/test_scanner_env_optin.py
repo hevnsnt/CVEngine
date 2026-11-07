@@ -142,3 +142,168 @@ class InstallTests(unittest.TestCase):
     def test_help_mentions_the_opt_out(self):
         proc = self.install('-h')
         self.assertIn('--no-builtin-scanner', proc.stdout)
+
+
+@unittest.skipUnless(shutil.which('bash') and Path('/proc/meminfo').exists(), 'needs bash on Linux')
+class SentinelChoiceTests(InstallTests):
+    """install.sh --sentinels and the one question (asked only on a terminal)."""
+
+    def install_tty(self, answers, *args, env=None):
+        """Run the installer with a pseudo terminal as stdin and stdout, typing ANSWERS (one string per line) at its prompts."""
+        import pty
+        import select
+        import time
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(['bash', 'install.sh', *args], cwd=self.repo, stdin=slave, stdout=slave, stderr=slave,
+                                env={**self.env, **(env or {})}, close_fds=True)
+        os.close(slave)
+        out, pending, deadline = b'', list(answers), time.time() + 60
+        while time.time() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+                if pending and out.rstrip().endswith(b']:'):  # "Choose 1, 2 or 3 [1]:"
+                    os.write(master, pending.pop(0).encode() + b'\n')
+                    out += b'<<typed>>'
+            elif proc.poll() is not None:
+                break
+        proc.wait(timeout=30)
+        os.close(master)
+        return proc, out.decode(errors='replace')
+
+    def test_internal_is_the_default_and_writes_nothing_about_the_scanner(self):
+        proc = self.install('--sentinels=internal')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for key in SCANNER_KEYS + ('CVENGINE_SENTINEL_PLAN',):
+            self.assertNotIn(key, self.scanner_free())
+        self.assertNotIn('Add your external Sentinel', proc.stdout)
+        self.assertIn('Add your first target', proc.stdout)
+
+    def test_external_turns_the_built_in_scanner_off_and_shows_the_enrollment_steps(self):
+        proc = self.install('--sentinels=external')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
+        self.assertIn('Add your external Sentinel', proc.stdout)
+        self.assertIn('Provision', proc.stdout)
+        self.assertIn('docs/SENTINELS.md', proc.stdout)
+        self.assertIn('built-in scanner off, as chosen', proc.stdout)
+
+    def test_both_keeps_the_scanner_on_records_the_plan_and_shows_the_steps(self):
+        proc = self.install('--sentinels', 'both')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        env = self.scanner_free()
+        self.assertNotIn('CVENGINE_BUILTIN_SCANNER', env)
+        self.assertEqual(env['CVENGINE_SENTINEL_PLAN'], 'both')
+        self.assertIn('Add your external Sentinel', proc.stdout)
+        self.assertIn('keeps running beside it', proc.stdout)
+
+    def test_a_bad_or_conflicting_choice_is_refused_before_anything_runs(self):
+        for args in (('--sentinels=bogus',), ('--sentinels=both', '--no-builtin-scanner'), ('--sentinels',)):
+            proc = self.install(*args)
+            self.assertNotEqual(proc.returncode, 0, args)
+            self.assertFalse((self.repo / '.env').exists(), args)
+
+    def test_a_rerun_keeps_the_choice_and_a_flag_switches_it(self):
+        self.install('--sentinels=external')
+        proc = self.install()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
+        self.assertIn('Add your external Sentinel', proc.stdout)
+        proc = self.install('--sentinels=internal')
+        self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '1')
+        self.assertNotIn('Add your external Sentinel', proc.stdout)
+
+    def test_openvas_is_never_installed_or_started(self):
+        proc = self.install('--sentinels=both')
+        self.assertIn('OpenVAS     not installed', proc.stdout)
+        self.assertFalse([k for k, v in active((self.repo / '.env').read_text()).items() if 'openvas' in (k + v).lower()])
+        self.assertNotIn('COMPOSE_PROFILES', self.scanner_free())
+
+    def test_the_question_on_a_terminal_has_three_answers(self):
+        for answer, plan in (('1', None), ('', None), ('2', 'both'), ('3', 'external'), ('external', 'external')):
+            with self.subTest(answer=answer):
+                (self.repo / '.env').unlink(missing_ok=True)
+                proc, out = self.install_tty([answer])
+                self.assertEqual(proc.returncode, 0, out)
+                self.assertIn('Will you add external Sentinels', out)
+                self.assertIn('Built-in scanner only', out)
+                env = self.scanner_free()
+                if plan == 'external':
+                    self.assertEqual(env['CVENGINE_BUILTIN_SCANNER'], '0')
+                elif plan == 'both':
+                    self.assertEqual(env['CVENGINE_SENTINEL_PLAN'], 'both')
+                else:
+                    self.assertNotIn('CVENGINE_BUILTIN_SCANNER', env)
+                    self.assertNotIn('CVENGINE_SENTINEL_PLAN', env)
+
+    def test_a_wrong_answer_asks_again_and_three_wrong_ones_take_the_default(self):
+        proc, out = self.install_tty(['x', '3'])
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIn('Please type 1, 2 or 3', out)
+        self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
+        (self.repo / '.env').unlink()
+        proc, out = self.install_tty(['x', 'y', 'z'])
+        self.assertIn('Taking the default', out)
+        self.assertNotIn('CVENGINE_BUILTIN_SCANNER', self.scanner_free())
+
+    def test_nothing_is_asked_without_a_terminal_or_with_n_or_ci_or_a_flag_or_an_earlier_choice(self):
+        proc = self.install()  # no terminal: the safe default, no prompt
+        self.assertNotIn('Will you add', proc.stdout)
+        for label, args, env in (('-n', ('-n',), None), ('--non-interactive', ('--non-interactive',), None), ('CI', (), {'CI': 'true'}),
+                                 ('flag', ('--sentinels=internal',), None)):
+            with self.subTest(label=label):
+                (self.repo / '.env').unlink(missing_ok=True)
+                proc, out = self.install_tty([], *args, env=env)
+                self.assertEqual(proc.returncode, 0, out)
+                self.assertNotIn('Will you add', out)
+        with self.subTest(label='earlier choice'):
+            (self.repo / '.env').write_text('CVENGINE_BUILTIN_SCANNER=0\n')
+            proc, out = self.install_tty([])
+            self.assertNotIn('Will you add', out)
+            self.assertIn('keeping the scanner choice already in .env', out)
+        with self.subTest(label='existing installation'):
+            (self.repo / '.env').write_text('POSTGRES_PASSWORD=abc\nAUTHORITY_PASSWORD=def\n')
+            proc, out = self.install_tty([])
+            self.assertNotIn('Will you add', out)
+            self.assertIn('existing installation', out)
+
+    def test_help_documents_the_flag_and_that_openvas_is_never_installed(self):
+        out = self.install('-h').stdout
+        for word in ('--sentinels', 'internal', 'both', 'external', '--non-interactive', 'OpenVAS is never installed'):
+            self.assertIn(word, out)
+
+
+class OpenvasOffByDefaultTests(unittest.TestCase):
+    def test_no_openvas_service_starts_without_its_profile(self):
+        text = (ROOT / 'docker-compose.yml').read_text()
+        import re
+        blocks = re.findall(r'\n  (openvas-[a-z-]+):\n(.*?)(?=\n  [a-z#]|\Z)', text, re.S)
+        self.assertGreaterEqual(len(blocks), 10)
+        for name, block in blocks:
+            self.assertIn('profiles: ["openvas"]', block, name)
+
+    def test_no_profile_is_active_in_the_example_and_make_up_names_no_openvas_service(self):
+        self.assertNotIn('COMPOSE_PROFILES', active((ROOT / '.env.example').read_text()))
+        make = (ROOT / 'Makefile').read_text()
+        services = next(line for line in make.splitlines() if line.startswith('SERVICES '))
+        self.assertNotIn('openvas', services)
+
+    def test_the_installer_never_starts_or_names_openvas_services(self):
+        text = (ROOT / 'install.sh').read_text()
+        self.assertNotIn('openvas-up', text)
+        self.assertNotIn('--profile', text)
+        self.assertNotIn('openvas-sync', text)
+
+
+class ReviewerImageReadableTests(unittest.TestCase):
+    def test_the_package_is_made_readable_for_the_unprivileged_user(self):
+        text = (ROOT / 'reviewer' / 'Dockerfile').read_text()
+        self.assertLess(text.index('COPY cvengine_reviewer'), text.index('chmod -R a+rX'))
+        self.assertLess(text.index('chmod -R a+rX'), text.index('USER 10002'))
+

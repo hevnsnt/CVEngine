@@ -1,34 +1,52 @@
 #!/usr/bin/env bash
 # One-command installer for a Linux server:  sudo ./install.sh
-# It asks nothing. It checks the machine, installs what is missing (Docker, make), generates every secret and the HTTPS
-# certificate, starts CVEngine, waits until it answers, creates the admin account and prints the address and password.
+# It checks the machine, installs what is missing (Docker, make), generates every secret and the HTTPS certificate, starts CVEngine, waits
+# until it answers, creates the admin account and prints the address, the password and the health of what it started. On a terminal it asks
+# one question first: will you add external Sentinels, or use only the built-in scanner? Without a terminal (a pipe, CI, -n) it asks nothing
+# and takes the safe default, the built-in scanner only. OpenVAS is never installed or started: it runs on a Sentinel (docs/OPENVAS.md).
 # Safe to run again: nothing already set is changed, and a running installation keeps its data.
 #
-#   sudo ./install.sh                     # detect this machine's address and use it
+#   sudo ./install.sh                     # ask the one question (on a terminal), detect this machine's address and use it
 #   sudo ./install.sh --domain scan.example.com   # use a name people will type instead
-#   sudo ./install.sh --no-builtin-scanner   # leave the built-in scanner off (on by default; docs/BUILTIN-SCANNER.md)
-#   sudo ./install.sh -n                # accepted for older scripts; the installer never prompts
+#   sudo ./install.sh --sentinels=internal   # built-in scanner only (the default; docs/BUILTIN-SCANNER.md)
+#   sudo ./install.sh --sentinels=both       # built-in scanner plus external Sentinels you add (the steps are shown at the end)
+#   sudo ./install.sh --sentinels=external   # external Sentinels only: the built-in scanner is not installed or started
+#   sudo ./install.sh -n                  # never ask: the flags and the safe defaults decide (also when CI is set or stdin is not a terminal)
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
+started=$SECONDS
 
 usage() {
-  echo "Usage: sudo $0 [--domain NAME] [--no-builtin-scanner] [-n] [-h]"
+  echo "Usage: sudo $0 [--domain NAME] [--sentinels internal|both|external] [--no-builtin-scanner] [-n] [-h]"
   echo "  --domain NAME  hostname or IPv4 address people will use to reach CVEngine (default: detected)"
-  echo "  --no-builtin-scanner  leave the built-in scanner off (it is on by default and runs every scan tool; docs/BUILTIN-SCANNER.md)"
-  echo "  -n             accepted and ignored: the installer never asks questions"
+  echo "  --sentinels X  which scanners this server uses (asked on a terminal when not given; docs/BUILTIN-SCANNER.md):"
+  echo "                   internal  the built-in scanner only (default)"
+  echo "                   both      the built-in scanner plus external Sentinels you add afterwards"
+  echo "                   external  external Sentinels only: the built-in scanner is not installed or started"
+  echo "  --no-builtin-scanner  same as --sentinels=external"
+  echo "  -n, --non-interactive  never ask a question; the flags and the safe defaults decide"
   echo "  -h             show this help"
+  echo "OpenVAS is never installed or started by this installer: it runs on a Sentinel you choose to add (docs/OPENVAS.md)."
 }
 
 original_args=("$@")
 domain=""
-builtin_scanner=''
+sentinels=''        # internal, both or external: from --sentinels or the question; empty means nobody chose
+interactive=1
+set_sentinels() {
+  case $1 in internal|both|external) ;; *) echo "--sentinels takes internal, both or external (got '$1')." >&2; usage >&2; exit 1 ;; esac
+  if [ -n "$sentinels" ] && [ "$sentinels" != "$1" ]; then echo "Conflicting choices: $sentinels and $1." >&2; usage >&2; exit 1; fi
+  sentinels=$1
+}
 while [ $# -gt 0 ]; do
   case $1 in
     --domain) domain=${2:-}; [ -n "$domain" ] || { usage; exit 1; }; shift 2 ;;
     --domain=*) domain=${1#--domain=}; shift ;;
-    --builtin-scanner) shift ;;  # accepted for older scripts: the built-in scanner is on by default
-    --no-builtin-scanner) builtin_scanner=0; shift ;;
-    -n) shift ;;
+    --sentinels) [ -n "${2:-}" ] || { usage >&2; exit 1; }; set_sentinels "$2"; shift 2 ;;
+    --sentinels=*) set_sentinels "${1#--sentinels=}"; shift ;;
+    --builtin-scanner) set_sentinels internal; shift ;;  # accepted for older scripts: the built-in scanner is on by default
+    --no-builtin-scanner) set_sentinels external; shift ;;
+    -n|--non-interactive) interactive=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 1 ;;
   esac
@@ -42,6 +60,10 @@ warn() { printf '%s warn%s %s\n' "$YELLOW" "$RESET" "$1"; }
 die()  { printf '\n%s  FAILED%s  %s\n' "$RED$BOLD" "$RESET" "$1" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Compose prints one line per downloaded layer when its output is not a terminal (hundreds of lines in a log or a pipe): only on a terminal is it
+# left to draw its progress bars. Errors are still printed.
+[ -t 1 ] || export COMPOSE_PROGRESS=${COMPOSE_PROGRESS:-quiet}
 
 compose() {
   if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi
@@ -82,6 +104,48 @@ free_kb=$(df -Pk . 2>/dev/null | awk 'NR == 2 {print $4}')
 if [ -n "${free_kb:-}" ]; then
   if [ "$free_kb" -lt 15000000 ]; then warn "only $((free_kb / 1048576)) GB free here: 20 GB or more is recommended for images, databases and scan results"
   else ok "$((free_kb / 1048576)) GB free disk"; fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The one question: which scanners will this server use. Asked only on a terminal, only when nobody chose by flag, and only on a first install:
+# a machine that already has an .env keeps what it has (a flag still changes it). Everything else gets the safe default, the built-in scanner only.
+env_value() { grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r"'"'"' '; }
+ask_sentinels() {
+  local answer='' tries=0 small=''
+  [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && small=" This machine has $((mem_kb / 1024)) MB: option 2 or 3 keeps it lighter."
+  printf '\n%sWill you add external Sentinels (recommended for scans from other networks and to keep this server light), or use only the built-in scanner?%s\n' "$BOLD" "$RESET"
+  cat <<EOF
+  1) Built-in scanner only        scans run on this server, in a container capped at 2 GB of memory (the default)
+  2) Built-in scanner plus external Sentinels
+                                  the built-in one stays; you add Sentinels afterwards (the steps are shown at the end)
+  3) External Sentinels only      nothing scans on this server: the built-in scanner is not installed or started,
+                                  and its 4.5 GB image is never downloaded. Scans wait until a Sentinel is enrolled.${small}
+  OpenVAS is part of none of these: it runs on a Sentinel you choose to add (docs/OPENVAS.md).
+EOF
+  while [ "$tries" -lt 3 ]; do
+    printf 'Choose 1, 2 or 3 [1]: '
+    read -r answer || { echo; answer=1; }  # end of input: the default
+    case ${answer:-1} in
+      1|internal) sentinels=internal; break ;;
+      2|both) sentinels=both; break ;;
+      3|external) sentinels=external; break ;;
+      *) echo "  Please type 1, 2 or 3." ;;
+    esac
+    tries=$((tries + 1))
+  done
+  [ -n "$sentinels" ] || { sentinels=internal; echo "  Taking the default: the built-in scanner only."; }
+  ok "scanners: $sentinels"
+}
+if [ -z "$sentinels" ]; then
+  if [ "$interactive" -eq 1 ] && [ -t 0 ] && [ -z "${CI:-}" ]; then
+    if [ -f .env ] && { [ -n "$(env_value CVENGINE_BUILTIN_SCANNER)" ] || [ -n "$(env_value CVENGINE_SENTINEL_PLAN)" ]; }; then
+      ok "keeping the scanner choice already in .env (run again with --sentinels=internal, both or external to change it)"
+    elif [ -f .env ] && [ -n "$(env_value POSTGRES_PASSWORD)" ] && ! env_value POSTGRES_PASSWORD | grep -qi 'change-me'; then
+      ok "this is an existing installation: its scanner settings stay as they are (--sentinels=internal, both or external changes them)"
+    else
+      ask_sentinels
+    fi
+  fi
 fi
 
 # packages: only Debian and Ubuntu families are installed for you; anywhere else the missing tool is named
@@ -157,7 +221,7 @@ done
 
 # ---------------------------------------------------------------------------------------------------------------------------
 step "Preparing settings"
-CVENGINE_ENABLE_BUILTIN_SCANNER=$builtin_scanner ./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
+CVENGINE_INSTALL_SENTINELS=$sentinels ./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
 # A small host: the built-in scanner's container ceiling is 1 GB instead of 2 (an owner's own value is kept)
 if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && ! grep -qE '^SCANNER_MEM_LIMIT=' .env; then
   printf 'SCANNER_MEM_LIMIT=1g\n' >> .env
@@ -207,30 +271,49 @@ admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
 # The built-in scanner enrols itself with the enrollment the server writes for it, which needs the admin account that now exists: written now
 # instead of at the server's next five-minute round. It then runs every scan tool. A scanner that is slow to come up is not a failed install:
 # the scans that need it wait, and it keeps trying.
+scanner_state=off
 if bash -c '. scripts/scanner.sh && cvengine_scanner_enabled docker compose' 2>/dev/null; then
   step "Starting the built-in scanner"
-  docker compose exec -T celery python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
-  scanner_ok=1
+  compose exec -T celery python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
+  scanner_state=waiting
   for _ in $(seq 1 36); do
-    if docker compose exec -T scanner python3 -m client.control heartbeat >/dev/null 2>&1; then scanner_ok=0; break; fi
+    if compose exec -T scanner python3 -m client.control heartbeat >/dev/null 2>&1; then scanner_state=live; break; fi
     sleep 5
   done
-  if [ "$scanner_ok" -eq 0 ]; then ok "the built-in scanner is enrolled and checking in"
+  if [ "$scanner_state" = live ]; then ok "the built-in scanner is enrolled and checking in"
   else warn "the built-in scanner has not checked in yet; it keeps trying (docker compose logs scanner, and Administration > Sentinels)"; fi
+else
+  step "The built-in scanner"
+  ok "not started (CVENGINE_BUILTIN_SCANNER is off in .env, or this compose file has no scanner): nothing of it was pulled or started"
 fi
 
 # The app cannot update itself (it has no Docker access on purpose): a small watcher on this machine applies an update an admin approves in
 # Settings > Updates, within seconds. Without it the Approve button does nothing, so it is part of the install. Skipped when automatic
 # deployment already looks after updates.
 step "Installing the update watcher"
+watcher=ok
 if ! command -v crontab >/dev/null 2>&1; then
+  watcher=missing
   warn "crontab is not available: approving an update in Settings > Updates will not start it. Install cron, then run scripts/install-updater.sh"
 elif crontab -l 2>/dev/null | grep -q 'cvengine-auto-deploy' || systemctl is-enabled cvengine-auto-deploy >/dev/null 2>&1; then
   ok "automatic deployment is installed: it deploys new master commits while Settings > Updates is set to Automatic (Approve does nothing until then; scripts/install-updater.sh adds the watcher that acts on it)"
 elif watcher_log=$(./scripts/install-updater.sh 2>&1); then
   ok "an update approved in Settings > Updates starts within seconds"
 else
+  watcher=failed
   warn "could not install the update watcher: $(printf '%s' "$watcher_log" | tail -n 1). Run scripts/install-updater.sh to enable one-click updates"
+fi
+
+# What was chosen, as it stands in .env now (a re-run keeps an earlier choice), and what is actually running.
+plan=internal
+case $(env_value CVENGINE_BUILTIN_SCANNER | tr '[:upper:]' '[:lower:]') in 0|false|no|off) plan=external ;; *) [ "$(env_value CVENGINE_SENTINEL_PLAN)" != both ] || plan=both ;; esac
+not_running=''
+for svc in db redis web celery celery-beat proxy reviewer; do
+  [ -n "$(compose ps --status running -q "$svc" 2>/dev/null)" ] || not_running="$not_running $svc"
+done
+scanner_image=''
+if [ "$scanner_state" != off ]; then
+  scanner_image=$(docker inspect -f '{{.Config.Image}}' "$(compose ps -aq scanner 2>/dev/null | head -n 1)" 2>/dev/null | sed 's/.*@sha256:\(............\).*/pinned digest sha256:\1.../') || scanner_image=''
 fi
 
 ca=$(pwd)/secrets/certs/ca.crt
@@ -238,14 +321,37 @@ printf '\n%s\n' "$GREEN$BOLD####################################################
 printf '%s\n' "$GREEN$BOLD  CVEngine is installed and running.$RESET"
 printf '%s\n' "$GREEN$BOLD#########################################################################$RESET"
 printf '\n%s\n\n' "$admin_banner"
+printf '%sHealth%s  (installed in %dm%02ds)\n' "$BOLD" "$RESET" $(((SECONDS - started) / 60)) $(((SECONDS - started) % 60))
+printf '  web         answering at https://%s/\n' "$address"
+if [ -z "$not_running" ]; then printf '  services    db, redis, web, celery, celery-beat, proxy and the AI reviewer are running\n'
+else printf '  services    %snot running:%s%s  (docker compose ps; docker compose logs <name>)\n' "$YELLOW" "$RESET" "$not_running"; fi
+case $scanner_state in
+  live) printf '  scanner     %sbuilt-in scanner enrolled and live%s%s\n' "$GREEN" "$RESET" "${scanner_image:+ ($scanner_image)}" ;;
+  waiting) printf '  scanner     %sbuilt-in scanner started, not checked in yet%s: scans wait for it, it keeps trying (docker compose logs scanner)\n' "$YELLOW" "$RESET" ;;
+  *) if [ "$plan" = external ]; then printf '  scanner     built-in scanner off, as chosen: scans wait until you enrol an external Sentinel (below)\n'
+     else printf '  scanner     %sbuilt-in scanner not started%s: it is switched off in .env or missing from the compose file (docs/BUILTIN-SCANNER.md)\n' "$YELLOW" "$RESET"; fi ;;
+esac
+case $watcher in ok) printf '  updates     the update watcher is installed (Settings > Updates > Approve works)\n' ;; *) printf '  updates     %sno update watcher%s: see the warning above\n' "$YELLOW" "$RESET" ;; esac
+printf '  OpenVAS     not installed, nothing of it runs here. It runs on a Sentinel (about 4 GB of RAM and 60 GB of disk there): docs/OPENVAS.md\n'
+printf '\n%sNext steps%s\n' "$BOLD" "$RESET"
+n=1
+printf '  %d. Open  https://%s/  and sign in with the account above (the password is shown only here; you choose your own at first sign-in).\n' "$n" "$address"; n=$((n + 1))
+printf '     Your browser will warn that the certificate is not trusted: that is expected, it is signed by this server'"'"'s own authority.\n'
+printf '     Continue past the warning, or trust the authority once:  %s\n' "$ca"
+printf '  %d. Add your first target. The setup wizard starts scanning it right away; the CVE feed is already loading in the background.\n' "$n"; n=$((n + 1))
+case $plan in
+  both|external)
+    printf '  %d. Add your external Sentinel (a machine with Docker and outbound HTTPS to this server):\n' "$n"; n=$((n + 1))
+    printf '       a. In CVEngine open Sentinels and press Provision (pick Where it runs: external for the internet side, internal inside a private network).\n'
+    printf '       b. The page then shows one command to paste on that machine: it clones the Sentinel client, enrols it with the one-time blob and starts it.\n'
+    printf '       c. The Sentinel appears on the same page as live within a minute. Guide: docs/SENTINELS.md; client: https://github.com/hevnsnt/cvengine-sentinel\n'
+    [ "$plan" != external ] || printf '     Until one is enrolled nothing is scanned: scans wait (nothing fails) and start by themselves once a Sentinel reports in.\n'
+    [ "$plan" != both ] || printf '     The built-in scanner keeps running beside it; docs/BUILTIN-SCANNER.md says how the two share the work.\n' ;;
+  *)
+    printf '  %d. To scan from other networks later, add an external Sentinel any time: Sentinels > Provision (docs/SENTINELS.md; sudo ./install.sh --sentinels=both records it).\n' "$n"; n=$((n + 1)) ;;
+esac
+printf '  %d. Things you may need later:\n' "$n"
 cat <<EOF
-  1. Open  https://${address}/  and sign in with the account above.
-     The setup wizard takes it from there: it starts scanning your first target
-     right away, and the CVE feed is already loading in the background.
-  2. Your browser will warn that the certificate is not trusted: that is expected,
-     it is signed by this server's own authority. Continue past the warning, or
-     trust the authority once:  ${ca}
-  3. Things you may need later:
        make admin-password   a new admin password, if this one is lost
        make logs             follow the logs
        sudo ./install.sh     run again any time; it rebuilds the code you have checked out
@@ -254,4 +360,5 @@ EOF
 case $address in
   localhost|127.*) warn "CVEngine only answers on this machine. To reach it from elsewhere: sudo ./install.sh --domain <this server's address or name>" ;;
 esac
+[ -z "$not_running" ] || warn "not running:$not_running. The install is otherwise complete; docker compose logs <name> says why."
 exit 0
