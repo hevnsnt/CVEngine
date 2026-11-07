@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import reaper
+from cveFeed.host_assessment import ASSESS_PRIORITY
 from cveFeed.models import AgentActivity, CVEEntry, CVEMatch, HostAssessment, OnDemandValidation, ScanControl
 from dashboard.models import Org, Project
 from startScan.models import Subdomain
@@ -138,7 +139,7 @@ class RedispatchTests(ReaperTests):
 		lost = self.assessment('h0.reap.example', 'queued', 1, started=False)
 		count, send = self.redispatch()
 		self.assertEqual(count, 1)
-		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue', priority=ASSESS_PRIORITY)
 		lost.refresh_from_db()
 		self.assertEqual((lost.status, lost.celery_id), ('queued', 'again-1'))
 
@@ -163,7 +164,7 @@ class RedispatchTests(ReaperTests):
 		self.live = {'still-there'}
 		count, send = self.redispatch()
 		self.assertEqual(count, 1)
-		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue')
+		send.assert_called_once_with(args=[lost.pk], queue='discovery_queue', priority=ASSESS_PRIORITY)
 
 	def test_a_second_message_for_a_started_assessment_does_nothing(self):
 		from cveFeed.host_assessment import execute

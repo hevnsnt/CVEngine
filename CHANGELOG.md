@@ -150,6 +150,23 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 - **The local-fallback machinery is gone.** Every kind is a Sentinel's work and none runs on the server, so `CVENGINE_LOCAL_FALLBACK` is ignored (set or not, a kind waits for a scanner, and nothing warns about the variable; remove it from `.env`), and what only served it is removed: the fallback telemetry (`agentapi.ScannerFallback`, dropped by migration `agentapi.0019`, `manage.py scanner_fallbacks`, the `scanning.scanner.fallbacks` status block), the per-hour local fallback caps (`CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR`, `CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR`) and warning, the vantage-point and unknown-kind warnings of the scanner status, and the reviewer's `local_share` check. The scanner-offline reading, its strip and the waiting of every stage are unchanged.
 - **Dead target-facing code is deleted.** The server's own certificate, TLS and mail-authentication readers have had no caller since the hygiene sweep moved to a Sentinel: `hygiene.probe_tls` (with `_fetch_cert`, `_chain_error` and `_accepts_legacy_tls`), `legacy_tls.py` (the TLS 1.0 client), `hygiene.email_findings` with the DNS readers it used (`fetch_txt`, `fetch_records`, `has_record`, `ask_txt`, `dns_askers`, `consensus_txt`), `mailfail.review` and `mailfail.fetch_mta_sts_policy`. The evaluators, the rating and the storage stay. Their tests moved to the Sentinel repository or were rewritten to run the scanner library's own reader through the sweep.
 
+## v1.3.7 (2026-11-06)
+
+### Fixed
+
+- **A Sentinel can no longer be refused for ever by a call counter that lost its expiry.** The claim, report and heartbeat calls of an agent or Sentinel are counted per minute in a cache key that expires with the minute. A Sentinel that polls a few times a minute was answered `429 too many claim calls: at most 60 per 60 seconds` for an hour while its sibling worked, which only a counter that never resets explains. A counter that is over its limit is now checked once for an expiry, and one that has none is started again. A refusal is also written to the log once per window with the counter's name and count, so a refusal that is a real burst can be told apart from one that is not.
+- **A scan no longer waits behind host assessments.** Discovery scans and host assessments share one queue, and the top-up queues assessments by the hundred: on an install with one discovery worker, 22 scans sat queued for 17 hours behind about 630 assessments. Assessments (their first queueing and the reaper's re-queueing) now go out at the lowest priority the broker has, and scans keep the highest, so a scan is the next thing the discovery worker takes. Messages already in the queue keep their place. No migration, no setting to change, nothing to run after the update.
+
+## v1.3.6 (2026-11-05)
+
+### Fixed
+
+- **The all-projects dashboard no longer overloads a small server.** An install with about 4,100 scans on a 3-core VPS ran at a load of 8 and swapped, and nearly all of it was one query repeated: the live ticker's open-ports count, which took 6 to 18 s and, when its snapshot went cold, was run by six requests at once. Three changes:
+  - **The three ticker counts (live hosts, addresses, open ports) read the host list once.** They used to be three nested queries that each repeated the whole host walk inside them; the addresses and ports are now looked up through their link tables by id. The numbers are the same (`tests/test_discovery_counts_query.py` checks the new result against the old query).
+  - **A computed snapshot is kept for ten minutes, not three times its freshness window, and a request with nothing to serve waits up to ten seconds for the one computing it** (it waited two). A slow count therefore leaves an old copy to serve while one request recomputes it, instead of an empty key that sends every poll to compute it at once. The lock of a computing request lasts 45 s (was 20).
+  - **A Live page waits at least twice as long as a slow answer took before it asks again** (`static/cve/poll.js`). It already polled one request at a time, paused in a hidden tab and backed off on errors; it now also backs off when the server is slow but not failing, so a busy server is not met with more of the same question.
+- No migration, no setting to change, nothing to run after the update.
+
 ## v1.3.5 (2026-11-04)
 
 ### Upgrade notes

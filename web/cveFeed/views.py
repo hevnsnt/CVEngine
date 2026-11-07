@@ -1169,17 +1169,31 @@ def api_activity(request):
     return snapshot_cache.respond(request, snapshot_cache.token_of(body), lambda: {**body, 'now': timezone.now().isoformat()})
 
 
+_COUNT_CHUNK = 5000  # ids per lookup below: a statement stays small however many hosts the caller can see
+
+
+def _chunks(ids, size=_COUNT_CHUNK):
+    ids = list(ids)
+    for start in range(0, len(ids), size):
+        yield ids[start:start + size]
+
+
 def discovery_counts():
     """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see.
 
-    One walk over the hosts, then two queries over the link tables by id: the nested ``IN (subquery)`` of the hosts' collapsed window query was
-    planned three times (hosts, addresses, ports) and made the ports count over a quarter of a second at 3000 hosts."""
+    The live hosts are read once (the one expensive part: the current inventory collapsed to a row per host), and the addresses and ports
+    are then looked up through the link tables by id. The three counts used to be three nested queries that each repeated the whole host walk
+    inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold."""
     from cveFeed.counts import LIVE_HOST_Q, host_reps
     from startScan.models import IpAddress, Subdomain
-    host_ids = list(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True).distinct())
-    ip_ids = list(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=host_ids).values_list('ipaddress_id', flat=True).distinct())
-    ports = IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values('port_id').distinct().count()
-    return {'hosts': len(host_ids), 'ips': len(ip_ids), 'ports': ports}
+    live = set(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True))
+    ips = set()
+    for chunk in _chunks(sorted(live)):
+        ips.update(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=chunk).values_list('ipaddress_id', flat=True))
+    ports = set()
+    for chunk in _chunks(sorted(ips)):
+        ports.update(IpAddress.ports.through.objects.filter(ipaddress_id__in=chunk, port__state__in=OPEN_PORT_STATES).values_list('port_id', flat=True))
+    return {'hosts': len(live), 'ips': len(ips), 'ports': len(ports)}
 
 
 def cached_discovery_counts(params=()):

@@ -16,6 +16,11 @@ from datetime import timedelta
 from cveFeed.models import HostAssessment
 
 logger = logging.getLogger(__name__)
+
+# Host assessments and discovery scans share one queue (``discovery_queue``) and, by default, one priority, so a few hundred assessments queued by
+# the top-up wait in front of every scan queued after them, and a scan can sit for hours behind them. The broker serves a lower number first (the
+# Redis transport keeps one list per step, 0 3 6 9): assessments go to the last step, scans and everything else keep the first.
+ASSESS_PRIORITY = 9
 ACTIVE = ('queued', 'running')
 
 
@@ -243,7 +248,7 @@ def enqueue(project, sub, *, source='manual', user=None):
         return HostAssessment.objects.get(project=project, host=host, status__in=ACTIVE), False
     from cveFeed.tasks import assess_host
     try:
-        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue')
+        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue', priority=ASSESS_PRIORITY)
         HostAssessment.objects.filter(pk=job.pk, status='queued').update(celery_id=task.id)
         from cveFeed import activity
         activity.log('discovery', f'Host assessment #{job.pk} queued for {host}', project=project.pk, status='queued')
@@ -311,7 +316,7 @@ def enqueue_batch(project, subs, *, source='topup'):
     from cveFeed import activity
     from cveFeed.tasks import assess_hosts
     try:
-        assess_hosts.apply_async(args=[ids], task_id=task_id, queue='discovery_queue')
+        assess_hosts.apply_async(args=[ids], task_id=task_id, queue='discovery_queue', priority=ASSESS_PRIORITY)
     except Exception as exc:
         logger.exception('could not enqueue host assessment batch %s', ids)
         HostAssessment.objects.filter(pk__in=ids).update(status='failed', finished_at=timezone.now(),

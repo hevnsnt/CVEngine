@@ -187,6 +187,19 @@ test('every waits longer while the pace fails and honours Retry-After', async ()
   assert.equal(timers.queue[0].delay, 40000, 'the server asked for 40 s; the doubled 4 s is shorter');
 });
 
+test('every waits at least twice as long as a slow answer took, and keeps its own interval for a quick one', async () => {
+  const timers = fakeTimers();
+  let now = 0;
+  const clock = () => now;
+  every(async () => { now += 12000; }, 2500, {doc: fakeDoc(), timers, random: () => 0.5, clock});
+  await settle();
+  assert.equal(timers.queue[0].delay, 24000, 'a 12 s answer is asked again after 24 s, not 2.5 s');
+  const quick = fakeTimers();
+  every(async () => { now += 300; }, 2500, {doc: fakeDoc(), timers: quick, random: () => 0.5, clock});
+  await settle();
+  assert.equal(quick.queue[0].delay, 2500, 'a quick answer keeps the poller\'s own interval');
+});
+
 test('a hidden tab does not poll, and polls at once when it is shown again', async () => {
   const doc = fakeDoc(true);
   const timers = fakeTimers();
