@@ -708,7 +708,7 @@ def _resume_pipeline(context):
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_stage_run=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, route_probe=None, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_reader=None,
-                node2shell_checker=None, probe_get=None, by_person=False, screenshot_queuer=None):
+                node2shell_checker=None, by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -798,9 +798,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     if stopped(scan_id):
         return gone
     from cveFeed import probes, wpscan_scan
-    probe_kwargs = {k: v for k, v in (('get', probe_get),) if v}
-    if retest or force:
-        probe_kwargs['force'] = True
+    probe_kwargs = {'force': True} if retest or force else {}
     probe_result = _stage(scan, 'Version and identity probes', 'version_probes', lambda: probes.run_for_scan(scan_id, **probe_kwargs),
                           fallback={'hosts': 0})  # finds the version of what the stages above saw without one, before correlation reads it
     if stopped(scan_id):
@@ -808,8 +806,6 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     from cveFeed import subdir_apps
     _once('subdir_apps', lambda: subdir_apps.carry_forward(scan))  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
-    if probe_get:
-        wp_kwargs['probe_get'] = probe_get
     if retest or force:
         wp_kwargs['force'] = True
     wpscan_result = _stage(scan, 'WordPress detection and scan', 'wpscan', lambda: wpscan_scan.run_wpscan(scan_id, **wp_kwargs),

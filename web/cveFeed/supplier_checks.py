@@ -21,15 +21,12 @@ finding is one step lower and says it is to be confirmed with the supplier."""
 import re
 from dataclasses import dataclass, field
 
-from cveFeed import hygiene
 
 INFO, LOW, MEDIUM, HIGH, CRITICAL = 0, 1, 2, 3, 4
 LEVELS = ('info', 'low', 'medium', 'high', 'critical')
 CATEGORIES = ('tls', 'email', 'web', 'exposed', 'cve')
 MAX_CVE_PRODUCTS = 10  # products one response may be matched for
 MAX_CVES_LISTED = 15  # CVE ids kept in one finding's evidence
-HSTS_MIN_AGE = 15552000  # 180 days
-EMAIL_SEVERITY = {'mta_sts_missing': LOW}  # an INFO in the owned-host review that matters for a supplier that receives your mail
 NO_VALIDATION = ('Not validated. The version is what the supplier\'s service announces; nothing was tried against it. A distribution or the '
                  'supplier may have backported the fix, so ask the supplier to confirm the patch level.')
 
@@ -93,40 +90,6 @@ def ask_for(check, domain, title=''):
 
 # ----------------------------------------------------------------------------- TLS and email (the owned-host evaluators, filtered)
 
-def _discriminator(host, domain):
-    """Several findings of one check on one domain (a DKIM key per selector, a DANE record per mail host) must not overwrite each other: the
-    host they are about, minus the domain, keeps their keys apart. A host that is the domain itself, a ``name:port``, or a service label
-    (``_dmarc``) is one per domain and needs none."""
-    host = (host or '').strip().lower().rstrip('.')
-    if not host or host == domain or host.startswith(f'{domain}:'):
-        return ''
-    if host.endswith('.' + domain):
-        host = host[:-len(domain) - 1]
-    return '' if host.startswith('_') else host
-
-
-def _from_hygiene(found, domain, category):
-    key = found.check
-    disc = _discriminator(found.host, domain)
-    if disc:
-        key = f'{key}@{disc}'[:60]
-    return Posture(key, EMAIL_SEVERITY.get(found.check, found.severity), found.title[:300], found.detail, category, domain,
-                   ask_for(found.check, domain, found.title), {**(found.evidence or {}), 'where': found.host})
-
-
-def tls_postures(domain, info, now=None):
-    """The certificate findings of ``domain:443`` at LOW or worse, from the probed ``info`` (``hygiene.probe_tls``)."""
-    return [_from_hygiene(f, domain, 'tls') for f in hygiene.evaluate_cert({**info, 'host': domain, 'port': 443}, now=now) if f.severity >= LOW]
-
-
-def email_postures(domain, findings):
-    """The SPF, DKIM, DMARC, MTA-STS and MailFail findings of ``domain`` at LOW or worse (``findings`` are ``hygiene.Finding`` rows)."""
-    out = []
-    for found in findings:
-        severity = EMAIL_SEVERITY.get(found.check, found.severity)
-        if severity >= LOW:
-            out.append(_from_hygiene(found, domain, 'email'))
-    return out
 
 
 # ----------------------------------------------------------------------------- HTTP security headers
@@ -135,63 +98,9 @@ def _headers(response):
     return {str(k).lower(): str(v) for k, v in ((response or {}).get('raw_headers') or (response or {}).get('headers') or {}).items()}
 
 
-def hsts_max_age(value):
-    found = re.search(r'max-age\s*=\s*"?(\d+)', value or '', re.IGNORECASE)
-    return int(found.group(1)) if found else None
-
-
 def answered(response):
     """Whether a response is the site's own answer: it came, no edge challenged it and it was not a plain "try later"."""
     return bool(response) and not response.get('challenge') and (response.get('status') or 0) not in (429, 503)
-
-
-def web_postures(domain, https, http):
-    """``(postures, evaluated)`` for the front page over HTTPS and over plain HTTP (each a response dict, or None when nothing answered).
-    ``evaluated`` is the set of check-name prefixes this run could decide, so a finding it no longer finds resolves and one it could not
-    look at is left alone."""
-    out, evaluated = [], set()
-    https_ok, http_ok = answered(https), answered(http)
-    if https_ok:
-        status = https.get('status') or 0
-        headers = _headers(https)
-        if status < 400:
-            evaluated.add('hsts_')
-            age = hsts_max_age(headers.get('strict-transport-security'))
-            if 'strict-transport-security' not in headers:
-                out.append(Posture('hsts_missing', MEDIUM, f'{domain} does not send Strict-Transport-Security',
-                                   'Without HSTS a browser can be tricked into using plain HTTP on first contact or after a downgrade.', 'web', domain,
-                                   ask_for('hsts_missing', domain), {'header': ''}))
-            elif age is not None and age < HSTS_MIN_AGE:
-                out.append(Posture('hsts_weak', LOW, f'{domain} sends a short Strict-Transport-Security max-age ({age} seconds)',
-                                   'A max-age under six months gives little protection once a visitor has not been back for a while.', 'web', domain,
-                                   ask_for('hsts_weak', domain), {'max_age': age}))
-        if 200 <= status < 300 and 'html' in (https.get('content_type') or ''):
-            evaluated.add('security_headers_missing')
-            csp = headers.get('content-security-policy', '')
-            missing = []
-            if not csp:
-                missing.append('Content-Security-Policy')
-            if 'x-frame-options' not in headers and 'frame-ancestors' not in csp.lower():
-                missing.append('X-Frame-Options')
-            if headers.get('x-content-type-options', '').strip().lower() != 'nosniff':
-                missing.append('X-Content-Type-Options')
-            if missing:
-                out.append(Posture('security_headers_missing', LOW, f'{domain} is missing security headers: {", ".join(missing)}',
-                                   'These response headers limit what a browser lets a page do (script sources, framing, content sniffing).',
-                                   'web', domain, ask_for('security_headers_missing', domain), {'missing': missing}))
-    if https_ok or http_ok:
-        evaluated.update(('http_no_redirect', 'no_https'))
-        http_status = (http or {}).get('status') or 0
-        if http_ok and 200 <= http_status < 300:
-            if https_ok:
-                out.append(Posture('http_no_redirect', MEDIUM, f'{domain} serves its site over plain HTTP instead of redirecting to HTTPS',
-                                   f'A plain HTTP request for http://{domain}/ was answered with the page itself (status {http_status}).', 'web', domain,
-                                   ask_for('http_no_redirect', domain), {'http_status': http_status}))
-            else:
-                out.append(Posture('no_https', HIGH, f'{domain} answers only over plain HTTP',
-                                   f'Nothing answered over HTTPS, and http://{domain}/ answered with the page itself (status {http_status}).', 'web', domain,
-                                   ask_for('no_https', domain), {'http_status': http_status}))
-    return out, evaluated
 
 
 # ----------------------------------------------------------------------------- well-known administration and login pages
@@ -222,41 +131,6 @@ WELL_KNOWN = (
     Page('admin', '/admin/', 'administration login', ((r'<input[^>]{0,200}type=["\']password["\']', LOW, ''),), guard_catch_all=True),
 )
 PATHS = tuple(page.path for page in WELL_KNOWN)
-
-
-def exposed_postures(domain, scheme, results, front=None):
-    """``(postures, evaluated)`` for the well-known pages. ``results`` maps a path of ``WELL_KNOWN`` to its response (or None when the request
-    failed). A page counts only when its status is one the page uses and what it says matches the product's own wording, so a catch-all
-    "200 for everything" is not a finding. ``front`` is the front page's response, for the catch-all comparison."""
-    from cveFeed import vhost_scan
-    out, evaluated = [], set()
-    for page in WELL_KNOWN:
-        response = results.get(page.path)
-        if not answered(response):
-            continue
-        evaluated.add(f'exposed_{page.key}')
-        status = response.get('status') or 0
-        if status not in page.statuses:
-            continue
-        text = ' '.join(((response.get('title') or ''), (response.get('www_authenticate') or ''), (response.get('body') or '')[:65536]))
-        if page.key == 'login' and any(k in _headers(response) for k in ('x-jenkins',)):
-            text += ' Jenkins'
-        for pattern, severity, suffix in page.rules:
-            if not re.search(pattern, text, re.IGNORECASE):
-                continue
-            if page.guard_catch_all and front and answered(front) and vhost_scan.similar(vhost_scan.fingerprint_of(response), vhost_scan.fingerprint_of(front)):
-                break
-            if page.key == 'tomcat_manager' and status == 401 and severity == CRITICAL:
-                severity = MEDIUM
-            label = f'{page.label} ({suffix})' if suffix else page.label
-            key = f'exposed_{page.key}' + (f'_{suffix.lower()}' if suffix else '')
-            url = f'{scheme}://{domain}{page.path}'
-            out.append(Posture(key, severity, f'{label} is reachable from the internet at {domain}{page.path}',
-                               f'A plain GET of {url} answered with status {status} and the page identifies itself as {label}. '
-                               'An administration or login page on the public internet is a target for password guessing and for the product\'s '
-                               'known flaws.', 'exposed', domain, ask_for('exposed_', domain), {'url': url, 'status': status, 'path': page.path}))
-            break
-    return out, evaluated
 
 
 # ----------------------------------------------------------------------------- the technology stack (the host card)

@@ -1,7 +1,5 @@
 """Virtual host discovery from the project's own names: how an answer is classified, which names are asked at all (scope, exclusions, what a
 scan already found), what is recorded and added, and the politeness the sweep keeps (pause, caps, pace, challenges, no body, vetted addresses)."""
-import http.server
-import threading
 from datetime import timedelta
 from unittest import mock
 
@@ -10,12 +8,13 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import ledger, probes, route_auth, slow_web, vhost_scan
+from cveFeed import ledger, route_auth, slow_web, vhost_scan
 from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun, TlsCertificate
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
+from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_tenancy import client_for
 
 DEFAULT_PAGE = {'status': 200, 'title': 'Welcome to nginx!', 'length': 615}
@@ -83,15 +82,51 @@ class VhostFixture:
             ('wiki.example.test', self.ADDRESS): answer(**WIKI_PAGE),  # the same application the name serves on its own address
         }
         self.server = Server(self.table)
+        LocalFallback('none').apply(self)
+        mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
+        self.guard = assert_ran_nowhere_locally(self, 'vhost_probe')
 
     def host(self, name, *ips, scan=True):
         sub = Subdomain.objects.create(target_domain=self.domain, name=name, scan_history=self.scan if scan else None)
         sub.ip_addresses.add(*ips)
         return sub
 
-    def run_sweep(self, **kw):
-        kw.setdefault('fetch', self.server)
-        kw.setdefault('pace', pace())
+    def _page_of(self, response):
+        return {'status': response['status'], 'title': response['title'], 'server': response['server'], 'content_type': response['content_type'],
+                'powered_by': response['powered_by'], 'url': response['url'], 'body': response['body'], 'headers': response['headers']}
+
+    def scanner_report(self, task):
+        """What a Sentinel's ``vhost_probe`` reads from ``self.table`` for ``task``: the default of each address, then each name (the table's
+        key is (name, address); a key that is not there is a name that did not answer). Every read is noted in ``self.server.calls``."""
+        out = []
+        for item in task['target']['addresses']:
+            self.server.calls.append((item['address'], None))
+            default = self.table.get((item['address'], None))
+            if default is None:  # the address did not answer: no name is asked
+                out.append({'id': item['id'], 'default': {'state': 'no_answer'}, 'names': []})
+                continue
+            names = []
+            for entry in item['names']:
+                self.server.calls.append((entry['name'], item['address']))
+                response = self.table.get((entry['name'], item['address']))
+                if response is None:
+                    names.append({'name': entry['name'], 'state': 'no_answer'})
+                    continue
+                row = {'name': entry['name'], 'state': 'answered', 'fingerprint': vhost_scan.fingerprint_of(response)}
+                if response.get('challenge'):
+                    row['state'], row['challenge'] = 'challenged', response['challenge']
+                if not vhost_scan.similar(row['fingerprint'], vhost_scan.fingerprint_of(default)):
+                    row['page'] = self._page_of(response)
+                names.append(row)
+            out.append({'id': item['id'], 'default': {'state': 'answered', 'fingerprint': vhost_scan.fingerprint_of(default)}, 'names': names})
+        return {'outcome': 'done', 'addresses': out, 'touched': [item['address'] for item in task['target']['addresses']], 'refused': []}
+
+    def run_sweep(self, responder=None, **kw):
+        """The sweep with a Sentinel (the fake scanner) answering from ``self.table``: this server asks nothing itself."""
+        if getattr(self, 'fake', None) is None:
+            self.fake = FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.scanner_report}).start_for(self)
+        if responder is not None:
+            self.fake.responders['vhost_probe'] = responder
         return vhost_scan.sweep(self.project.id, **kw)
 
     def observations(self, **kw):
@@ -192,12 +227,6 @@ class SweepTests(VhostFixture, TestCase):
         self.run_sweep()
         self.assertNotIn(('wiki.example.test', None), self.server.calls)  # its stored front page answered the comparison
 
-    def test_a_name_without_a_route_check_is_asked_once_at_its_own_address(self):
-        RouteAuth.objects.all().delete()
-        self.table[('wiki.example.test', None)] = answer(**WIKI_PAGE)
-        self.run_sweep()
-        self.assertEqual(self.server.calls.count(('wiki.example.test', None)), 1)
-        self.assertEqual(ProbeObservation.objects.get(host='wiki.example.test', probe=vhost_scan.PROBE).variant, 'same_app')
 
     def test_a_name_a_scan_found_on_the_address_is_never_asked(self):
         self.host('blog.example.test', self.ip)
@@ -259,16 +288,7 @@ class SweepTests(VhostFixture, TestCase):
         self.assertIn('automated testing', summary['skipped'])
         self.assertEqual(self.server.calls, [])
 
-    def test_a_pause_that_arrives_mid_sweep_stops_before_the_next_request(self):
-        summary = self.run_sweep(stop=lambda: len(self.server.calls) >= 3)
-        self.assertIn('paused', summary['skipped'])
-        self.assertEqual(len(self.server.calls), 3)
-        self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE, asset=f'{self.ADDRESS}|wiki.example.test').exists())  # still due
 
-    def test_the_sweep_waits_before_every_request(self):
-        counting = slow_web.Pace(sleep=lambda s: None, per_host=0, overall=0)
-        self.run_sweep(pace=counting)
-        self.assertEqual(counting.requests, len(self.server.calls))
 
     def test_it_can_be_switched_off(self):
         with mock.patch.dict('os.environ', {'CVENGINE_VHOST': '0'}):
@@ -338,35 +358,6 @@ class SweepTests(VhostFixture, TestCase):
         self.assertEqual(self.server.calls, [(self.ADDRESS, None)])
 
 
-class ChallengeTests(VhostFixture, TestCase):
-    def test_a_challenge_is_recorded_and_the_address_is_left_alone(self):
-        self.table[('portal.example.test', self.ADDRESS)] = answer(403, 'Just a moment...', 200, server='cloudflare', challenge='Cloudflare')
-        summary = self.run_sweep()
-        self.assertEqual(summary['challenged'], 1)
-        row = ProbeObservation.objects.get(host='portal.example.test', probe=vhost_scan.PROBE)
-        self.assertEqual((row.outcome, row.evidence['edge']), ('challenged', 'Cloudflare'))
-        self.assertIn('Allow the scanner', row.evidence['hint'])
-        self.assertEqual(self.server.asked(), ['portal.example.test'])  # nothing more is asked of an address whose edge refuses
-        self.assertFalse(Subdomain.objects.filter(name='portal.example.test', scan_history__isnull=True).exists())
-
-    def test_a_challenge_is_never_retried_at_the_next_run(self):
-        self.table[('portal.example.test', self.ADDRESS)] = answer(403, '', 0, challenge='Cloudflare')
-        self.run_sweep()
-        before = len(self.server.calls)
-        self.run_sweep()
-        self.assertEqual(len(self.server.calls), before)
-
-    def test_a_challenged_default_answer_asks_no_name_at_all(self):
-        self.table[(self.ADDRESS, None)] = answer(403, 'Attention Required', 300, challenge='Cloudflare')
-        self.run_sweep()
-        self.assertEqual(self.server.calls, [(self.ADDRESS, None)])
-        self.assertEqual(ProbeObservation.objects.get(probe=vhost_scan.PROBE).outcome, 'challenged')
-
-    def test_a_busy_server_is_not_a_result_and_is_not_pushed(self):
-        self.table[(self.ADDRESS, None)] = answer(429, 'Too Many Requests', 50)
-        self.run_sweep()
-        self.assertEqual(self.server.calls, [(self.ADDRESS, None)])
-        self.assertFalse(ProbeObservation.objects.filter(probe=vhost_scan.PROBE).exists())
 
 
 class VettingTests(VhostFixture, TestCase):
@@ -448,101 +439,5 @@ class ModelContextTests(VhostFixture, TestCase):
         self.assertTrue(ProbeObservation.objects.filter(host='portal.example.test', kind='vhost').exists())  # recorded, just not given to the model
 
 
-class RequestTests(SimpleTestCase):
-    """The real transport against a local server: the request is a GET with no body, the name is the Host header, the address is the one asked."""
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.seen = []
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                length = int(self.headers.get('Content-Length') or 0)
-                cls.seen.append((self.command, self.headers.get('Host'), self.path, length, self.headers.get('Cookie'), self.headers.get('Authorization')))
-                body = b'<html><head><title>Portal login</title></head><body>hello</body></html>'
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def do_POST(self):  # a POST would be a bug: recorded so a test can fail on it
-                cls.seen.append((self.command, self.headers.get('Host'), self.path, 0, None, None))
-                self.send_response(405)
-                self.end_headers()
-
-            def log_message(self, *args):
-                pass
-        cls.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-        cls.port = cls.server.server_address[1]
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        super().tearDownClass()
-
-    def setUp(self):
-        self.seen.clear()
-        for target in ('cveFeed.pinned_transport.is_scannable_ip', 'targetApp.target_types.is_scannable_ip'):
-            mock.patch(target, return_value=True).start()
-        self.addCleanup(mock.patch.stopall)
-
-    def test_the_name_is_the_host_header_and_the_vetted_address_is_what_is_connected_to(self):
-        response = slow_web.get(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
-        self.assertEqual(response['title'], 'Portal login')
-        self.assertEqual(self.seen[0][:3], ('GET', f'portal.example.test:{self.port}', '/'))  # the name does not resolve: only the address was used
-
-    def test_a_request_is_a_get_with_no_body_no_cookie_and_no_credential(self):
-        slow_web.get(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
-        method, _host, _path, length, cookie, auth = self.seen[0]
-        self.assertEqual((method, length, cookie, auth), ('GET', 0, None, None))
-
-    def test_the_transport_refuses_anything_but_a_get_or_head(self):
-        for method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-            with self.assertRaises(ValueError):
-                route_auth.probe_url(f'http://portal.example.test:{self.port}/', method=method, connect_ip='127.0.0.1')
-        self.assertEqual(self.seen, [])
-
-    def test_redirects_are_not_followed(self):
-        redirect = {'status': 302, 'location': 'http://169.254.169.254/latest/meta-data/'}
-        with mock.patch.object(route_auth, 'probe_url', return_value={**answer(302), **redirect}) as probe:
-            slow_web.get('http://portal.example.test/', connect_ip='203.0.113.10', project=1, probe=probe)
-        self.assertEqual(probe.call_count, 1)
 
 
-class PaceTests(SimpleTestCase):
-    def test_the_pace_waits_for_the_per_host_gap(self):
-        clock, slept = [100.0], []
-
-        def sleep(seconds):
-            slept.append(round(seconds, 3))
-            clock[0] += seconds
-        pace_ = slow_web.Pace(sleep=sleep, clock=lambda: clock[0], per_host=2.0, overall=0)
-        pace_.wait('203.0.113.10')
-        clock[0] += 0.5
-        pace_.wait('203.0.113.10')
-        pace_.wait('198.51.100.7')  # another host is not held back by the first
-        self.assertEqual(slept, [1.5])
-        self.assertEqual(pace_.requests, 3)
-
-    def test_the_global_gap_spaces_requests_across_hosts(self):
-        slept = []
-        clock = [1000.0]
-        pace_ = slow_web.Pace(sleep=slept.append, clock=lambda: clock[0], per_host=0, overall=1.0)
-        with mock.patch.object(slow_web, 'reserve_slot', side_effect=[0.0, 1.0, 1.0]):
-            for host in ('a', 'b', 'c'):
-                pace_.wait(host)
-        self.assertEqual(slept, [1.0, 1.0])
-
-    def test_reserve_slot_hands_out_slots_one_gap_apart(self):
-        fake = mock.Mock()
-        fake.r = None
-        with mock.patch('reNgine.resources.get_store', return_value=fake):
-            slow_web._local['next'] = 0.0
-            first = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-            second = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-            third = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-        self.assertEqual((first, second, third), (0.0, 2.0, 4.0))

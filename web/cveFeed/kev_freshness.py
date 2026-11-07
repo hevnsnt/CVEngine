@@ -120,16 +120,18 @@ def request_reread(subdomain_ids):
     return len(due)
 
 
-def reread(subdomain_ids, get=None):
+def reread(subdomain_ids):
     """Read the version of each host again with the web probes a scan runs for its products (the front page's headers and generator, the
     WordPress probe and the like), then correlate it again whatever they found, so a held KEV match is raised on a fresh reading or not at
     all. A host of a passive or manual only target, an excluded or archived host, or one whose project is paused is left for its next scan.
     Returns the number of hosts read."""
+    from agentapi import probe_dispatch
     from cveFeed import probes
     from cveFeed.archive_rediscovery import archived_names
     from cveFeed.exclusions import is_excluded
     from cveFeed.match_policy import unversioned_products
     from reNgine import resources
+    from reNgine.resources import ScannerUnavailable
     from startScan.models import Subdomain
     from targetApp.models import Domain
     read = 0
@@ -148,11 +150,20 @@ def reread(subdomain_ids, get=None):
         leads = [{'name': split_name_version(t.name)[0], 'source': 'tech'} for t in sub.technologies.all() if ':' in t.name]
         leads += unversioned_products(sub)
         plan = [e for e in probes.plan_for_host(sub, leads) if e['family'] == 'http']
-        for entry in plan:
-            try:
-                probes.run_one(project, target.id, sub, entry, get=get, fresh=True)
-            except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; the next scan reads the host anyway
-                logger.info('version re-read %s on host %s failed: %s', entry['probe'], sub.pk, type(exc).__name__)
+        if not plan:
+            continue
+        planned = [(sub, probes.asset_key(sub.name, entry), entry) for entry in plan]
+        try:  # a Sentinel reads the host again (``http_probe``); this server sends nothing, and with none able to take it the host is read at its next scan
+            answered = probe_dispatch.try_http_probes(target.project, None, planned)
+        except ScannerUnavailable as exc:
+            logger.info('version re-read of host %s waits for a scanner: %s', sub.pk, exc)
+            continue
+        for _sub, asset, entry in planned:
+            found = answered.get(asset)
+            if found is None or isinstance(found, Exception):  # one probe failing never stops the rest; the next scan reads the host anyway
+                logger.info('version re-read %s on host %s failed', entry['probe'], sub.pk)
+                continue
+            probes.apply_remote(project, target.id, sub, entry, found)
         probes.recorrelate(sub)
         read += 1
     return read

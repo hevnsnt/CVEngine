@@ -409,82 +409,6 @@ def observations_from_page(response, source_prefix='page'):
     return out
 
 
-def next_version(body):
-    """The Next.js version a framework script states (``window.next={version:"14.1.0"}``), or ''."""
-    found = re.search(r'\bnext\s{0,8}=\s{0,8}\{\s{0,8}version\s{0,8}:\s{0,8}["\'](\d+\.\d+\.\d+[\w.-]{0,20})["\']', body or '')
-    return found.group(1) if found else ''
-
-
-_NEXT_CHUNK = re.compile(r'/_next/static/chunks/(?:main|main-app|framework|webpack)-[A-Za-z0-9]{8,}\.js')
-
-
-def _wordpress_signals(responses):
-    """``(signals, version)`` for the WordPress probe: every signature found in a response's headers or body, and the core version a
-    generator tag, a readme or a core asset states."""
-    signals, generator = [], ''
-    for path, response in responses:
-        if not response:
-            continue
-        headers = {k.lower(): v for k, v in (response.get('headers') or {}).items()}
-        body = (response.get('body') or '')[:BODY_SCAN]
-        link = headers.get('link', '').replace("'", '"')
-        if 'rel="https://api.w.org/"' in link:
-            signals.append(('header:link-api.w.org', path))
-        if 'xmlrpc.php' in headers.get('x-pingback', ''):
-            signals.append(('header:x-pingback', path))
-        if path == '/wp-login.php' and re.search(r'id=["\']loginform["\']|name=["\']log["\']|wp-submit', body):
-            signals.append(('body:login-form', path))
-        if path.startswith('/wp-json') and re.search(r'"namespaces"\s*:\s*\[|"wp/v2"|"code"\s*:\s*"rest_', body):
-            signals.append(('body:rest-api', path))
-        if path == '/' and re.search(r'/wp-content/|/wp-includes/', body):
-            signals.append(('body:wp-content', path))
-        for product, found in versions.generator_tags(body if path == '/' else ''):
-            if product.lower() == 'wordpress':
-                signals.append(('meta:generator', path))
-                generator = generator or found
-    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cvengine_scanner.cms: best source wins, a library's ?ver= never)
-    pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
-    candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
-    candidates.sort(key=lambda c: -c[2])
-    if any(label.startswith('asset:') for _v, label, _c in candidates):
-        signals.append(('body:core-asset-ver', '/'))
-    return signals, (candidates[0][0] if candidates else '')
-
-
-def wordpress_observations(responses):
-    """The observations of the WordPress probe from its responses ``[(path, response)]``: found (with how and the version when stated),
-    challenged (an edge answered and no signature was readable: the owner is told what to allow), absent, or none when nothing answered."""
-    signals, version = _wordpress_signals(responses)
-    probed = [{'path': path, 'status': (r or {}).get('status'), 'challenge': (r or {}).get('challenge', '')} for path, r in responses]
-    if signals:
-        order = list(dict.fromkeys(s for s, _ in signals))
-        evidence = {'signals': order, 'probed': probed}
-        found = [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
-                              url=next(p for s, p in signals), evidence=evidence)]
-        from cveFeed import wp_core
-        answers = dict(responses)
-        if wp_core.UPGRADE_PATH in answers:  # the directory an update is extracted into: whether the web server serves it (cveFeed.wp_core)
-            state = wp_core.classify_dir(answers[wp_core.UPGRADE_PATH], answers.get(wp_core.UPGRADE_MISSING))
-            status = (answers[wp_core.UPGRADE_PATH] or {}).get('status')
-            found.append(_observation('wp-upgrade-dir', 'WordPress', variant=state, source='probe:upgrade-dir', url=wp_core.UPGRADE_PATH,
-                                      outcome='found' if state in (wp_core.LISTING, wp_core.REACHABLE) else 'absent' if state == wp_core.DENIED else 'hidden',
-                                      confidence=0.9 if state in (wp_core.LISTING, wp_core.DENIED) else 0.7 if state == wp_core.REACHABLE else 0.0,
-                                      evidence={'status': status, 'state': state}))
-        return found
-    challenged = next((r['challenge'] for _p, r in responses if r and r.get('challenge')), '')
-    reachable = [r for _p, r in responses if r]
-    if not reachable:
-        return []  # the host did not answer at all: nothing was learned, so nothing is recorded
-    if challenged or (reachable and all((r.get('status') or 0) in EDGE_STATUSES for r in reachable)):
-        provider = challenged or (versions.edges_from_headers((reachable[0].get('headers') or {})) or ['an edge'])[0]
-        evidence = {'probed': probed, 'edge': provider,
-                    'hint': (f'The edge ({provider}) answered cvENGINE\'s requests with a challenge or a block, so it could not be read whether '
-                             'this host runs WordPress. Allow the scanner\'s address (or its user agent) in the WAF or bot rules for this host, '
-                             'then rescan.')}
-        return [_observation('wordpress', 'WordPress', outcome='challenged', confidence=0.0, source='edge', evidence=evidence)]
-    return [_observation('wordpress', 'WordPress', outcome='absent', confidence=0.7, source='probe', evidence={'probed': probed})]
-
-
 # ----------------------------------------------------------------------------- running one probe
 
 def allowed_names(sub):
@@ -500,52 +424,6 @@ def allowed_names(sub):
     return names
 
 
-def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=None, reader=None, target=None):
-    """Run one http probe against ``base`` and return its observations. ``get(url)`` replaces the network (tests)."""
-    probe = BY_ID[probe_id]
-    # a script is read further than a page (cveFeed.js_libraries.MAX_SCRIPT_BYTES); a test's ``get`` reads both
-    script_get = None if get else (lambda url, headers=None: fetch(url, allowed=allowed, sleep=sleep, project=project,
-                                                                   max_bytes=js_libraries.MAX_SCRIPT_BYTES, headers=headers))
-    get = get or (lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project))
-    handler = probe.get('handler')
-    if handler == 'wordpress':
-        return wordpress_observations(_wordpress_responses(base, get, sleep))
-    responses = []
-    for index, (method, path) in enumerate(probe['requests']):
-        if index:
-            sleep(REQUEST_GAP)
-        try:
-            responses.append(get(base.rstrip('/') + path))
-        except (OSError, ValueError) as exc:
-            logger.info('probe %s: %s did not answer (%s)', probe_id, path, type(exc).__name__)
-            responses.append(None)
-    # fetch follows a redirect inside the host's group (apex and www answer for each other): a page another host served is that host's
-    # (its scripts, Server header and generator tags; the other host's own probe records them). Only what this host answered itself, its
-    # redirect, is read for it
-    responses = [own_answer(r, base) for r in responses]
-    out = []
-    first = responses[0] if responses else None
-    if handler == 'headers' and first:
-        out += observations_from_page(first)
-    elif handler == 'nextjs' and first:
-        out += _nextjs_observations(first, get, sleep)
-    elif handler == 'libraries' and first:
-        out += _library_observations(first, script_get or get, sleep, project, reader=reader, target=target)
-    out += apply_rules(probe, responses)
-    if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
-        out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
-    return out
-
-
-def own_answer(response, base):
-    """``response`` when ``base``'s own host served it, else that host's own first answer (``redirected_from``: a redirect, headers only),
-    or None when there is none to read: what another host served is never attributed to this one."""
-    if not response or served_by(response, base):
-        return response
-    origin = response.get('redirected_from')
-    return origin if origin and served_by(origin, base) else None
-
-
 def served_by(response, base):
     """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
     host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
@@ -555,93 +433,6 @@ def served_by(response, base):
     except ValueError:
         return False
     return not there or here == there
-
-
-def _wordpress_responses(base, get, sleep):
-    paths = ['/', '/wp-login.php', '/wp-json/']
-    responses = []
-    for index, path in enumerate(paths):
-        if index:
-            sleep(REQUEST_GAP)
-        try:
-            responses.append((path, get(base.rstrip('/') + path)))
-        except (OSError, ValueError):
-            responses.append((path, None))
-    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme, and for the directory updates are extracted into
-        sleep(REQUEST_GAP)
-        try:
-            responses.append(('/readme.html', get(base.rstrip('/') + '/readme.html')))
-        except (OSError, ValueError):
-            pass
-        for path, _sources in cms.asked('WordPress'):
-            if path == '/readme.html' or _wordpress_signals(responses)[1]:
-                continue   # the readme was asked above; the feed only while no page states the version
-            sleep(REQUEST_GAP)
-            try:
-                responses.append((path, get(base.rstrip('/') + path)))
-            except (OSError, ValueError):
-                pass
-        from cveFeed import wp_core
-        sleep(REQUEST_GAP)
-        try:
-            answer = get(base.rstrip('/') + wp_core.UPGRADE_PATH)
-        except (OSError, ValueError):
-            answer = None
-        responses.append((wp_core.UPGRADE_PATH, answer))
-        if wp_core.classify_dir(answer) == wp_core.REACHABLE:  # an empty page: ask once for a path that cannot exist beside it, to tell a catch-all
-            sleep(REQUEST_GAP)
-            try:
-                responses.append((wp_core.UPGRADE_MISSING, get(base.rstrip('/') + wp_core.UPGRADE_MISSING)))
-            except (OSError, ValueError):
-                pass
-    return responses
-
-
-def _same_host_scripts(response, pattern=None, limit=4):
-    page = response.get('final_url') or response.get('url') or ''
-    _every, local = js_libraries.script_sources(response.get('body', ''), page, limit=40)
-    return [u for u in local if pattern is None or pattern.search(u)][:limit]
-
-
-def _nextjs_observations(first, get, sleep):
-    scripts = _same_host_scripts(first, _NEXT_CHUNK, limit=3)
-    for url in scripts:
-        sleep(REQUEST_GAP)
-        try:
-            got = get(url)
-        except (OSError, ValueError):
-            continue
-        number = next_version(got.get('body'))
-        if number:
-            return [_observation('version', 'Next.js', number, outcome='found', confidence=0.9, source='script:next-chunk', url=urlsplit(url).path)]
-    seen = bool(scripts) or '__NEXT_DATA__' in (first.get('body') or '')
-    if seen:
-        return [_observation('version', 'Next.js', outcome='hidden', confidence=0.7, source='script:next-chunk', url='/')]
-    return []
-
-
-def _library_observations(first, get, sleep, project=None, reader=None, target=None):
-    """The library versions the front page's scripts state (cveFeed.js_libraries): one observation per library, its effective copy's
-    version, with every copy and which one runs in ``evidence['library']``. A version from a file name only (the file could not be read or
-    states none) is kept at low confidence; a query string is never a version."""
-    if not 200 <= (first.get('status') or 0) < 300 or first.get('challenge'):
-        return []  # an error page or an edge's challenge is not the site's page: its scripts say nothing (as for the route check)
-    page = first.get('final_url') or first.get('url') or ''
-    entries = js_libraries.parse_page(first.get('body', ''), page)
-    records = js_libraries.read_page(entries, page, get, js_libraries.vetter(page, project, target=target),
-                                     {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project)
-    return _library_records_observations(records)
-
-
-def _library_records_observations(records):
-    """One ``version`` observation per library record (``js_libraries.resolve``), carrying the record in ``evidence['library']``."""
-    out = []
-    for record in records.values():
-        version = record['version']
-        out.append(_observation('version', record['product'], version, source='script:body' if record['version_source'] == 'body' else 'script:filename',
-                                confidence=record['version_confidence'] if version else 0.7, outcome='found' if version else 'hidden', url='/',
-                                evidence={'library': record}))
-    return out
 
 
 _JS_STRING = re.compile(r'''["']([^"'\s<>]{1,300}?\.js(?:\?[^"'\s<>]{0,200})?)["']''')
@@ -1007,8 +798,9 @@ def max_hosts():
     return _int_env('CVENGINE_PROBE_MAX_HOSTS', 60)
 
 
-def run_one(project_id, domain_id, sub, entry, get=None, sleep=time.sleep, reader=None, fresh=False):
-    """Run one planned probe (``plan_for_host`` entry) on ``sub``, store what it found, apply it, and return the observations."""
+def run_one(project_id, domain_id, sub, entry):
+    """Run one planned probe of the ``nmap`` family (``plan_for_host`` entry) on ``sub`` through a Sentinel, store what it found, apply it, and return the
+    observations. The http probes never run here: a Sentinel's ``http_probe`` task runs them (``agentapi.probe_dispatch.try_http_probes``)."""
     probe_id, target = entry['probe'], entry['target']
     if BY_ID[probe_id]['family'] == 'nmap':
         from startScan.ip_rows import org_id_of_project
@@ -1022,9 +814,7 @@ def run_one(project_id, domain_id, sub, entry, get=None, sleep=time.sleep, reade
         found = observations_from_nmap(inventory, int(target['port']))
         port_inventory.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
     else:
-        reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
-        found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id, reader=reader,
-                               target=getattr(sub, 'target_domain', None))
+        raise ValueError('the http probes run on a Sentinel')
     record(project_id, domain_id, sub.name, probe_id, found)
     if apply_to_subdomain(sub, found):
         recorrelate(sub)
@@ -1049,7 +839,7 @@ def summarize(found):
     return '; '.join(dict.fromkeys(parts))[:300] or 'nothing the probe could read'
 
 
-def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
+def run_for_scan(scan_id, force=False):
     """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
     (at most MAX_PROBES_PER_HOST that are due), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
@@ -1082,11 +872,10 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
     due = due[:max_hosts()]
     if not due:
         return stats
-    reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget, shared by every host's library probe
     running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
                            status='running', scan_id=scan.id)
-    # the http probes go to a Sentinel when one can take them (agentapi.probe_dispatch); whatever it does not run is run here, as before
-    remote, waiting = ({}, False) if get is not None else _remote_http(scan, due)
+    # the http probes go to a Sentinel (agentapi.probe_dispatch); with none able to take them they stay due
+    remote, waiting = _remote_http(scan, due)
     if waiting:
         stats['waiting'] = True
     for sub, todo in due:
@@ -1103,7 +892,7 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
                         raise found
                     found = apply_remote(project, domain.id, sub, entry, found)
                 else:
-                    found = run_one(project, domain.id, sub, entry, get=get, sleep=sleep, reader=reader)
+                    found = run_one(project, domain.id, sub, entry)
             except (local_egress.PortHeld, resources.ScannerUnavailable) as exc:  # held here, or waiting for a scanner: not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1
@@ -1126,7 +915,7 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
 
 def _remote_http(scan, due):
     """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
-    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them and they may not run here."""
+    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them."""
     from agentapi import probe_dispatch
     from reNgine.resources import ScannerUnavailable
     planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
@@ -1135,7 +924,7 @@ def _remote_http(scan, due):
     except ScannerUnavailable as exc:
         logger.info('version probes of scan %s wait for a scanner: %s', scan.pk, exc)
         return {}, True
-    return (got[0] if got is not None else {}), False
+    return got, False
 
 
 def apply_remote(project_id, domain_id, sub, entry, found):

@@ -73,29 +73,6 @@ def reserve_slot(gap, now=time.time):
         return max(0.0, at - now())
 
 
-class Pace:
-    """Waits before each request: the per-host gap since the last request to that host, then the global slot. ``sleep`` and ``clock`` are
-    injectable so a test checks the pacing without waiting."""
-
-    def __init__(self, sleep=time.sleep, clock=time.monotonic, per_host=None, overall=None):
-        self.sleep, self.clock = sleep, clock
-        self.per_host = host_gap() if per_host is None else per_host
-        self.overall = global_gap() if overall is None else overall
-        self.last = {}
-        self.requests = 0
-
-    def wait(self, host):
-        key = str(host).lower()
-        since = self.clock() - self.last[key] if key in self.last else None
-        if since is not None and since < self.per_host:
-            self.sleep(self.per_host - since)
-        delay = reserve_slot(self.overall) if self.overall else 0.0
-        if delay > 0:
-            self.sleep(delay)
-        self.last[key] = self.clock()
-        self.requests += 1
-
-
 def get(url, connect_ip=None, project=None, probe=None):
     """One bounded, anonymous GET (``route_auth.probe_url``: pinned numeric destination vetted at connect time, no redirects, no cookie, the
     response read up to 64 KB). ``connect_ip`` sends the URL's name as the Host header and the TLS server name to that vetted address. The

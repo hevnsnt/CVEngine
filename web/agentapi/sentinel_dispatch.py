@@ -85,6 +85,14 @@ NEVER_LOCAL = (
     'alive_check',  # the retire check's web and connect checks of a vanished name's last address (cveFeed.changes._remote_alive)
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
     'web_screenshot',
+    'http_probe',  # the version and identity probes (cveFeed.probes): a Sentinel's requests, never this server's
+    'route_probe',  # the anonymous route reads (cveFeed.route_auth)
+    'vhost_probe',
+    'subdir_probe',
+    'supplier_check',
+    'hygiene_check',
+    'dangling_dns_check',
+    'discover',  # internal ranges: Sentinel-only already
 )
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added

@@ -41,7 +41,6 @@ DIRECT_SEND_REFERENCE = 'https://www.blackhillsinfosec.com/spoofing-microsoft-36
 # RFC 8624 §3.1: algorithms that MUST NOT be used for signing (ECC-GOST is also deprecated by RFC 9558)
 WEAK_DNSSEC_ALGORITHMS = {1: 'RSAMD5', 3: 'DSA', 5: 'RSASHA1', 6: 'DSA-NSEC3-SHA1', 7: 'RSASHA1-NSEC3-SHA1', 12: 'ECC-GOST'}
 RSA_DNSSEC_ALGORITHMS = {1, 5, 7, 8, 10}
-CHECKS_PREFIXES = ('mx_', 'mta_sts_', 'smtp_tlsrpt_', 'dane_', 'dnssec_', 'bimi_', 'arc_', 'adsp_', 'mailchannels_')
 
 
 def _finding(check, severity, title, detail, host, evidence=None, reference=''):
