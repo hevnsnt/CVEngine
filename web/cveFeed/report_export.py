@@ -116,10 +116,28 @@ def enqueue(ctx, slug, host=None, include_closed=False):
     return job, True
 
 
+QUEUE_STALL = timedelta(minutes=10)  # a report no worker has started this long after it was asked for: the worker is down or its queue is jammed
+RUN_MARGIN = timedelta(minutes=5)  # what a running report may take beyond the renderer's own time limit (reading the data, writing the file)
+
+
 def _expire_stuck(now):
-    """A report whose worker died would otherwise stay "running" for ever: fail the ones older than STUCK_AFTER."""
+    """A report whose worker died or never took it would otherwise stay "queued" or "running" for hours, and asking again would give the same dead row back
+    (``enqueue`` returns the twin of an active report): fail it with a message that says which, so the next ask starts a new one.
+
+    * queued for ``QUEUE_STALL``: nothing started it (the report worker is not running, or its queue is jammed): the message says so. A worker that
+      picks the message up later finds the row failed and does nothing (``execute`` claims only a queued row).
+    * running past the renderer's limit (``report_pdf.render_seconds``) and a margin: its worker was killed in the middle.
+    * anything active for ``STUCK_AFTER``: the catch-all of before."""
+    from cveFeed import report_pdf
     from cveFeed.models import ReportExport
-    ReportExport._base_manager.filter(status__in=ACTIVE, created_at__lt=now - STUCK_AFTER).update(
+    rows = ReportExport._base_manager
+    rows.filter(status='queued', created_at__lt=now - QUEUE_STALL).update(
+        status='failed', finished_at=now, error=f'no worker started this report within {int(QUEUE_STALL.total_seconds() // 60)} minutes '
+                                                 '(the report worker is not running, or its queue is busy); ask for it again')
+    limit = timedelta(seconds=report_pdf.render_seconds()) + RUN_MARGIN
+    rows.filter(status='running', started_at__lt=now - limit).update(
+        status='failed', finished_at=now, error=f'the report did not finish within {int(limit.total_seconds() // 60)} minutes (the worker stopped); ask for it again')
+    rows.filter(status__in=ACTIVE, created_at__lt=now - STUCK_AFTER).update(
         status='failed', finished_at=now, error='the report was not finished (the worker stopped); ask for it again')
 
 
