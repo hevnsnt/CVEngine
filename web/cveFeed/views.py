@@ -657,6 +657,8 @@ def host_rdp_screenshot(request, slug, subdomain_id, port):
 
 
 def welcome_page(request):
+    if not (request.user.is_authenticated and request.user.is_superuser):
+        return redirect('cve_dashboard')  # the setup wizard is for the App Admin only
     return render(request, 'cveFeed/welcome.html', ui_context(request, 'welcome'))
 
 

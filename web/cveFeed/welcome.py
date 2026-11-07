@@ -52,11 +52,9 @@ def _wizard_org(user):
 
 
 def needs_welcome(user):
-    """Superusers who have not finished the wizard (or have no project at all)."""
-    if not user.is_superuser:
-        return False
-    profile = UserProfile.objects.filter(user=user).first()
-    return not (profile and profile.onboarded) or not Project.objects.exists()
+    """App Admins who have not completed the setup wizard (``setup_flow.needs_wizard``): the first one to sign in is sent to it."""
+    from cveFeed import setup_flow
+    return setup_flow.needs_wizard(user)
 
 
 def state(request):
@@ -72,15 +70,13 @@ def state(request):
     }
 
 
-def save_org(request):
-    name = str(_body(request).get('name', '')).strip()[:100]
-    if len(name) < 2:
-        raise WelcomeError(400, 'Give your organization a name (2 or more characters).')
+def ensure_org(user, name):
+    """Create the wizard's organization, or rename the one it already made while nothing is built in it (the migration's untouched "Default" is renamed in place)."""
     org = _untouched_default_org() or Org.objects.filter(name=name).first()
     if org is None:
         # the step sent again with another name renames the organization the wizard made, while nothing is built in it
-        own = _wizard_org(request.user)
-        if own and own.name != 'Default' and OrgMembership.objects.filter(user=request.user, org=own, role='admin').exists() \
+        own = _wizard_org(user)
+        if own and own.name != 'Default' and OrgMembership.objects.filter(user=user, org=own, role='admin').exists() \
                 and not Domain.objects.filter(project__org=own).exists():
             org = own
     org = org or Org()
@@ -88,18 +84,30 @@ def save_org(request):
     if not org.pk:
         org.slug = _unique_slug(Org, name, 'org')
     org.save()
-    OrgMembership.objects.get_or_create(user=request.user, org=org, defaults={'role': 'admin'})
+    OrgMembership.objects.get_or_create(user=user, org=org, defaults={'role': 'admin'})
+    return org
+
+
+def wizard_org(user):
+    return _wizard_org(user)
+
+
+def wizard_project(user):
+    org = _wizard_org(user)
+    return Project.objects.filter(org=org).order_by('-id').first() or Project.objects.order_by('id').first()
+
+
+def save_org(request):
+    name = str(_body(request).get('name', '')).strip()[:100]
+    if len(name) < 2:
+        raise WelcomeError(400, 'Give your organization a name (2 or more characters).')
+    ensure_org(request.user, name)
     return state(request)
 
 
-def save_project(request):
-    data = _body(request)
-    name = str(data.get('name', '')).strip()[:100]
-    if len(name) < 2:
-        raise WelcomeError(400, 'Give your project a name (2 or more characters).')
-    if roles.is_reserved_project(name):
-        raise WelcomeError(400, f'"{roles.ALL_PROJECTS}" is reserved for the all-projects view; choose another name.')
-    org = _wizard_org(request.user)
+def ensure_project(user, name):
+    """Create the wizard's project in its organization, or rename the untouched starter project."""
+    org = _wizard_org(user)
     project = Project.objects.filter(org=org, name='Default').first() \
         if not Domain.objects.exists() else None  # rename the untouched starter project
     project = project or Project.objects.filter(org=org, name=name).first()
@@ -109,6 +117,17 @@ def save_project(request):
     if not project.pk or (project.slug == 'default' and not Domain.objects.filter(project=project).exists()):
         project.slug = _unique_slug(Project, name, 'project', exclude_pk=project.pk)
     project.save()
+    return project
+
+
+def save_project(request):
+    data = _body(request)
+    name = str(data.get('name', '')).strip()[:100]
+    if len(name) < 2:
+        raise WelcomeError(400, 'Give your project a name (2 or more characters).')
+    if roles.is_reserved_project(name):
+        raise WelcomeError(400, f'"{roles.ALL_PROJECTS}" is reserved for the all-projects view; choose another name.')
+    ensure_project(request.user, name)
     return state(request)
 
 
@@ -172,19 +191,33 @@ def finish(request):
     return state(request)
 
 
+def _flow(name):
+    def run(request):
+        from cveFeed import setup_flow
+        return getattr(setup_flow, name)(request)
+    return run
+
+
 ROUTES = {
-    ('GET', 'state'): state, ('POST', 'org'): save_org, ('POST', 'project'): save_project,
-    ('POST', 'target'): add_first_target, ('POST', 'keys'): save_keys, ('POST', 'finish'): finish,
+    ('GET', 'state'): _flow('state_view'), ('POST', 'org'): save_org, ('POST', 'project'): save_project,
+    ('POST', 'target'): add_first_target, ('POST', 'keys'): save_keys, ('POST', 'finish'): _flow('finish'),
+    # the setup wizard (cveFeed.setup_flow)
+    ('POST', 'seed'): _flow('save_seed'), ('POST', 'plan'): _flow('save_plan'), ('POST', 'scanners'): _flow('save_scanners'),
+    ('POST', 'provision'): _flow('provision'), ('POST', 'notify'): _flow('save_notify'), ('POST', 'extra'): _flow('mark_extra'),
+    ('POST', 'skip'): _flow('skip_step'), ('POST', 'password'): _flow('save_password'), ('GET', 'progress'): _flow('progress'),
 }
 
 
 def dispatch(request, path):
+    from cveFeed import setup_flow
     if not (request.user.is_authenticated and request.user.is_superuser):
         return JsonResponse({'error': 'superuser only'}, status=403)
     handler = ROUTES.get((request.method, path.strip('/')))
     if not handler:
         return JsonResponse({'error': 'not found'}, status=404)
     try:
-        return JsonResponse(handler(request))
-    except WelcomeError as exc:
+        response = JsonResponse(handler(request))
+    except (WelcomeError, setup_flow.WizardError) as exc:
         return JsonResponse({'error': exc.message}, status=exc.status)
+    response['Cache-Control'] = 'no-store'
+    return response

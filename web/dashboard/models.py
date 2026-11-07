@@ -257,6 +257,20 @@ class SystemTimings(models.Model):
 		return cls.objects.first() or cls()
 
 
+class SetupWizard(models.Model):
+	"""Single-row, server-side state of the first-run setup wizard (cveFeed.setup_flow): what each step saved, which were skipped, and when it was
+	completed. Stored on the server so the wizard resumes from any browser and a finished one never comes back. Holds no secret: a key or password
+	goes to its own settings row the moment it is entered and is never kept here."""
+	started_at = models.DateTimeField(null=True, blank=True)
+	completed_at = models.DateTimeField(null=True, blank=True)
+	completed_by = models.CharField(max_length=150, blank=True, default='')
+	data = models.JSONField(default=dict, blank=True)
+
+	@classmethod
+	def current(cls):
+		return cls.objects.first() or cls()
+
+
 class ScanPolicy(models.Model):
 	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
 	id = models.AutoField(primary_key=True)
