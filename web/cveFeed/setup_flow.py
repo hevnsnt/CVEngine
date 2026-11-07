@@ -659,7 +659,8 @@ def progress(request, now=None):
     finished = bool(out['discovery'] and out['discovery']['state'] in ('done', 'ended'))
     ready = over or found >= ENOUGH_HOSTS or finished
     out['dwell'].update(elapsed=elapsed, ready=bool(ready), hold=not ready,
-                        reason=('' if ready else 'Discovery found nothing yet, so the dashboard would open empty: giving it a little longer.'))
+                        reason=('' if ready else 'Discovery found nothing yet, so the dashboard would open empty: giving it a little longer.' if not found
+                                else f'Discovery has found {found} so far: giving it a little longer so the dashboard opens with more in it.'))
     out['next'] = next_step(data)
     out['completed'] = bool(row.completed_at)
     return out
