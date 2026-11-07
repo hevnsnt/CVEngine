@@ -271,7 +271,13 @@ make migrate >/dev/null 2>&1 || make migrate || { show_logs; die "Database migra
 admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "Could not create the admin account. Try 'make admin' once the services are up."; }
 # the make command echo ("docker compose ... exec") is noise: keep only the account banner
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
-[ -n "$admin_banner" ] || admin_banner=$admin_output
+account='the account above'
+if [ -z "$admin_banner" ]; then
+  # an account that already exists (a re-run) prints one sentence among the framework's start-up noise (logo, warnings): only that sentence is kept
+  account='your existing admin account'
+  admin_banner=$(printf '%s\n' "$admin_output" | grep -E '^The account ' | tail -n 1)
+  [ -n "$admin_banner" ] || admin_banner="The admin account is set up. Lost its password? Run: make admin-password"
+fi
 
 # The built-in scanner enrols itself with the enrollment the server writes for it, which needs the admin account that now exists: written now
 # instead of at the server's next five-minute round. It then runs every scan tool. A scanner that is slow to come up is not a failed install:
@@ -340,7 +346,7 @@ case $watcher in ok) printf '  updates     the update watcher is installed (Sett
 printf '  OpenVAS     not installed, nothing of it runs here. It runs on a Sentinel (about 4 GB of RAM and 60 GB of disk there): docs/OPENVAS.md\n'
 printf '\n%sNext steps%s\n' "$BOLD" "$RESET"
 n=1
-printf '  %d. Open  https://%s/  and sign in with the account above (the password is shown only here; you choose your own at first sign-in).\n' "$n" "$address"; n=$((n + 1))
+printf '  %d. Open  https://%s/  and sign in with %s (a generated password is shown only once; you choose your own at first sign-in).\n' "$n" "$address" "$account"; n=$((n + 1))
 printf '     Your browser will warn that the certificate is not trusted: that is expected, it is signed by this server'"'"'s own authority.\n'
 printf '     Continue past the warning, or trust the authority once:  %s\n' "$ca"
 printf '  %d. Add your first target. The setup wizard starts scanning it right away; the CVE feed is already loading in the background.\n' "$n"; n=$((n + 1))
