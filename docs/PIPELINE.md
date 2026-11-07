@@ -116,7 +116,7 @@ The WordPress scan runs on a Sentinel only (task kind `wpscan`, never on this se
 
 ### When discovery finds no web pages
 
-A standard or deep discovery turns each host into a URL with bbot's `http` module. If a discovery finds five or more hosts and bbot reports no `URL` and no `HTTP_RESPONSE` event at all, the activity feed says so ("found N hosts but bbot reported no web page for any of them"), and the discovery records no endpoint, HTTP status or page title. Screenshots and the route checks make their own requests, so they are not affected; what is lost is only what bbot would have recorded. The cause is inside bbot's own run, so the evidence is in its scan directory. In the `celery` container (`docker compose exec celery bash`):
+A standard or deep discovery turns each host into a URL with bbot's `http` module. If a discovery finds five or more hosts and bbot reports no `URL` and no `HTTP_RESPONSE` event at all, the activity feed says so ("found N hosts but bbot reported no web page for any of them"), and the discovery records no endpoint, HTTP status or page title. Screenshots and the route checks make their own requests, so they are not affected; what is lost is only what bbot would have recorded. The cause is inside bbot's own run, which happens on a Sentinel, so the evidence is in its scan directory there. In the built-in `scanner` container (`docker compose exec scanner bash`; for an external Sentinel, its own container):
 
 ```
 ls -t ~/.bbot/scans | head -3                      # the newest scan directories; the activity line names the one to read
@@ -125,7 +125,7 @@ grep -iE 'hard-failed|soft-failed|blasthttp|setup' $S/scan.log | head -40   # di
 ls $S; grep -c '"type": *"URL"' $S/output.json; grep -c '"type": *"HTTP_RESPONSE"' $S/output.json
 bbot -t www.<the target> -m http -y --json 2>&1 | grep -E '"type": *"(URL|HTTP_RESPONSE)"|hard-failed|rror' | head   # the web module by hand on one host
 /opt/bbot-venv/bin/python -c "import blasthttp; print(blasthttp.__file__)"   # the native HTTP engine the module uses
-curl -sI https://www.<the target> | head -3; env | grep -i proxy; dpkg --print-architecture   # can the container reach the web, is a proxy in the way, which build
+curl -sI https://www.<the target> | head -3; env | grep -i proxy; dpkg --print-architecture   # can the scanner reach the web, is a proxy in the way, which build
 ```
 
 The same questions in the app: **Settings, Proxy** (a proxy that is down makes every web request of bbot fail), the activity feed around the scan ("ran out of memory; retrying as passive" means the web module never ran, and `docker compose logs celery | grep -i 'out of memory'` on the host shows the same), and the discovery mode of the target (passive never visits a host).

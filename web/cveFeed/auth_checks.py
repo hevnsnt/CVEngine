@@ -441,29 +441,6 @@ def target_parts(target):
     return host, (int(port) if port else None)
 
 
-def certificate_verifies(host, port, project=None, timeout=3):
-    """``(True, '')`` when a TLS handshake with ``host:port`` (vetted and pinned like every scanner connection) verifies the certificate
-    chain and name, else ``(False, reason)``; the reason is the verifier's own words and holds no secret. This one-off check must not
-    authorize a later Nuclei request, because Nuclei does not verify the certificate on its separate credential-bearing connection."""
-    import ssl
-    from cveFeed import pinned_transport
-    try:
-        addresses = pinned_transport.resolve(host, port, project=project)
-        context = ssl.create_default_context()
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        raw = pinned_transport.open_socket(addresses, timeout, project=project)
-        try:
-            raw.settimeout(timeout)
-            context.wrap_socket(raw, server_hostname=host).close()
-        finally:
-            raw.close()
-        return True, ''
-    except ssl.SSLCertVerificationError as exc:
-        return False, (getattr(exc, 'verify_message', None) or 'the certificate does not verify')[:120]
-    except (OSError, ValueError) as exc:  # a refused connection, a timeout, another TLS failure, a destination the vetting refuses
-        return False, f'the server could not be checked ({type(exc).__name__})'
-
-
 def _url(host, scheme, port):
     name = f'[{host}]' if ':' in host else host
     default = 443 if scheme == 'https' else 80

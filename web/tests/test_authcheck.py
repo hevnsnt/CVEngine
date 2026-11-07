@@ -624,15 +624,6 @@ class LiveTlsTests(Fixture):
 			self.assertNotIn('Authorization', Handler.seen[0][2])
 			self.assertNotIn('Cookie', Handler.seen[0][2])
 
-	def test_the_certificate_check_nuclei_relies_on(self):
-		self.assertEqual(auth_checks.certificate_verifies('127.0.0.1', self.port('good')), (True, ''))
-		ok, reason = auth_checks.certificate_verifies('127.0.0.1', self.port('self'))
-		self.assertFalse(ok)
-		self.assertTrue(reason)
-		ok, reason = auth_checks.certificate_verifies('127.0.0.1', 1)  # nothing listens: not verifiable, so not sent
-		self.assertFalse(ok)
-		self.assertNotIn(SECRET, reason)
-
 
 class SignedRouteTests(Fixture):
 	"""The route stage with a stored sign-in. The signed-in pass runs on the built-in scanner only (kind ``route_probe_signed``), so the seam the pass asks
@@ -841,7 +832,6 @@ class NucleiTests(Fixture):
 			patcher = mock.patch(name, return_value=False)
 			patcher.start()
 			self.addCleanup(patcher.stop)
-		self.verify = mock.patch('cveFeed.auth_checks.certificate_verifies', return_value=(True, '')).start()  # nuclei never verifies itself
 		self.addCleanup(mock.patch.stopall)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.runs = []
@@ -965,7 +955,6 @@ class NucleiTests(Fixture):
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=self.stream())
 		self.assertEqual(self.signed_runs(), [])  # even a valid preflight cannot authenticate Nuclei's later TLS connection
 		self.assertEqual(out['authenticated']['skipped'], 'Nuclei TLS is not verified')
-		self.verify.assert_not_called()
 		line = AgentActivity.objects.filter(message__contains='Trust this certificate anyway').get().message
 		self.assertIn('https://app.example.test', line)
 		self.assertIn('Nuclei does not verify TLS', line)
@@ -1008,15 +997,12 @@ class NucleiTests(Fixture):
 		run, = self.signed_runs()
 		self.assertEqual(run['targets'], ['https://app.example.test'])
 		self.assertEqual(out['authenticated']['findings'], 1)
-		self.verify.assert_not_called()  # the owner chose; nothing to check
 
 	def test_a_plain_http_origin_has_no_certificate_to_check(self):
 		self.make(host='app.example.test', origins=['http:80'])
-		self.verify.return_value = (False, 'unused')
 		nuclei_scan.run_nuclei(self.scan(ports=((80, 'http'),)).id, stream=self.stream())
 		run, = self.signed_runs()
 		self.assertEqual(run['targets'], ['http://app.example.test'])
-		self.verify.assert_not_called()
 
 	def test_an_origin_on_another_port_is_named_with_its_port_and_only_that_one(self):
 		self.make(host='app.example.test', origins=['https:8443'])
