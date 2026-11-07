@@ -206,7 +206,7 @@ def merge_findings(found):
             order.append(key)
             continue
         kept = merged[key]
-        covers = list(dict.fromkeys([*(kept.evidence or {}).get('covers', []), *(f.evidence or {}).get('covers', [])]))
+        covers = sorted(dict.fromkeys([*(kept.evidence or {}).get('covers', []), *(f.evidence or {}).get('covers', [])]))  # sorted: the names shown do not depend on the order the sweep finished them in
         if f.severity > kept.severity or ('inherited_from' in (kept.evidence or {}) and 'inherited_from' not in (f.evidence or {})):
             merged[key] = kept = f
         if covers:
@@ -214,7 +214,7 @@ def merge_findings(found):
     out = []
     for key in order:
         f = merged[key]
-        covers = (f.evidence or {}).get('covers') or []
+        covers = sorted((f.evidence or {}).get('covers') or [])
         if covers:
             shown = ', '.join(covers[:5]) + (f' and {len(covers) - 5} more' if len(covers) > 5 else '')
             note = f' Names with no DMARC record of their own follow this policy: {shown}.'
