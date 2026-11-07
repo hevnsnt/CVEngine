@@ -130,6 +130,16 @@ class ExposureCountTests(CountFixture):
 		self.assertEqual(self.stats('cb')['exposed_hosts'], 1)
 		self.assertEqual(self.stats()['exposed_hosts'], 3)
 
+	def test_the_hosts_search_lists_exactly_the_hosts_the_exposed_tile_counts(self):
+		# ?exposed=1 is where the dashboard's Exposed hosts tile now links: same rule, so the list and the number cannot disagree
+		for slug in ('ca', 'cb', '_all'):
+			listed = self.api(f'projects/{slug}/search', exposed=1, page_size=50)
+			self.assertEqual(len(listed['results']), self.stats(None if slug == '_all' else slug)['exposed_hosts'], slug)
+			self.assertEqual(listed['count'], len(listed['results']), slug)
+		names = {h['host'] for h in self.api('projects/ca/search', exposed=1, page_size=50)['results']}
+		self.assertEqual(names, {'live0.one.test', 'live2.one.test'})
+		self.assertGreater(len(self.api('projects/ca/search', page_size=50)['results']), 2)  # without it, every host
+
 	def test_the_targets_table_uses_the_same_definition(self):
 		by_name = {t['name']: t['exposed'] for t in self.api('projects/ca/targets')['results']}
 		self.assertEqual(by_name['one.test'], 2)
