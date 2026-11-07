@@ -20,7 +20,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests import route_scanner
-from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
+from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_agentapi import call, rpc
 from tests.test_perf_hostpipeline import _stages
 
@@ -287,7 +287,7 @@ class RouteFixture:
 		self.tasks = []  # the route_probe tasks the fake scanner was handed
 		self.site = None
 		self.fake = None
-		LocalFallback('none').apply(self)  # route_probe has no local path: the stage is a scanner's or it waits
+		# route_probe has no local path (NEVER_LOCAL), whatever CVENGINE_LOCAL_FALLBACK says: the stage is a scanner's or it waits
 		self.guard = assert_ran_nowhere_locally(self, 'route_probe')
 
 	def scan(self, names=('www.rt.test',), ports=((443, 'https'),), ip='203.0.113.5'):
