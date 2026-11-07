@@ -46,6 +46,15 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
   along. An endpoint, a mail domain or a finding the scanner could not answer is unknown: its open findings stay open and baddns's rating stands. With no
   scanner able to take the work and the kind off `CVENGINE_LOCAL_FALLBACK`, the target stays due.
 
+- **The signed-in web route check moved off the server** (contract version 3, kind `route_probe_signed`). The server no longer sends a stored sign-in (headers,
+  cookie) to any host: `route_auth.probe_url` lost its `auth_scope` and the local certificate rule, and the pass in `cveFeed/auth_routes.py` now hands the built-in
+  scanner one task per stored credential and 25 hosts, carrying the routes, a scope policy of exactly those hosts and `secret_ref` (a reference, never a value).
+  The scanner reads the credential once through the single-use read (the same one the signed-in template pass uses), sends it only to a route whose host, scheme
+  and port the sign-in was stored for, follows no redirect, reads no script, searches no signed-in body and returns no value. The kind is in `NEVER_LOCAL` and
+  `BUILTIN_KINDS`: no external Sentinel is ever offered it, whatever it declares. Answers have the shape `route_probe` returns, so the server's storing and
+  comparing is unchanged (`evidence['authenticated']`); the credential store and its screen stay. With no built-in scanner able to take it the pass waits and the
+  routes stay due; a route the scanner could not ask is unknown, never a state. A Sentinel image needs the matching release.
+
 - **The WordPress scan no longer runs on the server, and the thorough pass moved to a Sentinel** (T8, kinds `wpscan` and `wpscan_thorough`). The local runner,
   its argument builder, its environment and resource-gate wiring and the installed-binary check are deleted from `cveFeed/wpscan_scan.py`; `wpscan` and the new
   kind `wpscan_thorough` (contract version 3, kind_since 3) join `sentinel_dispatch.NEVER_LOCAL`, so whatever `CVENGINE_LOCAL_FALLBACK` says they run on a

@@ -118,6 +118,7 @@ class GrantTests(SecretBase):
         self.assertEqual(body['credential']['cookie'], f'sid={COOKIE_SECRET}')
         self.assertEqual(body['credential']['host'], 'www.a.example')
         self.assertEqual(body['credential']['origins'], ['https:443'])
+        self.assertIs(body['credential']['host_scoped'], False)  # the scanner applies the target-wide rule itself
         self.assertEqual(body['credential']['target'], 'a.example')
         task.refresh_from_db()
         self.assertIsNotNone(task.secret_read_at)

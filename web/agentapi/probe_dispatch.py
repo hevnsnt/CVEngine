@@ -391,21 +391,52 @@ def try_routes(project, scan, by_host):
         if result is None:  # not claimed, failed or timed out: this chunk is asked here (dispatch_or_none recorded the fallback, or raised)
             local += chunk
             continue
-        reported = {row['id']: row for row in result.get('routes') or []}
-        for host in chunk:
-            for url in by_host[host]:
-                row = reported.get(url)
-                if row is None:
-                    answered[url] = RuntimeError('the scanner did not report this route')
-                elif row.get('error'):
-                    answered[url] = RuntimeError(row['error'])
-                else:
-                    answered[url] = {'credentials': [(c['type'], c['value']) for c in row['credentials']], 'status': row['status'], 'title': row['title'],
-                                     'content_type': row['content_type'], 'state': row['state'], 'evidence': row['evidence'],
-                                     'sensitive': row['sensitive'], 'sensitive_score': row['sensitive_score'], 'fp': None, 'bytes': row['bytes']}
+        answered.update(_route_answers(result, by_host, chunk))
         if result.get('refused'):
             logger.info('route_probe task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
     return answered, local
+
+
+def _route_answers(result, by_host, chunk):
+    """``{url: result or error}`` for the routes of ``chunk`` hosts in a route_probe or route_probe_signed result."""
+    reported = {row['id']: row for row in result.get('routes') or []}
+    answered = {}
+    for host in chunk:
+        for url in by_host[host]:
+            row = reported.get(url)
+            if row is None:
+                answered[url] = RuntimeError('the scanner did not report this route')
+            elif row.get('error'):
+                answered[url] = RuntimeError(row['error'])
+            else:
+                answered[url] = {'credentials': [(c['type'], c['value']) for c in row['credentials']], 'status': row['status'], 'title': row['title'],
+                                 'content_type': row['content_type'], 'state': row['state'], 'evidence': row['evidence'],
+                                 'sensitive': row['sensitive'], 'sensitive_score': row['sensitive_score'], 'fp': None, 'bytes': row['bytes']}
+    return answered
+
+
+def try_signed_routes(project, scan, credential, by_host):
+    """``{url: result or error}`` for the routes of ``by_host`` (``{host: [urls]}``, all covered by the one stored sign-in ``credential``) asked signed in by
+    the built-in scanner (kind ``route_probe_signed``): one task per 25 hosts, carrying ``secret_ref`` (a reference to the credential, never a value), which
+    only a built-in scanner that reads stored sign-ins is ever offered; it reads the credential once through ``sentinel/tasks/<id>/secret``. The answers
+    have the shape ``route_auth.analyse`` gives, and a route the scanner reports with an error, or not at all, is in the answer as an ``Exception``
+    (asked again later, never a state). The kind is in ``NEVER_LOCAL`` and has no local path: when no scanner can take the work, or a task ended
+    without a result, this raises ``ScannerUnavailable`` (nothing recorded, the routes stay due)."""
+    from agentapi import sentinel_broker
+    from cveFeed import probe_scope
+    from reNgine.resources import ScannerUnavailable
+    hosts = list(by_host)
+    answered = {}
+    for start in range(0, len(hosts), MAX_ROUTE_HOSTS_PER_TASK):
+        chunk = hosts[start:start + MAX_ROUTE_HOSTS_PER_TASK]
+        target = {'hosts': [{'host': host, 'urls': by_host[host]} for host in chunk],
+                  'scope': probe_scope.for_signed_routes(project.pk, chunk)}
+        result = sentinel_dispatch.dispatch_or_none(project, 'route_probe_signed', target, host=_hosts_label(chunk), scan=scan,
+                                                    secret_ref=sentinel_broker.secret_ref_for(credential.pk))
+        if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
+            raise ScannerUnavailable('route_probe_signed', 'the built-in scanner returned no result for a signed-in route check')
+        answered.update(_route_answers(result, by_host, chunk))
+    return answered
 
 
 def resolve_for(domain, names, errors=None, scan=None):

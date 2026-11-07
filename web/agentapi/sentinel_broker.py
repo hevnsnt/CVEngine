@@ -67,7 +67,7 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
 # Kinds only the built-in scanner takes: what they measure or run belongs to this install, not to a network a Sentinel was set up for. ``path_probe``
 # measures the path this install's scans leave from (``cveFeed.os_detection`` keeps one verdict for it), and ``nuclei_validate`` runs an AI-written
 # template the server has not approved yet, on the scanner's own loopback or against a host, where the server ran it before.
-BUILTIN_KINDS = ('path_probe', 'nuclei_validate')
+BUILTIN_KINDS = ('path_probe', 'nuclei_validate', 'route_probe_signed')  # route_probe_signed also needs the stored-sign-in read (secret_ref), which only a built-in image that reads one is offered
 BUILTIN = 'built-in only'  # the refusal reason of such a task offered to any other Sentinel
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
@@ -797,12 +797,12 @@ class SentinelEff:
             return 'scope', "the target is outside this Sentinel's scope"
         if task.kind not in self.caps:
             return 'capability', task.kind
+        if task.kind in BUILTIN_KINDS and not self.builtin:
+            return 'capability', BUILTIN  # a kind only the built-in scanner takes (path_probe, nuclei_validate, route_probe_signed): decided by the kind, before any task row says more
         if task.secret_ref and not self.reads_secrets:
             return 'capability', SIGNED_IN  # signed-in work is the built-in scanner's alone: its stored credential never reaches another Sentinel
         if validating(task) and not self.builtin:
             return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
-        if task.kind in BUILTIN_KINDS and not self.builtin:
-            return 'capability', BUILTIN  # path_probe and nuclei_validate measure or run what belongs to this install
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         return None
@@ -1757,7 +1757,7 @@ def _credential_payload(credential_id, project_id, now):
         return None
     AuthCredential.objects.filter(pk=cred.pk).update(last_used_at=now)
     return {'headers': headers, 'cookie': cookie, 'target': cred.domain.name, 'host': cred.host or None, 'origins': list(cred.origins or []),
-            'allow_untrusted_certificate': bool(cred.allow_untrusted_certificate), 'expires_at': svc._iso(cred.expires_at),
+            'host_scoped': bool(cred.domain.is_host_scoped()), 'allow_untrusted_certificate': bool(cred.allow_untrusted_certificate), 'expires_at': svc._iso(cred.expires_at),
             'revision': auth_checks.revision(cred)}
 
 
@@ -2293,7 +2293,7 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'nuclei_validate': _clean_nuclei_validate_result,
              'alive_check': probe_results.clean_alive_check, 'bucket_check': probe_results.clean_bucket_check,
              'vhost_probe': probe_results.clean_vhost_probe, 'subdir_probe': probe_results.clean_subdir_probe,
-             'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe,
+             'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe, 'route_probe_signed': probe_results.clean_route_probe_signed,
              'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
              'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean}
 
@@ -2306,7 +2306,7 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe', 'identity_check'):
+                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check'):
         return probe_results.bind(kind, result, task)
     if task is not None and kind == 'web_screenshot':
         return web_screenshot_results.bind(result, task)
