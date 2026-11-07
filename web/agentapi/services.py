@@ -2639,8 +2639,6 @@ def _term_q(field, value, quoted, project):
 def _search_matches(project, terms):
     """The current-inventory Subdomain rows that satisfy every term (before they are folded into one row per host). The one
     place a search is turned into a queryset, shared by the interactive search and the saved-search evaluator."""
-    from django.db.models import Exists, OuterRef
-
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
@@ -2652,8 +2650,24 @@ def _search_matches(project, terms):
         # A positive term is the same subquery, not a join on the outer query: a bare word joins technologies, addresses, ports, findings and CVE
         # matches at once, and the rows multiply (hosts x addresses x ports x findings x matches) before they are folded back into one per host.
         # That is what made a search over every project time out; a semi-join per term costs the host's own rows only.
-        qs = qs.filter(~Exists(Subdomain.objects.filter(q, pk=OuterRef('pk')))) if neg else qs.filter(Exists(Subdomain.objects.filter(q, pk=OuterRef('pk'))))
+        found = _host_has(q)
+        qs = qs.filter(~found) if neg else qs.filter(found)
     return qs
+
+
+def _host_has(q):
+    """A condition on a Subdomain row that holds when some row of the host satisfies ``q``. ``q`` is the term's own Q: for a bare word a long OR over the host's
+    addresses, ports, technologies, findings and CVE matches. Put in one subquery that is one join of all of them, and a word such as ``nginx`` made the
+    database build 150,000 joined rows to find 1,300 hosts (300 ms, twice a search). The OR of conditions on one host's rows holds when any branch holds
+    for some row, so each branch is its own semi-join and only joins what it needs (70 ms). A branch that is an AND (a port that is open AND has a
+    product) stays one subquery, so its conditions still apply to the same port row."""
+    from django.db.models import Exists, OuterRef, Q
+    from startScan.models import Subdomain
+    branches = [c if isinstance(c, Q) else Q(c) for c in q.children] if q.connector == Q.OR and not q.negated and len(q.children) > 1 else [q]
+    found = Q()
+    for branch in branches:
+        found |= Q(Exists(Subdomain.objects.filter(branch, pk=OuterRef('pk'))))
+    return found
 
 
 def search_host_rows(project, terms):
