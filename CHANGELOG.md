@@ -106,6 +106,19 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Changed
 
+- **A simpler shell: the left rail goes from 15 links to 6.** Overview, Findings, Assets, Scans, Scanners and Bug bounty (only for people authorised for it); Settings, Administration and Help sit in the footer, each only for the roles that can open them. Pages that used to have their own entry are tabs inside the one they belong to: Findings (All findings, CVE matches, Config checks, Changes, CVE catalog), Assets (Hosts, Targets, Graph, Secrets, Third parties), Scans (Scans, Activity), Scanners (Health, Sentinels, This project, Integrations). Every existing address still opens the same page, and the Ctrl K palette still finds all of them. The phone tab bar is Overview, Findings, Assets, Scans, More, Account, and More lists what the bar and rail do not.
+- **One Scanners page** shows scanner health (workers, scheduler, queues) without a Refresh click; Sentinels and API tokens and MCP are tabs of it.
+- **Settings is Essentials (AI model, Alerts, Reports, Updates) plus a collapsed Advanced group.** Notifications and Email are one Alerts pane; OpenVAS settings live only in Administration. Labels: Live is Overview, Hygiene is Config checks, Suppliers is Third parties, About is Help.
+- **The dashboard asks for its trend charts only when they are about to be seen**, instead of loading up to 1,000 findings and 1,000 changes on every visit, and the shell no longer repeats its scans request.
+
+### Fixed
+
+- Non-admin users no longer see a "Connect your AI model" button that answered 403.
+- The Sentinel Provision form starts on the current project, not the first one in the list.
+- The dashboard Exposed hosts tile opens the list of exactly those hosts (`hosts/?exposed=1`).
+
+### Changed
+
 - **The server no longer runs nmap or naabu.** The port and service stage, the UDP sweep, the full-port sweep and its follow-up fingerprint, the version probe and the path probe run on a Sentinel only. With no scanner able to take the work the stage waits and the addresses stay due (`ScannerUnavailable`); `CVENGINE_LOCAL_FALLBACK` no longer applies to `nmap`, `naabu`, `nmap_udp`, `nmap_full`, `nmap_verify` or `path_probe`. The server keeps what it does with a report: it reads the Sentinel's XML with the scanner library's parser and stores the ports and services (`cveFeed/port_inventory.py`, `cveFeed/port_stage.py`). `cveFeed/nmap_scan.py` and `cveFeed/naabu_scan.py` are gone.
 - **A browser key no longer scores like a password.** A host whose secrets the inventory knows is scored by its worst counting secret: a server secret 25, a browser key 5 (it was 25 for any credential pattern). The score line reads "Server credential served on /" or "Browser key served on /".
 
