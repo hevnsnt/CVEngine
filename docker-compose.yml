@@ -258,7 +258,7 @@ services:
   # sidecar's tailnet route (which lives in that namespace too) and the host network or macvlan overlays. Nothing connects to it; it reaches
   # the server as http://web:8000. Every update and `make up` recreate it after celery, as they do the Tailscale sidecar.
   scanner:
-    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:6924df8274666b1191b0830d287d97b5ea42d644c30ec608c09b5a5fa00d0da8}}"
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:685ddb251bf69ba552f68f6ef38203e7bc7afd75cdd668de600b45e6c7620a34}}"
     pull_policy: missing
     container_name: cvengine-scanner
     restart: unless-stopped
