@@ -75,3 +75,12 @@ class SearchFacetCacheTests(TestCase):
         views.bump_stats_revision()
         fresh, _ = self.search()
         self.assertEqual(sum(fresh['facets']['heat'].values()), self.HOSTS - 1)
+
+
+class FacetFreshnessTests(TestCase):
+    def test_a_dear_walk_is_served_longer_a_cheap_one_the_minimum(self):
+        from agentapi import services
+        self.assertEqual(services.facet_freshness(None), services.HEAT_FACET_SECONDS)
+        self.assertEqual(services.facet_freshness(0.2), services.HEAT_FACET_SECONDS)
+        self.assertEqual(services.facet_freshness(3.0), 30)
+        self.assertEqual(services.facet_freshness(500), services.HEAT_FACET_CEILING)

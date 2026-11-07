@@ -2444,24 +2444,44 @@ def _heat_facets(project, qs):
     return counts, heat_by_id, total > HEAT_FACET_CAP
 
 
-HEAT_FACET_SECONDS = 15  # how long the whole-match counts of a search (heat chips, facets, coverage) are served from the shared snapshot cache
+HEAT_FACET_SECONDS = 15  # the least time the whole-match counts of a search (heat chips, facets, coverage) are served from the shared snapshot cache
+HEAT_FACET_CEILING = 120  # the most: a walk over thousands of hosts that took T seconds is served for 10 x T, so the dashboard's poll never spends over a tenth of a core on it
+
+
+def facet_freshness(took):
+    """How long a walk that took ``took`` seconds is served from the snapshot cache."""
+    return int(min(HEAT_FACET_CEILING, max(HEAT_FACET_SECONDS, 10 * (took or 0))))
 
 
 def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable):
     """What a search counts over its whole match (heat per host, the unscannable split, the other facets): walking up to HEAT_FACET_CAP hosts with
     everything their heat reads is the dearest thing the Hosts page and the dashboard's coverage tile ask for, and they ask every few seconds. It is a
     shared snapshot (``cveFeed.snapshot_cache``) keyed by who may see the rows (the project ids, the caller's allowed projects) and by the search
-    itself, fresh for HEAT_FACET_SECONDS and dropped at once by a revision bump (a finding was closed)."""
+    itself, fresh for ``facet_freshness`` of what the last walk cost and dropped at once by a revision bump (a finding was closed)."""
+    import time
+
+    from django.core.cache import cache
+
     from cveFeed import snapshot_cache
 
     def compute():
+        started = time.monotonic()
         counts, by_id, truncated = _heat_facets(project, qs)
+        try:
+            cache.set(cost_key, time.monotonic() - started, 3600)
+        except Exception:  # noqa: BLE001
+            pass
         return {'heat': counts, 'by_id': by_id, 'truncated': truncated,
                 'unscannable': _unscannable_facet(qs, by_id) if with_unscannable else None,
                 'facets': _search_facets(by_id.keys(), facet_names, facet_size) if facet_names else {}}
     ids = sorted(project.ids) if _is_all(project) else [project.pk]
     scope = snapshot_cache.scope_hash('search-facets', ids, [list(t) for t in terms], str(params.get('internal', '')).strip().lower(), facet_names, facet_size, with_unscannable)
-    return snapshot_cache.snapshot('search-facets', scope, compute, HEAT_FACET_SECONDS)['payload']
+    cost_key = f'cve:snap:search-facets:cost:{scope}'
+    try:
+        fresh = facet_freshness(cache.get(cost_key))
+    except Exception:  # noqa: BLE001 - an unreadable cache is the shortest freshness, as everywhere in snapshot_cache
+        fresh = HEAT_FACET_SECONDS
+    return snapshot_cache.snapshot('search-facets', scope, compute, fresh)['payload']
 
 
 def _unscannable_facet(qs, heat_by_id):
