@@ -227,6 +227,9 @@ if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && ! grep -qE '^SCANNER
   printf 'SCANNER_MEM_LIMIT=1g\n' >> .env
   ok "SCANNER_MEM_LIMIT=1g for this host's memory"
 fi
+# The proxy's workers (an unprivileged user) read config/nginx at run time. A checkout made with umask 027 or 077 (hardened servers, some root shells)
+# leaves it unreadable to them and every page then answers 403: the files are made readable again here.
+chmod -R a+rX config 2>/dev/null || true
 address=$(grep -E '^DOMAIN_NAME=' .env | tail -n 1 | cut -d= -f2-)
 address=${address:-localhost}
 ok "address: https://$address/"
@@ -254,7 +257,9 @@ step "Waiting for CVEngine to answer"
 healthy=1
 for attempt in $(seq 1 90); do
   code=$(curl -ks -m 5 -o /dev/null -w '%{http_code}' https://127.0.0.1/ 2>/dev/null || echo 000)
-  case $code in 2??|3??|401|403) healthy=0; break ;; esac
+  # The proxy answering is not enough (it serves its own 403 maintenance page while the web service is still down, and 401 and 403 are also what a
+  # client outside the allowlist gets): the web container must be accepting connections too, which it does only after it has migrated the database.
+  case $code in 2??|3??|401|403) compose exec -T web python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000), 3)' >/dev/null 2>&1 && { healthy=0; break; } ;; esac
   [ $((attempt % 6)) -eq 0 ] && echo "  still starting (about $((attempt * 5 / 60)) minutes in)..."
   sleep 5
 done
