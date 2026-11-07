@@ -509,6 +509,30 @@ class PermissionTests(ReportBase):
         self.assertEqual(report_export.status(Ctx(user=self.worker), 'acme', job.token)['status'], 'failed')
 
 
+    def test_a_report_goes_to_its_own_queue(self):
+        """Not the feed worker's queue: a certificate lookup in backoff there held a report for hours (the page spun for ever)."""
+        with mock.patch('cveFeed.tasks.generate_report.apply_async', return_value=FAKE_TASK) as send:
+            job, created = report_export.enqueue(Ctx(user=self.worker), 'acme')
+        self.assertTrue(created)
+        send.assert_called_once_with(args=[job.pk], queue='report_queue')
+        self.assertEqual(report_export.QUEUE, 'report_queue')
+
+    def test_a_report_no_worker_took_fails_after_ten_minutes_and_a_late_worker_skips_it(self):
+        job = queued(self.worker, 'acme', run=False)
+        ReportExport.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(minutes=5))
+        self.assertEqual(report_export.status(Ctx(user=self.worker), 'acme', job.token)['status'], 'queued')  # still waiting its turn
+        ReportExport.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(minutes=11))
+        polled = report_export.status(Ctx(user=self.worker), 'acme', job.token)
+        self.assertEqual(polled['status'], 'failed')
+        self.assertIn('no worker took the report', polled['error'])
+        self.assertEqual(report_export.execute(job.pk)['status'], 'skipped')  # the message is delivered after all: nothing is made twice
+
+    def test_a_report_a_worker_is_making_is_not_failed_by_the_untaken_rule(self):
+        job = queued(self.worker, 'acme', run=False)
+        ReportExport.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(minutes=30), status='running')
+        self.assertEqual(report_export.status(Ctx(user=self.worker), 'acme', job.token)['status'], 'running')
+
+
 class ApiTests(ReportBase):
     def setUp(self):
         _, self.token = create_token(self.worker, 'agent')

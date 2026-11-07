@@ -8,6 +8,7 @@ happens when an agent stops heartbeating, is suspended or revoked, or its scope 
 
 Everything an agent reports is untrusted data: it is typed, clipped and stored, never executed, and never used to build a command.
 """
+import logging
 import os
 import time
 from contextlib import contextmanager
@@ -25,6 +26,8 @@ from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
 from tenancy import audit, roles, throttle
+
+logger = logging.getLogger(__name__)
 
 LIVE_WINDOW = timedelta(minutes=3)  # an agent not heard from for this long is offline and gets no new work
 OFFER_LEASE = timedelta(minutes=2)  # a claimed task must be accepted (or reported) within this
@@ -67,14 +70,33 @@ def _need_token(ctx, write=True):
     return ctx.token
 
 
+def _without_expiry(name):
+    """Whether the counter ``name`` exists with no expiry at all (Redis ``TTL`` -1). A window counter always has one; one that has none would
+    never reset, so everything past ``limit`` would be refused for ever. False on any cache that cannot say (a backend with no Redis client)."""
+    try:
+        key = cache.make_key(name)
+        return cache._cache.get_client(key, write=True).ttl(key) == -1
+    except Exception:  # noqa: BLE001 - a diagnostic: never let it break the call it guards
+        return False
+
+
 def _hit(name, limit, window):
-    """Count one call against a window and say whether it is within ``limit``. One INCR, so concurrent callers cannot all pass the check."""
+    """Count one call against a window and say whether it is within ``limit``. One INCR, so concurrent callers cannot all pass the check.
+    A counter over its limit is looked at once more (only then, so the common call costs nothing extra): one that has lost its expiry is
+    started again instead of refusing that caller for ever, and a refusal is logged with the counter, so a limiter that answers 429 to a
+    caller whose own rate is far below it can be told apart from a real burst."""
     cache.add(name, 0, window)
     try:
         used = cache.incr(name)
     except ValueError:  # the key expired between the add and the incr
         cache.set(name, 1, window)
         used = 1
+    if used > limit and _without_expiry(name):
+        logger.warning('rate limit counter %s had no expiry (count %s, limit %s per %s s): started again', name, used, limit, window)
+        cache.set(name, 1, window)
+        return True
+    if used > limit and used - limit == 1:  # once per window, at the first refusal
+        logger.warning('rate limit reached: %s used %s of %s per %s s', name, used, limit, window)
     return used <= limit
 
 

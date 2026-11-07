@@ -2,6 +2,7 @@
 is made by a child process (cveFeed.report_render) under a time limit and with a stripped environment."""
 import logging
 import os
+import shutil
 import subprocess
 import sys
 
@@ -10,6 +11,9 @@ from django.template.loader import render_to_string
 logger = logging.getLogger(__name__)
 
 DEFAULT_RENDER_SECONDS = 900
+# the renderer is a core of CPU for as long as it lays out the pages (23 s for 460): it runs at a lower priority than the web server and the database
+# sharing the host (``nice`` ships with coreutils; without it the renderer simply runs at the worker's own priority)
+_LOW_PRIORITY = ['nice', '-n', '10'] if shutil.which('nice') else []
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHILD_ENV = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'FONTCONFIG_PATH', 'FONTCONFIG_FILE', 'XDG_CACHE_HOME', 'XDG_DATA_DIRS', 'TMPDIR')
 
@@ -34,7 +38,7 @@ def render_pdf(html, out_path, timeout=None):
     environment with only what fonts and the dynamic loader need."""
     env = {k: os.environ[k] for k in CHILD_ENV if k in os.environ}
     try:
-        proc = subprocess.run([sys.executable, '-s', '-m', 'cveFeed.report_render', out_path], input=html.encode('utf-8'),
+        proc = subprocess.run([*_LOW_PRIORITY, sys.executable, '-s', '-m', 'cveFeed.report_render', out_path], input=html.encode('utf-8'),
                               capture_output=True, timeout=timeout or render_seconds(), cwd=WEB_DIR, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         _discard(out_path)

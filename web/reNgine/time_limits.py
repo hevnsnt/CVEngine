@@ -33,6 +33,7 @@ DEFAULTS = {
     'validation_priority_queue': SCAN_QUEUE,
     'wpscan_queue': SCAN_QUEUE,
     'testssl_queue': SCAN_QUEUE,
+    'report_queue': 1 * HOUR,  # a PDF takes seconds to minutes; the task keeps its own hour limit
     'screenshot_queue': 2 * HOUR,  # a drain stops taking batches after 40 minutes; a browser that hangs is killed long before this
     'bucketscan_queue': SCAN_QUEUE,
     'vhost_queue': SCAN_QUEUE,

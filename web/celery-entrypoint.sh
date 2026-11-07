@@ -112,6 +112,9 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
 # screenshot_queue: the web screenshot drain and the hourly sweep (they hand pages to Sentinels and wait for them, one drain at a time: a second task returns at once; no browser runs here)
 classic_queues+=",screenshot_queue"
+# report_queue: the one-click PDF report (cveFeed/report_export.py): seconds to minutes of work for one person who is waiting for it. Its own queue, so a long feed run or
+# a certificate lookup in backoff on the cve_feed worker cannot hold it; the classic worker has the free slots.
+classic_queues+=",report_queue"
 
 commands=""
 # each discovery run is memory hungry, so discovery gets a small pool of its own

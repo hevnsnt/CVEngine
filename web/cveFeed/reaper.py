@@ -93,6 +93,7 @@ def redispatch_queued_assessments(now=None):
     from django.db.models import Q
 
     from cveFeed import ledger
+    from cveFeed.host_assessment import ASSESS_PRIORITY
     from cveFeed.models import HostAssessment
     from cveFeed.scan_control import pause_requested
     from cveFeed.tasks import assess_host
@@ -114,7 +115,7 @@ def redispatch_queued_assessments(now=None):
                 continue
         except Exception:  # noqa: BLE001 - no Redis, no way to rate-limit: leave it to the reaper
             continue
-        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue')
+        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue', priority=ASSESS_PRIORITY)
         HostAssessment._base_manager.filter(pk=job.pk, status='queued').update(celery_id=task.id)
         queued += 1
     return queued

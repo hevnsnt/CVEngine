@@ -14,7 +14,7 @@ from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent
 from cveFeed import coverage_topup, discovery, host_assessment, reaper
-from cveFeed.host_assessment import BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
+from cveFeed.host_assessment import ASSESS_PRIORITY, BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -322,6 +322,17 @@ class TenancyTests(Base):
         self.assertTrue(created)
         one.assert_called_once()
         many.assert_not_called()
+        self.assertEqual(one.call_args.kwargs, {'args': [job.pk], 'queue': 'discovery_queue', 'priority': ASSESS_PRIORITY})
+
+    def test_assessments_queue_behind_scans_on_the_shared_discovery_queue(self):
+        """Scans and assessments share ``discovery_queue``; a scan sent without a priority is served before any assessment (the broker
+        serves the lower number first), so a few hundred queued assessments cannot hold a scan for hours."""
+        self.assertGreater(ASSESS_PRIORITY, 0)
+        subs = self.hosts(self.a1, 2)
+        with mock.patch('cveFeed.tasks.assess_hosts.apply_async', side_effect=unique_ids) as many:
+            enqueue_batch(self.project, subs)
+        self.assertEqual(many.call_args.kwargs['priority'], ASSESS_PRIORITY)
+        self.assertEqual(many.call_args.kwargs['queue'], 'discovery_queue')
 
 
 class ExecuteBatchTests(Base):
