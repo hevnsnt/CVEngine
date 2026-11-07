@@ -118,7 +118,7 @@ ask_sentinels() {
   cat <<EOF
   1) Built-in scanner only        scans run on this server, in a container capped at 2 GB of memory (the default)
   2) Built-in scanner plus external Sentinels
-                                  the built-in one stays; you add Sentinels afterwards (the steps are shown at the end)
+                                  the built-in one stays; you add Sentinels afterwards, in the browser
   3) External Sentinels only      nothing scans on this server: the built-in scanner is not installed or started,
                                   and its 4.5 GB image is never downloaded. Scans wait until a Sentinel is enrolled.${small}
   OpenVAS is part of none of these: it runs on a Sentinel you choose to add (docs/OPENVAS.md).
