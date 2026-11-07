@@ -29,7 +29,7 @@ class PolicyParsingTests(SimpleTestCase):
         self.assertEqual(self.kinds('none'), set())
 
     def test_a_list_allows_exactly_its_kinds_and_ignores_unknown_ones(self):
-        self.assertEqual(self.kinds('openvas, http_probe'), {'openvas', 'http_probe'})
+        self.assertEqual(self.kinds('openvas, hygiene_check'), {'openvas', 'hygiene_check'})
         self.assertEqual(self.kinds('openvas,telnet,'), {'openvas'})
         self.assertEqual(self.kinds('nmap, naabu, nmap_udp, nmap_full, nmap_verify, path_probe, secrets_scan'), set())  # these never run here, whatever the list says
 

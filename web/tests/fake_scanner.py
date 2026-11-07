@@ -218,7 +218,7 @@ class FakeScanner:
 
         from agentapi import scanner_state, sentinel_dispatch
         raw = os.environ.get(sentinel_dispatch.LOCAL_FALLBACK_ENV, '').strip().lower()
-        for key in {scanner_state.CACHE_KEY + raw, scanner_state.CACHE_KEY + 'none'}:
+        for key in {scanner_state.CACHE_KEY + raw, scanner_state.CACHE_KEY + 'default', scanner_state.CACHE_KEY + 'none'}:  # 'default': the key of an unset variable (scanner_state.state)
             with contextlib.suppress(Exception):
                 cache.delete(key)
 
