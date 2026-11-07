@@ -608,7 +608,7 @@
         if (window.top !== window) {
           window.addEventListener("message", function (e) {
             if (
-              e.origin === location.origin &&
+              (e.origin === location.origin || e.source === window.parent) &&
               e.data &&
               typeof e.data.state === "string"
             )

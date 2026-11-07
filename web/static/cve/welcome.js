@@ -389,7 +389,7 @@ const steps = {
       window.location.href = follow ? `/cve/?follow=${follow}` : '/cve/';
     };
     skip.onclick = () => leave();
-    const say = (text) => { try { frame.contentWindow.postMessage({ state: text }, location.origin); } catch (_) { /* not loaded yet */ } };
+    const say = (text) => { try { frame.contentWindow.postMessage({ state: text }, '*')  /* status words only; a srcdoc frame can have an opaque origin */; } catch (_) { /* not loaded yet */ } };
     frame.addEventListener('load', () => say('Starting up.'));
     const set = (l, mode, sub) => { l.li.className = mode; l.g.textContent = mode === 'ok' ? '\u2713' : mode === 'run' ? '\u2026' : ''; l.sm.textContent = sub || ''; };
     let landing = false;
@@ -409,7 +409,7 @@ const steps = {
         say(d && d.hosts ? `${d.hosts} hosts found. Opening your dashboard.` : 'Opening your dashboard. Discovery carries on in the background.');
         setTimeout(() => leave(d && d.scan_id), 2500);
       } else if (!w.ready) {
-        say(`${d ? d.text : ''} ${w.reason}`.trim());
+        say(d ? d.text : w.reason);
       }
       const left = Math.max(0, (w.min_seconds || 0) - (w.elapsed || 0));
       wait.textContent = w.ready ? '' : `Giving discovery up to ${left} more second${left === 1 ? '' : 's'} so the dashboard opens with findings in it. ${w.reason}`;
