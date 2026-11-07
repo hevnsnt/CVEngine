@@ -25,7 +25,7 @@ from tests.test_bucket_scan import Fixture as BucketFixture
 from tests.test_changes import ChangeFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_route_auth import RouteFixture
-from tests.test_subdir_apps import SubdirFixture
+from tests.test_subdir_apps import BASELINE_PATH, SubdirFixture
 from tests.test_vhost_scan import VhostFixture
 from tests.test_scanner_unavailable_stages import ENV, FallbackOffBase
 from tests.test_suppliers import NO_WAIT, Fixture as SupplierFixture, cert as supplier_cert, page as supplier_page
@@ -536,7 +536,7 @@ class SubdirProbeStageTests(SubdirFixture, TestCase):
         hosts = []
         for host in task['target']['hosts']:
             base = f"{host['scheme']}://{host['name']}"
-            baseline = vhost_scan.fingerprint_of(self.site(base + subdir_apps.BASELINE_PATH))
+            baseline = vhost_scan.fingerprint_of(self.site(base + BASELINE_PATH))
             answers, probed = [], []
             plan = [(p, 'curated') for p in task['target']['paths']] + [(lead['path'], lead['source']) for lead in host.get('leads', [])]
             for path, source in plan:

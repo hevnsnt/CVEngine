@@ -121,12 +121,21 @@ class VhostFixture:
             out.append({'id': item['id'], 'default': {'state': 'answered', 'fingerprint': vhost_scan.fingerprint_of(default)}, 'names': names})
         return {'outcome': 'done', 'addresses': out, 'touched': [item['address'] for item in task['target']['addresses']], 'refused': []}
 
+    def subdir_report(self, task):
+        raise AssertionError('this test did not expect a subdir_probe task')
+
+    def scanner(self):
+        """The fake Sentinel of the test (started once): it answers vhost_probe from ``self.table`` and subdir_probe from ``subdir_report``."""
+        if getattr(self, 'fake', None) is None:
+            self.fake = FakeScanner(kinds=['vhost_probe', 'subdir_probe'],
+                                    responders={'vhost_probe': self.scanner_report, 'subdir_probe': lambda task: self.subdir_report(task)}).start_for(self)
+        return self.fake
+
     def run_sweep(self, responder=None, **kw):
         """The sweep with a Sentinel (the fake scanner) answering from ``self.table``: this server asks nothing itself."""
-        if getattr(self, 'fake', None) is None:
-            self.fake = FakeScanner(kinds=['vhost_probe'], responders={'vhost_probe': self.scanner_report}).start_for(self)
+        fake = self.scanner()
         if responder is not None:
-            self.fake.responders['vhost_probe'] = responder
+            fake.responders['vhost_probe'] = responder
         return vhost_scan.sweep(self.project.id, **kw)
 
     def observations(self, **kw):
