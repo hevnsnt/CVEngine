@@ -223,9 +223,7 @@ def save_seed(request):
     with transaction.atomic():
         row = wizard_row()
         _started(row)
-        welcome.ensure_org(request.user, org_name)
-        welcome.ensure_project(request.user, project_name)
-        org, project = welcome.wizard_org(request.user), welcome.wizard_project(request.user)
+        org, project = _own_org_and_project(row, request.user, org_name, project_name)
         ctx = services.Ctx(user=request.user)
         try:
             result = services.add_target(ctx, project.slug, domain)
@@ -238,6 +236,27 @@ def save_seed(request):
     out['discovery_started'] = started
     out['added'] = [d['name'] for d in result['created']]
     return out
+
+
+def _own_org_and_project(row, user, org_name, project_name):
+    """The organization and project this wizard made, renamed in place when the step is sent again with other names (so the seed domain is not
+    added to a second project); the first time, or when they are gone, they are created."""
+    from dashboard.models import Org, Project
+    data = row.data or {}
+    org = Org.objects.filter(slug=(data.get('org') or {}).get('slug')).first() if data.get('org') else None
+    project = Project.objects.filter(slug=(data.get('project') or {}).get('slug'), org=org).first() if org and data.get('project') else None
+    if org is None or project is None:
+        from cveFeed import welcome
+        welcome.ensure_org(user, org_name)
+        welcome.ensure_project(user, project_name)
+        return welcome.wizard_org(user), welcome.wizard_project(user)
+    if org.name != org_name:
+        org.name = org_name
+        org.save(update_fields=['name'])
+    if project.name != project_name:
+        project.name = project_name
+        project.save(update_fields=['name'])
+    return org, project
 
 
 def start_discovery(row, project, domain):
