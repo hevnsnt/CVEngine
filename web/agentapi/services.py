@@ -2469,6 +2469,55 @@ HEAT_FACET_CAP = 5000  # hosts a facet count (and a ?heat= filter) will walk bef
 
 def _heat_facets(project, qs):
     """``({fire,smoke,ice,clean,unscanned: count}, {sub.id: heat}, truncated)`` for every host ``qs`` matches, up to
+    HEAT_FACET_CAP, with the rule _host() itself uses (so a chip's count and a host's own badge never disagree). ``truncated`` means
+    more than the cap matched q; the count is then a lower bound.
+
+    Computed in the database: the heat of each row is the hottest of its live CVE matches (``match_heat_rank_expr``) and live findings
+    (``finding_heat_rank_expr``), grouped by row, and a host is the group of rows ``host_siblings`` names, so no model instance of a
+    match, finding, address or port is built. ``_heat_facets_walk`` is the same answer read through the models (the test pins them equal)."""
+    from django.db.models import Max
+    from cveFeed.counts import CLOSED, RULED_OUT, host_siblings
+    from cveFeed.models import CVEMatch
+    from cveFeed.threat import SEVERITY_HEAT, finding_heat_rank_expr, match_heat_rank_expr
+    from startScan.models import ScanActivity, Subdomain, Vulnerability
+    total = qs.count()
+    own = list(qs.order_by('id').values_list('id', 'scan_history_id')[:HEAT_FACET_CAP])
+    ids = [i for i, _s in own]
+    siblings = host_siblings(ids)
+    wanted = set(ids) | {i for rows in siblings.values() for i, _n in rows}
+    scans = dict(own)
+    extra = [i for i in wanted if i not in scans]
+    if extra:
+        scans.update(Subdomain.objects.filter(id__in=extra).values_list('id', 'scan_history_id'))
+    wanted_ids = list(wanted)
+    rank = {}
+    for sub_id, r in (CVEMatch.objects.filter(subdomain_id__in=wanted_ids).exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED)
+                      .annotate(_r=match_heat_rank_expr()).order_by().values('subdomain_id').annotate(top=Max('_r')).values_list('subdomain_id', 'top')):
+        rank[sub_id] = max(rank.get(sub_id, 0), r or 0)
+    findings = Vulnerability.objects.filter(subdomain_id__in=wanted_ids)
+    for sub_id, r in (findings.filter(open_status=True, severity__in=list(SEVERITY_HEAT)).exclude(remediation_status__in=CLOSED)
+                      .annotate(_r=finding_heat_rank_expr()).order_by().values('subdomain_id').annotate(top=Max('_r')).values_list('subdomain_id', 'top')):
+        rank[sub_id] = max(rank.get(sub_id, 0), r or 0)
+    has_finding = set(findings.order_by().values_list('subdomain_id', flat=True).distinct())
+    done = set(ScanActivity.objects.filter(scan_of_id__in={s for s in scans.values() if s}, name__in=NUCLEI_STAGES, status=2)
+               .order_by().values_list('scan_of_id', flat=True).distinct())
+    names = {3: 'fire', 2: 'smoke', 1: 'ice'}
+    counts = {v: 0 for v in HEAT_FACET_VALUES}
+    heat_by_id = {}
+    for sub_id in ids:
+        group = [sub_id, *(i for i, _n in siblings.get(sub_id, []))]
+        top = max(rank.get(i, 0) for i in group)
+        if top:
+            heat = names[top]
+        else:  # no reason: clean if any copy has a finding or has been through nuclei, else unscanned
+            heat = 'clean' if any(i in has_finding or scans.get(i) in done for i in group) else 'unscanned'
+        counts[heat] += 1
+        heat_by_id[sub_id] = heat
+    return counts, heat_by_id, total > HEAT_FACET_CAP
+
+
+def _heat_facets_walk(project, qs):
+    """``({fire,smoke,ice,clean,unscanned: count}, {sub.id: heat}, truncated)`` for every host ``qs`` matches, up to
     HEAT_FACET_CAP, computed with the same group-merge logic _host() itself uses (so a chip's count and a host's own
     badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
     total = qs.count()
