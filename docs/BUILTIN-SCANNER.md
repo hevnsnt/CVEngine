@@ -26,6 +26,10 @@ What does **not** move yet, and so still runs on the server (the celery containe
 
 So "scanner offline" does not mean no traffic leaves the server: those checks keep going while the scanner is down, and only the kinds taken off the list wait. The full inventory is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#what-exists-today).
 
+## The path of last resort
+
+The built-in scanner is where work goes when nothing else can take it, not the first choice. While an external Sentinel is live and eligible for a task (the kind, the project, the address, a slot not required), the built-in scanner leaves the task to it. It takes the task when no such external exists, when the task has waited `CVENGINE_BUILTIN_FALLBACK_SECONDS` (default 120 seconds, `0` = at once) because the externals are full or not claiming, and always for the kinds only it runs: the scan path check, the template check, signed-in route checks, and signed-in or validating work. With only the built-in scanner (no external Sentinel enrolled) nothing changes: it takes every task at once. The Sentinels page shows its card as **Built-in, last resort** with the number of tasks it handled against the externals' in the last 24 hours. The whole rule is in [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#the-built-in-scanner-is-the-last-resort).
+
 ## How it enrols, and re-enrols
 
 The server (`agentapi/builtin_scanner.py`, at celery's start and then every five minutes) keeps one instance-wide enrollment ready, owned by the oldest App Admin, and writes it as a provisioning blob to `/var/lib/cvengine-scanner/blob` on the `scanner_bootstrap` volume, which only celery (writes) and the scanner (reads) mount. The scanner reads it from that file (`CVENGINE_SENTINEL_BLOB_FILE`), redeems it once and keeps its token in the `scanner_state` volume. The installer writes the first blob right after it creates the admin account, so a new install has its scanner enrolled within a minute or two.

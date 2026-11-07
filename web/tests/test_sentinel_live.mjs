@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {actionsFor, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -71,3 +71,13 @@ test('the stages waiting without a worker read as one sentence, and nothing at a
   assert.match(text, /1h 2m of worker time given back in the last hour\.$/);
 });
 
+test('the routing sentence says the built-in scanner is the last resort and how the day was shared', () => {
+  assert.equal(routingText(undefined), '');
+  const base = {explanation: 'The built-in scanner is the path of last resort.', builtin_24h: 1, external_24h: 40, externals: 2};
+  const text = routingText(base);
+  assert.match(text, /^The built-in scanner is the path of last resort\./);
+  assert.match(text, /handled 1 task and external Sentinels handled 40 tasks\./);
+  assert.doesNotMatch(text, /No external Sentinel is set up/);
+  assert.match(routingText({...base, externals: 0, builtin_24h: 7, external_24h: 0}), /No external Sentinel is set up, so the built-in scanner does all the scanning\.$/);
+  assert.match(routingText({...base, builtin_24h: 0, external_24h: 0}), /No task was finished by a Sentinel in the last 24 hours\./);
+});

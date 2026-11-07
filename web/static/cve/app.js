@@ -2859,9 +2859,9 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all", exposed: "0" };
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter, exposed: exposedFilter ? "1" : "0" }, HOST_DEFAULTS, ["host"]);
       views.refresh();
       if (searches) searches.refresh();
     };
@@ -2890,6 +2890,15 @@ const pages = {
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
+    // ?exposed=1: only the hosts the dashboard's Exposed hosts tile counts (an open CVE match the AI has not ruled out, or an open medium-or-worse finding)
+    let exposedFilter = readParam("exposed", "0", ["0", "1"]) === "1";
+    const exposedBtn = el("button", "", "Exposed only", { type: "button", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
+    exposedBtn.onclick = () => {
+      exposedFilter = !exposedFilter;
+      exposedBtn.setAttribute("aria-pressed", String(exposedFilter));
+      syncUrl();
+      list.reload();
+    };
     let totalHosts = 0;
     let heatFacets = null; // {fire, smoke, ice, clean, unscanned, truncated}: counted by the server over every host the search matches
     const heatChips = el("div", "picker heat-chips", null, { role: "group", "aria-label": "Temperature" });
@@ -2907,6 +2916,7 @@ const pages = {
       chipBtn.set(key, b);
       heatChips.append(b);
     });
+    heatChips.append(exposedBtn);
     // scope filter (?internal=): hosts inside a network a project declared internal are scanned only by a Sentinel there; the chips appear
     // once the server says a visible project declared one
     const SCOPE_CHIPS = [["all", "All hosts"], ["0", "External"], ["1", "Internal"]];
@@ -3819,10 +3829,10 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
-      pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
+      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}), ...(exposedFilter ? { exposed: 1 } : {}) }),
+      pageSize: () => (heatFilter === "all" && !exposedFilter ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: () =>
-        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all" || exposedFilter
           ? {
               icon: "search",
               title: "No host matches",
@@ -3834,6 +3844,8 @@ const pages = {
                     q.value = "";
                     heatFilter = "all";
                     scopeFilter = "all";
+                    exposedFilter = false;
+                    exposedBtn.setAttribute("aria-pressed", "false");
                     scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
                     syncUrl();
                     paintHeat();

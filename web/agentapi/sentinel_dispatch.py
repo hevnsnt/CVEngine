@@ -265,7 +265,10 @@ class _Dispatch:
                                   trace_id=self.task.trace_id)
         self.started = time.monotonic()
         self.queue_budget = _queue_timeout(kind)
-        self.claim_deadline = self.started + (self.queue_budget if self.busy else min(_claim_timeout(), self.timeout))
+        # While an external Sentinel is there for the kind the built-in scanner (the last resort) leaves the task alone for ``fallback_seconds``: the claim window then
+        # covers that wait and one more claim window for the built-in one, never more than the queue budget (``sentinel_broker.builtin_fallback_for`` keeps it inside)
+        hold = int(capacity.get('fallback_seconds') or 0)
+        self.claim_deadline = self.started + (self.queue_budget if self.busy else min(self.queue_budget, hold + _claim_timeout()) if hold else min(_claim_timeout(), self.timeout))
         self.run_deadline = None  # set once a Sentinel holds the task: the completion budget counts from the claim, not from the queueing
         self.never_claimed = False
         self.vanished = False  # the last live Sentinel went away while the task waited

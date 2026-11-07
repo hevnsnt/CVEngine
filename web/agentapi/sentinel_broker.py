@@ -93,6 +93,7 @@ MAX_RUNNING_IDS = 100
 TEMPLATE_POLICY_PATH = '/api/v1/sentinel/template-policy'
 PREFER_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel that does not prefer its kind while one that does is live and has room (CVENGINE_SENTINEL_PREFER_DEFER_SECONDS)
 BALANCE_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel while a less loaded, eligible one has room for it (CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS)
+BUILTIN_FALLBACK_DEFAULT = 120  # seconds a task waits for an external Sentinel before the built-in scanner may take it (CVENGINE_BUILTIN_FALLBACK_SECONDS)
 ENROLLMENT_KEEP = timedelta(days=7)  # an expired, never redeemed enrollment secret is deleted this long after it expired
 
 
@@ -414,6 +415,29 @@ def balance_defer_for(kind):
     """The seconds a queued task of ``kind`` is held back for a less loaded Sentinel: ``balance_defer_seconds()`` limited the way ``prefer_defer_for`` is
     (``_stage_window``), so balancing never costs a stage its Sentinel either."""
     return _stage_window(balance_defer_seconds(), kind)
+
+
+def builtin_fallback_seconds():
+    """``CVENGINE_BUILTIN_FALLBACK_SECONDS`` (default 120, ``0`` = immediate: the built-in scanner takes work as soon as it asks, as before 1.4's last-resort rule): how long a
+    queued task waits for an external Sentinel before the built-in scanner may take it. The built-in scanner is the path of last resort: while at least one live, external
+    Sentinel that covers the task is there for it, the built-in one leaves the task to it, and takes it only once it has waited this long (the externals are full, or not
+    claiming), or at once when there is no such external Sentinel."""
+    return max(0, _env_int('CVENGINE_BUILTIN_FALLBACK_SECONDS', BUILTIN_FALLBACK_DEFAULT))
+
+
+def builtin_fallback_for(kind):
+    """The seconds a queued task of ``kind`` is held back from the built-in scanner for the external Sentinels: ``builtin_fallback_seconds()``, held to what the stage can
+    afford. A dispatching stage waits for its task up to its queue budget (``sentinel_dispatch._queue_timeout``) and the built-in scanner must still have one claim
+    window (``_claim_timeout``) after the hold to take it, so the hold is at most the budget less that window: the last resort never loses the task to the stage giving up
+    first, and the hold never delays a task past its stage budget. ``openvas`` has no stage waiting (a later sweep tick polls it): it keeps the whole grace, held below
+    the queue's own expiry."""
+    grace = builtin_fallback_seconds()
+    if not grace:
+        return 0
+    from agentapi import sentinel_dispatch
+    if kind == 'openvas':
+        return min(grace, max(0, int(OPENVAS_QUEUE_TTL.total_seconds()) - 60))
+    return min(grace, max(0, sentinel_dispatch._queue_timeout(kind) - sentinel_dispatch._claim_timeout() - 2))
 
 
 def effective_capabilities(agent, withheld=None, policy=None):
@@ -841,9 +865,16 @@ def validating(task):
 
 
 def builtin_pk():
-    """The id of the built-in scanner's Agent, or ``None`` while there is none."""
+    """The id of the built-in scanner's Agent, or ``None`` while there is none. Inside ``sentinel_policy.shared_lookups`` it is read once and reused (the claim
+    pass asks for it per task)."""
+    memo = getattr(sentinel_policy._local, 'cache', None)
+    if memo is not None and 'builtin-pk' in memo:
+        return memo['builtin-pk']
     agent = builtin_scanner.builtin_agent()
-    return agent.pk if agent is not None else None
+    pk = agent.pk if agent is not None else None
+    if memo is not None:
+        memo['builtin-pk'] = pk
+    return pk
 
 
 def is_builtin(agent):
@@ -978,6 +1009,13 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         if why:
             out.update(explain_none(project, kind, internal, now, builtin_only))
         return out
+    fallback, externals = 0, 0
+    if not builtin_only:
+        outside = [e for e in live if not e.builtin]
+        grace = builtin_fallback_for(kind)
+        if outside and len(outside) < len(live) and grace and not any(kind in e.preferred for e in live if e.builtin):
+            # the built-in scanner is the last resort (``builtin_fallback_for``): while an external Sentinel is there for ``kind`` its slots are no capacity of this\n            # work, so a full external is ``busy`` (the stage waits in the queue, where the built-in one takes the task once the grace is over), not ``free``
+            live, fallback, externals = outside, grace, len(outside)
     held, held_kind = {}, {}
     for agent_id, task_kind, n in (SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES)
                                    .values_list('agent_id', 'kind').annotate(n=Count('id'))):
@@ -1000,7 +1038,10 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         if exclude is not None:
             waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
         free = max(0, free - waiting.count())
-    return {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+    out = {'state': 'free' if free else 'busy', 'live': len(live), 'slots': slots, 'free': free}
+    if fallback:
+        out.update(externals=externals, fallback_seconds=fallback)  # the built-in scanner is held back for this long: a stage's claim window must cover it
+    return out
 
 
 # Why a kind has nowhere to go, in the order a reader should act on it (the first that applies is the reason; every Sentinel's own state is in the sentence).
@@ -1059,9 +1100,17 @@ def explain_none(project, kind, internal=False, now=None, builtin_only=False):
     now = now or timezone.now()
     agents = list(Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', token__revoked=False)
                   .exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
+    agents = _builtin_last(agents)
     live = {e.agent.pk: e for e in _live_for(project, now)}
     reason, clauses = _explain(kind, agents, live, internal, builtin_pk() if builtin_only else None)
     return _none_answer(kind, reason, clauses, bool(agents))
+
+
+def _builtin_last(agents, own=None):
+    """``agents`` with the built-in scanner moved to the end (the order is otherwise kept): it is the path of last resort, so no list the server writes names it first.
+    ``own`` is the built-in scanner's id when the caller has read it already."""
+    own = builtin_pk() if own is None else own
+    return sorted(agents, key=lambda a: a.pk == own)
 
 
 def kinds_overview(now=None):
@@ -1129,6 +1178,8 @@ def project_slots(project, now=None):
     if memo is not None and key in memo:
         return memo[key]
     live = _live_for(project, now)
+    if builtin_fallback_seconds() and any(not e.builtin for e in live):
+        live = [e for e in live if not e.builtin]  # the built-in scanner is the last resort: it does not widen the pool while an external Sentinel is there
     slots = max(sum(e.max_concurrent for e in live if kind in e.caps) for kind in ('nmap', 'nuclei_light'))
     if memo is not None:
         memo[key] = slots
@@ -1540,7 +1591,8 @@ def _lighter_elsewhere(eff, task, own_held, now, memo):
     task is held back from this one for a moment. Load is the tasks a Sentinel holds (claimed or running) over its ``max_concurrent``, compared by cross
     multiplication, so a Sentinel with twice the slots carries twice the tasks at the same load; equal loads are no reason to hold anything back (the first to
     ask takes it). ``own_held`` is what this Sentinel holds. ``memo`` is the per-call cache of one ``_try_claim``."""
-    found = _peers(task, eff.agent.pk, now, memo)
+    own = builtin_pk()
+    found = [(other, pair) for other, pair in _peers(task, eff.agent.pk, now, memo) if other.agent.pk != own]  # a task is never held for the built-in scanner, the last resort
     if not found:
         return False
     key = _answer_key(task, found, eff) + ('lighter',)
@@ -1550,12 +1602,34 @@ def _lighter_elsewhere(eff, task, own_held, now, memo):
     return memo[key]
 
 
+def _left_to_externals(eff, task, now, memo):
+    """Whether ``task`` is held back from the built-in scanner ``eff`` (the last resort, ``builtin_fallback_for``): at least one live, active, external Sentinel is eligible for it\n    (its kind, scope, hosts and network, not denied, not cooling off, not updating: ``refusal``, ``_updating``; its free slots are not asked, a full one frees one soon), and the\n    task has not waited the grace yet. Never for a kind only the built-in one takes, a task it prefers (an administrator's choice for the kind), or ``CVENGINE_BUILTIN_FALLBACK_SECONDS=0``."""
+    if not eff.builtin or task.kind in BUILTIN_KINDS or task.kind in eff.preferred:
+        return False
+    hold = builtin_fallback_for(task.kind)
+    if not hold or (now - task.created_at).total_seconds() >= hold:
+        return False
+    own = builtin_pk()
+    found = [(other, pair) for other, pair in _peers(task, eff.agent.pk, now, memo) if other.agent.pk != own]
+    if not found:
+        return False
+    key = _answer_key(task, found, eff) + ('external',)
+    if key not in memo:
+        memo[key] = any(not other.problem and other.live and task.kind in other.caps and other.refusal(task) is None and not _updating(other.agent, now)
+                        for other, _ in found)
+    return memo[key]
+
+
 def _try_claim(agent, kinds, now):
     with sentinel_policy.shared_lookups():  # the instance defaults and the built-in scanner's id, read once for the rights built below
         return _claim(agent, kinds, now)
 
 
+_hint = threading.local()  # what the last ``_claim`` of this thread was waiting for: ``wake`` seconds until the earliest task left to the externals may be taken, ``other`` for any other hold
+
+
 def _claim(agent, kinds, now):
+    _hint.wake, _hint.other = None, False
     eff = effective(agent, now)
     if eff.problem:
         raise ApiError(403, f'no work can be assigned: {eff.problem}')
@@ -1583,17 +1657,28 @@ def _claim(agent, kinds, now):
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
                 held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is at its limit of {cap} at once here')
                 continue  # at its per-kind cap: a later queued task of another kind may still be taken
-            defer_for = defers[task.kind] if task.kind in defers else defers.setdefault(task.kind, prefer_defer_for(task.kind))
-            if defer_for and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < defer_for:
-                if _preferred_elsewhere(eff, task, now, memo):
-                    held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a Sentinel that prefers it for up to {defer_for} seconds')
+            if eff.builtin:
+                # the last resort: it waits for the external Sentinels (up to the grace), then takes the task without the prefer and balance holds below, which are
+                # for the externals to share work among themselves (``_left_to_externals``: its own ``prefer`` for a kind lifts the wait)
+                if _left_to_externals(eff, task, now, memo):
+                    _hint.wake = min(getattr(_hint, 'wake', None) or 1e9, max(0.0, builtin_fallback_for(task.kind) - (now - task.created_at).total_seconds()))
+                    held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is left to the external Sentinels for up to {builtin_fallback_for(task.kind)} seconds, '
+                                                      'the built-in scanner being the last resort')
                     continue
-            balance_for = balances[task.kind] if task.kind in balances else balances.setdefault(task.kind, balance_defer_for(task.kind))
-            # a Sentinel that holds nothing is never less loaded than another; one that prefers the kind is not held back for a Sentinel that does not (prefer wins)
-            if balance_for and held and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < balance_for:
-                if _lighter_elsewhere(eff, task, held, now, memo):
-                    held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a less loaded Sentinel for up to {balance_for} seconds')
-                    continue
+            else:
+                defer_for = defers[task.kind] if task.kind in defers else defers.setdefault(task.kind, prefer_defer_for(task.kind))
+                if defer_for and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < defer_for:
+                    if _preferred_elsewhere(eff, task, now, memo):
+                        _hint.other = True
+                        held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a Sentinel that prefers it for up to {defer_for} seconds')
+                        continue
+                balance_for = balances[task.kind] if task.kind in balances else balances.setdefault(task.kind, balance_defer_for(task.kind))
+                # a Sentinel that holds nothing is never less loaded than another; one that prefers the kind is not held back for a Sentinel that does not (prefer wins)
+                if balance_for and held and task.kind not in eff.preferred and (now - task.created_at).total_seconds() < balance_for:
+                    if _lighter_elsewhere(eff, task, held, now, memo):
+                        _hint.other = True
+                        held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a less loaded Sentinel for up to {balance_for} seconds')
+                        continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
@@ -1650,6 +1735,12 @@ def _await_work(agent, why, left):
     a Sentinel that prefers it, or a less loaded one, becomes this Sentinel's by time alone, so then it looks again after one second, as it always
     did. Without Redis it sleeps one second."""
     from agentapi import sentinel_notify
+    wake = getattr(_hint, 'wake', None)
+    if (why or '').startswith(HELD_BACK) and wake is not None and not getattr(_hint, 'other', False) and time.sleep is _REAL_SLEEP:
+        # only the built-in scanner's wait for the external Sentinels: nothing changes before the grace ends but a wake-up, so it sleeps until then (a poll a second, with
+        # every external's rights rebuilt each time, would be a burden on a small server for as long as the externals are busy)
+        sentinel_notify.wait_agent(agent.pk, min(float(sentinel_notify.safety_seconds()), left, wake + 0.2), sleep=lambda s: time.sleep(min(1.0, s)))
+        return
     if (why or '').startswith(HELD_BACK) or time.sleep is not _REAL_SLEEP:
         time.sleep(min(1.0, left))
         return
@@ -2605,7 +2696,8 @@ def _live_overview(ctx):
     projects the caller may read (``_live_task``): another tenant's work shows as its kind on a target and nothing more."""
     reap_expired()
     now = timezone.now()
-    agents = list(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES])
+    builtin_id = sentinel_policy.builtin_pk()  # one read for the page: the order below and each card compare ids
+    agents = _builtin_last(broker._manageable(ctx.user).filter(kind='scanner').exclude(status='revoked').order_by('name', 'id')[:CANDIDATES], builtin_id)  # the last resort is listed last
     ids = [a.pk for a in agents]
     allowed = roles.allowed_project_ids(ctx.user)  # looked up once for the whole request and handed to every helper below
     allowed = None if allowed is None else set(allowed)
@@ -2633,7 +2725,6 @@ def _live_overview(ctx):
     activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
-    builtin_id = sentinel_policy.builtin_pk()  # likewise: one read, then each card compares ids
     decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
@@ -2643,7 +2734,7 @@ def _live_overview(ctx):
         st = stats.get(agent.pk, {})
         seen = agent.last_seen
         out.append({
-            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'status': agent.status, 'status_note': note, 'held_by': held_by, 'can_manage': decide[agent.pk],
+            'id': agent.pk, 'name': agent.name, 'builtin': agent.pk == builtin_id, 'last_resort': agent.pk == builtin_id, 'status': agent.status, 'status_note': note, 'held_by': held_by, 'can_manage': decide[agent.pk],
             'state': _state_of(agent, eff.live, bool(mine)), 'live': eff.live,
             'last_seen': svc._iso(seen), 'seconds_since_seen': int((now - seen).total_seconds()) if seen else None,
             'registered': svc._iso(agent.registered_at), 'os': agent.os, 'max_concurrent': eff.max_concurrent,
@@ -2667,11 +2758,31 @@ def _live_overview(ctx):
     from cveFeed import internal_view, openvas_scan
     networks = internal_view.declared_networks()
     from agentapi import stage_runs
-    return {'server_time': now.isoformat(), 'queued': queued, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
+    routing = _routing(out)
+    return {'server_time': now.isoformat(), 'queued': queued, 'routing': routing, 'live_window_seconds': int(LIVE_WINDOW.total_seconds()),
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
             'stage_runs': stage_runs.metrics(now, project_ids=allowed),  # the stages waiting on Sentinels without a worker (the caller's projects)
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
             'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
+
+
+def _routing(rows):
+    """How the work was shared between the external Sentinels and the built-in scanner, for the Sentinels page, from the rows built for it (so only the Sentinels the viewer manages
+    count): the tasks each finished (done or failed) in the last 24 hours and the last hour, the built-in scanner's share, the grace (``builtin_fallback_seconds``) and a plain
+    sentence saying what the built-in scanner is for."""
+    def total(rows_, key):
+        return sum(r['stats'][key] for r in rows_)
+    own = [r for r in rows if r['builtin']]
+    outside = [r for r in rows if not r['builtin']]
+    grace = builtin_fallback_seconds()
+    handled = {'builtin_24h': total(own, 'done_24h') + total(own, 'failed_24h'), 'external_24h': total(outside, 'done_24h') + total(outside, 'failed_24h'),
+               'builtin_1h': total(own, 'done_1h') + total(own, 'failed_1h'), 'external_1h': total(outside, 'done_1h') + total(outside, 'failed_1h')}
+    every = handled['builtin_24h'] + handled['external_24h']
+    handled['builtin_share_24h'] = round(handled['builtin_24h'] / every, 3) if every else None
+    when = ('as soon as it asks (the grace is off)' if not grace else f'only when no external Sentinel is there for the work, or once the work has waited {grace} seconds for one')
+    return {**handled, 'fallback_seconds': grace, 'externals': len(outside), 'externals_live': sum(1 for r in outside if r['live'] and r['status'] == 'active'),
+            'explanation': ('The built-in scanner is the path of last resort. External Sentinels take all scanning first; this install\'s own scanner takes a task ' + when +
+                            ', or work only it can run (scan path checks, template checks, signed-in route checks).')}
 
 
 def _visible_orgs(user, allowed=_ASK):

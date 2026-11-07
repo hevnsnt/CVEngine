@@ -1369,26 +1369,29 @@ const tabs = el("nav", "set-nav", null, {
 });
 const panel = el("div", "set-panel");
 view.append(tabs, panel);
-const groups = [
-  ["AI and access", ["ai", "keys", "tailscale"]],
-  ["Scanning", ["scan_policy", "openvas", "ip_allowlist", "proxy", "resources"]],
-  ["Alerts and reports", ["notifications", "email", "reports"]],
-  ["System", ["updates", "reset"]],
-];
+// Essentials are the four things most installs ever touch; everything else is under Advanced, collapsed. OpenVAS is not in Settings: its one
+// place is Administration > OpenVAS, which an organization admin can open too (the panel is the same).
+const essentials = ["ai", "alerts", "reports", "updates"];
+const advanced = ["keys", "tailscale", "scan_policy", "ip_allowlist", "proxy", "resources", "reset"];
 const labels = {
   ai: "AI model",
+  alerts: "Alerts",
+  reports: "Reports",
+  updates: "Updates",
   keys: "API keys",
   tailscale: "Tailscale",
-  openvas: "OpenVAS",
-  notifications: "Notifications",
-  email: "Email",
   scan_policy: "Scan policy",
   ip_allowlist: "IP allowlist",
   proxy: "Proxy",
-  reports: "Reports",
   resources: "Resources",
-  updates: "Updates",
   reset: "Factory reset",
+};
+// Alerts: where this server sends notices (chat webhooks) and how it sends mail, one pane instead of two
+sections.alerts = async (m) => {
+  const mail = el("div");
+  await sections.notifications(m);
+  m.append(mail);
+  await sections.email(mail);
 };
 
 // configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
@@ -1397,6 +1400,12 @@ try {
   storage = window.localStorage;
 } catch (_) {
   /* blocked: the group stays collapsed by default and nothing is remembered */
+}
+const advItems = el("div", "set-group-items", null, { id: "set-adv-items" });
+const advToggle = el("button", "set-group-title set-toggle", "Advanced", { type: "button", "aria-controls": "set-adv-items" });
+function setAdvOpen(isOpen) {
+  advItems.hidden = !isOpen;
+  advToggle.setAttribute("aria-expanded", String(isOpen));
 }
 const cmItems = el("div", "set-group-items", null, { id: "set-cm-items" });
 const cmToggle = el("button", "set-group-title set-toggle", SECTION_LABEL, {
@@ -1420,6 +1429,7 @@ async function open(name, card = "") {
       ),
     );
   if (name === SECTION_ID) setCmOpen(true);
+  if (name === SECTION_ID || advanced.includes(name)) setAdvOpen(true); // a link into an advanced pane opens the fold around it
   panel.textContent = "";
   history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
   try {
@@ -1428,21 +1438,17 @@ async function open(name, card = "") {
     panel.append(el("p", "msg err", err.message));
   }
 }
-groups.forEach(([title, names]) => {
-  const group = el("div", "set-group", null, { role: "presentation" });
-  group.append(el("span", "set-group-title", title, { "aria-hidden": "true" }));
-  names.forEach((name) => {
-    const b = el("button", "btn ghost sm", labels[name], {
-      role: "tab",
-      "data-tab": name,
-      "aria-selected": "false",
-    });
-    b.type = "button";
-    b.onclick = () => open(name);
-    group.append(b);
-  });
-  tabs.append(group);
-});
+const tabButton = (name) => {
+  const b = el("button", "btn ghost sm", labels[name], { role: "tab", "data-tab": name, "aria-selected": "false" });
+  b.type = "button";
+  b.onclick = () => open(name);
+  return b;
+};
+const essentialsGroup = el("div", "set-group", null, { role: "presentation" });
+essentialsGroup.append(el("span", "set-group-title", "Essentials", { "aria-hidden": "true" }), ...essentials.map(tabButton));
+tabs.append(essentialsGroup);
+advToggle.onclick = () => setAdvOpen(advItems.hidden);
+advanced.forEach((name) => advItems.append(tabButton(name)));
 const cmGroup = el("div", "set-group", null, { role: "presentation" });
 cmToggle.onclick = () => setCmOpen(cmItems.hidden);
 cards().forEach((entry) => {
@@ -1457,15 +1463,24 @@ cards().forEach((entry) => {
   cmItems.append(b);
 });
 cmGroup.append(cmToggle, cmItems);
-tabs.append(cmGroup);
+// Timings (feed interval, discovery and nuclei limits) live in Administration; a link here so Advanced is where one looks for them
+advItems.append(Object.assign(el("a", "btn ghost sm", "Timings", { href: "/cve/admin/#timings" })));
+advItems.append(cmGroup);
+const advGroup = el("div", "set-group", null, { role: "presentation" });
+advGroup.append(advToggle, advItems);
+tabs.append(advGroup);
 setCmOpen(readOpen(storage), false);
+setAdvOpen(false);
 
 // an old link to #engines (the tab this replaced) opens the scan policy
-const legacyTabs = { engines: "scan_policy" };
+const legacyTabs = { engines: "scan_policy", notifications: "alerts", email: "alerts" };
 const hash = location.hash.slice(1);
+if (hash === "openvas") window.location.replace("/cve/admin/#openvas"); // its one place now
 const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
 open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#openvas") window.location.replace("/cve/admin/#openvas");
   if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  else if (legacyTabs[location.hash.slice(1)]) open(legacyTabs[location.hash.slice(1)]);
   else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
 });

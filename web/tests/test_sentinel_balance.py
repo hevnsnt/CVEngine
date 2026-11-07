@@ -301,13 +301,15 @@ class PolicyInterplayTests(BalanceBase):
 
 
 class FakeScannerTests(BalanceBase):
-    """The built-in scanner (FakeScanner) and an external Sentinel are peers: whichever is lighter takes the work."""
+    """The built-in scanner (FakeScanner) is the path of last resort (docs/SCANNER-ARCHITECTURE.md): a live external Sentinel takes a task first, whatever the loads, and
+    the built-in one takes it only once it has waited the grace (``CVENGINE_BUILTIN_FALLBACK_SECONDS``) or when no external Sentinel is there. The balance between
+    externals is above, in the tests of two external Sentinels; the rule between the two kinds is in ``tests.test_internal_last_resort``."""
 
     def setUp(self):
         super().setUp()
-        self.enterContext(mock.patch.dict('os.environ', CLAIM_8))  # the fake would otherwise shorten the claim window to one second, which leaves no room to hold anything
+        self.enterContext(mock.patch.dict('os.environ', {**CLAIM_8, 'CVENGINE_BUILTIN_FALLBACK_SECONDS': '30'}))  # the fake would otherwise shorten the claim window to one second
 
-    def test_the_built_in_scanner_defers_to_a_lighter_external_one_and_serves_the_task_once_the_window_has_passed(self):
+    def test_the_built_in_scanner_leaves_a_task_to_an_idle_external_one_and_serves_it_once_the_grace_has_passed(self):
         fake = FakeScanner(kinds=['nmap'], max_concurrent=4, mode='timeout').start_for(self)
         outside = self.external('Remote-1')
         self.hold(fake.agent, 2)
@@ -319,29 +321,28 @@ class FakeScannerTests(BalanceBase):
         self.assertEqual(self.claim(outside, ['nmap'])[0].pk, task.pk)
         self.assertEqual(task.__class__.objects.get(pk=task.pk).agent_id, outside.pk)
 
-    def test_the_external_sentinel_defers_to_a_lighter_built_in_scanner(self):
+    def test_the_external_sentinel_takes_the_task_even_when_it_is_the_heavier_one(self):
         fake = FakeScanner(kinds=['nmap'], max_concurrent=4, mode='timeout').start_for(self)
         outside = self.external('Remote-1')
-        self.hold(outside, 1)
+        self.hold(outside, 1)  # the built-in scanner holds nothing, so it is the lighter one; the last resort is not a peer to wait for
         created = timezone.now()
         task = self.queue('nmap', created=created)
-        self.assertIsNone(self.claim(outside, ['nmap'], created + timedelta(seconds=1))[0])
-        served = fake.serve_once()
-        self.assertEqual(served['id'], task.pk)
+        self.assertIsNone(fake.serve_once())
+        self.assertEqual(self.claim(outside, ['nmap'], created + timedelta(seconds=1))[0].pk, task.pk)
 
-    def test_two_idle_peers_serve_in_the_order_they_ask(self):
+    def test_the_built_in_scanner_serves_at_once_when_no_external_sentinel_is_there(self):
         fake = FakeScanner(kinds=['nmap'], max_concurrent=4, mode='timeout').start_for(self)
-        self.external('Remote-1')
         task = self.queue('nmap', created=timezone.now())
         self.assertEqual(fake.serve_once()['id'], task.pk)
 
-    def test_the_stage_still_gets_a_sentinel_when_the_lighter_peer_never_answers(self):
+    def test_the_stage_still_gets_a_sentinel_when_the_external_one_never_answers(self):
         fake = FakeScanner(kinds=['nmap'], max_concurrent=4, mode='timeout').start_for(self)
         self.external('Remote-1')  # live and idle, never polls
         self.hold(fake.agent, 1)
-        self.queue('nmap', created=timezone.now() - timedelta(seconds=10))
-        served = fake.serve_once()
-        self.assertIsNotNone(served)  # past the window: the busier one takes it rather than the stage running it locally
+        task = self.queue('nmap', created=timezone.now() - timedelta(seconds=10))
+        self.assertIsNone(fake.serve_once())  # inside the grace the task is left to the external one
+        SentinelTask.objects.filter(pk=task.pk).update(created_at=timezone.now() - timedelta(seconds=60))
+        self.assertIsNotNone(fake.serve_once())  # past the grace the built-in one takes it rather than the stage running it locally
 
 
 class QueryCountTests(BalanceBase):
