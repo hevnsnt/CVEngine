@@ -12,7 +12,7 @@
 #   sudo ./install.sh --sentinels=both       # built-in scanner plus external Sentinels you add in the browser
 #   sudo ./install.sh --sentinels=external   # external Sentinels only: the built-in scanner is not installed or started
 #   sudo ./install.sh -n                     # never ask (also when CI is set or stdin is not a terminal)
-#   CVENGINE_INSTALL_PORTS="..."             # ports that must be free before the first start (default "443 8082"); the tests set it to ""
+#   CVENGINE_INSTALL_PORTS="..."             # ports that must be free before the first start (default: the HTTPS and HTTP ports, 443 and 8082); the tests set it to ""
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 started=$SECONDS
@@ -200,6 +200,9 @@ fi
 ok "docker daemon is running"
 
 # ports: our own proxy holding them from a previous run is fine
+https_port=${CVENGINE_HTTPS_PORT:-$(env_value CVENGINE_HTTPS_PORT)}; https_port=${https_port:-443}
+http_port=${CVENGINE_HTTP_PORT:-$(env_value CVENGINE_HTTP_PORT)}; http_port=${http_port:-8082}
+install_ports=${CVENGINE_INSTALL_PORTS-$https_port $http_port}
 running_proxy=$(compose -f docker-compose.yml ps -q proxy 2>/dev/null || true)
 if [ -z "$running_proxy" ]; then
   port_busy() {
@@ -207,10 +210,10 @@ if [ -z "$running_proxy" ]; then
     elif have netstat; then netstat -ltn 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found = 1} END {exit !found}'
     else return 1; fi
   }
-  for port in ${CVENGINE_INSTALL_PORTS-443 8082}; do
+  for port in $install_ports; do
     if port_busy "$port"; then die "Port $port is already in use by another program. Stop it (for example another web server) and run this again."; fi
   done
-  ok "ports ${CVENGINE_INSTALL_PORTS-443 8082} are free"
+  ok "ports $install_ports are free"
 else
   ok "CVEngine is already running here: rebuilding it from this checkout (this does not fetch new code, see docs/UPDATES.md)"
 fi
@@ -257,7 +260,7 @@ if ! make up; then show_logs; die "CVEngine did not start. The log lines above s
 step "Waiting for CVEngine to answer"
 healthy=1
 for attempt in $(seq 1 90); do
-  code=$(curl -ks -m 5 -o /dev/null -w '%{http_code}' https://127.0.0.1/ 2>/dev/null || echo 000)
+  code=$(curl -ks -m 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$https_port/" 2>/dev/null || echo 000)
   # The proxy answering is not enough (it serves its own 403 maintenance page while the web service is still down, and 401 and 403 are also what a
   # client outside the allowlist gets): the web container must be accepting connections too, which it does only after it has migrated the database.
   case $code in 2??|3??|401|403) compose exec -T web python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000), 3)' >/dev/null 2>&1 && { healthy=0; break; } ;; esac
@@ -306,8 +309,10 @@ for svc in db redis web celery celery-beat proxy reviewer; do
 done
 
 ca=$(pwd)/secrets/certs/ca.crt
+open_url="https://$address/"
+{ [ "$https_port" = 443 ] || [[ $address == *:* ]]; } || open_url="https://$address:$https_port/"
 printf '\n%s\n' "$GREEN$BOLD  CVEngine is running (installed in $(((SECONDS - started) / 60))m$(printf '%02d' $(((SECONDS - started) % 60)))s).$RESET"
-printf '\n  Open:      %shttps://%s/%s\n' "$BOLD" "$address" "$RESET"
+printf '\n  Open:      %shttps://%s/%s\n' "$BOLD" "${open_url#https://}" "$RESET"
 printf '  Sign in:   %s\n' "$account"
 printf '%s\n' "$admin_banner" | sed 's/^/             /'
 printf '             (a generated password is shown only once; a lost one: make admin-password)\n'

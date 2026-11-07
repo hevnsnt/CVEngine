@@ -170,8 +170,8 @@ services:
     # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
     # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
     ports:
-      - 8082:8082/tcp
-      - 443:443/tcp
+      - ${CVENGINE_HTTP_PORT:-8082}:8082/tcp  # both host ports can be moved (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in .env) when another program holds 443
+      - ${CVENGINE_HTTPS_PORT:-443}:443/tcp
     depends_on:
       - web
       - db
