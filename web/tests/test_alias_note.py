@@ -5,6 +5,7 @@ import re
 from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
@@ -331,6 +332,7 @@ class SearchTests(Base):
 		hm.update_host_profile(self.ctx(self.admin), 'an-p1', 'solo-b.lab.test', alias='Spare unit', note='shelf nine')
 
 		def queries(q):
+			cache.clear()  # the whole-match counts are a shared snapshot: every call here measures its own walk, not another term's
 			with CaptureQueriesContext(connection) as ctx:
 				found = svc.search_hosts(self.ctx(self.admin), 'an-p1', {'q': q, 'page_size': 100})['results']
 			self.assertEqual(len(found), 1, q)
