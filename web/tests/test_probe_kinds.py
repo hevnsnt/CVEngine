@@ -1072,6 +1072,29 @@ class SupplierCheckPolicyTests(SupplierFixture, TestCase):
         self.assertEqual(broker.task_hosts(task), (['a.vendor.test', 'b.vendor.test'], []))
 
 
+class IdentityQuestionsAboutAddressesTests(SimpleTestCase):
+    """An IP-only host has an address for a name. A Sentinel refuses a whole identity_check task when one question is malformed (an A, CNAME, NS or MX
+    question about an address), which failed the task in 0.1 s and took every good question in it along."""
+
+    def test_only_a_ptr_question_may_name_an_address_and_the_rest_of_the_batch_is_still_asked(self):
+        sent = []
+
+        def dispatch(project, kind, target, **kw):
+            sent.append(target)
+            return {'dns': [{'id': q['id'], 'status': 'ok', 'records': [], 'canonical': ''} for q in target.get('dns') or []], 'certs': []}
+        dns = [{'id': '10.77.143.10', 'name': '10.77.143.10', 'type': 'CNAME'}, {'id': '2001:db8::1', 'name': '[2001:db8::1]', 'type': 'A'},
+               {'id': 'www.example.test', 'name': 'www.example.test', 'type': 'CNAME'}, {'id': '10.77.143.10 ptr', 'name': '10.77.143.10', 'type': 'PTR'}]
+        scope = {'hosts': ['10.77.143.10', '2001:db8::1', 'www.example.test']}
+        with mock.patch.object(probe_dispatch, '_offered', return_value=True), mock.patch.object(probe_scope, 'for_identity', return_value=scope), \
+                mock.patch.object(sentinel_dispatch, 'dispatch_or_none', side_effect=dispatch):
+            answers, _certs = probe_dispatch.try_identity(mock.Mock(pk=1), None, dns=dns)
+        self.assertEqual([(q['name'], q['type']) for q in sent[0]['dns']], [('www.example.test', 'CNAME'), ('10.77.143.10', 'PTR')])
+        self.assertEqual(set(answers), {'www.example.test', '10.77.143.10 ptr'})  # the address questions are missing: no answer, never "none"
+        with mock.patch.object(probe_dispatch, '_offered', return_value=True), mock.patch.object(sentinel_dispatch, 'dispatch_or_none') as nothing:
+            self.assertEqual(probe_dispatch.try_identity(mock.Mock(pk=1), None, dns=dns[:2]), ({}, {}))
+        nothing.assert_not_called()  # nothing left to ask: no task at all
+
+
 class IdentityCheckResultTests(SimpleTestCase):
     """The ``identity_check`` kind: what a Sentinel reports is clipped to the contract and cut down to what the task asked."""
 
