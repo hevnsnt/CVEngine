@@ -223,6 +223,7 @@ def save_seed(request):
     with transaction.atomic():
         row = wizard_row()
         _started(row)
+        kick_builtin_scanner()
         org, project = _own_org_and_project(row, request.user, org_name, project_name)
         ctx = services.Ctx(user=request.user)
         try:
@@ -334,6 +335,26 @@ def builtin_state():
     if not out.get('live'):
         return {'enabled': True, 'enrolled': True, 'live': False, 'text': 'The built-in scanner is enrolled but has not reported in for a few minutes.'}
     return {'enabled': True, 'enrolled': True, 'live': True, 'text': 'The built-in scanner is ready.'}
+
+
+KICK_EVERY = 20  # seconds between two requests to the worker to ready the built-in scanner's enrollment
+
+
+def kick_builtin_scanner():
+    """Ask the worker to ready the built-in scanner's enrollment now instead of at its next five-minute beat: the App Admin only just came into being, and
+    the scanner container waits for the enrollment the server writes for it (the worker owns that volume). At most every ``KICK_EVERY`` seconds, and only
+    while the built-in scanner is on and not yet live. Returns whether a request was sent."""
+    from agentapi import builtin_scanner
+    status = builtin_scanner.status()
+    if not status.get('enabled') or status.get('live') or not cache.add('wizard-kick-builtin', 1, KICK_EVERY):
+        return False
+    try:
+        from cveFeed.tasks import ensure_builtin_scanner
+        ensure_builtin_scanner.delay()
+    except Exception:  # the broker is not up yet: the beat does it within five minutes, and the next poll asks again
+        logger.warning('setup wizard: could not ask the worker to enrol the built-in scanner', exc_info=True)
+        return False
+    return True
 
 
 def live_sentinels(now=None):
@@ -616,6 +637,8 @@ def progress(request, now=None):
     data = row.data or {}
     disc = data.get('discovery') or {}
     live = live_sentinels(now)
+    if not live['builtin']:
+        kick_builtin_scanner()
     out = {'sentinel': {**live, 'builtin_state': builtin_state()}, 'discovery': None, 'dwell': {'min_seconds': dwell_seconds()}}
     started = _parse(disc.get('started_at'))
     elapsed = int((now - started).total_seconds()) if started else None

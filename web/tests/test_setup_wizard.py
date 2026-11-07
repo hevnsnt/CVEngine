@@ -130,6 +130,16 @@ class SeedTests(WizardBase):
         self.assertEqual(Project.objects.filter(name='Production').count(), 1)
         self.assertEqual(ScanHistory.objects.count(), 1)
 
+    def test_the_worker_is_asked_to_enrol_the_built_in_scanner_not_left_to_the_beat(self):
+        with mock.patch('cveFeed.tasks.ensure_builtin_scanner.delay') as asked, mock.patch('agentapi.builtin_scanner.enabled', return_value=True):
+            self.seed()
+            self.c.get('/cve/api/welcome/progress')  # inside the throttle window: not asked twice
+        asked.assert_called_once_with()
+        cache.clear()
+        with mock.patch('cveFeed.tasks.ensure_builtin_scanner.delay') as asked, mock.patch('agentapi.builtin_scanner.enabled', return_value=False):
+            self.c.get('/cve/api/welcome/progress')
+        asked.assert_not_called()  # switched off by the installer: nothing to enrol
+
     def test_a_bad_domain_is_rejected_and_nothing_is_created(self):
         for bad in ('', 'localhost', '10.0.0.0/24', '192.0.2.5', 'not a domain', 'a..b.test', '-x.test', 'http://'):
             response = self.seed(domain=bad)
