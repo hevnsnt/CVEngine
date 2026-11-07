@@ -74,6 +74,27 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual((self.repo / '.env').read_text(), first)
 
+    def test_host_ports_given_to_the_installer_are_kept_in_env_for_later_runs(self):
+        proc, _ = self.run_install(CVENGINE_HTTPS_PORT='18443', CVENGINE_HTTP_PORT='18082', CVENGINE_INSTALL_PORTS='')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        env = (self.repo / '.env').read_text().splitlines()
+        self.assertEqual([l for l in env if l.startswith('CVENGINE_HTTPS_PORT')], ['CVENGINE_HTTPS_PORT=18443'])  # the commented example line became the value
+        self.assertEqual([l for l in env if l.startswith('CVENGINE_HTTP_PORT')], ['CVENGINE_HTTP_PORT=18082'])
+        self.assertIn('https://10.1.2.3:18443/', proc.stdout)
+        # a second run without the variables keeps them, and a changed value replaces the old one rather than adding a second line
+        proc, _ = self.run_install(CVENGINE_INSTALL_PORTS='')
+        self.assertIn('CVENGINE_HTTPS_PORT=18443', (self.repo / '.env').read_text())
+        proc, _ = self.run_install(CVENGINE_HTTPS_PORT='19443', CVENGINE_INSTALL_PORTS='')
+        text = (self.repo / '.env').read_text()
+        self.assertEqual(text.count('CVENGINE_HTTPS_PORT='), 1)
+        self.assertIn('CVENGINE_HTTPS_PORT=19443', text)
+
+    def test_a_port_that_is_not_a_number_is_refused_before_anything_is_built(self):
+        proc, calls = self.run_install(CVENGINE_HTTPS_PORT='44x3', CVENGINE_INSTALL_PORTS='')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('not a port number', proc.stderr)
+        self.assertNotIn('build', calls)
+
     def test_a_stopped_docker_daemon_stops_with_the_fix_not_a_stack_trace(self):
         (self.stub / 'no_daemon').write_text('')
         proc, calls = self.run_install()

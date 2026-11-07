@@ -185,6 +185,39 @@ class SeedTests(WizardBase):
             self.assertIn('bbot_discovery', fake.kinds)
         self.queued.assert_called_once_with(scan.id, 'standard')
 
+    def test_a_discovery_the_server_refused_shows_the_reason_not_only_that_it_ended_early(self):
+        self.seed()
+        scan = ScanHistory.objects.get()
+        reason = 'seed.test resolves to a loopback, link-local or internal address; discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)'
+        ScanHistory.objects.filter(pk=scan.pk).update(scan_status=discovery.FAILED, error_message=reason)
+        found = self.c.get('/cve/api/welcome/progress').json()['discovery']
+        self.assertEqual(found['state'], 'ended')
+        self.assertIn('resolves to a loopback, link-local or internal address', found['text'])
+        self.assertIn('0 hosts found:', found['text'])
+        self.assertEqual(found['error'], reason)
+        ScanHistory.objects.filter(pk=scan.pk).update(error_message=None)  # no reason on record: the plain sentence, as before
+        plain = self.c.get('/cve/api/welcome/progress').json()['discovery']
+        self.assertEqual(plain['text'], 'Discovery of seed.test ended early with 0 hosts found. You can start it again from Targets.')
+
+    def test_sending_step_one_again_restarts_a_discovery_that_found_no_host(self):
+        self.seed()
+        first = ScanHistory.objects.get()
+        self.assertFalse(self.seed().json()['discovery_started'])  # still queued: nothing is started a second time
+        ScanHistory.objects.filter(pk=first.pk).update(scan_status=discovery.FAILED, error_message='bbot exited with status 1')
+        again = self.seed().json()
+        self.assertTrue(again['discovery_started'])
+        self.assertEqual(ScanHistory.objects.filter(domain__name='seed.test').count(), 2)
+        self.assertEqual(SetupWizard.objects.get().data['discovery']['scan_id'], ScanHistory.objects.exclude(pk=first.pk).get().pk)
+        self.queued.assert_called_once()  # the second seed()'s own mock: one run queued for the new scan
+
+    def test_sending_step_one_again_leaves_a_discovery_that_found_hosts_alone(self):
+        self.seed()
+        scan = ScanHistory.objects.get()
+        Subdomain.objects.create(name='www.seed.test', scan_history=scan, target_domain=scan.domain)
+        ScanHistory.objects.filter(pk=scan.pk).update(scan_status=discovery.FAILED, error_message='bbot reached its time limit')
+        self.assertFalse(self.seed().json()['discovery_started'])
+        self.assertEqual(ScanHistory.objects.filter(domain__name='seed.test').count(), 1)
+
     def test_with_no_sentinel_the_discovery_is_queued_then_requeued_when_one_is_live(self):
         self.seed()
         scan = ScanHistory.objects.get()
