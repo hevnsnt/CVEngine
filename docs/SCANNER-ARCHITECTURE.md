@@ -1,6 +1,6 @@
 # One scanner for cvENGINE: the plan for 1.4
 
-Status: in progress, on the `1.4-develop` branch. Built: the result contract (`web/agentapi/sentinel_contract.json`), the Sentinel image
+Status: in progress, on the `1.4-develop` branch. Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
 published by digest, the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
 anything, no local path for any kind (`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) with the derived
 "scanner offline" state and non-fatal waiting, signed-in nuclei through the secure read, and the server's vantage point delivered to the
@@ -180,8 +180,9 @@ which send nothing to the target and need no vantage point.
    internal `discover` kind is Sentinel-only by design), `CVENGINE_LOCAL_FALLBACK` is ignored, and the fallback telemetry that gated the deletions
    (`agentapi.ScannerFallback`, `manage.py scanner_fallbacks`) is gone with the paths it watched.
 6. Extract the shared library and delete the server's copies of the parsers and flags. The library is done (hevnsnt/cvENGINE-sentinel#34),
-   and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). Open: one
-   source of truth for the result contract (the server still holds its own `sentinel_contract.json`, which the library's CI compares with it).
+   and the server imports it for the fingerprint readers, the nmap parser, and the scan flags and policy constants (section D). The
+   result contract has one source of truth, the library (T7): the server holds no copy and reads it from the library it installs, pinned by
+   commit sha in `web/requirements.txt`.
 7. Probes and bbot: the scope-policy task and the streamed job type, then move them. bbot: the streamed job type and its scope policy are built (see
    **bbot** above); the local run is deleted (T8).
    Probes in progress: contract version 3 has the scope policy

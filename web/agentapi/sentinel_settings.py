@@ -327,7 +327,7 @@ FEATURES = ('secret_read', 'vantage')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (agentapi/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}

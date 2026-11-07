@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 SERVICE = 'wafw00f'
 DEFAULT_MAX_HOSTS = 25
 GENERIC = {'generic', 'unknown', 'none', ''}
-NAME_LEN = 100  # a product or manufacturer name is cut to this, here and in the Sentinel result contract (agentapi/sentinel_contract.json, the ``waf`` kind)
+NAME_LEN = 100  # a product or manufacturer name is cut to this, here and in the Sentinel result contract (cvengine_scanner/contract/sentinel_contract.json, the ``waf`` kind)
 MAX_PRODUCTS = 20  # the most products one host's result names; the contract's list bound (a handful at the very most)
 
 

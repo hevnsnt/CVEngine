@@ -1,8 +1,9 @@
 """The result contract between cvENGINE and a Sentinel, as data.
 
-``sentinel_contract.json`` is a JSON Schema (2020-12) of what a Sentinel sends back for each task kind. It is the one file both sides
-read: the Sentinel repo takes a copy at the version it targets and validates its own results against it, and this repo's tests tie it
-to the limits the broker enforces (``sentinel_broker``) and to one fixture per kind. A change a client must follow bumps
+``sentinel_contract.json`` is a JSON Schema (2020-12) of what a Sentinel sends back for each task kind. Its one source of truth is the
+scanner library (``cvengine_scanner.contract``, repo hevnsnt/cvENGINE-sentinel), which this server installs at the commit pinned in
+``web/requirements.txt``; this module reads it from the installed library and holds no copy. A contract change lands as a Sentinel pull
+request first, then the server bumps that pin (docs/SENTINELS.md, "The result contract"). This repo's tests tie the file to the limits the broker enforces (``sentinel_broker``) and to one fixture per kind. A change a client must follow bumps
 ``contract_version``. The server stays strict whatever a client sends (``sentinel_broker.clean_result``); the contract is what a
 correct client keeps to, so the server never has to clip or drop anything of a good Sentinel's.
 
@@ -15,14 +16,13 @@ Frozen fixtures. ``tests/fixtures/sentinel_results/`` holds one good result per 
 joins ``v2/``, copied when version 3 added ``bbot_discovery`` and ``secrets_scan``). A frozen set is never edited again, and the server keeps accepting every one of them down to ``min_supported_contract_version``:
 a Sentinel one release behind sends exactly what it sent before, and ``tests.test_sentinel_contract`` runs each frozen set through
 ``sentinel_broker.clean_result`` and this schema."""
-import json
-from pathlib import Path
+from cvengine_scanner import contract as _library
 
-PATH = Path(__file__).with_name('sentinel_contract.json')
+PATH = _library.PATH  # the file inside the installed library (read-only: it is the library's, not this repo's)
 
 
 def load():
-    return json.loads(PATH.read_text())
+    return _library.load()
 
 
 KINDS = tuple(load()['kind_since'])  # every task kind, in the order the file lists them
