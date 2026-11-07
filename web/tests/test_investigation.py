@@ -308,8 +308,11 @@ class ValidationIntegrationTests(ContextFixture, TestCase):
     def test_the_runner_records_what_the_probe_found_and_reports_the_matching_version(self):
         self.sub.technologies.add(Technology.objects.create(name='nginx'))
         check = next(c for c in validation.plan_checks(self.subject(), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')
-        with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
-                mock.patch('cveFeed.probes.fetch', side_effect=lambda url, **kw: answers({probes.PROBE_PATH: page(404, body='<hr><center>nginx/1.24.0</center>')})(url)):
+        from tests import probe_scanner
+        from tests.fake_scanner import FakeScanner, LocalFallback
+        LocalFallback('none').apply(self)
+        get = answers({probes.PROBE_PATH: page(404, body='<hr><center>nginx/1.24.0</center>')})
+        with mock.patch('cveFeed.probes.recorrelate'), FakeScanner(kinds=['http_probe'], responders={'http_probe': lambda task: probe_scanner.result(task, get)}):
             result = validation.run_fact_probe(check)
         self.assertEqual((result['status'], result['observed']), ('observed', {'product': 'nginx', 'version': '1.24.0'}))
         self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', product='nginx', version='1.24.0').exists())

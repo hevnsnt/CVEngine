@@ -12,7 +12,7 @@ port than 443 and 80):
 * TLS and certificate health of the name on port 443 (``hygiene.probe_tls``: expiry, name match, chain, weak signature or key, TLS 1.0/1.1);
 * email authentication (SPF, DKIM, DMARC, MTA-STS and the MailFail checks, DNS only, plus the one MTA-STS policy file over verified HTTPS);
 * HTTP security headers and a short fixed list of well-known administration and login pages: the front page over HTTPS and over HTTP, then
-  one plain GET per path of ``supplier_checks.WELL_KNOWN`` through the slow, polite web client (``slow_web``), never a guessed path;
+  one plain GET per path of ``supplier_checks.WELL_KNOWN`` at the Sentinel's slow, polite pace, never a guessed path;
 * known CVEs for the products and versions the responses announce, matched with the existing correlation rules and a strict version rule
   (``supplier_checks.cve_postures``). Nothing is tried against the supplier, so nothing is ever "validated".
 
@@ -31,13 +31,11 @@ Where the checks run: a project's suppliers are checked by a Sentinel (the ``sup
 its validated names, the pacing and the request budget still left, and the scope policy (``probe_scope.for_suppliers``); the Sentinel runs the
 network part (``cvengine_scanner.probes.suppliers``) and reports a row per name. This module keeps everything else: the list, the validation, the
 schedule and the budget, the ledger, the CVE match against the catalog (the Sentinel only reports what the response announces), the text of what to
-ask the supplier, and what is stored (``row_result`` reads a row; nothing in it is stored as it is). With no Sentinel for the kind the old path below
-runs here, as before, when ``CVENGINE_LOCAL_FALLBACK`` allows it; otherwise the suppliers stay due and nothing is recorded as checked."""
-import http.client
+ask the supplier, and what is stored (``row_result`` reads a row; nothing in it is stored as it is). This server makes none of the
+requests (``supplier_check`` is in ``sentinel_dispatch.NEVER_LOCAL``): with no Sentinel able to take the work the suppliers stay due and nothing is
+recorded as checked."""
 import logging
 import os
-import socket
-import ssl
 from dataclasses import dataclass, field
 
 from django.db import transaction
@@ -176,98 +174,6 @@ def checks_tiers():
     return Supplier.TIERS
 
 
-# ----------------------------------------------------------------------------- the address gate
-
-def numeric_addresses(ips, port=443):
-    """``pinned_transport``'s numeric ``(family, sockaddr)`` pairs for vetted address strings."""
-    out = []
-    for ip in ips:
-        out.append((socket.AF_INET6, (ip, port, 0, 0)) if ':' in ip else (socket.AF_INET, (ip, port)))
-    return tuple(out)
-
-
-def public_addresses(name, net):
-    """``(addresses, state)`` for a name: ``ok`` with every address it resolves to (IPv4 first) when ALL of them are public; ``blocked`` when
-    any is loopback, private, link-local, metadata or otherwise one a scanner must not touch (the whole name is then refused, whatever
-    ``CVENGINE_ALLOW_PRIVATE_TARGETS`` is set to); ``none`` when the name has no address; ``unknown`` when the lookup failed."""
-    from targetApp.target_types import is_scannable_ip
-    try:
-        found = list(dict.fromkeys(net.resolve(name)))
-    except socket.gaierror as exc:
-        return [], ('none' if exc.errno in (socket.EAI_NONAME, getattr(socket, 'EAI_NODATA', -5)) else 'unknown')
-    except (OSError, ValueError):
-        return [], 'unknown'
-    if not found:
-        return [], 'none'
-    if not all(is_scannable_ip(ip, allow_private=False) for ip in found):
-        return [], 'blocked'
-    return sorted(found, key=lambda ip: (':' in ip, ip)), 'ok'
-
-
-# ----------------------------------------------------------------------------- the network (injectable)
-
-class Network:
-    """The real network of the checks. A test injects an object with the same methods and never touches the internet. Every connection goes
-    to addresses ``public_addresses`` admitted; nothing here resolves a name by itself except ``resolve``."""
-
-    def resolve(self, name):
-        return [info[4][0] for info in socket.getaddrinfo(name, 443, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)]
-
-    def fetch(self, url, ip):
-        """One bounded, anonymous GET through the slow web client, connected to the vetted ``ip`` (the URL's name is the Host and TLS name)."""
-        return slow_web.get(url, connect_ip=ip)
-
-    def tls(self, name, addresses):
-        from cveFeed import hygiene
-        return hygiene.probe_tls(name, 443, addresses=numeric_addresses(addresses))
-
-    def dns_state(self, name):
-        import dns.exception
-        import dns.resolver
-
-        from cveFeed import hygiene
-        try:
-            hygiene._resolver().resolve(name, 'MX')
-            return 'ok'
-        except dns.resolver.NoAnswer:
-            return 'ok'
-        except dns.resolver.NXDOMAIN:
-            return 'nxdomain'
-        except (dns.resolver.NoNameservers, dns.exception.DNSException):
-            return 'unknown'
-
-    def txt(self, name):
-        from cveFeed import hygiene
-        return hygiene.fetch_txt(name)
-
-    def records(self, name, rtype):
-        from cveFeed import hygiene
-        return hygiene.fetch_records(name, rtype)
-
-    def has_record(self, name, rtype):
-        from cveFeed import hygiene
-        return hygiene.has_record(name, rtype)
-
-    def mta_sts_policy(self, domain, addresses):
-        """The MTA-STS policy file over verified HTTPS (RFC 8461), to the vetted addresses only, no redirects, at most 64 KB. None when there is none."""
-        from cveFeed import mailfail, pinned_transport
-        host = f'mta-sts.{domain}'
-        context = ssl.create_default_context()
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        conn = pinned_transport.HTTPConnection(host, 443, numeric_addresses(addresses), mailfail.HTTP_TIMEOUT, context=context)
-        try:
-            conn.request('GET', '/.well-known/mta-sts.txt', headers={'Host': host, 'User-Agent': 'CVEngine supplier check'})
-            response = conn.getresponse()
-            if response.status != 200:
-                return None
-            body = pinned_transport.read_body(response, mailfail.MAX_POLICY_BYTES + 1)  # gzip despite identity is decoded, capped after decoding
-            return None if len(body) > mailfail.MAX_POLICY_BYTES else body.decode('utf-8', 'replace')
-        except (OSError, http.client.HTTPException, ValueError):
-            return None
-        finally:
-            conn.close()
-
-
 class Budget:
     """The requests one sweep may still make (a certificate read counts as ``TLS_COST``)."""
 
@@ -279,10 +185,6 @@ class Budget:
 
     def left(self):
         return self.limit - self.used
-
-
-class _Stopped(Exception):
-    """Scanning was paused, or the sweep's request budget ran out, in the middle of a name."""
 
 
 # ----------------------------------------------------------------------------- one name
@@ -297,163 +199,6 @@ class DomainResult:
     answered: bool = False  # something conclusive came back
     stopped: bool = False
     partial: bool = False
-
-
-def _email(res, domain, net, pace, budget):
-    """SPF, DKIM, DMARC, MTA-STS and the MailFail checks, DNS only, for a name that handles mail."""
-    from cveFeed import hygiene, mailfail
-    state = net.dns_state(domain)
-    res.card.setdefault('evidence', {})['dns'] = state
-    if state != 'ok':
-        return
-    has_mx = net.has_record(domain, 'MX')
-    mail = has_mx or any('v=spf1' in t.lower() for t in net.txt(domain)) or any('v=dmarc1' in t.lower() for t in net.txt(f'_dmarc.{domain}'))
-    res.card['mail'] = {'handles_mail': bool(mail), 'mx': bool(has_mx)}
-    if not mail:
-        return
-    found, has_mx = hygiene.email_findings(domain, fetch=net.txt, mx=net.has_record, records=net.records)
-    sts = net.txt(f'_mta-sts.{domain}')
-    if any('v=stsv1' in t.lower() for t in sts):  # the one policy file, fetched only to the addresses vetted for mta-sts.<domain>
-        addresses, sts_state = public_addresses(f'mta-sts.{domain}', net)
-        if sts_state in ('ok', 'none', 'blocked'):
-            policy = None
-            if sts_state == 'ok':
-                budget.spend(1)
-                pace.wait(f'mta-sts.{domain}')
-                policy = net.mta_sts_policy(domain, addresses)
-            found = [f for f in found if not f.check.startswith('mta_sts_')] + mailfail.evaluate_mta_sts(domain, sts, policy, has_mx)
-    if net.dns_state(domain) != 'ok':  # the resolver failed on the way: an empty answer is not "no record"
-        res.card['evidence']['dns'] = 'unknown'
-        return
-    res.postures += checks.email_postures(domain, found)
-    res.resolvable['email'] = {''}
-    res.answered = True
-
-
-def _http_section(https, http_page, base, scheme, domain):
-    """The ``http`` section of the card: the front page's status over both schemes and the raw response headers of the one that answered."""
-    section = {'https_status': (https or {}).get('status'), 'http_status': (http_page or {}).get('status')}
-    if base:
-        section.update({'url': f'{scheme}://{domain}/', 'status': base.get('status'), 'title': (base.get('title') or '')[:200],
-                        'content_type': base.get('content_type') or '', 'server': str(base.get('server') or '')[:200],
-                        'powered_by': str(base.get('powered_by') or '')[:200], 'location': str(base.get('location') or '')[:300],
-                        'cookies': sorted(base.get('cookies') or [])[:20], 'bytes': base.get('bytes'),
-                        'headers': dict(list((base.get('raw_headers') or {}).items())[:60])})
-    return section
-
-
-def _tls_section(info):
-    """The ``tls`` section: the certificate and protocol as read, text clipped to what the card stores."""
-    from cveFeed import hygiene
-    info = hygiene.clip_certificate(info)
-    not_after = info.get('not_after')
-    days = (not_after - timezone.now()).days if not_after else None
-    return {'subject': info['subject'], 'issuer': info['issuer'], 'sans': info['sans'][:50], 'not_before': info['not_before'].isoformat() if info.get('not_before') else None,
-            'not_after': not_after.isoformat() if not_after else None, 'days_left': days, 'key': info['key_description'],
-            'signature': info['signature_algorithm'], 'protocol': info['protocol'], 'cipher': info['cipher'], 'chain_error': info['chain_error'],
-            'legacy_tls': bool(info.get('legacy_tls'))}
-
-
-def check_domain(domain, net, pace, budget, pool, stop=lambda: False, now=None):
-    """Every check of one supplier name: its host card first (certificate, response headers, technology stack), then the findings. Returns a
-    ``DomainResult``; nothing is stored here. ``pool`` is a callable returning the CVE catalog's ``(cve_by_id, product_index)``, read only when
-    the stack shows a version."""
-    from cvengine_scanner import versions
-
-    from cveFeed import route_auth
-    res = DomainResult(domain)
-    addresses, state = public_addresses(domain, net)
-    res.summary['address'] = state
-    res.card = {'state': {'ok': 'unreachable', 'none': 'no_address', 'blocked': 'blocked'}.get(state, 'unreachable'), 'addresses': addresses[:6],
-                'evidence': {'address': state}}
-    try:
-        if stop():
-            raise _Stopped
-        _email(res, domain, net, pace, budget)
-        if state != 'ok':
-            if state == 'blocked':
-                res.card['evidence']['note'] = 'The name resolves to an address that is not public, so it was not contacted.'
-            return res
-        ip = addresses[0]
-
-        def spend(units):
-            if stop():
-                raise _Stopped
-            if budget.left() < units:
-                res.partial = True
-                raise _Stopped
-            budget.spend(units)
-            pace.wait(domain)
-
-        def get(url):
-            spend(1)
-            try:
-                return net.fetch(url, ip)
-            except (OSError, ValueError, http.client.HTTPException):
-                return None
-
-        spend(TLS_COST)
-        try:
-            info = net.tls(domain, addresses)
-        except Exception as exc:  # noqa: BLE001 - a certificate the library cannot read must not stop the rest
-            logger.info('supplier: could not read the certificate of %s (%s)', domain, type(exc).__name__)
-            info = None
-        if info:
-            res.postures += checks.tls_postures(domain, info, now=now)
-            res.resolvable['tls'] = {'tls_'}
-            res.answered = True
-            res.card['tls'] = _tls_section(info)
-
-        https, http_page = get(f'https://{domain}/'), get(f'http://{domain}/')
-        front = https if checks.answered(https) else http_page if checks.answered(http_page) else None
-        challenge = (https or {}).get('challenge') or (http_page or {}).get('challenge') or ''
-        if challenge:
-            res.card['evidence']['challenged'] = challenge  # an edge refused the request: recorded, never retried or worked around
-            res.card['state'] = 'challenged'
-        if any(slow_web.busy(r) for r in (https, http_page) if r):
-            res.partial = True
-        web, evaluated = checks.web_postures(domain, https, http_page)
-        res.postures += web
-        if evaluated:
-            res.resolvable['web'] = evaluated
-            res.answered = True
-        res.card['http'] = _http_section(https, http_page, None, '', domain) if front is None else None
-        if front is None or challenge:
-            return res
-        res.card['state'] = 'ok'
-        scheme = 'https' if checks.answered(https) else 'http'
-        base = https if scheme == 'https' else http_page
-        res.card['http'] = _http_section(https, http_page, base, scheme, domain)
-        # the stack: the fingerprinting owned hosts use (headers, generator tags, markers in the page, script names), read from this one page
-        evidence = route_auth.classify({**base, 'url': f'{scheme}://{domain}/'})[1]
-        technologies = checks.technologies_of(evidence.get('fingerprints'))
-        edges = versions.edges_from_headers({**(base.get('headers') or {}), 'server': base.get('server', '')})
-        res.card['technologies'] = technologies
-        res.card['evidence'].update({'edge': edges, 'fingerprint_sources': sorted({t['source'] for t in technologies})})
-        if any(t['version'] for t in technologies):
-            matched, looked_up = checks.cve_postures(domain, checks.observations_of(technologies), pool(), edge=bool(edges),
-                                                     distro=versions.parse_server_header(base.get('server', '')).get('distro', ''))
-            res.postures += matched
-            res.card['evidence']['announced'] = looked_up
-        if not edges:
-            res.resolvable['cve'] = {'cve_'}
-        results = {}
-        for page in checks.WELL_KNOWN:
-            response = get(f'{scheme}://{domain}{page.path}')
-            results[page.path] = response
-            if response and response.get('challenge'):
-                res.card['evidence']['challenged'] = response['challenge']
-                break
-            if response and slow_web.busy(response):
-                res.partial = True
-                break
-        exposed, evaluated = checks.exposed_postures(domain, scheme, results, front=base)
-        res.postures += exposed
-        if evaluated:
-            res.resolvable['exposed'] = evaluated
-    except _Stopped:
-        res.stopped = not res.partial
-    return res
 
 # ----------------------------------------------------------------------------- storing
 
@@ -582,8 +327,8 @@ def row_result(row, pool):
 
 
 def _remote_rows(supplier, domains, budget):
-    """``{domain: row}`` from a Sentinel's ``supplier_check`` for ``domains`` of ``supplier``, or ``None`` when no Sentinel can take the kind (or none
-    answered) and the names are checked here. Raises ``ScannerUnavailable`` when none can and the kind may not run here: the supplier stays due."""
+    """``{domain: row}`` from a Sentinel's ``supplier_check`` for ``domains`` of ``supplier``. Raises ``ScannerUnavailable`` when none can take the
+    kind: the supplier stays due."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
     return probe_dispatch.try_suppliers(Project.objects.get(pk=supplier.project_id), domains, budget.left())
@@ -591,7 +336,7 @@ def _remote_rows(supplier, domains, budget):
 
 def _remote_results(domains, skipped, rows, budget, pool):
     """``(results, stopped)`` in the order of ``domains``: a skipped name as such, a name the Sentinel reported as its row, a name it did not
-    report not at all (it was not checked, so it answers nothing). As on the local path, nothing after a name that ran out of budget or time."""
+    report not at all (it was not checked, so it answers nothing). Nothing after a name that ran out of budget or time."""
     results = []
     for domain in domains:
         if domain in skipped:
@@ -608,34 +353,22 @@ def _remote_results(domains, skipped, rows, budget, pool):
     return results, False
 
 
-def check_supplier(supplier, net, pace, budget, pool, stop, banned=frozenset(), now=None, remote=False):
-    """All names of one supplier. Returns ``(results, stopped)``. With ``remote`` the names that may be contacted go to a Sentinel as one
-    ``supplier_check`` task when one can take it (``ScannerUnavailable`` propagates when none can and the kind may not run here); otherwise, and
-    for a task that gets no answer, they are checked here one by one."""
+def check_supplier(supplier, budget, pool, stop, banned=frozenset()):
+    """All names of one supplier. Returns ``(results, stopped)``. The names that may be contacted go to a Sentinel as one ``supplier_check`` task;
+    ``ScannerUnavailable`` propagates when none can take it (the kind never runs on this server: ``sentinel_dispatch.NEVER_LOCAL``), so the
+    supplier stays due. A name the Sentinel did not report is not in the results."""
     domains = (supplier.domains or [])[:max_domains()]
-    if remote and not stop():
-        skipped = {d: _skipped(d) for d in domains if d in banned or owned_by(supplier.project_id, d)}
-        todo = [d for d in domains if d not in skipped]
-        rows = _remote_rows(supplier, todo, budget) if todo else None
-        if rows is not None:
-            return _remote_results(domains, skipped, rows, budget, pool)
-    results = []
-    for domain in domains:
-        if stop():
-            return results, True
-        if domain in banned or owned_by(supplier.project_id, domain):  # excluded since it was added, or since become one of the project's own targets
-            results.append(_skipped(domain))
-            continue
-        res = check_domain(domain, net, pace, budget, pool, stop=stop, now=now)
-        results.append(res)
-        if res.stopped or res.partial:
-            return results, True
-    return results, False
+    if stop():
+        return [], True
+    skipped = {d: _skipped(d) for d in domains if d in banned or owned_by(supplier.project_id, d)}  # excluded since it was added, or since become one of the project's own targets
+    todo = [d for d in domains if d not in skipped]
+    rows = _remote_rows(supplier, todo, budget) if todo else {}
+    return _remote_results(domains, skipped, rows, budget, pool)
 
 
-def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, now=None):
-    """One project's due suppliers. Returns the counts (and ``skipped`` with the reason when nothing ran). ``net``, ``pace``, ``pool`` and
-    ``stop`` replace the network, the pacing, the CVE catalog and the pause check in tests."""
+def sweep(project_id, stop=None, pool=None, budget=None, now=None):
+    """One project's due suppliers. Returns the counts (and ``skipped`` with the reason when nothing ran). ``pool`` and ``stop`` replace the
+    CVE catalog and the pause check in tests."""
     from cveFeed import activity, exclusions, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from reNgine import resources
@@ -655,8 +388,6 @@ def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, no
         due = due_suppliers(project_id)
         if not due:
             return summary
-        remote = net is None  # a test (or a caller) that hands in the network checks here: the local path
-        net, pace = net or Network(), pace or slow_web.Pace()
         budget = budget or Budget(max_requests())
         if pool is None:
             from cveFeed import correlation
@@ -675,7 +406,7 @@ def sweep(project_id, net=None, pace=None, stop=None, pool=None, budget=None, no
                 summary['deferred'] += 1
                 continue
             try:
-                results, stopped = check_supplier(supplier, net, pace, budget, pool, stop, banned=banned, now=now, remote=remote)
+                results, stopped = check_supplier(supplier, budget, pool, stop, banned=banned)
             except ScannerUnavailable as exc:
                 logger.info('supplier sweep of project %s waits for a scanner: %s', project_id, exc)
                 summary['skipped'] = 'waiting for a scanner: the suppliers stay due'

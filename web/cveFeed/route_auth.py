@@ -7,16 +7,11 @@ The anonymous probe is deliberately small: no credentials, no cookies, redirects
 each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
 helper (``probe_url``) is injectable.
 """
-import concurrent.futures
-import functools
-import hashlib
 import http.client
 import logging
 import re
-import secrets
 import socket
 import threading
-import time
 from urllib.parse import urljoin, urlparse
 
 from cvengine_scanner import fingerprint, soft404, versions
@@ -336,148 +331,9 @@ def analyse(result):
 
 
 CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
-MAX_BASELINES_PER_BASE = 8  # extra requests a web base may be asked for what its missing pages look like, on top of its routes
-# ... and the host as a whole, over both its bases: two bases need 12 for the common routes (the most MAX_URLS_PER_HOST urls can ask for), so a
-# host is asked for at most its routes and these, MAX_REQUESTS_PER_HOST requests in all (a front page's own scripts are read besides: _read_scripts)
-MAX_BASELINES_PER_HOST = 12
-MAX_REQUESTS_PER_HOST = MAX_URLS_PER_HOST + MAX_BASELINES_PER_HOST
-
-
-def _split_route(path):
-    """``(directory, shape, extension)`` of a route path: the directory it is in (``/api/v1/``), and how a name for it that cannot exist
-    should look, because servers answer a missing ``.php`` file, a missing directory and a missing bare name differently."""
-    directory = path.rsplit('/', 1)[0] + '/'
-    name = path.rsplit('/', 1)[1]
-    if path.endswith('/') and path != '/':
-        return path.rsplit('/', 2)[0] + '/', 'slash', ''
-    ext = name.rsplit('.', 1)[1].lower() if '.' in name else ''
-    return directory, ('ext' if re.fullmatch(r'[a-z0-9]{1,5}', ext) else 'bare'), ext
-
-
-def _baseline_path(directory, shape, ext):
-    name = f'cvengine-{secrets.token_hex(6)}'
-    return directory + (name + '/' if shape == 'slash' else f'{name}.{ext}' if shape == 'ext' else name)
-
-
-def _baseline(base, directory, shape, ext, probe, known):
-    """The fingerprint of the server's answer for a path that cannot exist in ``directory``, of the kind ``shape`` names, read once per
-    web base, directory and shape. ``known`` is one host's. None when it could not be read or this host or base has used up its requests for it."""
-    key = (base, directory, shape, ext if shape == 'ext' else '')
-    if key not in known:
-        if len(known) >= MAX_BASELINES_PER_HOST or sum(1 for k in known if k[0] == base) >= MAX_BASELINES_PER_BASE:
-            return None
-        time.sleep(PER_REQUEST_GAP)
-        path = _baseline_path(directory, shape, ext)
-        try:
-            known[key] = soft404.fingerprint(probe(base + path), path)
-        except Exception:  # noqa: BLE001 - no answer to compare with: the route stands as it was read
-            known[key] = None
-    return known[key]
-
-
-def _against_missing_page(answer, url, probe, known):
-    """``answer`` for ``url`` as it stands, or as ``catch_all`` when the server gives the same answer for a path that cannot exist in the
-    same directory and of the same kind (soft404). Every answer that could be a route's own is compared, not only an open one: a server
-    that sends every path to its login page, or answers 403 to all of them, says as little about a route as one that serves a shell.
-    The root is never compared."""
-    parts = urlparse(url)
-    path = parts.path or '/'
-    status = answer.get('status') or 0
-    if path == '/' or status in (404, 410) or not (200 <= status < 400 or status in (401, 403, 405)) or answer.get('state') == 'error':
-        return answer
-    fp = answer.get('fp')
-    if fp is None:
-        return answer
-    base = f'{parts.scheme}://{parts.netloc}'
-    directory, shape, ext = _split_route(path)
-    # where a path that cannot exist is asked for: beside the route, in its own kind and as a plain name (what ffuf, feroxbuster and
-    # dirsearch calibrate per directory). Below the route is not asked: a server that answers every path under /api alike has an /api
-    for kind in dict.fromkeys((shape, 'bare')):
-        missing = _baseline(base, directory, kind, ext if kind == 'ext' else '', probe, known)
-        if missing is not None and soft404.same(fp, missing):
-            evidence = {**answer['evidence'], 'catch_all': {**soft404.public(missing), 'kind': kind,
-                                                            'note': 'the same answer as for a path that cannot exist'}}
-            return {**answer, 'state': CATCH_ALL, 'evidence': evidence, 'sensitive': {}, 'sensitive_score': 0, 'credentials': []}
-    return answer
 
 
 # ----------------------------------------------------------------------------- network
-
-def _read_route(probe, url):
-    """One route probe: a front page is read up to ROOT_READ_BYTES (its footer scripts are the host's too), any other route up to the
-    usual sample."""
-    if (urlparse(url).path or '/') == '/' and isinstance(probe, functools.partial) and probe.func is probe_url:
-        return probe(url, max_bytes=ROOT_READ_BYTES)
-    return probe(url)
-
-
-MAX_SCRIPT_URLS = 8
-
-
-def script_urls(entries, page_url):
-    """The front page's scripts on its own host (same scheme, host and port), absolute, without query strings, at most MAX_SCRIPT_URLS: what the
-    secrets scan reads besides the routes. A script on any other host is left to the library reader's own vetting."""
-    from urllib.parse import urljoin
-    base = urlparse(page_url)
-    out = []
-    for entry in entries or ():
-        src = (entry.get('url') or entry.get('src')) if isinstance(entry, dict) else entry
-        if not isinstance(src, str) or not src.strip():
-            continue
-        try:
-            url = urlparse(urljoin(page_url, src.strip()))
-        except ValueError:
-            continue
-        if url.scheme not in ('http', 'https') or (url.scheme, url.netloc.lower()) != (base.scheme, base.netloc.lower()):
-            continue
-        clean = url._replace(query='', fragment='').geturl()[:2000]
-        if clean not in out:
-            out.append(clean)
-        if len(out) >= MAX_SCRIPT_URLS:
-            break
-    return out
-
-
-def _read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, reader=None, target=None):
-    """Read the scripts the front page loads and record the libraries their own files state (cveFeed.js_libraries): the page's own host,
-    the same site and public library CDNs only, each other host vetted (address, exclusions, bug bounty scope), at most
-    ``budget['left']`` scripts for the host (js_libraries.MAX_SCRIPTS_PER_HOST over all its web bases) and MAX_SCRIPT_BYTES each, through
-    the same bounded, pinned, anonymous GET as every route check with the same gap between requests. Every copy of a library is kept in
-    ``evidence['libraries']`` with the one that runs marked; the fingerprints name the libraries by what the files say, a file name only
-    when the file could not be read, a query string never."""
-    from reNgine import resources
-    evidence = result.get('evidence') or {}
-    page = evidence.pop('page_scripts', None) or {}
-    entries, page_url = page.get('scripts') or [], page.get('page') or ''
-    if not entries:
-        return
-    own = script_urls(entries, page_url)
-    if own:
-        evidence['script_urls'] = own  # the page's own scripts, read again by the secrets_scan stage (cveFeed.secrets_stage)
-    budget = budget if budget is not None else {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
-    if isinstance(probe, functools.partial) and probe.func is probe_url:
-        probe = functools.partial(probe, max_bytes=js_libraries.MAX_SCRIPT_BYTES)  # a library file is read further than a page
-    coverage = {}
-    records = js_libraries.read_page(entries, page_url, probe, js_libraries.vetter(page_url, project, gate, target), budget,
-                                     before_each=lambda: time.sleep(PER_REQUEST_GAP), stop=lambda: resources.abort_requested(scan_id),
-                                     reader=reader, project=project, coverage=coverage)
-    if isinstance(evidence.get('script_page'), dict):  # how many of the page's scripts were read whole: a script not read may hold anything
-        evidence['script_page']['unread'] = max(0, coverage.get('scripts', 0) - coverage.get('read', 0))
-    # a file-name hint gives way only to a library the page's scripts were resolved for; any other stays as it was
-    resolved = {r['product'].lower() for r in records.values()}
-    hints = {f['name'] for f in evidence.get('fingerprints') or []
-             if f.get('source') == 'script:filename' and f['name'].split(':', 1)[0].strip().lower() in resolved}
-    kept = [f for f in evidence.get('fingerprints') or [] if f['name'] not in hints]
-    found = fingerprint.extend(kept, js_libraries.names_of(records))
-    if records:
-        evidence['libraries'] = records
-    if found:
-        evidence['fingerprints'] = found
-        evidence['fingerprint_names'] = [f['name'] for f in found]
-    else:
-        evidence.pop('fingerprints', None)
-        evidence.pop('fingerprint_names', None)
-
 
 def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
               connect_ip=None):
@@ -585,9 +441,6 @@ def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMP
         connection.close()
 
 
-_LOCAL_PROBE = probe_url  # the probe the stage asks with when the caller gives none (``probe_url`` itself may be replaced in a test)
-
-
 # ----------------------------------------------------------------------------- the stage
 
 def _chunks(items, size=CHUNK):
@@ -664,23 +517,23 @@ def _legacy_root_urls(project, urls):
             if js_libraries.legacy_roots(evidence) or js_libraries.unrecorded_page(evidence, status)}
 
 
-def run_route_auth(scan_id, probe=probe_url, force=False):
+def run_route_auth(scan_id, force=False):
     """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes: on the
     built-in scanner only, never from this server), recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
     from cveFeed import auth_routes
-    out = _run_route_auth(scan_id, probe, force)
+    out = _run_route_auth(scan_id, force)
     signed = auth_routes.run_signed_in(scan_id, force)
     if signed is not None:
         out['signed_in'] = signed
     return out
 
 
-def _run_route_auth(scan_id, probe=probe_url, force=False):
-    """Check how the scan's web routes answer an anonymous GET and store the result per project route. Routes checked inside
-    the TTL (7 days, CVENGINE_TTL_ROUTE_AUTH) are not asked again. Returns
-    ``{'routes', 'hosts', 'by_state', 'reused', 'errors'}``. ``force`` (a re-test of changed hosts) ignores the TTL: a version
-    or service change on an existing web port must not be judged against yesterday's auth state. The plan is the re-tested hosts'
-    routes only, so it stays as bounded as the re-test itself."""
+def _run_route_auth(scan_id, force=False):
+    """Check how the scan's web routes answer an anonymous GET, on a Sentinel (``route_probe``), and store the result per project route. This server
+    sends nothing: with no Sentinel able to take the work the routes stay due. Routes checked inside the TTL (7 days, CVENGINE_TTL_ROUTE_AUTH) are
+    not asked again. Returns ``{'routes', 'hosts', 'by_state', 'reused', 'errors'}``. ``force`` (a re-test of changed hosts) ignores the TTL: a
+    version or service change on an existing web port must not be judged against yesterday's auth state. The plan is the re-tested hosts' routes
+    only, so it stays as bounded as the re-test itself."""
     from django.utils import timezone
 
     from cveFeed import activity, ledger, scoring
@@ -689,9 +542,6 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     empty = {'routes': 0, 'hosts': 0, 'by_state': {}, 'reused': 0, 'errors': 0}
-    injected = probe is not _LOCAL_PROBE  # a test's probe replaces the network: the routes are asked here, never through a Sentinel
-    if probe is probe_url:  # the project may authorise the tailnet devices of its own
-        probe = functools.partial(probe_url, project=project)
     retired = _retired_endpoints(scan)
     plan = _plan(scan, retired)
     if not plan:
@@ -714,65 +564,21 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
         by_host = {}
         for url in won_urls:
             by_host.setdefault(host_of[url], []).append(url)
-        probed, errors, blocked = {}, {}, 0
-        local_hosts = by_host
-        if not injected:  # through a Sentinel when one can take route_probe; what none took is asked below, here, as before
-            try:
-                answered, local = _remote_routes(scan, by_host)
-            except resources.ScannerUnavailable as exc:  # no scanner takes it and it may not run here: nothing was asked, the routes stay due
-                message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
-                logger.warning('route check of scan %s is waiting for a scanner: %s', scan.id, exc)
-                activity.log('run_check', f'Web route check for {domain.name} is waiting: {message}', project=project, scan_id=scan.id)
-                return {**empty, 'skipped': message}
-            for url, result in answered.items():
-                if isinstance(result, Exception):
-                    errors[url] = str(result)[:200]
-                else:
-                    probed[url] = result
-            local_hosts = {host: by_host[host] for host in local}
-        from cveFeed.bounty_gate import Gate
-        gate = Gate(blocked=())  # a script on another host of the same site is read only when the program's scope names that host
-        reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget; a forced re-test reads past the cache
-
-        def probe_host(host, urls):
-            if not host_allowed(host, project):
-                return host, None
-            out = []
-            scripts_left = {'left': js_libraries.MAX_SCRIPTS_PER_HOST}  # the host's scripts read, over both its web bases
-            missing_pages = {}  # web base -> the answer to a path that cannot exist, read once if a route came out open
-            for i, url in enumerate(urls):
-                if resources.abort_requested(scan_id):
-                    break
-                if i:
-                    time.sleep(PER_REQUEST_GAP)
-                try:
-                    result = _against_missing_page(analyse(_read_route(probe, url)), url, probe, missing_pages)
-                    _read_scripts(result, probe, scan_id, budget=scripts_left, project=project, gate=gate, reader=reader, target=domain)
-                    out.append((url, result))
-                except Exception as exc:  # noqa: BLE001 - a timeout or refused connection is not an auth state
-                    out.append((url, exc))
-            return host, out
-
+        probed, errors = {}, {}
+        try:
+            answered = _remote_routes(scan, by_host)
+        except resources.ScannerUnavailable as exc:  # no scanner takes it: nothing was asked, the routes stay due
+            message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
+            logger.warning('route check of scan %s is waiting for a scanner: %s', scan.id, exc)
+            activity.log('run_check', f'Web route check for {domain.name} is waiting: {message}', project=project, scan_id=scan.id)
+            return {**empty, 'skipped': message}
+        for url, result in answered.items():
+            if isinstance(result, Exception):
+                errors[url] = str(result)[:200]
+            else:
+                probed[url] = result
         running = activity.log('run_check', f'Checking {len(won_urls)} web routes on {len(by_host)} hosts of {domain.name}',
                                project=project, status='running', scan_id=scan.id)
-        if local_hosts:
-            with resources.heavy_job('route-probe', label=f'{domain.name}: {sum(len(u) for u in local_hosts.values())} routes'):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=ROUTE_WORKERS) as pool:
-                    futures = []
-                    for host, urls in local_hosts.items():
-                        if resources.abort_requested(scan_id):
-                            break
-                        futures.append(pool.submit(probe_host, host, urls))
-                    for future in futures:
-                        host, out = future.result()
-                        if out is None:
-                            blocked += 1
-                            continue
-                        for url, result in out:
-                            if isinstance(result, Exception):
-                                errors[url] = str(result)[:200]
-                            else:
-                                probed[url] = result
         stored = _persist(scan, project, probed, now=timezone.now(), retired_endpoints=retired)
         ledger.record(SERVICE, list(probed), project, scan)
         scoring.rescore_quietly(project, list(by_host))
@@ -786,18 +592,14 @@ def _run_route_auth(scan_id, probe=probe_url, force=False):
             + (f'; {stored["sensitive"]} routes serve sensitive data' if stored['sensitive'] else '')
             + (f'; {len(errors)} could not be reached' if errors else '')), routes=len(probed))
         return {'routes': len(probed), 'hosts': len(by_host), 'by_state': counts, 'reused': len(fresh), 'errors': len(errors),
-                'blocked': blocked, 'sensitive': stored['sensitive']}
+                'blocked': 0, 'sensitive': stored['sensitive']}
 
 
 def _remote_routes(scan, by_host):
-    """``({url: result or error}, local_hosts)``: what a Sentinel's ``route_probe`` tasks answered for the planned routes (``{host: [urls]}``, see
-    ``agentapi.probe_dispatch.try_routes``) and the hosts to ask here; every host is asked here when no Sentinel can take the kind. Raises
-    ``ScannerUnavailable`` when none can and the kind may not run here."""
+    """``{url: result or error}``: what a Sentinel's ``route_probe`` tasks answered for the planned routes (``{host: [urls]}``, see
+    ``agentapi.probe_dispatch.try_routes``). Raises ``ScannerUnavailable`` when none can take it: this server never asks a route."""
     from agentapi import probe_dispatch
-    got = probe_dispatch.try_routes(scan.domain.project, scan, by_host)
-    if got is None:
-        return {}, list(by_host)
-    return got
+    return probe_dispatch.try_routes(scan.domain.project, scan, by_host)
 
 
 def _persist(scan, project, probed, now, retired_endpoints=None):

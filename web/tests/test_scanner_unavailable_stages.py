@@ -226,7 +226,6 @@ class PipelineStageTests(FallbackOffBase):
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
                 scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, db_exposure_checks={}, provider=None,
-                route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=scan)}

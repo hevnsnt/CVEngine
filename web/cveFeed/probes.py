@@ -1007,8 +1007,10 @@ def max_hosts():
     return _int_env('CVENGINE_PROBE_MAX_HOSTS', 60)
 
 
-def run_one(project_id, domain_id, sub, entry, get=None, sleep=time.sleep, reader=None, fresh=False):
-    """Run one planned probe (``plan_for_host`` entry) on ``sub``, store what it found, apply it, and return the observations."""
+def run_one(project_id, domain_id, sub, entry, scan=None):
+    """Run one planned probe (``plan_for_host`` entry) on ``sub`` through a Sentinel, store what it found, apply it, and return the observations. The
+    http family is a ``http_probe`` task (``agentapi.probe_dispatch.try_http_probes``: ``ScannerUnavailable`` when no Sentinel can take it, so
+    nothing is recorded); the nmap family is a Sentinel's too."""
     probe_id, target = entry['probe'], entry['target']
     if BY_ID[probe_id]['family'] == 'nmap':
         from startScan.ip_rows import org_id_of_project
@@ -1021,14 +1023,18 @@ def run_one(project_id, domain_id, sub, entry, get=None, sleep=time.sleep, reade
         inventory = _sentinel_nmap_probe(project_id, target)
         found = observations_from_nmap(inventory, int(target['port']))
         port_inventory.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
-    else:
-        reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
-        found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id, reader=reader,
-                               target=getattr(sub, 'target_domain', None))
-    record(project_id, domain_id, sub.name, probe_id, found)
-    if apply_to_subdomain(sub, found):
-        recorrelate(sub)
-    return found
+        record(project_id, domain_id, sub.name, probe_id, found)
+        if apply_to_subdomain(sub, found):
+            recorrelate(sub)
+        return found
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    asset = asset_key(sub.name, entry)
+    answered = probe_dispatch.try_http_probes(Project.objects.get(pk=project_id), scan, [(sub, asset, entry)])
+    found = answered.get(asset)
+    if found is None or isinstance(found, Exception):
+        raise found or RuntimeError('the scanner did not report this probe')
+    return apply_remote(project_id, domain_id, sub, entry, found)
 
 
 def summarize(found):
@@ -1049,9 +1055,9 @@ def summarize(found):
     return '; '.join(dict.fromkeys(parts))[:300] or 'nothing the probe could read'
 
 
-def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
+def run_for_scan(scan_id, force=False):
     """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
-    (at most MAX_PROBES_PER_HOST that are due), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
+    (at most MAX_PROBES_PER_HOST that are due; the http probes are a Sentinel's: ``http_probe``), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
     from cveFeed.nuclei_scan import scan_targets
     from reNgine import resources
@@ -1082,11 +1088,12 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
     due = due[:max_hosts()]
     if not due:
         return stats
-    reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget, shared by every host's library probe
+    if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
+        return stats  # nothing is handed to a scanner for a scan that was stopped or while scanning is paused: the probes stay due
     running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
                            status='running', scan_id=scan.id)
-    # the http probes go to a Sentinel when one can take them (agentapi.probe_dispatch); whatever it does not run is run here, as before
-    remote, waiting = ({}, False) if get is not None else _remote_http(scan, due)
+    # the http probes go to a Sentinel (agentapi.probe_dispatch); this server runs none: with no scanner able to take them they stay due
+    remote, waiting = _remote_http(scan, due)
     if waiting:
         stats['waiting'] = True
     for sub, todo in due:
@@ -1097,14 +1104,14 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
             if waiting and BY_ID[entry['probe']]['family'] == 'http':
                 continue  # no scanner can take it and it may not run here: it stays due
             try:
-                if asset in remote:
-                    found = remote[asset]
-                    if isinstance(found, Exception):
-                        raise found
+                if BY_ID[entry['probe']]['family'] == 'http':
+                    found = remote.get(asset)
+                    if found is None or isinstance(found, Exception):
+                        raise found or RuntimeError('the scanner did not report this probe')
                     found = apply_remote(project, domain.id, sub, entry, found)
                 else:
-                    found = run_one(project, domain.id, sub, entry, get=get, sleep=sleep, reader=reader)
-            except (local_egress.PortHeld, resources.ScannerUnavailable) as exc:  # held here, or waiting for a scanner: not run, not failed, still due
+                    found = run_one(project, domain.id, sub, entry, scan=scan)
+            except resources.ScannerUnavailable as exc:  # held here, or waiting for a scanner: not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1
                 continue
@@ -1126,7 +1133,7 @@ def run_for_scan(scan_id, get=None, force=False, sleep=time.sleep):
 
 def _remote_http(scan, due):
     """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
-    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them and they may not run here."""
+    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them (the kind never runs here)."""
     from agentapi import probe_dispatch
     from reNgine.resources import ScannerUnavailable
     planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
@@ -1135,7 +1142,7 @@ def _remote_http(scan, due):
     except ScannerUnavailable as exc:
         logger.info('version probes of scan %s wait for a scanner: %s', scan.pk, exc)
         return {}, True
-    return (got[0] if got is not None else {}), False
+    return got, False
 
 
 def apply_remote(project_id, domain_id, sub, entry, found):

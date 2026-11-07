@@ -86,6 +86,11 @@ NEVER_LOCAL = (
     'identity_check',  # name and certificate reads (cveFeed.hosting, domain_ownership, discovery.identity_names): a Sentinel's resolver, never this server's
     'web_screenshot',
     'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): built-in scanner only, this server sends no stored sign-in anywhere
+    'http_probe',  # the version and identity probes (cveFeed.probes): a Sentinel's requests, this server fetches no target page for them
+    'route_probe',  # the anonymous web route check (cveFeed.route_auth): a Sentinel's requests
+    'vhost_probe',  # the virtual host sweep (cveFeed.vhost_scan): a Sentinel's requests
+    'subdir_probe',  # the subdirectory application sweep (cveFeed.subdir_apps): a Sentinel's requests
+    'supplier_check',  # the supplier posture checks (cveFeed.supplier_scan): a Sentinel's requests, lookups and handshakes
 )
 _WARNED_FALLBACK = set()  # the distinct values of CVENGINE_LOCAL_FALLBACK already warned about in this process
 # The kinds the built-in scanner runs, and so the kinds that never run on this server by default (``CVENGINE_LOCAL_FALLBACK`` unset). A kind is added

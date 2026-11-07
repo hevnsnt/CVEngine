@@ -88,23 +88,23 @@ class StageFreesItsWorkerTests(AsyncBase):
 class ExpiryTests(AsyncBase):
     """A task nobody claims (or that fails) ends the run's wait exactly as the blocking wait ended: the same fallback decision, recorded once."""
 
-    def one(self, ips=('192.0.2.10',)):
+    def one(self, ips=('192.0.2.10',), kind='http_probe'):
         def body(ctx=None):
-            return dispatch.dispatch_or_none(self.project, 'http_probe', {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
+            return dispatch.dispatch_or_none(self.project, kind, {'addresses': list(ips)}, ips=list(ips), scan=self.scan)
         name = adapter('test.one', lambda ctx: body())
         return stage_runs.run(name, {}, first=body, project=self.project, scan=self.scan)
 
     def test_unclaimed_where_local_is_allowed_returns_none_with_one_fallback_row(self):
         LocalFallback('all').apply(self)
-        with FakeScanner(kinds=['http_probe'], mode='idle', async_stages=True) as fake:
-            self.assertTrue(stage_runs.is_waiting(self.one()))
+        with FakeScanner(kinds=['hygiene_check'], mode='idle', async_stages=True) as fake:
+            self.assertTrue(stage_runs.is_waiting(self.one(kind='hygiene_check')))
             results = fake.drain()
         self.assertEqual(results, [None])  # the caller runs it here, as before
         task = SentinelTask.objects.get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
-        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('http_probe', 'not_claimed_in_time')])
-        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up http_probe work').values_list('status', flat=True)),
+        self.assertEqual(list(ScannerFallback.objects.values_list('kind', 'reason')), [('hygiene_check', 'not_claimed_in_time')])
+        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up hygiene_check work').values_list('status', flat=True)),
                          ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
 
     def test_unclaimed_where_local_is_not_allowed_raises_scanner_unavailable_in_the_callback(self):

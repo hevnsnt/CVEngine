@@ -9,6 +9,8 @@ from cvengine_scanner import flags as scan_flags
 from cveFeed import port_inventory, probes
 from cveFeed.models import ProbeObservation, ServiceRun
 from startScan.models import IpAddress, Port, Subdomain, Technology
+from tests import probe_scanner
+from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 
 
@@ -257,12 +259,17 @@ class RecordingTests(RouteFixture, TestCase):
         self.scan_obj = self.scan()
         self.sub = Subdomain.objects.get(scan_history=self.scan_obj)
         self.sub.technologies.add(Technology.objects.create(name='nginx'))
+        self.table = {}
+        self.http_guard = assert_ran_nowhere_locally(self, 'http_probe')
+        FakeScanner(kinds=['http_probe'], responders={'http_probe': lambda task: probe_scanner.result(task, answers(self.table))}).start_for(self)
 
     def run_one(self, table, probe_id='error-page'):
+        """One planned probe through a fake Sentinel that reads ``table`` (the scanner's reading is ``probes.run_http_probe``; the server stores it)."""
+        self.table = table
         sub = Subdomain.objects.filter(pk=self.sub.pk).prefetch_related('technologies', 'ip_addresses__ports').select_related('target_domain').get()
         entry = {'probe': probe_id, 'target': {'base': 'https://www.rt.test'}}
         with mock.patch('cveFeed.probes.recorrelate') as correlate:
-            found = probes.run_one(self.project.id, self.domain.id, sub, entry, get=answers(table), sleep=lambda s: None)
+            found = probes.run_one(self.project.id, self.domain.id, sub, entry)
         return found, correlate
 
     def test_a_found_version_is_stored_with_its_source_and_becomes_a_technology(self):
@@ -310,6 +317,13 @@ class StageTests(RouteFixture, TestCase):
             sub.technologies.add(Technology.objects.get_or_create(name='nginx')[0])
         self.requests = []
         self.page_404 = NGINX_404
+        self.http_guard = assert_ran_nowhere_locally(self, 'http_probe')
+        self.tasks = []
+        self.fake = FakeScanner(kinds=['http_probe'], responders={'http_probe': self.report}).start_for(self)
+
+    def report(self, task):
+        self.tasks.append(task)
+        return probe_scanner.result(task, self.get)
 
     def get(self, url):
         self.requests.append(url)
@@ -317,7 +331,7 @@ class StageTests(RouteFixture, TestCase):
 
     def stage(self, **kw):
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            return probes.run_for_scan(self.scan_obj.id, get=self.get, sleep=lambda s: None, **kw)
+            return probes.run_for_scan(self.scan_obj.id, **kw)
 
     def test_the_stage_probes_leads_records_versions_and_uses_the_ledger(self):
         out = self.stage()
@@ -340,17 +354,26 @@ class StageTests(RouteFixture, TestCase):
         self.stage()
         self.assertFalse([u for u in self.requests if 'plain.rt.test' in u])
 
-    def test_a_stopped_scan_or_a_pause_ends_the_stage(self):
+    def test_a_stopped_scan_or_a_pause_ends_the_stage_before_anything_is_handed_to_the_scanner(self):
         with mock.patch('reNgine.resources.abort_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
         with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
+        self.assertEqual((self.tasks, self.requests), ([], []))
+
+    def test_with_the_scanner_offline_the_stage_waits_and_every_probe_stays_due(self):
+        self.fake.go_offline()
+        out = self.stage()
+        self.assertTrue(out['waiting'])
+        self.assertEqual((out['probes'], out['errors'], self.requests), (0, 0, []))
+        self.assertFalse(ServiceRun.objects.filter(service=probes.SERVICE).exists())
 
     def test_one_failing_probe_is_recorded_failed_and_the_rest_run(self):
         def boom(url):
             raise OSError('connection reset')
+        self.get = boom
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            out = probes.run_for_scan(self.scan_obj.id, get=boom, sleep=lambda s: None)
+            out = probes.run_for_scan(self.scan_obj.id)
         self.assertEqual(out['errors'], 0)  # a request error inside a probe is an unanswered request, not a crashed probe
         self.assertEqual(ProbeObservation.objects.filter(kind='version', outcome='found').count(), 0)
 
@@ -452,6 +475,9 @@ class UnidentifiedPortStageTests(RouteFixture, TestCase):
         ip.save(update_fields=['org'])
         ip.ports.add(port)
         self.nmap_asked = []
+        self.http_guard = assert_ran_nowhere_locally(self, 'http_probe')
+        FakeScanner(kinds=['http_probe'], responders={'http_probe': lambda task: probe_scanner.result(
+            task, answers({probes.PROBE_PATH: page(404, body=NGINX_404_HIDDEN)}))}).start_for(self)
 
     def nmap(self, project_id, target):  # the scanner's report, in place of the Sentinel task (probes._sentinel_nmap_probe)
         self.nmap_asked.append(str(target['port']))
@@ -461,7 +487,7 @@ class UnidentifiedPortStageTests(RouteFixture, TestCase):
         with mock.patch('cveFeed.probes.recorrelate'), mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
                 mock.patch('targetApp.target_types.is_scannable_ip', return_value=True), \
                 mock.patch('cveFeed.probes._sentinel_nmap_probe', self.nmap):
-            return probes.run_for_scan(self.scan_obj.id, get=answers({probes.PROBE_PATH: page(404, body=NGINX_404_HIDDEN)}), sleep=lambda s: None)
+            return probes.run_for_scan(self.scan_obj.id)
 
     def test_the_port_is_probed_once_the_products_probes_are_fresh_and_bind_is_stored(self):
         first = self.stage()

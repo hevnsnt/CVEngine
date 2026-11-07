@@ -495,8 +495,7 @@ class NucleiStageTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		kwargs = dict(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-			port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-			route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+			port_stage_run=port_double(), db_exposure_checks={}, provider=None)
 		discover = overrides.pop('discover', None) or sentinel_discovery(events)
 		kwargs.update(overrides)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), discover:
@@ -792,8 +791,7 @@ class BbotCoverageTests(TestCase):
 			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, light_stream=lambda path, **k: nuclei.append(open(path).read().split()) or iter([]),
-				targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(nmap_runner), db_exposure_checks={}, provider=None,
-				route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(nmap_runner), db_exposure_checks={}, provider=None)
 		return scan, out, bbot, nmap, nuclei
 
 	def test_a_subdomain_of_a_discovered_target_never_calls_the_discovery_and_is_seeded(self):
@@ -847,7 +845,7 @@ class QueuedScanTests(TestCase):
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(batches=[[]], after_batch=started):
 			discovery.run_pipeline(scan.id, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-				port_stage_run=port_double(), db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				port_stage_run=port_double(), db_exposure_checks={}, provider=None)
 		self.assertEqual(seen, [(discovery.RUNNING, discovery.RUNNING)])
 
 	def test_a_queued_scan_blocks_a_duplicate_whatever_its_age_but_a_stale_running_one_does_not(self):
@@ -881,7 +879,7 @@ class IpTargetTests(TestCase):
 			nmap.append(list(targets))
 			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
 		kwargs = dict(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner),
-			db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
+			db_exposure_checks={}, provider=None,
 			ip_lookups={'ptr': lambda ip: ['host-5.example.net'], 'certificate': lambda ip: ['shop.example.org', 'www.example.org']})
 		kwargs.update(overrides)
 		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):

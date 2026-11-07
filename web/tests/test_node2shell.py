@@ -163,7 +163,6 @@ class PipelineWiringTests(RouteFixture, TestCase):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 								  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
 								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
 								  node2shell_checker=checker)
 		self.assertEqual(calls, ['https://api.rt.test'])
 		from startScan.models import ScanActivity
@@ -177,6 +176,5 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 								  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-								  route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]))
 		self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='node2shell').exists())

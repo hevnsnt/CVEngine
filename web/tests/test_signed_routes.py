@@ -35,9 +35,10 @@ class SignedRouteStageBase(Fixture):
         ip, _ = IpAddress.objects.get_or_create(address='203.0.113.10')
         sub.ip_addresses.add(ip)
         ip.ports.add(Port.objects.create(number=443, service_name='https', state='open'))
-        # the anonymous check ran first (injected probe: the anonymous routes are read here, never through a scanner), then a sign-in was stored
-        ra.run_route_auth(self.scan.id, probe=lambda url, **kw: {'url': url, 'status': 302, 'location': '/login', 'www_authenticate': '', 'cookies': [],
-                                                                 'content_type': 'text/html', 'body': '', 'title': ''})
+        # the anonymous check ran first (a Sentinel's, ``route_probe``): every route answered with a redirect to the login page; then a sign-in was stored
+        for path in ra.COMMON_PATHS:
+            RouteAuth.objects.create(project=self.project, domain=self.domain, host='app.example.test', path=path, url=f'https://app.example.test{path}',
+                                     auth_state='session_required', http_status=302, redirect_to='/login', checked_at=timezone.now())
         self.cred = self.make(host='app.example.test')
 
     def answer(self, task):

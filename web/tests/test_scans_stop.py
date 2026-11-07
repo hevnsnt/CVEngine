@@ -166,7 +166,7 @@ class ScansListAndStopTests(TestCase):
                 mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene, sentinel_discovery(events):
             out = discovery.run_pipeline(scan.id, port_stage_run=port_double(nmap_runner),
                 light_stream=lambda path, **k: later.append('light') or iter([]), targeted_stream=lambda path, **k: later.append('t') or iter([]),
-                db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+                db_exposure_checks={}, provider=None)
         self.assertEqual(out['status'], 'aborted')
         self.assertEqual(later, [])  # nothing after the stage that was running
         hygiene.assert_not_called()

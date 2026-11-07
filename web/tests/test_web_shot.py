@@ -371,8 +371,7 @@ class DiscoveryStageTests(ShotFixture, TestCase):
 		with mock.patch('cveFeed.discovery.stopped', return_value=False):
 			return discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 										 port_stage_run=port_double(),
-										 db_exposure_checks={}, provider=None, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-										 route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''}, **kwargs)
+										 db_exposure_checks={}, provider=None, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), **kwargs)
 
 	def test_a_scan_with_web_pages_queues_them_in_its_own_stage_after_nmap(self):
 		from startScan.models import ScanActivity

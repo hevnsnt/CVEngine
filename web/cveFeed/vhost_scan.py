@@ -21,13 +21,13 @@ fingerprints in the evidence). A distinct application is added to the project: t
 scan-less row certificate transparency creates, linked to the address), so names that resolve to the same addresses stay one host with
 aliases, exactly as the Hosts page already merges them, and what its page states (a product and a version) becomes the host's technologies,
 which the existing CVE correlation reads. An edge that challenges is never retried and never worked around: the address is left alone until
-the next window."""
-import functools
+the next window.
+
+The requests are a Sentinel's (task kind ``vhost_probe``, ``agentapi.probe_dispatch.try_vhosts``), never this server's: with no Sentinel able to take
+the work the addresses stay due."""
 import ipaddress
 import logging
 import os
-import re
-from datetime import timedelta
 from urllib.parse import urlsplit
 
 from django.utils import timezone
@@ -308,82 +308,6 @@ def stored_own(project_id, name):
             'length': int((row.evidence or {}).get('bytes') or 0), 'location': _location_path(row.redirect_to), 'server': ''}
 
 
-def _own_fingerprint(project_id, name, scheme, port, fetch, pace, cache):
-    """The fingerprint of the name's own site: its stored front-page route check when there is one, else one GET of the name at its own
-    address (resolved and vetted like every request; nothing when the name is not allowed or does not answer)."""
-    from cveFeed import probes
-    if name in cache:
-        return cache[name]
-    cache[name] = None
-    stored = stored_own(project_id, name)
-    if stored is not None:
-        cache[name] = stored
-        return stored
-    if not probes._permitted(name, project_id):
-        return None
-    try:
-        pace.wait(name)
-        response = fetch(f'{scheme}://{slow_web.authority(name, port, scheme)}/')
-    except (OSError, ValueError):
-        return None
-    if not response.get('challenge') and not slow_web.busy(response):
-        cache[name] = fingerprint_of(response)
-    return cache[name]
-
-
-def sweep_address(project_id, address, entry, names, targets, fetch, pace, cache, stop=None):
-    """Ask one address its default response and then each of ``names``. Returns the counts. ``stop()`` is checked before each request (pause)."""
-    from cveFeed import ledger
-    scheme, port = entry['base']
-    ip = entry['ip']
-    summary = {'asked': 0, 'distinct': 0, 'added': 0, 'challenged': 0, 'default_site': 0, 'same_app': 0, 'no_answer': 0, 'stopped': False}
-    host = slow_web.authority(address, port, scheme)
-    primary = sorted(entry['names'])[0]
-    domain_id = covering_domain(primary, targets) or targets[0][2]
-    pace.wait(address)
-    try:
-        default_response = fetch(f'{scheme}://{host}/')
-    except (OSError, ValueError) as exc:
-        logger.info('vhost: %s did not answer its default request (%s)', address, type(exc).__name__)
-        ledger.record(IP_SERVICE, [address], project_id)  # nothing is serving: asked again after the short window, not at every run
-        return summary
-    if default_response.get('challenge'):
-        _challenged(project_id, domain_id, primary, address, port, default_response, 'the default request')
-        ledger.record(IP_SERVICE, [address], project_id)
-        summary['challenged'] += 1
-        return summary
-    if slow_web.busy(default_response):
-        return summary  # the server asked for time: nothing is recorded, the address is asked again at the next run
-    default = fingerprint_of(default_response)
-    for name in names:
-        if stop and stop():
-            summary['stopped'] = True
-            return summary
-        pace.wait(address)
-        asset = f'{address}|{name}'
-        try:
-            response = fetch(f'{scheme}://{slow_web.authority(name, port, scheme)}/', connect_ip=address)
-        except (OSError, ValueError):
-            ledger.record(SERVICE, [asset], project_id)  # no answer is an answer: not asked again inside the window
-            summary['no_answer'] += 1
-            continue
-        if response.get('challenge'):
-            _challenged(project_id, covering_domain(name, targets), name, address, port, response, 'a request with the name')
-            ledger.record(SERVICE, [asset], project_id)
-            ledger.record(IP_SERVICE, [address], project_id)
-            summary['challenged'] += 1
-            return summary  # the edge answers for the whole address: nothing more is asked of it
-        if slow_web.busy(response):
-            return summary
-        summary['asked'] += 1
-        candidate = fingerprint_of(response)
-        own = None
-        if candidate['status'] in ANSWERS and not similar(candidate, default):
-            own = _own_fingerprint(project_id, name, scheme, port, fetch, pace, cache)
-        _settle(project_id, name, address, ip, scheme, port, targets, summary, default, candidate, own, response)
-    return summary
-
-
 def _settle(project_id, name, address, ip, scheme, port, targets, summary, default, candidate, own, response):
     """What one answered name comes to: classify it against the address's default and the name's own site, remember that it was asked, and
     add the application (or retire it) as the verdict says. ``response`` is the full answer, read for the versions its page states."""
@@ -402,7 +326,7 @@ def _settle(project_id, name, address, ip, scheme, port, targets, summary, defau
 
 
 def settle_remote(project_id, address, entry, names, targets, report, stored):
-    """What a Sentinel's ``vhost_probe`` report of one address comes to, the counts of ``sweep_address``: the same verdicts from the same
+    """What a Sentinel's ``vhost_probe`` report of one address comes to, the counts of the address: the verdicts from the
     fingerprints, recomputed here (what the Sentinel judged is not read), recorded the same way. Anything the Sentinel did not answer is left as
     it is, so it stays due: a name it did not report, an address it could not ask. ``stored`` is ``{name: fingerprint}`` of the own sites the
     server sent with the task, which win over what the Sentinel looked up itself."""
@@ -489,8 +413,8 @@ def _items(selected, project_id=None):
 
 
 def _remote_reports(project_id, items):
-    """``(reports, waiting)``: the reports a Sentinel's ``vhost_probe`` tasks gave (``{address: report}``; ``None`` when no Sentinel can take the
-    kind and the sweep asks here, as before), and whether the sweep must wait because none can and the kind may not run here."""
+    """``(reports, waiting)``: the reports a Sentinel's ``vhost_probe`` tasks gave (``{address: report}``), and whether the sweep must wait because
+    no Sentinel can take the kind (it never runs on this server: ``sentinel_dispatch.NEVER_LOCAL``)."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
     from reNgine.resources import ScannerUnavailable
@@ -503,7 +427,7 @@ def _remote_reports(project_id, items):
     return got, False
 
 
-def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
+def sweep(project_id, vet_ip=None, stop=None):
     """One project's due addresses, at most ``max_ips``, each asked up to ``max_names`` names. Returns the summary (and ``skipped`` with the
     reason when nothing ran)."""
     from cveFeed import activity, exclusions, fullscan, ledger
@@ -527,9 +451,6 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
     with resources.redis_claim(f'cvengine:vhost:{project_id}', owner, CLAIM_TTL) as holder:
         if holder is not True:
             return {**summary, 'skipped': 'another virtual host sweep is running for this project'}
-        injected = fetch is not None or pace is not None  # tests replace the network: the local path
-        pace = pace or slow_web.Pace()
-        fetch = fetch or functools.partial(slow_web.get, project=project_id)
         vet_ip = vet_ip or fullscan.in_scope
         banned = exclusions.excluded_names(project_id) | archived_names(project_id)
         pool = known_names(project_id)
@@ -556,15 +477,14 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
             if not vet_ip(entry['ip']):  # a prohibited, shared-platform, CDN or excluded-only address is never asked, and holds no place in the run
                 continue
             selected.append((address, entry, names))
-        items = {} if injected else {i['id']: i for i in _items(selected, project_id)}
-        reports, waiting = (None, False) if injected or not selected else _remote_reports(project_id, list(items.values()))
+        items = {i['id']: i for i in _items(selected, project_id)}
+        reports, waiting = ({}, False) if not selected else _remote_reports(project_id, list(items.values()))
         if waiting:
             summary['skipped'] = 'waiting for a scanner: the addresses stay due'
             selected = []
         running = None
-        cache = {}
         for address, entry, names in selected:
-            if reports is not None and address not in reports:
+            if address not in reports:
                 continue  # the scanner did not answer for this address: nothing is recorded, it stays due
             if stop():
                 summary['skipped'] = 'scanning is paused: the addresses stay due'
@@ -572,10 +492,7 @@ def sweep(project_id, fetch=None, pace=None, vet_ip=None, stop=None):
             if running is None:
                 running = activity.log('run_check', 'Virtual host check of the known names on the project\'s web addresses', project=project_id,
                                        status='running')
-            if reports is not None:
-                part = settle_remote(project_id, address, entry, names, targets, reports[address], {n['name']: n['own'] for n in items[address]['names'] if 'own' in n})
-            else:
-                part = sweep_address(project_id, address, entry, names, targets, fetch, pace, cache, stop=stop)
+            part = settle_remote(project_id, address, entry, names, targets, reports[address], {n['name']: n['own'] for n in items[address]['names'] if 'own' in n})
             summary['ips'] += 1
             for key in ('asked', 'distinct', 'added', 'challenged', 'default_site', 'same_app', 'no_answer'):
                 summary[key] += part[key]

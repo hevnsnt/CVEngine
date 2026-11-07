@@ -150,9 +150,9 @@ class HarnessModeTests(NoRealSleep, DispatchBase):
         self.assertIn('the Sentinel reported it failed', str(caught.exception))
 
     def test_fail_where_local_is_allowed_returns_none_so_the_stage_falls_back(self):
-        with LocalFallback('http_probe'), FakeScanner(kinds=['http_probe'], mode='fail'):
-            self.assertIsNone(self.go('http_probe'))
-        self.assertEqual(SentinelTask.objects.get(kind='http_probe').status, 'failed')
+        with LocalFallback('hygiene_check'), FakeScanner(kinds=['hygiene_check'], mode='fail'):
+            self.assertIsNone(self.go('hygiene_check'))
+        self.assertEqual(SentinelTask.objects.get(kind='hygiene_check').status, 'failed')
 
     def test_the_kinds_with_no_local_path_wait_whatever_the_list_says(self):
         with LocalFallback('all'), FakeScanner(kinds=['nmap'], mode='fail'):
@@ -282,8 +282,8 @@ class HarnessGuardTests(TestCase):
         before = os.environ.get(ENV)
         with LocalFallback('none'):
             self.assertEqual(dispatch.local_fallback_kinds(), set())
-            with LocalFallback('openvas,http_probe'):
-                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'http_probe'})
+            with LocalFallback('openvas,hygiene_check'):
+                self.assertEqual(dispatch.local_fallback_kinds(), {'openvas', 'hygiene_check'})
             with LocalFallback(None):
                 self.assertIn('openvas', dispatch.local_fallback_kinds())
         self.assertEqual(os.environ.get(ENV), before)
@@ -696,7 +696,7 @@ class PipelineServedTests(StageBase, FallbackOffBase):
         with FakeScanner(mode='offline') as fake, mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
                 self.scan.id, {'scan_id': self.scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-                db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
+                db_exposure_checks={}, provider=None,
                 probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
                                        'content_type': '', 'final_url': url, 'url': url})
         self.assertWaited(fake)

@@ -19,6 +19,7 @@ from cveFeed.models import ProbeObservation, RouteAuth
 from startScan.models import Subdomain, Technology
 from tests.test_js_library_versions import JQ_371_MIN, PAGE_URL, NoCache, read
 from tests.test_probes import answers, page
+from tests import route_scanner
 from tests.test_route_auth import RouteFixture
 
 
@@ -557,7 +558,7 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
             url = f'https://{host}/'
             result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, **answer})
             with mock.patch.object(js_libraries, '_cache', return_value=None):
-                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
                                          target=self.site)
             RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
                                      http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
@@ -665,7 +666,7 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
 
     def read_front_pages(self):
         from cveFeed import route_auth
-        cut = self.CUT or route_auth.ROOT_READ_BYTES
+        cut = self.CUT or route_scanner.ROOT_READ_BYTES
 
         def probe(url, **_kw):
             body = self.SCRIPTS.get(url.split('?', 1)[0])
@@ -679,7 +680,7 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
             url = f'https://{host}/'
             result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, 'title': '', **answer})
             with mock.patch.object(js_libraries, '_cache', return_value=None):
-                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
                                          target=self.site)
             RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
                                      http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
@@ -762,7 +763,7 @@ class ReviewScenarioBase(RouteFixture, TestCase):
             return ({'status': 200, 'body': text, 'url': target, 'content_type': 'application/javascript', 'headers': {}} if text is not None
                     else {'status': 404, 'body': 'nf', 'url': target, 'content_type': 'text/html', 'headers': {}})
         with mock.patch.object(js_libraries, '_cache', return_value=None):
-            route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id), target=self.site)
+            route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id), target=self.site)
         RouteAuth.objects.update_or_create(project=self.project, url=url, defaults={
             'domain': self.site, 'host': host, 'path': '/', 'auth_state': result['state'], 'http_status': status,
             'redirect_to': result['evidence'].get('redirect_to', ''), 'evidence': result['evidence'], 'checked_at': timezone.now()})
@@ -804,7 +805,7 @@ class ReviewScenarioTests(ReviewScenarioBase):
         self.assertEqual(self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')].ai_verdict, '')
         # read whole (the route check reads a front page up to ROOT_READ_BYTES), the old copy is on the page: matched from its name
         self.read_root('big2.x.test', 200, page, scripts={'https://big2.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN},
-                       bytes=len(page), read_limit=route_auth.ROOT_READ_BYTES, truncated=False)
+                       bytes=len(page), read_limit=route_scanner.ROOT_READ_BYTES, truncated=False)
         match = self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')]
         self.assertEqual((match.ai_verdict, match.evidence['version_source']), ('', 'filename'))
 
@@ -979,7 +980,7 @@ class RereviewScenarioTests(ReviewScenarioBase):
         page = ('<html><head><script src="/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script></head><body>' + filler +
                 '<script src="/js/bootstrap.min.js"></script><script src="/legacy/jquery-1.8.3.min.js"></script></body></html>')
         self.read_root('many.x.test', 200, page, scripts={'https://many.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN},
-                       bytes=len(page), read_limit=route_auth.ROOT_READ_BYTES, truncated=False)
+                       bytes=len(page), read_limit=route_scanner.ROOT_READ_BYTES, truncated=False)
         self.assertTrue(RouteAuth.objects.get(host='many.x.test').evidence['script_page']['capped'])
         found = self.correlate(sub)
         self.assertEqual(found[('many.x.test', 'CVE-2024-6484', '3.4.1')].ai_verdict, '')
@@ -1073,20 +1074,10 @@ class RereviewScenarioTests(ReviewScenarioBase):
 
 
 class FrontPageReadTests(SimpleTestCase):
-    def test_the_route_check_reads_a_front_page_further_than_any_other_route(self):
-        import functools
-        from cveFeed import route_auth
-        with mock.patch.object(route_auth, 'probe_url', return_value={'status': 200}) as probe_url:
-            probe = functools.partial(route_auth.probe_url, project=7)
-            route_auth._read_route(probe, 'https://x.test/')
-            route_auth._read_route(probe, 'https://x.test/login')
-        self.assertEqual(probe_url.call_args_list[0].kwargs, {'project': 7, 'max_bytes': route_auth.ROOT_READ_BYTES})
-        self.assertEqual(probe_url.call_args_list[1].kwargs, {'project': 7})
-
     def test_hostile_front_pages_of_the_full_read_size_stay_fast(self):
         import time
         from cveFeed import route_auth
-        n = route_auth.ROOT_READ_BYTES
+        n = route_scanner.ROOT_READ_BYTES
         bodies = {'meta without an end': '<meta ' * (n // 6), 'csrf meta without an end': '<meta name="csrf ' * (n // 17),
                   'meta refresh': '<meta http-equiv=refresh ' * (n // 25), 'script openings': '<script ' * (n // 8),
                   'inputs': '<input ' * (n // 7), 'comment openings': '<!--<script src=/a.js>' * (n // 22),
