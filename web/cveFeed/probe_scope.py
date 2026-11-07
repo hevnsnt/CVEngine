@@ -226,6 +226,13 @@ def for_addresses(project_id, addresses):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+def for_ssh(project_id, addresses):
+    """The policy of an ssh_probe task: the addresses it inspects, each asked as itself on the ports the task names (``ssh_scan.candidates`` already kept
+    only the ones a scanner may touch, by this server's address rules, which travel along for the scanner to apply again). Nothing else is listed."""
+    hosts = list(dict.fromkeys(str(a).strip().lower() for a in addresses if str(a).strip()))[:MAX_HOSTS]
+    return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
+
+
 def for_buckets(project_id, candidates):
     """The policy of a bucket_check task: the storage platforms' own endpoints, never a project host. An S3 bucket's regional host is learnt
     from the platform's answer, so S3 and GCS are named by their endpoint domain (the scanner also holds every request to the documented
