@@ -4,6 +4,7 @@ from django.test import SimpleTestCase
 from cvengine_scanner import fingerprint
 
 from cveFeed import probes
+from tests import probe_scanner
 from tests.test_probes import answers, page
 
 DRUPAL_PAGE = ('<html><head><meta name="Generator" content="Drupal 10 (https://www.drupal.org)">'
@@ -34,7 +35,7 @@ class PassiveVersionTests(SimpleTestCase):
 
 class VersionFileTests(SimpleTestCase):
     def run_probe(self, probe_id, table):
-        return probes.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
 
     def test_joomla_falls_back_to_the_language_pack_when_the_manifest_is_hidden(self):
         found = self.run_probe('joomla-manifest', {'/language/en-GB/en-GB.xml': page(200, body='<metafile><version>4.4.3</version></metafile>')})

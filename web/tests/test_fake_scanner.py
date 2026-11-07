@@ -23,7 +23,7 @@ from cveFeed import discovery, ledger, nuclei_scan, port_stage, tls_audit, udp_s
 from cveFeed.models import ProbeObservation, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
-from tests import fake_scanner as fs
+from tests import fake_scanner as fs, probe_scanner
 from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
 from tests.test_route_auth import RouteFixture
 from tests.test_scanner_unavailable_stages import ENV, IP, NoScannerBase, WaitsMixin
@@ -598,28 +598,37 @@ class WpscanServedTests(StageBase, RouteFixture, TestCase):
             mock.patch(target, return_value=[] if target.endswith('quick') else 0).start()
 
     def go(self):
-        return wpscan_scan.run_wpscan(self.scan_obj.id, probe_get=lambda url: {
-            'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '',
-            'final_url': url, 'url': url}, sleep=lambda seconds: None)
+        return wpscan_scan.run_wpscan(self.scan_obj.id)
 
     def state(self):
         return wpscan_scan.state_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
 
     def test_the_scanner_serves_the_fixture_and_the_stage_records_the_site(self):
         self.arm('wpscan')
-        with FakeScanner(kinds=['wpscan']) as fake:
+        with FakeScanner(kinds=['http_probe', 'wpscan'], responders={'http_probe': lambda task: probe_scanner.result(task, probe_scanner.not_found)}) as fake:
             out = self.go()
-        self.assertServed(fake, 'wpscan')
+        self.assertServed(fake, 'http_probe', 'wpscan')  # the WordPress probe is a Sentinel's task too: this server asked no site for anything
+        self.assertEqual([p['probe'] for p in fake.served[0]['target']['probes']], ['wordpress-detect', 'wordpress-detect'])
+        self.assertEqual(out['probed'], 2)
         self.assertNotIn('error', out)
         self.assertEqual((out['sites'], out['scanned']), (1, 1))
         state = self.state()
         self.assertEqual((state['state'], state['core']), ('scanned', '6.5'))  # the fixture's WordPress version, through the classifier
         self.assertEqual(list(ServiceRun.objects.filter(service=wpscan_scan.SERVICE).values_list('asset', 'status')), [('www.rt.test', 'done')])
-        self.assertEqual(fake.served[0]['target']['url'], 'https://www.rt.test')
+        self.assertEqual(next(e for e in fake.served if e['kind'] == 'wpscan')['target']['url'], 'https://www.rt.test')
+
+    def test_a_scanner_that_cannot_run_the_probe_still_scans_the_sites_that_show_wordpress_and_the_rest_stay_due(self):
+        self.arm('wpscan')
+        with FakeScanner(kinds=['wpscan']) as fake:  # no http_probe: the probe waits
+            out = self.go()
+        self.assertServed(fake, 'wpscan')
+        self.assertEqual((out['probed'], out['probe_waiting'], out['scanned']), (0, 'http_probe', 1))
+        self.assertFalse(ServiceRun.objects.filter(service=wpscan_scan.PROBE_SERVICE).exists())  # no site was asked, none is recorded as asked
+        self.assertFalse(ProbeObservation.objects.filter(host='plain.rt.test').exists())  # and the other site is not read as 'not WordPress'
 
     def test_with_the_scanner_offline_the_stage_waits_and_the_site_stays_due(self):
         self.arm('wpscan')
-        with FakeScanner(kinds=['wpscan'], mode='offline') as fake:
+        with FakeScanner(kinds=['http_probe', 'wpscan'], mode='offline') as fake:
             out = self.go()
         self.assertWaited(fake)
         self.assertNotIn('error', out)
@@ -658,9 +667,7 @@ class WpscanThoroughServedTests(StageBase, RouteFixture, TestCase):
                 pass
 
     def go(self):
-        return wpscan_scan.run_thorough(self.project.id, probe_get=lambda url: {
-            'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '',
-            'final_url': url, 'url': url}, sleep=lambda seconds: None)
+        return wpscan_scan.run_thorough(self.project.id)
 
     def row(self):
         return wpscan_scan.thorough_of(list(ProbeObservation.objects.filter(host='www.rt.test')))
@@ -710,9 +717,7 @@ class PipelineServedTests(StageBase, NoScannerBase):
         with FakeScanner(mode='offline') as fake, mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
                 self.scan.id, {'scan_id': self.scan.id, 'status': discovery.SUCCESS}, hygiene=False,
-                db_exposure_checks={}, provider=None,
-                probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
-                                       'content_type': '', 'final_url': url, 'url': url})
+                db_exposure_checks={}, provider=None)
         self.assertWaited(fake)
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=self.scan)}
         for name in ('nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan'):

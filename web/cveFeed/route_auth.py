@@ -4,17 +4,14 @@ signed in: see cveFeed.auth_routes).
 For each web host a handful of common routes (``/``, ``/login``, ``/admin``, ``/api`` ...) and the paths a discovery saw are asked
 once with a plain GET and classified as open, a login page, a session requirement, single sign-on, a redirect or not found.
 The anonymous probe is deliberately small: no credentials, no cookies, redirects are never followed, and at most ROUTE_SAMPLE_BYTES of
-each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the network
-helper (``probe_url``) is injectable.
+each body are read. ``classify`` and the planning helpers are pure functions so every rule is unit tested; the requests themselves are a
+Sentinel's (``route_probe`` and ``http_probe`` tasks): this module sends nothing.
 """
-import http.client
 import logging
 import re
-import socket
-import threading
 from urllib.parse import urljoin, urlparse
 
-from cvengine_scanner import fingerprint, soft404, versions
+from cvengine_scanner import fingerprint, soft404
 
 from cveFeed import js_libraries
 
@@ -30,20 +27,12 @@ MAX_BASES_PER_HOST = 2  # prefer 443 then 80, then other web ports by number
 MAX_ENDPOINT_PATHS = 12  # EndPoint paths per host, static assets excluded
 MAX_URLS_PER_HOST = 20
 MAX_URLS_PER_SCAN = 1500
-ROUTE_WORKERS = 8  # hosts probed in parallel; one host's paths go one after another
 PER_REQUEST_GAP = 0.2  # seconds between two requests to the same host
-CONNECT_TIMEOUT, READ_TIMEOUT = 3, 6
-PROBE_TOTAL_SECONDS = 20  # wall-clock budget for one probe: the per-read timeouts alone let a host that trickles bytes hold a worker thread for good
 ROUTE_SAMPLE_BYTES = 64 * 1024
-MAX_PROBE_BYTES = 256 * 1024  # the most a version probe may ask for (a JavaScript bundle names its framework version deep inside)
 MAX_READ_BYTES = 300 * 1024  # the most any probe reads of one decoded body: a library file (cveFeed.js_libraries.MAX_SCRIPT_BYTES)
 # a front page is read further than another route: the script tags of a large WordPress page (the theme's and plugins' scripts sit in its
 # footer, 230 KB in) decide which libraries the host serves; a page still longer than this is marked truncated and proves no absence
 ROOT_READ_BYTES = MAX_READ_BYTES
-# what an ordinary browser sends. Some CDNs answer an obvious scanner request with a challenge page instead of the site, so the version
-# probes (never the route check) present as a browser; the headers say nothing a browser would not, and no cookie or credential is sent.
-BROWSER_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-                   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.9'}
 MAX_PATH_LENGTH = 200
 CHUNK = 500
 STATIC_EXT = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.map', '.pdf', '.xml', '.txt')
@@ -220,7 +209,7 @@ def _stub_page(body, title, page_scripts):
 
 
 def classify(probe):
-    """``(state, evidence)`` for one probe (the dict ``probe_url`` returns: status, location, www_authenticate, cookies,
+    """``(state, evidence)`` for one probe (the dict a Sentinel's route probe returns: status, location, www_authenticate, cookies,
     content_type, body, title, url). ``evidence`` carries the markers matched, the bytes sampled and the cookie names; it
     never carries the body."""
     status = probe.get('status') or 0
@@ -331,114 +320,6 @@ def analyse(result):
 
 
 CATCH_ALL = 'catch_all'  # answers as the server answers for a path that does not exist: no evidence that the route is there
-
-
-# ----------------------------------------------------------------------------- network
-
-def probe_url(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), max_bytes=ROUTE_SAMPLE_BYTES, headers=None, method='GET', project=None, browser=False,
-              connect_ip=None):
-    """Bounded anonymous GET/HEAD using a pinned numeric destination and original Host/SNI. ``connect_ip`` connects to that vetted address instead
-    of resolving the URL's name: the name is still sent as the Host header and the TLS server name (the virtual host check, cveFeed.vhost_scan).
-    The request is anonymous: a stored sign-in is never sent from this server (the signed-in route check runs on the built-in scanner, cveFeed.auth_routes);
-    it never verifies the certificate, so it still inspects a broken-certificate site."""
-    import ssl
-    from http.cookies import SimpleCookie, CookieError
-    from urllib.parse import quote, urlsplit
-    from cveFeed import pinned_transport
-
-    if method not in ('GET', 'HEAD'):
-        raise ValueError('route probes are read-only: GET or HEAD')
-    max_bytes = min(int(max_bytes), MAX_READ_BYTES)
-    if max_bytes < 0:
-        raise ValueError('invalid probe byte limit')
-    if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) == 127 for c in url):
-        raise ValueError('invalid probe URL')
-    parsed = urlsplit(url)
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username is not None or parsed.password is not None:
-        raise ValueError('probe URL must be HTTP(S) without credentials')
-    if headers and any(key.lower() not in ('host', 'if-none-match') for key in headers):
-        raise ValueError('only a Host override (and the ETag of a cached script) is allowed for anonymous probes')
-    host = parsed.hostname.encode('idna').decode('ascii')
-    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
-    if connect_ip:
-        import ipaddress
-        from targetApp.target_types import is_scannable_ip
-        pinned = ipaddress.ip_address(str(connect_ip))
-        if not is_scannable_ip(str(pinned), project=project):
-            raise ValueError('probe destination is prohibited')
-        addresses = ((socket.AF_INET6, (str(pinned), port, 0, 0)) if pinned.version == 6 else (socket.AF_INET, (str(pinned), port)),)
-    else:
-        addresses = pinned_transport.resolve(host, port, project=project)
-    context = None
-    if parsed.scheme == 'https':
-        context = ssl.create_default_context()
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.check_hostname = False  # an anonymous check inspects broken-certificate sites too
-        context.verify_mode = ssl.CERT_NONE
-    connection = pinned_transport.HTTPConnection(host, port, addresses, timeout[0], context=context, project=project)
-    authority = f'[{host}]' if ':' in host else host
-    if parsed.port is not None:
-        authority += f':{port}'
-    request_headers = {'User-Agent': 'CVEngine route check', 'Accept': 'text/html,*/*;q=0.5',
-                       'Accept-Encoding': 'identity', 'Host': authority}
-    if browser:
-        request_headers.update(BROWSER_HEADERS)
-    request_headers.update({key.title(): value for key, value in (headers or {}).items()})
-    path = quote(parsed.path or '/', safe="/%:@!$&'()*+,;=-._~")
-    if parsed.query:
-        path += '?' + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
-    response = None
-    expired = threading.Event()
-
-    def abort():  # closes the connection under a blocked read; the read then ends and the budget breach is raised below
-        expired.set()
-        sock = connection.sock
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-    watchdog = threading.Timer(PROBE_TOTAL_SECONDS, abort)
-    watchdog.daemon = True
-    watchdog.start()
-    try:
-        connection.connect()
-        connection.sock.settimeout(timeout[1])
-        connection.request(method, path, headers=request_headers)
-        response = connection.getresponse()
-        raw = pinned_transport.read_body(response, max_bytes)  # gzip and deflate from a device that ignores identity are decoded, capped after decoding
-        if expired.is_set():
-            raise TimeoutError('probe exceeded its total time budget')
-        encoding = response.headers.get_content_charset() or 'utf-8'
-        try:
-            text = raw.decode(encoding, errors='replace')
-        except LookupError:
-            text = raw.decode('utf-8', errors='replace')
-        title = page_title(text)
-        cookies = SimpleCookie()
-        for value in response.headers.get_all('Set-Cookie', []):
-            try:
-                cookies.load(value)
-            except CookieError:
-                pass
-        return {'url': url, 'status': response.status, 'location': response.getheader('Location', ''),
-                'www_authenticate': response.getheader('WWW-Authenticate', ''), 'cookies': list(cookies.keys()),
-                'content_type': (response.getheader('Content-Type') or '').split(';')[0].strip().lower(),
-                'body': text, 'title': title, 'bytes': len(raw), 'read_limit': max_bytes, 'truncated': len(raw) >= max_bytes,
-                'server': response.getheader('Server', ''),
-                'powered_by': response.getheader('X-Powered-By', ''), 'headers': versions.keep_headers(response.headers.items()),
-                'raw_headers': {k.lower(): ' '.join(v.split())[:200] for k, v in list(response.headers.items())[:60]
-                                if k.lower() not in ('set-cookie', 'authorization', 'proxy-authorization')}}
-    except (OSError, http.client.HTTPException):
-        if expired.is_set():
-            raise TimeoutError('probe exceeded its total time budget') from None
-        raise
-    finally:
-        watchdog.cancel()
-        if response is not None:
-            response.close()
-        connection.close()
 
 
 # ----------------------------------------------------------------------------- the stage

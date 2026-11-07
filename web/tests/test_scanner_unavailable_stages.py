@@ -222,9 +222,7 @@ class PipelineStageTests(NoScannerBase):
         Subdomain.objects.get(scan_history=scan).technologies.add(Technology.objects.create(name='WordPress'))  # a site for the WordPress scan to wait on
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             out = discovery._run_stages(
-                scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, db_exposure_checks={}, provider=None,
-                probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
-                                       'content_type': '', 'final_url': url, 'url': url})
+                scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False, db_exposure_checks={}, provider=None)
         rows = {row.name: row.status for row in ScanActivity.objects.filter(scan_of=scan)}
         for name in ('nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan'):
             self.assertEqual(rows[name], discovery.SUCCESS, f'{name}: {rows}')
@@ -292,9 +290,6 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def go(self, **kw):
-        kw.setdefault('probe_get', lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
-                                                'content_type': '', 'final_url': url, 'url': url})
-        kw.setdefault('sleep', lambda s: None)
         return wpscan_scan.run_wpscan(self.scan_obj.id, **kw)
 
     def test_with_no_sentinel_the_stage_waits_and_runs_no_local_wpscan(self):
@@ -305,6 +300,15 @@ class WpscanTests(WaitsMixin, RouteFixture, TestCase):
         self.assertIn('no scanner could take this work (wpscan)', out['skipped'])
         self.assertNothingRecorded('wpscan')
         self.assertNamesTheScanner('wpscan')
+
+    def test_with_no_sentinel_the_probe_asks_nothing_and_no_site_is_read_as_not_wordpress(self):
+        out = self.go()
+        self.assertEqual(out['probe_waiting'], 'http_probe')  # the WordPress probe is a Sentinel's: none could take it
+        from cveFeed import ledger
+        from cveFeed.models import ProbeObservation
+        self.assertFalse(ledger.fresh(wpscan_scan.PROBE_SERVICE, ['www.rt.test', 'plain.rt.test'], self.project.id))  # both stay due
+        self.assertFalse(ProbeObservation.objects.filter(probe='wordpress-detect').exists())
+        self.assertFalse(ProbeObservation.objects.filter(host='plain.rt.test').exists())  # no row at all: never 'not WordPress'
 
     def test_with_a_sentinel_nobody_claims_the_site_is_waiting_not_failed(self):
         from django.contrib.auth.models import User

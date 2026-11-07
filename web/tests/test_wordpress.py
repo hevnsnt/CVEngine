@@ -8,6 +8,7 @@ from cveFeed import host_context, wp_correlation, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, HostArchive, ProbeObservation, RouteAuth, ServiceRun
 from dashboard.models import ApiCredential
 from startScan.models import Subdomain, Technology
+from tests import probe_scanner
 from tests.fake_scanner import FakeScanner
 from tests.test_probes import answers, page
 from tests.test_route_auth import RouteFixture
@@ -30,6 +31,12 @@ class WordPressFixture(RouteFixture):
         self.calls = []
         self.clear_claims()
         self.addCleanup(self.clear_claims)
+        self.scanner = self.start_scanner()
+
+    def start_scanner(self):
+        """The Sentinel that answers the WordPress probe (``http_probe``) with what ``self.table`` says each page is (``probe_get``). It declares ``wpscan``
+        too, so a quick pass is not held back for want of a scanner for that kind (the tests give the pass its own runner)."""
+        return probe_scanner.start(self, get=self.probe_get, kinds=['wpscan'])
 
     def clear_claims(self):
         """The WordPress scan passes hold a Redis claim per project id (``cvengine:wpscan:thorough:<id>``, ``cvengine:wpscan:quick:<id>``, 5 to 10 minutes). A
@@ -52,8 +59,6 @@ class WordPressFixture(RouteFixture):
         return PLUGIN_REPORT
 
     def go(self, **kw):
-        kw.setdefault('probe_get', self.probe_get)
-        kw.setdefault('sleep', lambda s: None)
         kw.setdefault('runner', self.runner)
         with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), mock.patch('cveFeed.wp_correlation.run_for_host'):
             return wpscan_scan.run_wpscan(self.scan_obj.id, **kw)
@@ -63,6 +68,27 @@ class WordPressFixture(RouteFixture):
 
 
 class CandidateTests(WordPressFixture, TestCase):
+    def test_a_probe_the_scanner_could_not_make_is_failed_and_due_again_never_not_wordpress(self):
+        from cveFeed import ledger
+        self.scanner.responders['http_probe'] = lambda task: {'outcome': 'done', 'touched': [], 'refused': [], 'probes': [
+            {'id': probe['id'], 'observations': [], 'error': 'OSError'} for probe in task['target']['probes']]}
+        self.go()
+        self.assertEqual(self.asked, [])  # this server asked no page
+        self.assertFalse(ProbeObservation.objects.filter(probe='wordpress-detect').exists())
+        self.assertFalse(any(self.state(host) and self.state(host)['state'] == 'not_wordpress' for host in ('www.rt.test', 'rt.test', 'plain.rt.test')))
+        self.assertEqual(list(ServiceRun.objects.filter(service=wpscan_scan.PROBE_SERVICE).values_list('status', flat=True)), ['failed'] * 3)
+        self.assertFalse(ledger.fresh(wpscan_scan.PROBE_SERVICE, ['www.rt.test', 'rt.test', 'plain.rt.test'], self.project.id))  # all three are due at the next scan
+
+    def test_the_probe_is_the_scanners_one_task_that_names_each_host_and_the_server_asks_no_page(self):
+        from agentapi.models import SentinelTask
+        self.table = {'/wp-login.php': page(200, headers=LINK, body='<form id="loginform">')}
+        out = self.go()
+        task = SentinelTask.objects.get(kind='http_probe')
+        self.assertEqual({(p['host'], p['probe']) for p in task.target['probes']},
+                         {(host, 'wordpress-detect') for host in ('www.rt.test', 'rt.test', 'plain.rt.test')})
+        self.assertEqual(out['probed'], 3)
+        self.assertEqual(self.state('www.rt.test')['probe'], 'found')
+
     def test_passive_archive_evidence_with_edge_only_live_tags_and_a_202_route_check_still_schedules_wpscan(self):
         """The production pattern: the web archive remembers WordPress (288 URLs under wp-content), the live tags are only the CDN, the route
         check was answered 202 by the edge, and the scanner's own requests are challenged. WPScan must still run and the host must say why."""
@@ -307,7 +333,7 @@ class ThoroughPassTests(WordPressFixture, TestCase):
 
     def thorough(self, runner=None, **kw):
         with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), mock.patch('cveFeed.wp_correlation.run_for_host'):
-            return wpscan_scan.run_thorough(self.project.id, runner=runner or self.runner, sleep=lambda s: None, probe_get=self.probe_get, **kw)
+            return wpscan_scan.run_thorough(self.project.id, runner=runner or self.runner, **kw)
 
     def test_the_quick_pass_queues_the_thorough_pass_and_does_not_wait_for_it(self):
         self.quick()

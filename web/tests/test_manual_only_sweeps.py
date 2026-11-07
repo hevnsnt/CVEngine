@@ -144,7 +144,7 @@ class APersonsRequestStillReachesTheHost(PlainWorld):
         wpscan_scan.record_thorough(w.project.id, w.domain.id, w.host, 'pending', 'queued')
         Domain.objects.filter(pk=w.domain.pk).update(discovery_mode=MANUAL)
         runner = mock.Mock(side_effect=AssertionError('WPScan must not run'))
-        summary = wpscan_scan.run_thorough(w.project.id, runner=runner, sleep=lambda s: None, probe_get=mock.Mock())
+        summary = wpscan_scan.run_thorough(w.project.id, runner=runner)
         runner.assert_not_called()
         self.assertEqual(summary['failed'], 1)
         row = ProbeObservation.objects.get(project=w.project, host=w.host, probe=wpscan_scan.THOROUGH_PROBE)

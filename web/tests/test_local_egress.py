@@ -241,15 +241,6 @@ class ConnectionLogTests(Clean, TestCase):
             ('198.51.100.3', 25, 'exact', 'paced', 'nmap', project.id, 9),
             ('198.51.100.4', 465, 'exact', 'sent', 'route-probe', None, None)])
 
-    def test_an_in_process_connection_is_logged_exactly_with_its_address(self):
-        from cveFeed import pinned_transport
-        sock = mock.Mock()
-        with mock.patch.object(pinned_transport.socket, 'socket', return_value=sock), \
-                mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True):
-            pinned_transport.open_socket(((2, ('198.51.100.7', 587)),), 3, proxy=None)
-        (record,) = local_egress.connection_log()['records']
-        self.assertEqual((record['address'], record['port'], record['mode'], record['outcome']), ('198.51.100.7', 587, 'exact', 'sent'))
-
     def test_filters_and_pages(self):
         for i in range(5):
             local_egress.log_connections([f'198.51.100.{i}'], [25 if i % 2 else 587], 'nmap', project=1 if i < 3 else 2, now=T0 + i)
@@ -369,29 +360,6 @@ class ApiInputTests(Clean, TestCase):
         self.assertEqual(call(token, 'GET', '/api/v1/egress/connections?since=2026-01-01T00:00:00Z&limit=5')[0], 200)
         error, _ = tool_call(token, 'list_egress_connections', {'since': 'nan'})
         self.assertTrue(error)
-
-
-@mock.patch.dict(os.environ, {'CVENGINE_LOCAL_SKIP_PORTS': '', 'CVENGINE_LOCAL_PORT_BUDGETS': '25:400/hour'})
-class InProcessAccountingTests(Clean, TestCase):
-    def test_a_refused_destination_is_neither_logged_nor_charged(self):
-        from cveFeed import pinned_transport
-        with mock.patch.object(pinned_transport.socket, 'socket') as sock:
-            with self.assertRaises(ValueError):
-                pinned_transport.open_socket(((2, ('10.1.2.3', 25)),), 3, proxy=None)
-        sock.assert_not_called()
-        self.assertEqual(local_egress.connection_log()['records'], [])
-        self.assertFalse(local_egress.used_this_hour(25))
-
-    def test_each_address_actually_tried_is_logged(self):
-        from cveFeed import pinned_transport
-        first, second = mock.Mock(), mock.Mock()
-        first.connect.side_effect = ConnectionRefusedError('refused')
-        with mock.patch.object(pinned_transport.socket, 'socket', side_effect=[first, second]), \
-                mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True):
-            sock = pinned_transport.open_socket(((2, ('198.51.100.1', 25)), (2, ('198.51.100.2', 25))), 3, proxy=None)
-        self.assertIs(sock, second)
-        self.assertEqual(sorted(r['address'] for r in local_egress.connection_log()['records']), ['198.51.100.1', '198.51.100.2'])
-        self.assertEqual(local_egress.used_this_hour(25), 2)
 
 
 class HermeticTests(SimpleTestCase):
