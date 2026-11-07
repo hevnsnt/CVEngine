@@ -108,7 +108,8 @@ class InstallTests(unittest.TestCase):
             (self.stub / name).write_text(body)
             (self.stub / name).chmod(0o755)
         base = {k: v for k, v in os.environ.items() if k not in SCANNER_KEYS + ('CVENGINE_ENABLE_BUILTIN_SCANNER',)}
-        self.env = {**base, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'CVENGINE_DETECT_IP': '10.1.2.3'}
+        self.env = {**base, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'CVENGINE_DETECT_IP': '10.1.2.3', 'CVENGINE_INSTALL_PORTS': ''}  # the host's own 443 may be taken: the stubs need no ports
+        self.env.pop('CI', None)  # GitHub Actions sets CI, which (rightly) silences the question
 
     def install(self, *args):
         return subprocess.run(['bash', 'install.sh', *args], cwd=self.repo, capture_output=True, text=True, env=self.env, timeout=60)
@@ -138,6 +139,20 @@ class InstallTests(unittest.TestCase):
         text = (self.repo / 'install.sh').read_text()
         self.assertIn("printf 'SCANNER_MEM_LIMIT=1g\\n' >> .env", text)
         self.assertIn('-lt 7000000', text)
+
+    def test_the_port_check_still_refuses_a_busy_port_and_defaults_to_443_and_8082(self):
+        import socket
+        self.assertIn('${CVENGINE_INSTALL_PORTS-443 8082}', (ROOT / 'install.sh').read_text())
+        if not shutil.which('ss'):
+            self.skipTest('needs ss')
+        with socket.socket() as busy:
+            busy.bind(('0.0.0.0', 0))
+            busy.listen(1)
+            self.env['CVENGINE_INSTALL_PORTS'] = str(busy.getsockname()[1])
+            proc = self.install()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('is already in use', proc.stdout + proc.stderr)
+        self.assertFalse((self.repo / '.env').exists())
 
     def test_help_mentions_the_opt_out(self):
         proc = self.install('-h')
@@ -182,26 +197,22 @@ class SentinelChoiceTests(InstallTests):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         for key in SCANNER_KEYS + ('CVENGINE_SENTINEL_PLAN',):
             self.assertNotIn(key, self.scanner_free())
-        self.assertNotIn('Add your external Sentinel', proc.stdout)
-        self.assertIn('Add your first target', proc.stdout)
+        self.assertNotIn('external Sentinels only', proc.stdout)
+        self.assertIn('setup continues in the browser', proc.stdout)
 
-    def test_external_turns_the_built_in_scanner_off_and_shows_the_enrollment_steps(self):
+    def test_external_turns_the_built_in_scanner_off_and_says_so_on_the_finish_screen(self):
         proc = self.install('--sentinels=external')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
-        self.assertIn('Add your external Sentinel', proc.stdout)
-        self.assertIn('Provision', proc.stdout)
-        self.assertIn('docs/SENTINELS.md', proc.stdout)
-        self.assertIn('built-in scanner off, as chosen', proc.stdout)
+        self.assertIn('as chosen', proc.stdout)
 
-    def test_both_keeps_the_scanner_on_records_the_plan_and_shows_the_steps(self):
+    def test_both_keeps_the_scanner_on_records_the_plan(self):
         proc = self.install('--sentinels', 'both')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         env = self.scanner_free()
         self.assertNotIn('CVENGINE_BUILTIN_SCANNER', env)
         self.assertEqual(env['CVENGINE_SENTINEL_PLAN'], 'both')
-        self.assertIn('Add your external Sentinel', proc.stdout)
-        self.assertIn('keeps running beside it', proc.stdout)
+        self.assertIn('plus external Sentinels', proc.stdout)
 
     def test_a_bad_or_conflicting_choice_is_refused_before_anything_runs(self):
         for args in (('--sentinels=bogus',), ('--sentinels=both', '--no-builtin-scanner'), ('--sentinels',)):
@@ -214,14 +225,14 @@ class SentinelChoiceTests(InstallTests):
         proc = self.install()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
-        self.assertIn('Add your external Sentinel', proc.stdout)
+        self.assertIn('external Sentinels only', proc.stdout)
         proc = self.install('--sentinels=internal')
         self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '1')
-        self.assertNotIn('Add your external Sentinel', proc.stdout)
+        self.assertNotIn('external Sentinels only', proc.stdout)
 
     def test_openvas_is_never_installed_or_started(self):
         proc = self.install('--sentinels=both')
-        self.assertIn('OpenVAS     not installed', proc.stdout)
+        self.assertIn('OpenVAS:   not installed', proc.stdout)
         self.assertFalse([k for k, v in active((self.repo / '.env').read_text()).items() if 'openvas' in (k + v).lower()])
         self.assertNotIn('COMPOSE_PROFILES', self.scanner_free())
 

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# One-command installer for a Linux server:  sudo ./install.sh
-# It checks the machine, installs what is missing (Docker, make), generates every secret and the HTTPS certificate, starts CVEngine, waits
-# until it answers, creates the admin account and prints the address, the password and the health of what it started. On a terminal it asks
-# one question first: will you add external Sentinels, or use only the built-in scanner? Without a terminal (a pipe, CI, -n) it asks nothing
-# and takes the safe default, the built-in scanner only. OpenVAS is never installed or started: it runs on a Sentinel (docs/OPENVAS.md).
-# Safe to run again: nothing already set is changed, and a running installation keeps its data.
+# Thin bootstrap for a Linux server:  sudo ./install.sh
+# It checks the machine, installs what is missing (Docker, make), generates every secret and the HTTPS certificate, starts CVEngine, waits until
+# it answers, creates the admin account and prints the address. Everything else (targets, scanners, Sentinels, notifications) is set up in the
+# browser by the setup wizard: this script asks nothing that matters. On a terminal it offers one optional shortcut, which scanners this server
+# will use; without a terminal (a pipe, CI, -n) it asks nothing and takes the safe default, the built-in scanner only. OpenVAS is never installed
+# or started: it runs on a Sentinel (docs/OPENVAS.md). Safe to run again: nothing already set is changed, and a running installation keeps its data.
 #
-#   sudo ./install.sh                     # ask the one question (on a terminal), detect this machine's address and use it
+#   sudo ./install.sh                        # detect this machine's address and use it
 #   sudo ./install.sh --domain scan.example.com   # use a name people will type instead
 #   sudo ./install.sh --sentinels=internal   # built-in scanner only (the default; docs/BUILTIN-SCANNER.md)
-#   sudo ./install.sh --sentinels=both       # built-in scanner plus external Sentinels you add (the steps are shown at the end)
+#   sudo ./install.sh --sentinels=both       # built-in scanner plus external Sentinels you add in the browser
 #   sudo ./install.sh --sentinels=external   # external Sentinels only: the built-in scanner is not installed or started
-#   sudo ./install.sh -n                  # never ask: the flags and the safe defaults decide (also when CI is set or stdin is not a terminal)
+#   sudo ./install.sh -n                     # never ask (also when CI is set or stdin is not a terminal)
+#   CVENGINE_INSTALL_PORTS="..."             # ports that must be free before the first start (default "443 8082"); the tests set it to ""
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 started=$SECONDS
@@ -206,10 +207,10 @@ if [ -z "$running_proxy" ]; then
     elif have netstat; then netstat -ltn 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found = 1} END {exit !found}'
     else return 1; fi
   }
-  for port in 443 8082; do
+  for port in ${CVENGINE_INSTALL_PORTS-443 8082}; do
     if port_busy "$port"; then die "Port $port is already in use by another program. Stop it (for example another web server) and run this again."; fi
   done
-  ok "ports 443 and 8082 are free"
+  ok "ports ${CVENGINE_INSTALL_PORTS-443 8082} are free"
 else
   ok "CVEngine is already running here: rebuilding it from this checkout (this does not fetch new code, see docs/UPDATES.md)"
 fi
@@ -279,25 +280,6 @@ if [ -z "$admin_banner" ]; then
   [ -n "$admin_banner" ] || admin_banner="The admin account is set up. Lost its password? Run: make admin-password"
 fi
 
-# The built-in scanner enrols itself with the enrollment the server writes for it, which needs the admin account that now exists: written now
-# instead of at the server's next five-minute round. It then runs every scan tool. A scanner that is slow to come up is not a failed install:
-# the scans that need it wait, and it keeps trying.
-scanner_state=off
-if bash -c '. scripts/scanner.sh && cvengine_scanner_enabled docker compose' 2>/dev/null; then
-  step "Starting the built-in scanner"
-  compose exec -T celery python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
-  scanner_state=waiting
-  for _ in $(seq 1 36); do
-    if compose exec -T scanner python3 -m client.control heartbeat >/dev/null 2>&1; then scanner_state=live; break; fi
-    sleep 5
-  done
-  if [ "$scanner_state" = live ]; then ok "the built-in scanner is enrolled and checking in"
-  else warn "the built-in scanner has not checked in yet; it keeps trying (docker compose logs scanner, and Administration > Sentinels)"; fi
-else
-  step "The built-in scanner"
-  ok "not started (CVENGINE_BUILTIN_SCANNER is off in .env, or this compose file has no scanner): nothing of it was pulled or started"
-fi
-
 # The app cannot update itself (it has no Docker access on purpose): a small watcher on this machine applies an update an admin approves in
 # Settings > Updates, within seconds. Without it the Approve button does nothing, so it is part of the install. Skipped when automatic
 # deployment already looks after updates.
@@ -322,54 +304,24 @@ not_running=''
 for svc in db redis web celery celery-beat proxy reviewer; do
   [ -n "$(compose ps --status running -q "$svc" 2>/dev/null)" ] || not_running="$not_running $svc"
 done
-scanner_image=''
-if [ "$scanner_state" != off ]; then
-  scanner_image=$(docker inspect -f '{{.Config.Image}}' "$(compose ps -aq scanner 2>/dev/null | head -n 1)" 2>/dev/null | sed 's/.*@sha256:\(............\).*/pinned digest sha256:\1.../') || scanner_image=''
-fi
 
 ca=$(pwd)/secrets/certs/ca.crt
-printf '\n%s\n' "$GREEN$BOLD#########################################################################$RESET"
-printf '%s\n' "$GREEN$BOLD  CVEngine is installed and running.$RESET"
-printf '%s\n' "$GREEN$BOLD#########################################################################$RESET"
-printf '\n%s\n\n' "$admin_banner"
-printf '%sHealth%s  (installed in %dm%02ds)\n' "$BOLD" "$RESET" $(((SECONDS - started) / 60)) $(((SECONDS - started) % 60))
-printf '  web         answering at https://%s/\n' "$address"
-if [ -z "$not_running" ]; then printf '  services    db, redis, web, celery, celery-beat, proxy and the AI reviewer are running\n'
-else printf '  services    %snot running:%s%s  (docker compose ps; docker compose logs <name>)\n' "$YELLOW" "$RESET" "$not_running"; fi
-case $scanner_state in
-  live) printf '  scanner     %sbuilt-in scanner enrolled and live%s%s\n' "$GREEN" "$RESET" "${scanner_image:+ ($scanner_image)}" ;;
-  waiting) printf '  scanner     %sbuilt-in scanner started, not checked in yet%s: scans wait for it, it keeps trying (docker compose logs scanner)\n' "$YELLOW" "$RESET" ;;
-  *) if [ "$plan" = external ]; then printf '  scanner     built-in scanner off, as chosen: scans wait until you enrol an external Sentinel (below)\n'
-     else printf '  scanner     %sbuilt-in scanner not started%s: it is switched off in .env or missing from the compose file (docs/BUILTIN-SCANNER.md)\n' "$YELLOW" "$RESET"; fi ;;
-esac
-case $watcher in ok) printf '  updates     the update watcher is installed (Settings > Updates > Approve works)\n' ;; *) printf '  updates     %sno update watcher%s: see the warning above\n' "$YELLOW" "$RESET" ;; esac
-printf '  OpenVAS     not installed, nothing of it runs here. It runs on a Sentinel (about 4 GB of RAM and 60 GB of disk there): docs/OPENVAS.md\n'
-printf '\n%sNext steps%s\n' "$BOLD" "$RESET"
-n=1
-printf '  %d. Open  https://%s/  and sign in with %s (a generated password is shown only once; you choose your own at first sign-in).\n' "$n" "$address" "$account"; n=$((n + 1))
-printf '     Your browser will warn that the certificate is not trusted: that is expected, it is signed by this server'"'"'s own authority.\n'
-printf '     Continue past the warning, or trust the authority once:  %s\n' "$ca"
-printf '  %d. Add your first target. The setup wizard starts scanning it right away; the CVE feed is already loading in the background.\n' "$n"; n=$((n + 1))
+printf '\n%s\n' "$GREEN$BOLD  CVEngine is running (installed in $(((SECONDS - started) / 60))m$(printf '%02d' $(((SECONDS - started) % 60)))s).$RESET"
+printf '\n  Open:      %shttps://%s/%s\n' "$BOLD" "$address" "$RESET"
+printf '  Sign in:   %s\n' "$account"
+printf '%s\n' "$admin_banner" | sed 's/^/             /'
+printf '             (a generated password is shown only once; a lost one: make admin-password)\n'
+printf '\n  Open it: setup continues in the browser, the setup wizard does the rest.\n'
 case $plan in
-  both|external)
-    printf '  %d. Add your external Sentinel (a machine with Docker and outbound HTTPS to this server):\n' "$n"; n=$((n + 1))
-    printf '       a. In CVEngine open Sentinels and press Provision (pick Where it runs: external for the internet side, internal inside a private network).\n'
-    printf '       b. The page then shows one command to paste on that machine: it clones the Sentinel client, enrols it with the one-time blob and starts it.\n'
-    printf '       c. The Sentinel shows as live on the same page once it has reported in. Guide: docs/SENTINELS.md; client: https://github.com/hevnsnt/cvengine-sentinel\n'
-    [ "$plan" != external ] || printf '     Until one is enrolled nothing is scanned: scans wait (nothing fails) and start by themselves once a Sentinel reports in.\n'
-    [ "$plan" != both ] || printf '     The built-in scanner keeps running beside it; docs/BUILTIN-SCANNER.md says how the two share the work.\n' ;;
-  *)
-    printf '  %d. To scan from other networks later, add an external Sentinel any time: Sentinels > Provision (docs/SENTINELS.md; sudo ./install.sh --sentinels=both records it).\n' "$n"; n=$((n + 1)) ;;
+  external) printf '  Scanners:  external Sentinels only, as chosen: the built-in scanner is not started; the wizard shows how to add a Sentinel.\n' ;;
+  both)     printf '  Scanners:  the built-in scanner plus external Sentinels you add in the browser.\n' ;;
+  *)        printf '  Scanners:  the built-in scanner (it checks in by itself within a few minutes; Sentinels shows its state).\n' ;;
 esac
-printf '  %d. Things you may need later:\n' "$n"
-cat <<EOF
-       make admin-password   a new admin password, if this one is lost
-       make logs             follow the logs
-       sudo ./install.sh     run again any time; it rebuilds the code you have checked out
-                             (it does not fetch new code: updates are in Settings > Updates, see docs/UPDATES.md)
-EOF
+printf '  OpenVAS:   not installed; it runs on a Sentinel (docs/OPENVAS.md).\n'
+printf '\n  Your browser will warn that the certificate is not trusted: it is signed by this server'"'"'s own authority. Continue, or trust once: %s\n' "$ca"
+case $watcher in ok) ;; *) warn "no update watcher (see above): Settings > Updates > Approve will not start an update" ;; esac
 case $address in
   localhost|127.*) warn "CVEngine only answers on this machine. To reach it from elsewhere: sudo ./install.sh --domain <this server's address or name>" ;;
 esac
-[ -z "$not_running" ] || warn "not running:$not_running. The install is otherwise complete; docker compose logs <name> says why."
+[ -z "$not_running" ] || warn "not running:$not_running. docker compose logs <name> says why."
 exit 0
