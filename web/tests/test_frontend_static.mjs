@@ -231,7 +231,7 @@ test('a Sentinel card has Update now, the built-in scanner does not and says why
 });
 
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
-  assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", "Built-in"/);
+  assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", s\.last_resort \? "Built-in, last resort" : "Built-in"/);
   assert.match(sentinelSource, /versionBlock\(detail, \{ onChange: reload, builtin: s\.builtin \}\)/);
 });
 
