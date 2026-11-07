@@ -361,19 +361,27 @@ const steps = {
   },
 
   build(node) {
+    discBar.classList.remove('on');  // the building screen shows the same live counts itself
     node.append(el('h1', '', 'Building your workspace'),
       el('p', 'lead', 'The first discovery is running. This is what is really happening, so you can see it is not just a spinner.'));
-    const frame = el('iframe', 'scene', null, { src: '/static/cve/maintenance.html?scene=1', title: 'Two engineers at work', loading: 'eager' });
+    // The scene is the maintenance page's own two engineers. It is fetched and given to the frame as its document (srcdoc) so that no framing header on the
+    // static file (Django's X-Frame-Options, a proxy's) can blank it; ``data-scene`` is set here because a srcdoc page has no query string to read it from.
+    const frame = el('iframe', 'scene', null, { title: 'Two engineers at work', loading: 'eager' });
+    fetch('/static/cve/maintenance.html', { credentials: 'same-origin' }).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then((html) => { frame.srcdoc = html.replace('<html', '<html data-scene="1"'); })
+      .catch(() => { frame.remove(); });
     const lines = ['Sentinel ready', 'Discovery running', 'Hosts found'].map((t) => {
       const li = el('li'); const g = el('span', 'g', ''); const c = el('div'); const b = el('span', '', t); const sm = el('small', '', '');
       c.append(b, sm); li.append(g, c); return { li, g, sm, b };
     });
     const list = el('ul', 'steps-list', null, { id: 'build-steps' }); lines.forEach((l) => list.append(l.li));
     const recent = el('p', 'recent', '');
+    const wait = el('p', 'note', '', { id: 'build-wait' });
+    const meter = el('span', ''); const track = el('div', 'meter', null, { role: 'progressbar', 'aria-label': 'Time given to discovery' }); track.append(meter);
     const actions = el('div', 'actions'); actions.append(el('span', 'grow'));
     const skip = el('button', 'btn ghost', 'Skip: open the dashboard now', { type: 'button', id: 'build-skip' });
     actions.append(skip);
-    node.append(frame, list, recent, actions);
+    node.append(frame, list, recent, track, wait, actions);
     let leaving = false;
     const leave = async (follow) => {
       if (leaving) return; leaving = true; stop();
@@ -389,7 +397,7 @@ const steps = {
       let r;
       try { r = await welcome('GET', 'progress'); } catch (err) { say(err.message); return; }
       const s = r.sentinel, d = r.discovery;
-      set(lines[0], s.live ? 'ok' : 'run', s.live ? `${s.live} connected${s.builtin ? ' (built-in scanner)' : ''}${s.external ? `, ${s.external} external` : ''}` : s.builtin_state.text);
+      set(lines[0], s.live ? 'ok' : 'run', s.live ? `${s.live} connected: ${[s.builtin ? 'the built-in scanner' : '', s.external ? `${s.external} external` : ''].filter(Boolean).join(' and ')}` : s.builtin_state.text);
       if (d) {
         set(lines[1], d.state === 'done' || d.state === 'ended' ? 'ok' : 'run', d.text);
         set(lines[2], d.hosts ? 'ok' : 'run', `${d.hosts} subdomain${d.hosts === 1 ? '' : 's'} found so far`);
@@ -403,6 +411,10 @@ const steps = {
       } else if (!w.ready) {
         say(`${d ? d.text : ''} ${w.reason}`.trim());
       }
+      const left = Math.max(0, (w.min_seconds || 0) - (w.elapsed || 0));
+      wait.textContent = w.ready ? '' : `Giving discovery up to ${left} more second${left === 1 ? '' : 's'} so the dashboard opens with findings in it. ${w.reason}`;
+      meter.style.width = `${Math.min(100, Math.round(((w.elapsed || 0) / Math.max(1, w.min_seconds || 1)) * 100))}%`;
+      meter.parentElement.hidden = w.ready;
     };
     poll(); timer = setInterval(poll, 2500);
   },
