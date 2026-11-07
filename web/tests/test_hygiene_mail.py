@@ -14,6 +14,7 @@ from cveFeed import mailfail as mf
 from cveFeed.models import AgentActivity
 from dashboard.models import Org, Project
 from targetApp.models import Domain
+from tests import hygiene_harness
 
 
 def checks(findings):
@@ -276,7 +277,7 @@ class ActivityCreditTests(TestCase):
 		project = Project.objects.create(name='Acme', slug='acme', insert_date=now, org=Org.objects.create(name='Acme', slug='acme-org'))
 		domain = Domain.objects.create(name='acme.example', project=project, insert_date=now)
 		credited = mf.evaluate_mx('acme.example', ['acme-example.mail.protection.outlook.com.'])
-		hy.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: (credited, True), mx=lambda n, t: False)
+		hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: (credited, True), mx=lambda n, t: False)
 		entry = AgentActivity.objects.filter(kind='hygiene', message__contains='MailFail').latest('id')
 		self.assertEqual(entry.status, 'done')
 		self.assertIn('Black Hills Information Security', entry.message)

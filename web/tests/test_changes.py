@@ -8,7 +8,6 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import activity, changes, discovery
-from cveFeed import hygiene as hy
 from cveFeed.models import AgentActivity, AssetChange, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -17,6 +16,7 @@ from targetApp.models import Domain
 from tests.test_agentapi import call, rpc
 from tests.test_hygiene import cert
 from tests.test_perf_hostpipeline import _stages
+from tests import hygiene_harness
 
 
 def state(ports=None, techs=(), ip='203.0.113.5'):
@@ -281,7 +281,7 @@ class CertChangeTests(TestCase):
 			if host != 'www.example.test':
 				return None
 			return {**cert(host=host, port=port, sans=[host], subject=host), 'issuer': issuer}
-		return hy.run_hygiene(self.domain.id, probe=probe, emailer=lambda n: ([], False), mx=lambda n, t: False)
+		return hygiene_harness.run_hygiene(self.domain.id, probe=probe, emailer=lambda n: ([], False), mx=lambda n, t: False)
 
 	def test_a_changed_certificate_is_one_change_and_the_first_sight_is_none(self):
 		self.assertEqual(self.run_with('CN=Old CA')['cert_changes'], 0)

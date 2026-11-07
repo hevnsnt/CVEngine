@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from agentapi import services as svc
 from agentapi.services import ApiError
-from cveFeed import hygiene, tailscale_api, tailscale_checks, tailscale_local, tailscale_scope, tailscale_sync
+from cveFeed import tailscale_api, tailscale_checks, tailscale_local, tailscale_scope, tailscale_sync
 from cveFeed.models import HostExclusion, HostLabel, HostProfile, HostState, HygieneFinding, TailscaleDevice, TailscaleLink
 from cveFeed.tailscale_api import TailscaleError
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
@@ -29,6 +29,7 @@ from tests.test_agentapi import call, tool_call
 from tests.test_settings import send
 from tests.test_tenancy import client_for
 from tests.port_stage_stub import port_double
+from tests import hygiene_harness
 
 SECRET = 'tskey-client-SECRETSECRETSECRET'
 TOKEN = 'tskey-api-TOPSECRETTOKEN'
@@ -1269,10 +1270,10 @@ class FindingStorageTests(SyncBase):
     def test_the_tls_and_email_sweep_leaves_tailscale_findings_alone(self):
         self.sync()
         domain = self.domains()['100.64.0.1']
-        hygiene.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
+        hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
         self.assertEqual({r.status for r in self.rows().values()}, {'open'})
         HygieneFinding.objects.create(domain=domain, host='100.64.0.1', check_name='tls_expired', severity=3, title='old')
-        hygiene.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
+        hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
         self.assertEqual(HygieneFinding.objects.get(check_name='tls_expired').status, 'resolved')  # its own checks still resolve
 
     def test_policy_findings_are_skipped_when_the_policy_cannot_be_read_and_kept_otherwise(self):

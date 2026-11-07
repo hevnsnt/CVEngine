@@ -19,6 +19,7 @@ from startScan.models import Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call, tool_call
 from tests.test_tenancy import client_for
+from tests import hygiene_harness
 
 PUBLIC = '203.0.113.10'
 GOOD_HEADERS = {'strict-transport-security': 'max-age=31536000', 'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
@@ -1103,10 +1104,9 @@ class SeparationTests(Fixture, TestCase):
         self.assertEqual(HostState.objects.count(), 0)
 
     def test_run_hygiene_and_the_owned_stores_do_not_know_suppliers(self):
-        from cveFeed import hygiene
         supplier = self.supplier(domains=[self.D])
         SupplierFinding.objects.create(supplier=supplier, domain=self.D, check_name='tls_expired', title='t', category='tls', severity=4)
-        hygiene.run_hygiene(self.own.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
+        hygiene_harness.run_hygiene(self.own.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
         self.assertEqual(SupplierFinding.objects.get().status, 'open')  # the owned-host sweep resolves and counts none of it
         self.assertEqual(HygieneFinding.objects.count(), 0)
 
