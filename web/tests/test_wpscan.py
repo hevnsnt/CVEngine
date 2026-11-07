@@ -7,6 +7,7 @@ from cveFeed.api_credentials import SERVICES, used_in_scans
 from cveFeed.models import ProbeObservation, RouteAuth, ServiceRun
 from dashboard.models import ApiCredential
 from startScan.models import ScanActivity, Subdomain, Technology, Vulnerability
+from tests import probe_scanner
 from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.port_stage_stub import port_double
@@ -104,11 +105,13 @@ class StageTests(RouteFixture, TestCase):
         self.wp = Subdomain.objects.get(scan_history=self.scan_obj, name='www.rt.test')
         self.wp.technologies.add(Technology.objects.create(name='WordPress'))
         self.calls = []
+        self.scanner = self.start_scanner()
+
+    def start_scanner(self):
+        """The Sentinel that answers the WordPress probe (``http_probe``): every page it asks for is a 404 unless a test sets ``self.pages``."""
+        return probe_scanner.start(self)
 
     def go(self, *args, **kw):
-        kw.setdefault('probe_get', lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '',
-                                                'content_type': '', 'final_url': url, 'url': url})
-        kw.setdefault('sleep', lambda s: None)
         return wpscan_scan.run_wpscan(self.scan_obj.id, *args, **kw)
 
     def runner(self, url, token):
@@ -186,8 +189,7 @@ class StageTests(RouteFixture, TestCase):
         with mock.patch('cveFeed.discovery.stopped', return_value=False):
             discovery._run_stages(self.scan_obj.id, {'scan_id': self.scan_obj.id, 'status': discovery.SUCCESS}, hygiene=False,
                                   port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-                                  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), wpscan_runner=runner,
-                                  probe_get=lambda url: {'status': 404, 'headers': {}, 'body': '', 'title': '', 'challenge': '', 'server': '', 'powered_by': '', 'content_type': '', 'final_url': url, 'url': url})
+                                  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), wpscan_runner=runner)
         self.assertEqual(stages, ['https://www.rt.test'])
         self.assertTrue(ScanActivity.objects.filter(scan_of=self.scan_obj, name='wpscan').exists())
 
@@ -202,37 +204,18 @@ class CredentialTests(SimpleTestCase):
 class SentinelDispatchTests(StageTests):
     """run_wpscan's own default runner, when none is passed in, is agentapi.sentinel_dispatch.wrap_wpscan_runner - not
     the local tool (there is none). A live, eligible Sentinel's reported outcome must reach the persistence
-    this module has (findings, CVE links, the Technology row, the ServiceRun row), same as a local run does."""
+    this module has (findings, CVE links, the Technology row, the ServiceRun row), same as a local run does. The same Sentinel answers
+    the WordPress probe (``http_probe``) too."""
 
-    def make_sentinel(self):
-        from django.contrib.auth.models import User
-        from django.utils import timezone
+    scan_modes = None
 
-        from agentapi.auth import create_token
-        from agentapi.models import Agent
-        user = User.objects.create_user('wpscan-sentinel-owner', password='x')
-        token, _raw = create_token(user, 'wpscan-sentinel-token')
-        return Agent.objects.create(token=token, name='live-wpscan-sentinel', kind='scanner', status='active',
-                                    scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                    capabilities=['wpscan'], last_seen=timezone.now())
-
-    def _answer_with(self, result):
-        from django.utils import timezone
-
-        from agentapi.models import SentinelTask
-
-        def fake_sleep(_seconds):
-            task = SentinelTask.objects.filter(status__in=('queued', 'claimed', 'running')).order_by('-id').first()
-            if task:
-                SentinelTask.objects.filter(pk=task.pk).update(status='done', result=result, finished_at=timezone.now())
-        return fake_sleep
+    def start_scanner(self):
+        result = {'outcome': 'done', 'report': REPORT, 'returncode': 0, 'stderr_tail': ''}
+        return probe_scanner.start(self, kinds=['wpscan'], responders={'wpscan': result}, modes=self.scan_modes)
 
     def test_no_runner_passed_in_dispatches_to_a_live_sentinel_and_findings_are_saved_the_same_way(self):
-        self.make_sentinel()
         ApiCredential.objects.create(project=self.project, service='wpscan', value={'api_key': 'secret-token'})
-        result = {'outcome': 'done', 'report': REPORT, 'returncode': 0, 'stderr_tail': ''}
-        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=self._answer_with(result)):
-            out = self.go()  # no runner= kwarg: wpscan_scan.run_wpscan must build its own via wrap_wpscan_runner
+        out = self.go()  # no runner= kwarg: wpscan_scan.run_wpscan must build its own via wrap_wpscan_runner
         self.assertEqual((out['scanned'], out['findings']), (1, 4))
         vuln = Vulnerability.objects.get(name__startswith='WordPress 6.4.2')
         self.assertEqual((vuln.source, vuln.severity, vuln.subdomain_id), ('wpscan', 3, self.wp.id))
@@ -240,9 +223,11 @@ class SentinelDispatchTests(StageTests):
         task = SentinelTask.objects.get(kind='wpscan')
         self.assertEqual(task.status, 'done')
         self.assertEqual(task.target['token'], '***')  # the project's API token is scrubbed once the task is done
+        self.assertTrue(SentinelTask.objects.filter(kind='http_probe', status='done').exists())  # the probe was the Sentinel's too
 
     def test_no_runner_passed_in_waits_and_never_runs_locally_when_no_sentinel_claims_in_time(self):
-        self.make_sentinel()
+        self.scanner.stop()
+        self.scanner = probe_scanner.start(self, kinds=['wpscan'], modes={'wpscan': 'idle'})
         LocalFallback('none').apply(self)
         guard = assert_ran_nowhere_locally(self, 'wpscan')
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_CLAIM_TIMEOUT': '0.2'}), mock.patch('cveFeed.wpscan_scan.queue_quick', return_value=[]):  # the retry job would go to the real broker

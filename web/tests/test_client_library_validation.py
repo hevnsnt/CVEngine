@@ -35,7 +35,7 @@ def script(version, pad=0):
 
 
 class Site:
-	"""A fake network for the read: ``pages`` maps a URL to the answer ``probes.fetch`` would give."""
+	"""A fake network for the read: ``pages`` maps a URL to the answer a Sentinel's fetch would give."""
 	def __init__(self, pages=None, error=None):
 		self.pages, self.error, self.calls = pages or {}, error, []
 
@@ -290,7 +290,6 @@ class Base(TestCase):
 						mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
 						mock.patch('cveFeed.activity.log', return_value=None),
 						mock.patch('cveFeed.notify._send', return_value=False),
-						mock.patch('cveFeed.probes.REQUEST_GAP', 0),
 						mock.patch('cveFeed.js_libraries.SCRIPT_HOST_GAP', 0)):
 			patched.start()
 			self.addCleanup(patched.stop)

@@ -14,9 +14,10 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import correlation, js_libraries, match_policy, probes
+from cveFeed import correlation, js_libraries, match_policy
 from cveFeed.models import ProbeObservation, RouteAuth
 from startScan.models import Subdomain, Technology
+from tests import probe_scanner
 from tests.test_js_library_versions import JQ_371_MIN, PAGE_URL, NoCache, read
 from tests.test_probes import answers, page
 from tests import route_scanner
@@ -282,7 +283,7 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
                                               url='https://rt.test/js/jquery-3.2.1.min.js')}
 
     def run_probe(self, probe_id, base, table):
-        return probes.run_http_probe(probe_id, base, {'blog.rt.test', 'rt.test', 'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe(probe_id, base, {'blog.rt.test', 'rt.test', 'www.rt.test'}, get=answers(table))
 
     def test_the_libraries_probe_records_nothing_for_a_host_that_redirected_elsewhere(self):
         self.assertEqual([o for o in self.run_probe('html-libraries', 'https://blog.rt.test', self.TARGET) if o['kind'] == 'version'], [])
@@ -297,27 +298,6 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
         self.assertEqual([(o['product'], o['version']) for o in found if o['version']], [('jQuery', '3.2.1')])
         found = self.run_probe('headers-root', 'https://rt.test', self.TARGET)
         self.assertIn(('jQuery', '3.2.1'), {(o['product'], o['version']) for o in found})
-
-    def test_through_the_real_redirect_following_fetch(self):
-        def probe_url(url, **_kw):
-            if url == 'https://blog.rt.test/':
-                return {'status': 301, 'location': 'https://rt.test/', 'body': '', 'url': url, 'headers': {'server': 'cloudflare'},
-                        'server': 'cloudflare', 'powered_by': '', 'content_type': 'text/html', 'title': '301 Moved Permanently'}
-            path = '/' + url.split('://', 1)[1].split('/', 1)[1]
-            return {**self.TARGET.get(path, page(404, body='not found')), 'url': url}
-
-        def get(url, **kw):
-            return probes.fetch(url, probe=probe_url, sleep=lambda s: None, allowed={'blog.rt.test', 'rt.test', 'www.rt.test'})
-        with mock.patch.object(probes, '_permitted', return_value=True):
-            alias = probes.run_http_probe('html-libraries', 'https://blog.rt.test', set(), get=get, sleep=lambda s: None)
-            target = probes.run_http_probe('html-libraries', 'https://rt.test', set(), get=get, sleep=lambda s: None)
-        self.assertEqual([o for o in alias if o['kind'] == 'version'], [])
-        self.assertEqual([(o['product'], o['version']) for o in target if o['version']], [('jQuery', '3.2.1')])
-        with mock.patch.object(probes, '_permitted', return_value=True):
-            headers = probes.run_http_probe('headers-root', 'https://blog.rt.test', set(), get=get, sleep=lambda s: None)
-        products = {o['product'] for o in headers if o['kind'] == 'version'}
-        self.assertIn('Cloudflare', products)  # what the alias's own redirect answer says about itself stays
-        self.assertFalse(products & {'nginx', 'jQuery', 'Bootstrap'}, products)  # the page it leads to is not its
 
     def test_a_redirect_inside_the_same_host_still_records_the_page(self):
         table = {'/': {**self.TARGET['/'], 'final_url': 'https://blog.rt.test/en/', 'url': 'https://blog.rt.test/en/'},

@@ -3,6 +3,7 @@ the first ``?ver=`` of any asset under /wp-includes/ is jQuery's, and it was sto
 from django.test import SimpleTestCase
 
 from cveFeed import probes
+from tests import probe_scanner
 from tests.test_probes import answers, page
 
 HEAD = (
@@ -59,7 +60,7 @@ class ProbeTests(SimpleTestCase):
         def get(url):
             asked.append('/' + url.split('://', 1)[1].split('/', 1)[1])
             return answers({'/wp-login.php': page(200, body='<form id="loginform">'), **table})(url)
-        found = probes.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get)
         return found, asked
 
     def test_the_version_in_the_footer_is_stored_as_the_hosts_wordpress_version(self):

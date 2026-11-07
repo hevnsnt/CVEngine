@@ -19,7 +19,7 @@ from reNgine import resources
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
-from tests import route_scanner
+from tests import library_http, route_scanner
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_agentapi import call, rpc
 from tests.test_perf_hostpipeline import _stages
@@ -196,53 +196,50 @@ class ProbeTests(SimpleTestCase):
 
 	def setUp(self):
 		Handler.seen.clear()
-		# This fixture deliberately connects to its own loopback server. Production
-		# policy rejection is exercised separately in test_pinned_transport.
-		policy = mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True)
-		policy.start()
-		self.addCleanup(policy.stop)
+		# This fixture deliberately connects to its own loopback server. Policy rejection is the scanner library's own (cvengine_scanner/tests/probes/test_transport.py).
+		library_http.allow_loopback(self)
 
 	def test_reads_at_most_the_sample_cap_and_sends_no_cookies_or_credentials(self):
-		result = ra.probe_url(f'http://127.0.0.1:{self.port}/big')
+		result = library_http.probe_url(f'http://127.0.0.1:{self.port}/big')
 		self.assertEqual(result['status'], 200)
-		self.assertLessEqual(result['bytes'], ra.ROUTE_SAMPLE_BYTES)
-		self.assertLessEqual(len(result['body']), ra.ROUTE_SAMPLE_BYTES)
+		self.assertLessEqual(result['bytes'], library_http.http.ROUTE_SAMPLE_BYTES)
+		self.assertLessEqual(len(result['body']), library_http.http.ROUTE_SAMPLE_BYTES)
 		self.assertEqual(result['title'], 'Big Page')
 		self.assertEqual(Handler.seen, [('/big', None, None)])
 
 	def test_gzip_page_ignoring_identity_is_read_with_a_decompressed_byte_cap(self):
-		result = ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-big')
+		result = library_http.probe_url(f'http://127.0.0.1:{self.port}/gzip-big')
 		self.assertEqual(result['title'], 'Compressed Page')
 		self.assertIn('Device Model', result['body'])
-		self.assertEqual(result['bytes'], ra.ROUTE_SAMPLE_BYTES)
-		self.assertEqual(len(result['body']), ra.ROUTE_SAMPLE_BYTES)
+		self.assertEqual(result['bytes'], library_http.http.ROUTE_SAMPLE_BYTES)
+		self.assertEqual(len(result['body']), library_http.http.ROUTE_SAMPLE_BYTES)
 
 	def test_invalid_gzip_is_a_probe_error(self):
 		with self.assertRaisesRegex(ValueError, 'invalid compressed probe response'):
-			ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-invalid')
+			library_http.probe_url(f'http://127.0.0.1:{self.port}/gzip-invalid')
 
 	def test_small_gzip_and_deflate_pages_have_usable_titles(self):
 		for path in ('gzip', 'deflate', 'deflate-raw'):
 			with self.subTest(path=path):
-				result = ra.probe_url(f'http://127.0.0.1:{self.port}/{path}')
+				result = library_http.probe_url(f'http://127.0.0.1:{self.port}/{path}')
 				self.assertEqual(result['title'], 'Compressed Page')
 				self.assertIn('Device Model', result['body'])
 				self.assertEqual(result['bytes'], len(result['body'].encode()))
 
 	def test_empty_compressed_body_is_an_empty_page_not_an_error(self):
-		result = ra.probe_url(f'http://127.0.0.1:{self.port}/gzip-empty')
+		result = library_http.probe_url(f'http://127.0.0.1:{self.port}/gzip-empty')
 		self.assertEqual(result['body'], '')
 
 	def test_never_follows_a_redirect(self):
-		result = ra.probe_url(f'http://127.0.0.1:{self.port}/redir')
+		result = library_http.probe_url(f'http://127.0.0.1:{self.port}/redir')
 		self.assertEqual((result['status'], result['location'], result['cookies']), (302, '/final', ['sid']))
 		self.assertEqual([p for p, _, _ in Handler.seen], ['/redir'])
 
 	def test_rejects_non_http_urls_and_userinfo_before_resolution(self):
-		with mock.patch('cveFeed.pinned_transport.resolve') as resolve:
+		with mock.patch.object(library_http.transport, 'resolve') as resolve:
 			for url in ('file:///tmp/dummy', 'ftp://example.test/', 'http://u:p@example.test/', 'http://example.test/\n'):
 				with self.assertRaises(ValueError):
-					ra.probe_url(url)
+					library_http.probe_url(url)
 			resolve.assert_not_called()
 
 	def test_pinned_request_preserves_host_headers_schema_and_read_limit(self):
@@ -256,11 +253,11 @@ class ProbeTests(SimpleTestCase):
 		connection = mock.Mock()
 		connection.getresponse.return_value = response
 		addresses = ((2, ('203.0.113.10', 8443)),)
-		with mock.patch('cveFeed.pinned_transport.resolve', return_value=addresses), \
-				mock.patch('cveFeed.pinned_transport.HTTPConnection', return_value=connection) as factory:
-			result = ra.probe_url('https://original.example.test:8443/a?x=1', max_bytes=100,
+		with mock.patch.object(library_http.transport, 'resolve', return_value=addresses), \
+				mock.patch.object(library_http.transport, 'HTTPConnection', return_value=connection) as factory:
+			result = library_http.probe_url('https://original.example.test:8443/a?x=1', max_bytes=100,
 							  headers={'Host': 'fallback.example.test'})
-		self.assertEqual(factory.call_args.args, ('original.example.test', 8443, addresses, ra.CONNECT_TIMEOUT))
+		self.assertEqual(factory.call_args.args[:4], ('original.example.test', 8443, addresses, library_http.http.CONNECT_TIMEOUT))
 		self.assertFalse(factory.call_args.kwargs['context'].check_hostname)
 		request_headers = connection.request.call_args.kwargs['headers']
 		self.assertEqual(request_headers['Host'], 'fallback.example.test')
@@ -539,7 +536,6 @@ class ProbeTimeBudgetTests(SimpleTestCase):
 	def test_a_host_that_trickles_bytes_is_cut_off_at_the_total_budget(self):
 		import socket
 		import time
-		from cveFeed import pinned_transport
 		listener = socket.socket()
 		listener.bind(('127.0.0.1', 0))
 		listener.listen(1)
@@ -562,9 +558,10 @@ class ProbeTimeBudgetTests(SimpleTestCase):
 		thread.start()
 		started = time.monotonic()
 		try:
-			with mock.patch.object(pinned_transport, 'is_scannable_ip', return_value=True), mock.patch.object(ra, 'PROBE_TOTAL_SECONDS', 1):
+			library_http.allow_loopback(self)
+			with mock.patch.object(library_http.http, 'PROBE_TOTAL_SECONDS', 1):
 				with self.assertRaises(TimeoutError):
-					ra.probe_url(f'http://127.0.0.1:{listener.getsockname()[1]}/')
+					library_http.probe_url(f'http://127.0.0.1:{listener.getsockname()[1]}/')
 		finally:
 			stop.set()
 			listener.close()

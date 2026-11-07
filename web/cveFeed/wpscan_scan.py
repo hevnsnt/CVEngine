@@ -537,11 +537,44 @@ def status_counts(project_ids=None):
 
 # ----------------------------------------------------------------------------- the stage
 
-def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only=None):
-    """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
-    Returns ``{host: first observation}`` for the hosts probed now."""
-    from cveFeed import ledger, probes, route_auth
+def _ask_wordpress(scan, chosen):
+    """``{host: observations}`` of the ``wordpress-detect`` probe a Sentinel ran for each ``(sub, bases)`` of ``chosen`` (``agentapi.probe_dispatch.try_http_probes``:
+    one ``http_probe`` task per chunk, this server asks the site for nothing). A host's bases are asked in order and the first that is WordPress ends
+    its list; an answer that is an error is no answer (``[]``: the host stays due, never read as \"not WordPress\"). Raises ``ScannerUnavailable``
+    when no Sentinel can take the work or a task ended with no result: nothing was asked, nothing is recorded."""
+    from agentapi import probe_dispatch
+    from cveFeed import probes
     from reNgine import resources
+    pending = {sub.name.lower(): (sub, list(bases)) for sub, bases in chosen}
+    results = {}
+    while pending:
+        planned, asked = [], {}
+        for host, (sub, bases) in pending.items():
+            entry = {'probe': 'wordpress-detect', 'label': probes.BY_ID['wordpress-detect']['label'], 'family': 'http', 'target': {'base': bases.pop(0)}, 'for': []}
+            asset = probes.asset_key(host, entry)
+            planned.append((sub, asset, entry))
+            asked[host] = asset
+        for start in range(0, len(planned), probe_dispatch.MAX_PROBES_PER_TASK):
+            if resources.abort_requested(scan.id) or resources.global_pause_requested(fail_closed=True):
+                return results
+            answered = probe_dispatch.try_http_probes(scan.domain.project, scan, planned[start:start + probe_dispatch.MAX_PROBES_PER_TASK])
+            for sub, asset, _entry in planned[start:start + probe_dispatch.MAX_PROBES_PER_TASK]:
+                got = answered.get(asset)
+                host = sub.name.lower()
+                if got is None or isinstance(got, Exception):
+                    logger.info('WordPress probe failed for %s: %s', host, type(got).__name__ if got is not None else 'no answer')
+                    got = []
+                results[host] = got
+        pending = {host: (sub, bases) for host, (sub, bases) in pending.items()
+                   if bases and not (results.get(host) and results[host][0]['outcome'] == 'found')}
+    return results
+
+
+def detect(scan, subs, candidates, force=False, only=None):
+    """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
+    The probe is a Sentinel's (``http_probe``, probe ``wordpress-detect``): this server sends nothing to a site. Returns ``{host: first observation}``
+    for the hosts probed now. ``ScannerUnavailable`` (no Sentinel can take it) propagates: nothing is recorded and every site stays due."""
+    from cveFeed import ledger, probes, route_auth
     project, domain = scan.domain.project_id, scan.domain
     by_name = {s.name.lower(): s for s in subs}
     siblings = siblings_of(subs, set(candidates))
@@ -550,27 +583,13 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only
     if only is not None:
         order = [h for h in order if h in only]
     covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
-    group = set(candidates) | siblings
     results = {}
-    kwargs = {'get': probe_get, 'project': project} if probe_get else {'project': project}
-    if sleep:
-        kwargs['sleep'] = sleep
+    chosen = [(by_name[host], route_auth.web_bases(by_name[host])) for host in order if host not in covered]
+    answers = _ask_wordpress(scan, chosen) if chosen else {}
     for host in order:
-        if host in covered:
+        if host in covered or host not in answers:
             continue
-        if resources.abort_requested(scan.id) or resources.global_pause_requested(fail_closed=True):
-            break
-        sub = by_name[host]
-        allowed = (group & set(by_name)) | probes.allowed_names(sub)
-        found = []
-        for base in route_auth.web_bases(sub):
-            try:
-                found = probes.run_http_probe('wordpress-detect', base, allowed, **kwargs)
-            except Exception as exc:  # noqa: BLE001 - one host failing never stops the rest
-                logger.info('WordPress probe failed for %s: %s', host, type(exc).__name__)
-                found = []
-            if found and found[0]['outcome'] == 'found':
-                break
+        sub, found = by_name[host], answers[host]
         if not found:
             ledger.record(PROBE_SERVICE, [host], project, scan, 'failed')
             continue
@@ -586,7 +605,7 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only
     return results
 
 
-def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, internal=False, only=None, attempt=0):
+def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, attempt=0):
     """The pipeline stage: probe for WordPress, then scan every host that shows any sign of it (and every grouped name that probes
     positive), positive probes first. Never silent: every candidate gets a recorded state. Returns a summary dict; ``error`` is set only when
     every attempted site failed.
@@ -598,7 +617,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     A site the stage cannot reach in time (over the per-scan limit, out of the stage's time budget, no memory for it) is not left for the next
     scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
     limits the run to those hosts (that job's call); ``attempt`` counts its retries. The summary's ``deferred`` lists the hosts queued."""
-    from cveFeed import activity, ledger, probes, wp_correlation
+    from cveFeed import activity, ledger, wp_correlation
     from reNgine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -619,15 +638,25 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
         signals = {h: v for h, v in signals.items() if h in only}
     for host, found in signals.items():
         record_signals(project, domain.id, host, found)
-    probed = {} if internal else detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force, only=only)
+    probed, probe_waiting = {}, None
+    if not internal:
+        try:
+            probed = detect(scan, subs, signals, force=force, only=only)
+        except resources.ScannerUnavailable as exc:  # no Sentinel can ask the sites: nothing is recorded, they stay due, and none is read as not WordPress
+            probe_waiting = exc
+            logger.warning('WordPress detection of scan %s is waiting for a scanner: %s', scan_id, exc)
     positive = {h for h, o in probed.items() if o['outcome'] == 'found'}
     for host in sorted(h for h, o in probed.items() if o['outcome'] == 'absent' and h not in signals):
         record_state(project, domain.id, host, 'not_wordpress', 'the probe found no WordPress signature')
     wanted = sorted(set(signals) | positive, key=lambda h: (h not in positive, h))
     deferred = []
     summary = {'candidates': len(signals), 'probed': len(probed), 'sites': len(wanted), 'scanned': 0, 'findings': 0, 'technologies': 0, 'reused': 0}
+    if probe_waiting is not None:  # the sites with a sign of WordPress are still scanned below; the ones only the probe could name wait for it
+        summary['probe_waiting'] = probe_waiting.kind
     wp_correlation.carry_forward(scan)
     if not wanted:
+        if probe_waiting is not None:  # nothing could be asked: not 'no WordPress here', and every site stays due
+            return {**summary, 'skipped': f'no scanner could take this work ({probe_waiting.kind}); the sites stay due until one can'}
         return summary
     fresh = set() if force else ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
     summary['reused'] = len([h for h in wanted if h in fresh])
@@ -767,7 +796,7 @@ def _requeue_quick(scan, hosts, attempt):
         logger.exception('could not queue the WordPress quick pass for %s', scan.domain.name)
 
 
-def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None):
+def run_quick(scan_id, hosts, attempt=1, runner=None):
     """The queued quick pass: the stage's WordPress scan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
     spent. Returns the run's summary, or ``{'skipped': why}``."""
@@ -786,12 +815,12 @@ def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None
     if waiting:  # no scanner can run it and this server may not: asked again at the same attempt a little later, with no run and no activity line
         _requeue_quick(scan, only, attempt)
         return {'skipped': waiting}
-    if runner is None and sleep is None and probe_get is None:
+    if runner is None:
         # the sites a Sentinel scans are waited for without holding the worker (agentapi.stage_runs): the callback finishes the pass
         from agentapi import stage_runs
         context = {'scan_id': scan_id, 'hosts': sorted(only), 'attempt': attempt}
         return stage_runs.run('wpscan.quick', context, first=lambda: _quick(scan, only, attempt), project=scan.domain.project_id, scan=scan_id)
-    return _quick(scan, only, attempt, runner=runner, sleep=sleep, probe_get=probe_get)
+    return _quick(scan, only, attempt, runner=runner)
 
 
 def _resume_quick(context):
@@ -802,7 +831,7 @@ def _resume_quick(context):
     return _quick(scan, set(context['hosts']), context['attempt'])
 
 
-def _quick(scan, only, attempt, runner=None, sleep=None, probe_get=None):
+def _quick(scan, only, attempt, runner=None):
     from agentapi import stage_runs
     from reNgine import resources
     claim = stage_runs.claim_kwargs('wpscan-quick', f'quick-{os.getpid()}')
@@ -810,7 +839,7 @@ def _quick(scan, only, attempt, runner=None, sleep=None, probe_get=None):
         if holder is not True:
             queue_quick(scan, only, attempt)
             return {'skipped': 'another quick pass is running for this project'}
-        return run_wpscan(scan.pk, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
+        return run_wpscan(scan.pk, runner=runner, only=only, attempt=attempt)
 
 
 # ----------------------------------------------------------------------------- the thorough pass
@@ -847,7 +876,7 @@ def _latest_row(project_id, host):
             .filter(in_target_scope_q()).select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
 
 
-def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
+def run_thorough(project_id, runner=None):
     """The thorough pass for one project: every host waiting for it, one at a time, each handed to a Sentinel as one ``wpscan_thorough`` task
     (plugin and theme detection in mixed mode, as long a budget as it needs: ``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default; the
     Sentinel ends the scan 30 seconds before it and reports what it read). One pass per project at a time (a Redis claim kept alive while it runs, and
@@ -859,7 +888,7 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
     one that did not finish it in time, the host stays ``pending`` and nothing is recorded as done, so a later pass asks again. The report is
     classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
     (``runner(url, token, timeout) -> report``)."""
-    from cveFeed import activity, exclusions, ledger, probes, wp_correlation
+    from cveFeed import activity, exclusions, ledger, wp_correlation
     from reNgine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
     owner = f'thorough-{os.getpid()}'

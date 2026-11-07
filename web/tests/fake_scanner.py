@@ -390,7 +390,7 @@ LOCAL_RUNNERS = {
     'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'wpscan_thorough': (),  # likewise
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'http_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard. The re-test runners of cveFeed.validation (http_head, script_read) still GET from this server
+    'http_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'alive_check': (),  # likewise
     'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
@@ -426,7 +426,7 @@ HEAVY_KINDS = {
     'wpscan': ('wpscan',),
     'wpscan_thorough': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
-    'http_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard. The re-test runners of cveFeed.validation (http_head, script_read) still GET from this server
+    'http_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'dns_resolve': (),
     'alive_check': (),
     'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard

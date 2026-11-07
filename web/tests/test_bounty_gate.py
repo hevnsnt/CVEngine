@@ -155,7 +155,7 @@ def thorough_wpscan(self, w):
     wpscan_scan.record_thorough(w.project.id, w.domain.id, w.host, 'pending', 'queued')
     runner = mock.Mock(side_effect=ValueError('not running WordPress'))
     with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-        wpscan_scan.run_thorough(w.project.id, runner=runner, sleep=lambda s: None, probe_get=mock.Mock())
+        wpscan_scan.run_thorough(w.project.id, runner=runner)
     return runner.called
 
 

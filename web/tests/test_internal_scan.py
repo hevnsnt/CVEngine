@@ -463,7 +463,7 @@ class WpscanTests(Base):
             return wpscan_answer
         with mock.patch('cveFeed.tasks.correlate_cves', return_value={'subdomains': 1, 'matches': 0}), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', side_effect=fake_dispatch_or_none), \
-                mock.patch('cveFeed.probes.run_http_probe') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles, \
+                mock.patch('agentapi.probe_dispatch.try_http_probes') as probe, mock.patch('cveFeed.wpscan_scan.plugin_titles') as titles, \
                 mock.patch('cveFeed.wpscan_scan.queue_thorough') as thorough:
             out = internal_scan.run(scan.id, dispatch=dispatch, nuclei_stream=lambda kind: iter_none, provider=None, wp_runner=wp_runner, **kwargs)
         return scan, out, calls, {'probe': probe, 'titles': titles, 'thorough': thorough}

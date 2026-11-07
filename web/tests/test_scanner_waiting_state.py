@@ -20,6 +20,7 @@ from cveFeed.models import AgentActivity, ProbeObservation, ScanControl, Service
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from targetApp.models import Domain
+from tests import probe_scanner
 from tests.test_route_auth import RouteFixture
 from tests.test_system_status import call, patched
 from tests.test_tls_audit import CLEAN
@@ -505,9 +506,12 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
         super().setUp()
         self.table = dict(WP)
 
+    def start_scanner(self):
+        """A scanner that answers the WordPress probe but has no ``wpscan``: the quick pass has nothing to wait for it on, and must say so."""
+        return probe_scanner.start(self, get=self.probe_get)
+
     def run_quick(self, **kw):
-        return wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=2, runner=kw.pop('runner', self.runner), probe_get=self.probe_get,
-                                     sleep=lambda s: None)
+        return wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=2, runner=kw.pop('runner', self.runner))
 
     @mock.patch.object(sentinel_dispatch, 'builtin_scanner_enrolled', return_value=False)  # nothing is reported until the built-in scanner has enrolled
     def test_before_the_builtin_scanner_enrolls_it_runs_exactly_as_before(self, _enrolled):

@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from django.test import SimpleTestCase, TestCase
 
 from cvengine_scanner import flags as scan_flags
+from cvengine_scanner.probes import version_probes
 
 from cveFeed import port_inventory, probes
 from cveFeed.models import ProbeObservation, ServiceRun
@@ -34,7 +35,7 @@ NGINX_404_HIDDEN = NGINX_404.replace('nginx/1.24.0', 'nginx')
 
 class RuleTests(SimpleTestCase):
     def run_probe(self, probe_id, table):
-        return probes.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
 
     def test_the_nginx_error_page_footer_states_a_version(self):
         found = self.run_probe('error-page', {probes.PROBE_PATH: page(404, body=NGINX_404)})
@@ -96,7 +97,7 @@ class RuleTests(SimpleTestCase):
 
 class WordPressProbeTests(SimpleTestCase):
     def detect(self, table, base='https://www.rt.test'):
-        found = probes.run_http_probe('wordpress-detect', base, {'www.rt.test', 'rt.test'}, get=answers(table), sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('wordpress-detect', base, {'www.rt.test', 'rt.test'}, get=answers(table))
         return found[0]
 
     def test_a_header_only_signature_is_a_positive_detection(self):
@@ -122,60 +123,10 @@ class WordPressProbeTests(SimpleTestCase):
         self.assertEqual(found['outcome'], 'absent')
 
     def test_challenge_detection(self):
-        self.assertEqual(probes.challenge_of(page(403, headers={'cf-mitigated': 'challenge'})), 'Cloudflare')
-        self.assertEqual(probes.challenge_of(page(200, body='<h1>Just a moment...</h1> cloudflare')), 'Cloudflare')
-        self.assertEqual(probes.challenge_of(page(503, headers={'server': 'cloudflare'}, title='')), 'Cloudflare')
-        self.assertEqual(probes.challenge_of(page(404, headers={'server': 'nginx'})), '')
-
-
-class FetchTests(SimpleTestCase):
-    def test_redirects_stay_inside_the_group_and_the_gate(self):
-        calls = []
-
-        def fake(url, **kwargs):
-            calls.append((url, kwargs.get('browser')))
-            if url == 'https://rt.test/':
-                return {**page(301, url=url), 'location': 'https://www.rt.test/'}
-            if url == 'https://www.rt.test/':
-                return {**page(301, url=url), 'location': 'https://elsewhere.example/'}
-            return page(200, url=url)
-        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            got = probes.fetch('https://rt.test/', probe=fake, sleep=lambda s: None, allowed={'rt.test', 'www.rt.test'})
-        self.assertEqual([c[0] for c in calls], ['https://rt.test/', 'https://www.rt.test/'])
-        self.assertTrue(all(c[1] for c in calls))  # browser-like headers
-        self.assertEqual(got['final_url'], 'https://www.rt.test/')
-
-    def test_a_blocked_destination_is_refused_before_any_request(self):
-        with mock.patch('cveFeed.route_auth.host_allowed', return_value=False):
-            with self.assertRaises(ValueError):
-                probes.fetch('https://internal.rt.test/', probe=mock.Mock(), sleep=lambda s: None)
-
-    def test_an_edge_challenge_is_returned_at_once_and_never_pushed_against(self):
-        challenge = {**page(503, headers={'server': 'cloudflare', 'cf-ray': 'x'}, title=''), 'challenge': ''}
-        probe = mock.Mock(return_value=challenge)
-        pauses = []
-        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            got = probes.fetch('https://rt.test/', probe=probe, sleep=pauses.append)
-        self.assertEqual((probe.call_count, pauses), (1, []))
-        self.assertEqual(got['challenge'], 'Cloudflare')
-
-    def test_a_plain_try_later_is_asked_again_once_after_a_pause(self):
-        probe = mock.Mock(return_value=page(503, headers={'server': 'nginx'}))
-        pauses = []
-        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-            got = probes.fetch('https://rt.test/', probe=probe, sleep=pauses.append)
-        self.assertEqual(probe.call_count, len(probes.RETRY_DELAYS) + 1)
-        self.assertEqual(pauses, list(probes.RETRY_DELAYS))
-        self.assertEqual(got['challenge'], '')
-
-    def test_a_redirect_to_an_excluded_name_is_not_followed(self):
-        redirect = {**page(301), 'location': 'https://rt.test/'}
-        probe = mock.Mock(return_value=redirect)
-        with mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
-                mock.patch('cveFeed.archive_rediscovery.archived_names', return_value=frozenset()), \
-                mock.patch('cveFeed.exclusions.is_excluded', side_effect=lambda project, host: host == 'rt.test'):
-            with self.assertRaises(ValueError):
-                probes.fetch('https://www.rt.test/', probe=probe, sleep=lambda s: None, allowed={'www.rt.test', 'rt.test'}, project=1)
+        self.assertEqual(version_probes.challenge_of(page(403, headers={'cf-mitigated': 'challenge'})), 'Cloudflare')
+        self.assertEqual(version_probes.challenge_of(page(200, body='<h1>Just a moment...</h1> cloudflare')), 'Cloudflare')
+        self.assertEqual(version_probes.challenge_of(page(503, headers={'server': 'cloudflare'}, title='')), 'Cloudflare')
+        self.assertEqual(version_probes.challenge_of(page(404, headers={'server': 'nginx'})), '')
 
 
 NMAP_PROBE_XML = """<?xml version="1.0"?><nmaprun><scaninfo protocol="tcp" services="443"/><host><address addr="203.0.113.5" addrtype="ipv4"/><ports>
@@ -264,7 +215,7 @@ class RecordingTests(RouteFixture, TestCase):
         FakeScanner(kinds=['http_probe'], responders={'http_probe': lambda task: probe_scanner.result(task, answers(self.table))}).start_for(self)
 
     def run_one(self, table, probe_id='error-page'):
-        """One planned probe through a fake Sentinel that reads ``table`` (the scanner's reading is ``probes.run_http_probe``; the server stores it)."""
+        """One planned probe through a fake Sentinel that reads ``table`` (the scanner's reading is the scanner library's ``run_http_probe``; the server stores it)."""
         self.table = table
         sub = Subdomain.objects.filter(pk=self.sub.pk).prefetch_related('technologies', 'ip_addresses__ports').select_related('target_domain').get()
         entry = {'probe': probe_id, 'target': {'base': 'https://www.rt.test'}}

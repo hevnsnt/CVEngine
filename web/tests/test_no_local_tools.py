@@ -64,7 +64,6 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
@@ -178,7 +177,6 @@ ALLOWED = {
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',

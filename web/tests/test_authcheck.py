@@ -23,7 +23,7 @@ from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembe
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
-from tests import route_scanner
+from tests import library_http, route_scanner
 from tests.fake_scanner import FakeScanner, LocalFallback
 from tests.test_agentapi import call, rpc, tool_call
 
@@ -539,9 +539,7 @@ class LiveProbeTests(Fixture):
 
 	def setUp(self):
 		Handler.seen.clear()
-		policy = mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True)  # this fixture talks to its own loopback servers
-		policy.start()
-		self.addCleanup(policy.stop)
+		library_http.allow_loopback(self)  # this fixture talks to its own loopback servers
 		self.target = Domain.objects.create(name='127.0.0.1', project=self.project, insert_date=timezone.now())
 		self.cred = self.make(self.target, host='127.0.0.1', origins=[f'http:{self.port}'])
 
@@ -549,17 +547,17 @@ class LiveProbeTests(Fixture):
 		return AuthScope.for_domain(self.target)
 
 	def test_an_anonymous_probe_sends_nothing(self):
-		ra.probe_url(f'http://127.0.0.1:{self.port}/')
+		library_http.probe_url(f'http://127.0.0.1:{self.port}/')
 		self.assertNotIn('Authorization', Handler.seen[0][2])
 		self.assertNotIn('Cookie', Handler.seen[0][2])
 
 	def test_the_anonymous_header_rule_still_refuses_arbitrary_headers(self):
 		with self.assertRaises(ValueError):
-			ra.probe_url(f'http://127.0.0.1:{self.port}/', headers={'Authorization': SECRET})
+			library_http.probe_url(f'http://127.0.0.1:{self.port}/', headers={'Authorization': SECRET})
 
 
 class LiveTlsTests(Fixture):
-	"""The real anonymous probe against a local TLS server with a certificate that does not verify: it is read all the same and nothing is sent with it.
+	"""The scanner library's anonymous probe (the GET a Sentinel makes) against a local TLS server with a certificate that does not verify: it is read all the same and nothing is sent with it.
 	Whether a sign-in goes over such a connection is the built-in scanner's decision (client/tests/test_signed_routes.py in the Sentinel repository)."""
 
 	@classmethod
@@ -603,10 +601,7 @@ class LiveTlsTests(Fixture):
 
 	def setUp(self):
 		Handler.seen.clear()
-		for name, value in (('cveFeed.pinned_transport.is_scannable_ip', True),):  # the fixture talks to its own loopback servers
-			patcher = mock.patch(name, return_value=value)
-			patcher.start()
-			self.addCleanup(patcher.stop)
+		library_http.allow_loopback(self)  # the fixture talks to its own loopback servers
 		trust = mock.patch.dict(os.environ, {'SSL_CERT_FILE': self.ca})  # the one CA this test trusts, read by the default verify paths
 		trust.start()
 		self.addCleanup(trust.stop)
@@ -627,7 +622,7 @@ class LiveTlsTests(Fixture):
 		for flag in (False, True):
 			self.switch(flag)
 			Handler.seen.clear()
-			result = ra.probe_url(f'https://127.0.0.1:{self.port("self")}/')
+			result = library_http.probe_url(f'https://127.0.0.1:{self.port("self")}/')
 			self.assertEqual(result['status'], 200)
 			self.assertNotIn('Authorization', Handler.seen[0][2])
 			self.assertNotIn('Cookie', Handler.seen[0][2])
@@ -821,8 +816,7 @@ class SignedRouteTests(Fixture):
 		self.assertTrue(self.signed_calls())
 
 	def test_this_server_has_no_way_left_to_send_a_stored_sign_in(self):
-		import inspect
-		self.assertNotIn('auth_scope', inspect.signature(ra.probe_url).parameters)
+		self.assertFalse(hasattr(ra, 'probe_url'))  # this server has no GET of any kind: anonymous or signed in, the request is a Sentinel's
 		self.assertFalse(hasattr(ra, 'UntrustedCertificate'))
 
 

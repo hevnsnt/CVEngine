@@ -10,12 +10,13 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import ledger, route_auth, vhost_scan
+from cveFeed import ledger, vhost_scan
 from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun, TlsCertificate
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
+from tests import library_http
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_tenancy import client_for
 
@@ -477,9 +478,9 @@ class VettingTests(VhostFixture, TestCase):
 
     def test_an_address_that_resolves_nowhere_a_scanner_may_go_is_refused_by_the_transport_too(self):
         with self.assertRaises(ValueError):
-            route_auth.probe_url('https://portal.example.test/', connect_ip='127.0.0.1')
+            library_http.probe_url('https://portal.example.test/', connect_ip='127.0.0.1')
         with self.assertRaises(ValueError):
-            route_auth.probe_url('https://portal.example.test/', connect_ip='169.254.169.254')
+            library_http.probe_url('https://portal.example.test/', connect_ip='169.254.169.254')
 
 
 class HostMergeTests(VhostFixture, TestCase):
@@ -533,9 +534,9 @@ class ModelContextTests(VhostFixture, TestCase):
 
 
 class RequestTests(SimpleTestCase):
-    """``route_auth.probe_url``, the one GET primitive left on this server (the validation re-test uses it), against a local server: a GET with no
-    body and no cookie, the name is the Host header, the address is the one asked, a redirect is not followed. The sweep's own requests are a
-    Sentinel's (its transport is tested in the Sentinel repository: cvengine_scanner/tests/probes/test_transport.py)."""
+    """The scanner library's GET (``cvengine_scanner.probes.http.probe_url``: the one a Sentinel makes, this server has none), against a local server: a
+    GET with no body and no cookie, the name is the Host header, the address is the one asked, a redirect is not followed. The sweep's own requests are
+    a Sentinel's (its transport is also tested in the Sentinel repository: cvengine_scanner/tests/probes/test_transport.py)."""
 
     @classmethod
     def setUpClass(cls):
@@ -578,27 +579,25 @@ class RequestTests(SimpleTestCase):
 
     def setUp(self):
         self.seen.clear()
-        for target in ('cveFeed.pinned_transport.is_scannable_ip', 'targetApp.target_types.is_scannable_ip'):
-            mock.patch(target, return_value=True).start()
-        self.addCleanup(mock.patch.stopall)
+        library_http.allow_loopback(self)
 
     def test_the_name_is_the_host_header_and_the_vetted_address_is_what_is_connected_to(self):
-        response = route_auth.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
+        response = library_http.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
         self.assertEqual(response['title'], 'Portal login')
         self.assertEqual(self.seen[0][:3], ('GET', f'portal.example.test:{self.port}', '/'))  # the name does not resolve: only the address was used
 
     def test_a_request_is_a_get_with_no_body_no_cookie_and_no_credential(self):
-        route_auth.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
+        library_http.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
         method, _host, _path, length, cookie, auth = self.seen[0]
         self.assertEqual((method, length, cookie, auth), ('GET', 0, None, None))
 
     def test_the_transport_refuses_anything_but_a_get_or_head(self):
         for method in ('POST', 'PUT', 'DELETE', 'PATCH'):
             with self.assertRaises(ValueError):
-                route_auth.probe_url(f'http://portal.example.test:{self.port}/', method=method, connect_ip='127.0.0.1')
+                library_http.probe_url(f'http://portal.example.test:{self.port}/', method=method, connect_ip='127.0.0.1')
         self.assertEqual(self.seen, [])
 
     def test_redirects_are_not_followed(self):
-        response = route_auth.probe_url(f'http://portal.example.test:{self.port}/moved', connect_ip='127.0.0.1')
+        response = library_http.probe_url(f'http://portal.example.test:{self.port}/moved', connect_ip='127.0.0.1')
         self.assertEqual((response['status'], response['location']), (302, 'http://169.254.169.254/latest/meta-data/'))
         self.assertEqual(len(self.seen), 1)  # the answer is the redirect itself, nothing was asked of its target

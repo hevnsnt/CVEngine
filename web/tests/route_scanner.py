@@ -5,7 +5,7 @@ from cveFeed import route_auth as ra
 
 
 def rows_for(task, site, scripts=None):
-    """``(rows, touched)`` for the ``route_probe`` ``task``: ``site(url)`` is the probe answer of one route (a dict as ``route_auth.probe_url`` returns);
+    """``(rows, touched)`` for the ``route_probe`` ``task``: ``site(url)`` is the probe answer of one route (a dict as the scanner library's ``probe_url`` returns);
     an ``OSError`` from it is a route reported with its error."""
     rows = []
     for entry in task['target']['hosts']:

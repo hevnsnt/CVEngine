@@ -92,7 +92,7 @@ class RunQuickTests(WordPressFixture, TestCase):
         self.table = dict(WP)
 
     def test_it_runs_the_stage_for_just_the_queued_hosts(self):
-        out = wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=1, runner=self.runner, probe_get=self.probe_get, sleep=lambda s: None)
+        out = wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=1, runner=self.runner)
         self.assertNotIn('skipped', out)
         self.assertEqual({u for u, _t in self.calls}, {'https://rt.test'})
 
