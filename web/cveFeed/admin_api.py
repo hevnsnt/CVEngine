@@ -821,7 +821,6 @@ ROUTES = [
     ('GET', r'health', scheduler_health),
     ('GET', r'scan-control', scan_control_get), ('POST', r'scan-control', scan_control_set),
     ('GET', r'openvas', lambda r, actor, **k: openvas_admin.admin_get(r, actor)), ('PUT', r'openvas', lambda r, actor, **k: openvas_admin.admin_put(r, actor)),
-    ('POST', r'openvas/check', lambda r, actor, **k: openvas_admin.admin_check(r, actor)),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 

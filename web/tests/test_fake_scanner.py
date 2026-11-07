@@ -24,7 +24,7 @@ from cveFeed.models import ProbeObservation, ServiceRun
 from reNgine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
 from tests import fake_scanner as fs
-from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
+from tests.fake_scanner import FakeScanner, LocalCapable, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
 from tests.test_route_auth import RouteFixture
 from tests.test_scanner_unavailable_stages import ENV, IP, FallbackOffBase, WaitsMixin
 from tests.test_sentinel_dispatch import UDP_XML, DispatchBase
@@ -272,7 +272,7 @@ class HarnessGuardTests(TestCase):
 
     def test_every_kind_has_a_local_path_and_a_gate(self):
         from agentapi.models import SentinelTask as Task
-        dispatchable = set(Task.KINDS) - set(scanner_state.NO_STAGE) - {'openvas', 'discover'}
+        dispatchable = set(Task.KINDS) - set(scanner_state.NO_STAGE) - {'discover'}
         self.assertEqual(set(fs.LOCAL_RUNNERS), dispatchable)
         self.assertEqual(set(fs.HEAVY_KINDS), dispatchable)
         with self.assertRaises(ValueError):
@@ -280,6 +280,7 @@ class HarnessGuardTests(TestCase):
 
     def test_local_fallback_sets_and_restores_the_environment_variable(self):
         before = os.environ.get(ENV)
+        LocalCapable('openvas', 'http_probe').apply(self)  # kinds with no local path would be dropped from the list (NEVER_LOCAL)
         with LocalFallback('none'):
             self.assertEqual(dispatch.local_fallback_kinds(), set())
             with LocalFallback('openvas,hygiene_check'):

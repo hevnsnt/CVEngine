@@ -1,5 +1,5 @@
 """The probe kinds through a Sentinel (contract version 3): ``http_probe`` (the version and identity probes, ``cveFeed.probes``) and
-``dns_resolve`` (the discovery pipeline's name lookups).
+``dns_resolve`` (the discovery pipeline's name lookups) and ``page_read`` (a validation re-test's HEAD of a URL and re-read of a host's pages and scripts).
 
 The server keeps the choice of what to probe (the plan, the ledger, the per-scan cap), the scope policy (``cveFeed.probe_scope``), the
 validation of what comes back (``agentapi.probe_results``) and what is stored. The Sentinel runs the requests (``cvengine_scanner.probes``) under
@@ -326,20 +326,19 @@ def _confirm_resolvers():
 def try_hygiene(domain, tls, mail):
     """The cleaned result of one ``hygiene_check`` task (``probe_results.clean_hygiene_check``) for ``domain``: ``tls`` is ``[(host, port)]`` and
     ``mail`` is ``[(name, always)]`` (a name flagged ``always`` is reviewed whatever its records, the others only when they have an MX record of their
-    own and are not a CNAME). ``None`` when no Sentinel can take ``hygiene_check`` or the one that took it did not answer (the caller does the work here, as
-    before). Raises ``ScannerUnavailable`` when no Sentinel can take the work and the kind may not run here. Nothing in the answer says an endpoint or a
-    name was checked unless its row is there: the caller reads a missing one as unknown."""
+    own and are not a CNAME). The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work
+    or the task ended unanswered. Nothing in the answer says an endpoint or a name was checked unless its row is there: the caller reads a missing one
+    as unknown."""
     from cveFeed import probe_scope
     project = domain.project
-    if not (tls or mail) or not _offered(project, 'hygiene_check'):
-        return None
+    if not (tls or mail):
+        return {'certs': [], 'mail': []}
+    _offered(project, 'hygiene_check')  # raises ScannerUnavailable when none can take it
     tls, mail = list(tls)[:MAX_TLS_PER_TASK], list(mail)[:MAX_MAIL_PER_TASK]
     target = {'tls': [{'host': h, 'port': p} for h, p in tls], 'mail': [{'name': n, 'always': bool(a)} for n, a in mail],
               'confirm_resolvers': _confirm_resolvers(), 'rdap': os.environ.get('CVENGINE_HYGIENE_RDAP', '1') != '0',
               'scope': probe_scope.for_hygiene(project.pk, tls, [n for n, _a in mail])}
     result = sentinel_dispatch.dispatch_or_none(project, 'hygiene_check', target, host=_hosts_label([domain.name] + [h for h, _p in tls]))
-    if result is None:
-        return None
     if result.get('refused'):
         logger.info('hygiene_check task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
     return result
@@ -347,12 +346,12 @@ def try_hygiene(domain, tls, mail):
 
 def try_dangling(project, checks, providers):
     """``{id: row}`` for the baddns findings (``checks``: ``[{'id', 'host', 'kind', 'triggers'}]``) a Sentinel rated, each row ``{'state': 'rated'|'unknown',
-    'severity', 'drop', 'note', 'zone'}``; ``None`` when no Sentinel can take ``dangling_dns_check`` or one did not answer (the caller rates them here, as
-    before). A finding the Sentinel did not report is missing from the answer: the caller keeps baddns's own rating. Raises ``ScannerUnavailable``
-    when no Sentinel can take the work and the kind may not run here."""
+    'severity', 'drop', 'note', 'zone'}``. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can
+    take the work or a task ended unanswered. A finding the Sentinel did not report is missing from the answer: the caller keeps baddns's own rating."""
     from cveFeed import probe_scope
-    if not checks or not _offered(project, 'dangling_dns_check'):
-        return None
+    if not checks:
+        return {}
+    _offered(project, 'dangling_dns_check')  # raises ScannerUnavailable when none can take it
     answered = {}
     for start in range(0, len(checks), MAX_FINDINGS_PER_TASK):
         chunk = checks[start:start + MAX_FINDINGS_PER_TASK]
@@ -362,8 +361,6 @@ def try_dangling(project, checks, providers):
             continue
         target = {'checks': chunk, 'providers': providers, 'scope': scope}
         result = sentinel_dispatch.dispatch_or_none(project, 'dangling_dns_check', target, host=_hosts_label(c['host'] for c in chunk))
-        if result is None:
-            return None
         answered.update({row['id']: row for row in result.get('ratings') or []})
     return answered
 
@@ -435,6 +432,27 @@ def try_signed_routes(project, scan, credential, by_host):
             raise ScannerUnavailable('route_probe_signed', 'the built-in scanner returned no result for a signed-in route check')
         answered.update(_route_answers(result, by_host, chunk))
     return answered
+
+
+def try_page_read(project, read, scope, scan=None):
+    """The answer of a Sentinel to one ``page_read`` (``read`` is ``{'id', 'op', 'host', ...}``: ``op`` is ``head`` with a ``url``, or ``libraries`` with the
+    ``bases`` of the host, the ``library`` a match is about and the ``seen_urls`` the host was seen to load it from; ``scope`` is
+    ``probe_scope.for_page_read``): the row of the result, ``{'id', 'head'}`` or ``{'id', 'reading'}``. The kind is in ``NEVER_LOCAL`` and has no local path:
+    with no scanner able to take the work this raises ``ScannerUnavailable`` (nothing was read, nothing is recorded), and so does a task that ended with no
+    result. A read the Sentinel could not make is a ``RuntimeError`` carrying its reason: the check is unknown, never a state."""
+    from reNgine.resources import ScannerUnavailable
+    target = {'reads': [read], 'scope': scope}
+    result = sentinel_dispatch.dispatch_or_none(project, 'page_read', target, host=read['host'], scan=scan)
+    if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
+        raise ScannerUnavailable('page_read', 'the scanner returned no result for a page read')
+    row = next((r for r in result.get('reads') or [] if r.get('id') == read['id']), None)
+    if row is None:
+        raise RuntimeError('the scanner did not report this read')
+    if row.get('error'):
+        raise RuntimeError(row['error'])
+    if result.get('refused'):
+        logger.info('page_read task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return row
 
 
 def resolve_for(domain, names, errors=None, scan=None):

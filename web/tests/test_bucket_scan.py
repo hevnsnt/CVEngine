@@ -9,12 +9,13 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import bucket_probe as bp, bucket_scan as bs, hygiene
+from cveFeed import bucket_probe as bp, bucket_scan as bs
 from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, HygieneFinding, ProbeObservation, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call
+from tests import hygiene_harness
 
 Response = bp.Response
 
@@ -635,7 +636,7 @@ class SweepTests(Fixture, TestCase):
 
     def test_run_hygiene_leaves_these_findings_alone(self):
         self.sweep(self.listing)
-        out = hygiene.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
+        out = hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
         self.assertIsNotNone(out)
         self.assertEqual(self.finding('static.example.test').status, 'open')
 

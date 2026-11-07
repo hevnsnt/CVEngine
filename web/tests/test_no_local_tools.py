@@ -41,7 +41,6 @@ SKIP_DIRS = {'__pycache__', 'tests'}
 # Phase 5 and 8 delete PRs shrink this; the final slice empties it. Paths are relative to web/.
 ALLOWED = {
     'nmap': [
-        'Dockerfile',
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -50,7 +49,6 @@ ALLOWED = {
         'agentapi/sentinel_dispatch.py',
         'agentapi/services.py',
         'agentapi/system_status.py',
-        'celery-entrypoint.sh',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/changes.py',
         'cveFeed/check_coverage.py',
@@ -172,7 +170,6 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'naabu': [
-        'Dockerfile',
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -180,7 +177,6 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
-        'celery-entrypoint.sh',
         'cveFeed/check_coverage.py',
         'cveFeed/egress_proxy.py',
         'cveFeed/heavy_process.py',
@@ -194,12 +190,10 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'wpscan': [
-        'Dockerfile',
         'agentapi/mcp.py',  # capability list in a tool description names the kind, runs nothing
         'agentapi/rest.py',  # capability and task kind lists in the route help name the kind, runs nothing
         'agentapi/sentinel_broker.py',  # the kind name as a data value: result cleaner and token scrub, runs nothing
         'agentapi/sentinel_dispatch.py',  # the kind name as a data value (NEVER_LOCAL, ceilings, dispatch of the task), runs nothing
-        'celery-entrypoint.sh',
         'cveFeed/api_credentials.py',  # the stored credential service key is the kind name, a data value
         'cveFeed/autotune_policy.py',  # T8 leftover: per-kind CPU shares sum to 1; the lead removes the heavy-kind tunables in the final slice
         'cveFeed/check_coverage.py',  # ledger kinds and the check id are data values, runs nothing
@@ -218,7 +212,6 @@ ALLOWED = {
         'reNgine/resources.py',  # T8 leftover: heavy-kind memory and concurrency tables; the lead removes them in the final slice
     ],
     'testssl': [
-        'Dockerfile',
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
@@ -235,13 +228,11 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'bbot': [
-        'Dockerfile',  # 1.4 T8: image slice (lead): installs the discovery tool and its browser, no code runs it
         'agentapi/mcp.py',  # 1.4 T8: user-facing tool descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
         'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
         'agentapi/services.py',  # 1.4 T8: finding kind 'bbot' (a stored data value) and text shared with other tool words, runs nothing
-        'celery-entrypoint.sh',  # 1.4 T8: image slice (lead): a comment about the discovery worker pool
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the check label (stored data values), runs nothing
         'cveFeed/diagnostics.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
@@ -275,7 +266,6 @@ ALLOWED = {
         'cveFeed/waf_fingerprint.py',  # 1.4 WAF fingerprint on a Sentinel: the ledger key is a stored data value, runs nothing
     ],
     'gowitness': [
-        'Dockerfile',
     ],
     'aardwolf': [
     ],
@@ -284,7 +274,6 @@ ALLOWED = {
         'cveFeed/heavy_process.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
-        'cveFeed/validation.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',
         'reNgine/time_limits.py',

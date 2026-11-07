@@ -3,7 +3,7 @@
 
   python3 scripts/generate_sbom.py [--output cvengine.sbom.cdx.json]
 
-It lists what a build is made of, read from the files that pin it: the scanner tools, the base image and the apt packages (web/Dockerfile), the Python
+It lists what a build is made of, read from the files that pin it: the nuclei binary and its toolchain, the base image and the apt packages (web/Dockerfile), the Python
 packages (web/requirements.txt) and the service images (docker-compose.yml). Nothing is downloaded and the output is reproducible: the
 same commit gives the same document (the timestamp is the commit's). A component that is not pinned to an exact version (a floating
 image tag, a version range, nuclei's templates) is listed with `cvengine:pinned` = `false` so a reader can see what the bill cannot vouch
@@ -48,22 +48,12 @@ def component(name, version, purl, kind='application', hashes=(), pinned=True, n
 
 
 def tools(dockerfile):
-    nmap, go = arg(dockerfile, 'NMAPVERSION'), arg(dockerfile, 'GOVERSION')
+    go = arg(dockerfile, 'GOVERSION')
     out = [
-        component('nmap', nmap, f'pkg:generic/nmap@{nmap}', hashes=[arg(dockerfile, 'NMAP_SHA256'), arg(dockerfile, 'NMAP_RPM_SHA256_AMD64')],
-                  note='amd64: the official x86_64 release RPM; arm64: compiled from the release tarball (hashes: tarball, RPM)', url='https://nmap.org'),
         component('go', go, f'pkg:generic/go@{go}', hashes=[arg(dockerfile, 'GO_SHA256_AMD64'), arg(dockerfile, 'GO_SHA256_ARM64')],
-                  note='build toolchain for nuclei and naabu (hashes: amd64, arm64)', url='https://go.dev'),
+                  note='build toolchain for nuclei, in a build stage that is not part of the image (hashes: amd64, arm64)', url='https://go.dev'),
         component('nuclei', arg(dockerfile, 'NUCLEI_VERSION'), GOMOD.format('nuclei/v3', arg(dockerfile, 'NUCLEI_VERSION')),
                   url='https://github.com/projectdiscovery/nuclei'),
-        component('naabu', arg(dockerfile, 'NAABU_VERSION'), GOMOD.format('naabu/v2', arg(dockerfile, 'NAABU_VERSION')),
-                  url='https://github.com/projectdiscovery/naabu'),
-        component('bbot', arg(dockerfile, 'BBOT_VERSION'), f'pkg:pypi/bbot@{arg(dockerfile, "BBOT_VERSION")}', url='https://github.com/blacklanternsecurity/bbot'),
-        component('tzdata', arg(dockerfile, 'TZDATA_VERSION'), f'pkg:pypi/tzdata@{arg(dockerfile, "TZDATA_VERSION")}', kind='library', note='installed beside bbot'),
-        component('wpscan', arg(dockerfile, 'WPSCAN_VERSION'), f'pkg:gem/wpscan@{arg(dockerfile, "WPSCAN_VERSION")}', url='https://github.com/wpscanteam/wpscan'),
-        component('testssl.sh', arg(dockerfile, 'TESTSSL_VERSION'), f'pkg:github/testssl/testssl.sh@v{arg(dockerfile, "TESTSSL_VERSION")}',
-                  hashes=[arg(dockerfile, 'TESTSSL_SHA256')], note='GPLv2, run as a separate program; the release tarball (hash: tarball)',
-                  url='https://testssl.sh'),
         component('nuclei-templates', None, None, kind='data', pinned=False, note='refreshed at runtime, by design',
                   url='https://github.com/projectdiscovery/nuclei-templates'),
     ]

@@ -436,7 +436,7 @@ def _tools():
                                  'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
-            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version'))}}
+            'versions': {'nuclei': _tool_version(('nuclei', '-version'))}}
 
 
 def _runzero(problems):

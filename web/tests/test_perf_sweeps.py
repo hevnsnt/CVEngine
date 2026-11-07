@@ -4,11 +4,12 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import ctmonitor, hygiene, ledger, tasks
+from cveFeed import ctmonitor, ledger, tasks
 from cveFeed.models import ServiceRun
 from dashboard.models import Org, Project, SystemTimings
 from reNgine import resources
 from targetApp.models import Domain
+from tests import hygiene_harness
 
 
 def _clear_claims():
@@ -88,7 +89,5 @@ class SweepTests(TestCase):
 		(domain,) = self._domains('rec.test')
 		ctmonitor.run_ct_watch(domain.id, fetch=lambda name: set())
 		self.assertEqual(ledger.fresh('ct-watch', ['rec.test'], self.project), {'rec.test'})
-		with mock.patch.object(hygiene, 'tls_targets', return_value=[]), \
-				mock.patch.object(hygiene, 'email_domains', return_value=[]):
-			hygiene.run_hygiene(domain.id)
+		hygiene_harness.run_hygiene(domain.id)  # a scanner answers: nothing speaks TLS, the name has no mail findings
 		self.assertEqual(ledger.fresh('hygiene', ['rec.test'], self.project), {'rec.test'})

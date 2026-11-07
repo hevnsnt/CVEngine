@@ -119,9 +119,45 @@ def for_probes(project_id, planned, unattended=True):
             if entry['probe'] == 'html-libraries':
                 for name in _same_site_hosts(project_id, sub, gate):
                     add(name)
-        for name in sorted(js_libraries.CDN_HOSTS):  # a public library CDN touches no target (probes.scope_hop asks nothing of one either)
+        for name in sorted(js_libraries.CDN_HOSTS):  # a public library CDN touches no target (the scanner asks nothing of one either)
             if name not in hosts and len(hosts) < MAX_HOSTS:
                 hosts.append(name)
+    return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
+
+
+def for_page_read(project_id, sub, unattended=True):
+    """The policy of a page_read task about the host ``sub``: the host itself, then, unless its target is host scoped (which reads its own host only), the
+    names a redirect or a script may lead to (``probes.allowed_names``: the apex and ``www``) and the other hosts of the same site this project holds
+    (``_same_site_hosts``, the library reader's own rule), and the public library CDNs. A name that is excluded, archived, outside the bug bounty
+    program's scope (``unattended``: a run the system started is also held to the project's confirmation) or held only under a target set to exactly
+    one other host (``narrowed_names``) is never listed, and is named in ``excluded`` so the scanner says why a hop was refused. Sorted, so the same
+    task is the same task on every pass."""
+    from cveFeed import js_libraries, probes
+    from targetApp.models import narrowed_names
+    own = sub.name.lower().rstrip('.')
+    target = getattr(sub, 'target_domain', None)
+    scoped = target is not None and target.is_host_scoped()
+    gate = _Gate(project_id, unattended=unattended)
+    hosts, excluded = [], set()
+
+    def add(name):
+        name = (name or '').strip().lower().rstrip('.')
+        if not name or name in hosts or name in excluded:
+            return
+        if gate.refusal(name) or (name != own and narrowed_names(project_id, [name])):
+            excluded.add(name)
+        elif len(hosts) < MAX_HOSTS:
+            hosts.append(name)
+
+    add(own)
+    if not scoped:
+        for name in sorted(probes.allowed_names(sub)):
+            add(name)
+        for name in sorted(_same_site_hosts(project_id, sub, gate)):
+            add(name)
+    for name in sorted(js_libraries.CDN_HOSTS):  # a public library CDN touches no target
+        if name not in hosts and len(hosts) < MAX_HOSTS:
+            hosts.append(name)
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 

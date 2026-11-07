@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe`` and ``route_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe`` and ``page_read``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -635,6 +635,125 @@ def clean_route_probe_signed(body):
     return out
 
 
+MAX_READS = 10
+MAX_READ_PAGES = 6
+MAX_READ_SCRIPTS = 80  # js_libraries.MAX_ENTRIES: scripts read from one page
+MAX_READ_SCANS = 120   # scripts read in one read: the per-host limit and the files a match was seen to load from
+MAX_READ_JSON = 32 * 1024  # one record, one script scan or one page scan as JSON
+PAGE_OUTCOMES = ('', 'read', 'redirect', 'challenged', 'error_page', 'unanswered', 'refused', 'held')
+_LIBRARY_KEY = re.compile(r'^[a-z0-9][a-z0-9_.+-]{0,59}$')
+
+
+def _small(value, kind):
+    """``value`` when it is a ``kind`` whose JSON is at most MAX_READ_JSON, else an empty one: what a page read found is shown and read as data only."""
+    if not isinstance(value, kind):
+        return kind()
+    size = _json_size(value)
+    return value if size is not None and size <= MAX_READ_JSON else kind()
+
+
+def _flag(value):
+    return value is True
+
+
+def _head(raw):
+    """What one HEAD (or the GET that followed a 405) answered: the status and the three headers and title the check keeps. Never a body."""
+    status = raw.get('status')
+    return {'status': status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else None,
+            'method': raw.get('method') if raw.get('method') in ('HEAD', 'GET') else 'HEAD',
+            'server': _text(raw.get('server'), 300), 'powered_by': _text(raw.get('powered_by'), 300), 'title': _text(raw.get('title'), 300)}
+
+
+def _read_scan(raw):
+    """What one fetched script said, searched whole (``page_read._scanned`` of the Sentinel): bounded, and only the keys a script read looks at."""
+    if not isinstance(raw, dict):
+        return None
+    status = raw.get('status')
+    out = {'status': status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else 0, 'whole': _flag(raw.get('whole'))}
+    for key in ('truncated', 'held', 'overflow', 'blocks_more'):
+        if key in raw:
+            out[key] = _flag(raw[key])
+    if raw.get('error'):
+        out['error'] = _text(raw['error'], 200)
+    for key in ('versions', 'unplaceable', 'blocks', 'loaders'):
+        if isinstance(raw.get(key), list):
+            out[key] = _small(raw[key][:60], list)
+    return out
+
+
+def _read_scans(raw):
+    out = {}
+    for url, item in list(raw.items())[:MAX_READ_SCANS] if isinstance(raw, dict) else ():
+        scan = _read_scan(item)
+        if isinstance(url, str) and url and scan is not None:
+            out[_text(url, 500)] = scan
+    return out
+
+
+def _read_page(raw):
+    """One web base's read: the answer (``outcome``, ``status``, ``final_url``, ``location``) and, for a page that was read, what its scripts state."""
+    if not isinstance(raw, dict) or raw.get('outcome') not in PAGE_OUTCOMES:
+        return None
+    status = raw.get('status')
+    page = {'base': _text(raw.get('base'), 300), 'outcome': raw['outcome'],
+            'status': status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 999 else 0}
+    for key, limit in (('final_url', 500), ('location', 500), ('challenge', 60), ('error', 200)):
+        if raw.get(key):
+            page[key] = _text(raw[key], limit)
+    if raw['outcome'] != 'read':
+        return page
+    records = raw.get('records') if isinstance(raw.get('records'), dict) else {}
+    page['records'] = {k: _small(v, dict) for k, v in list(records.items())[:30] if isinstance(k, str) and _LIBRARY_KEY.match(k) and isinstance(v, dict)}
+    page['skipped'] = [[_text(u, 500), _text(w, 120)] for u, w in (r for r in raw.get('skipped', [])[:40] if isinstance(r, (list, tuple)) and len(r) == 2)]
+    page['truncated'] = [_text(u, 500) for u in raw.get('truncated', [])[:20] if isinstance(u, str)] if isinstance(raw.get('truncated'), list) else []
+    page['lazy'] = [_text(k, 60) for k in raw.get('lazy', [])[:20] if isinstance(k, str)] if isinstance(raw.get('lazy'), list) else []
+    page['inline'] = [[_text(k, 60), _text(v, 100)] for k, v in (r for r in raw.get('inline', [])[:20] if isinstance(r, (list, tuple)) and len(r) == 2)]
+    page['entries'] = [{'url': _text(e.get('url'), 500), 'kind': _text(e.get('kind'), 30), 'library': _text(e.get('library'), 60), 'fallback': _flag(e.get('fallback'))}
+                       for e in raw.get('entries', [])[:MAX_READ_SCRIPTS] if isinstance(e, dict) and isinstance(e.get('url'), str)]
+    for key in ('scripts', 'read_whole', 'inline_unread'):
+        value = raw.get(key)
+        page[key] = value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100000 else 0
+    page['capped'], page['page_truncated'] = _flag(raw.get('capped')), _flag(raw.get('page_truncated'))
+    page['page_scan'] = _read_scan(raw.get('page_scan')) or {}
+    return page
+
+
+def _reading(raw):
+    """A host's pages and scripts as a Sentinel read them (``page_read.read_host_libraries`` of the Sentinel), clipped to the keys and types a script read
+    uses (``cveFeed.validation.library_outcome``). ``None`` when it is not a reading."""
+    if not isinstance(raw, dict) or not isinstance(raw.get('pages'), list):
+        return None
+    pages = [p for p in map(_read_page, raw['pages'][:MAX_READ_PAGES]) if p is not None]
+    left = raw.get('budget_left')
+    return {'pages': pages, 'scanned': _read_scans(raw.get('scanned')), 'extra': _read_scans(raw.get('extra')),
+            'budget_left': left if isinstance(left, int) and not isinstance(left, bool) and 0 <= left <= 1000 else 0}
+
+
+def clean_page_read(body):
+    """The ``page_read`` result: per read, a ``head`` (one HEAD, a GET only after a 405) or a ``reading`` (the front pages of web bases and the scripts they
+    load), or an ``error`` (the read could not be made: unknown, never a state)."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_READS:
+        raise ApiError(400, 'a page_read result lists its reads (at most %d)' % MAX_READS)
+    out = []
+    for item in reads:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+            continue
+        row = {'id': _text(item['id'], 200)}
+        if item.get('error'):
+            row['error'] = _text(item['error'], 200)
+        elif isinstance(item.get('head'), dict):
+            row['head'] = _head(item['head'])
+        else:
+            reading = _reading(item.get('reading'))
+            if reading is None:
+                row['error'] = 'the scanner reported neither an answer nor an error for this read'
+            else:
+                row['reading'] = reading
+        out.append(row)
+    return {'reads': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 def bind(kind, result, task):
     """``result`` cut down to what ``task`` asked about: a probe id the task did not plan, or a name it did not name, is dropped and counted."""
     target = task.target if isinstance(task.target, dict) else {}
@@ -668,8 +787,9 @@ def bind(kind, result, task):
         ratings = [r for r in result['ratings'] if r['id'] in asked]
         dropped = len(result['ratings']) - len(ratings)
         result = {**result, 'ratings': ratings}
-    elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe', 'route_probe_signed'):
-        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes', 'route_probe_signed': 'routes'}[kind]
+    elif kind in ('http_probe', 'alive_check', 'bucket_check', 'route_probe', 'route_probe_signed', 'page_read'):
+        key = {'http_probe': 'probes', 'alive_check': 'checks', 'bucket_check': 'buckets', 'route_probe': 'routes', 'route_probe_signed': 'routes',
+               'page_read': 'reads'}[kind]
         if kind in ('route_probe', 'route_probe_signed'):  # the routes a task asked about are the urls of its hosts
             asked = {u for h in target.get('hosts') or [] if isinstance(h, dict) for u in h.get('urls') or [] if isinstance(u, str)}
         else:

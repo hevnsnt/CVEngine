@@ -20,7 +20,7 @@ from reNgine.resources import ScannerUnavailable
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
-from tests.fake_scanner import assert_ran_nowhere_locally
+from tests.fake_scanner import LocalCapable, assert_ran_nowhere_locally
 
 FAST_XML = '''<?xml version="1.0"?>
 <nmaprun><host>
@@ -44,6 +44,7 @@ def _answer_queued_task(result, status='done'):
 
 class DispatchBase(TestCase):
     def setUp(self):
+        LocalCapable('openvas').apply(self)  # the generic dispatch tests use openvas as the kind that may still fall back locally; in production it has no local path (NEVER_LOCAL)
         self.org = Org.objects.create(name='D', slug='disp')
         self.project = Project.objects.create(name='D', slug='disp-p', insert_date=timezone.now(), org=self.org)
         self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())

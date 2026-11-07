@@ -16,28 +16,20 @@ class ToolVersionCheckTests(SimpleTestCase):
 	def test_it_reads_the_pins_and_flags_the_ones_that_are_behind(self):
 		def get(url, as_json=True):
 			host = urlparse(url).hostname
-			if host == 'nmap.org':
-				return '<a href="nmap-7.95.tar.bz2">x</a> <a href="nmap-99.1.tar.bz2">y</a> <a href="nmap-7.992.tar.bz2">z</a>'
-			if host == 'rubygems.org':
-				return {'version': '9.9.9'}
 			if host == 'proxy.golang.org':
 				return {'Version': 'v99.0.0'}
 			if host == 'pypi.org':
 				return {'info': {'version': '9999.0'}}
-			if host == 'api.github.com':
-				return [{'name': 'v3.3dev'}, {'name': 'v99.1'}, {'name': 'v3.2.3'}]
 			if host == 'go.dev':
 				return [{'version': 'go99.1rc1', 'stable': False}, {'version': 'go99.0.1', 'stable': True}]
 			return {'results': [{'name': 'stable'}, {'name': 'v99.2.0'}, {'name': 'v1.0.0'}]}
 		rows = {r['tool']: r for r in tools.collect(get)}
-		self.assertTrue(rows['nmap']['behind'])
-		self.assertEqual(rows['nmap']['latest'], '99.1')
-		self.assertTrue(rows['wpscan']['behind'])
-		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)'):
+		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
 			self.assertTrue(rows[tool]['behind'], tool)
-		self.assertEqual((rows['naabu']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
-		self.assertEqual((rows['testssl.sh']['latest'], rows['testssl.sh']['behind']), ('99.1', True))  # a development tag is not a release
-		self.assertIn('| nmap |', tools.report(list(rows.values())))
+		self.assertEqual((rows['nuclei']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
+		self.assertIn('| nuclei |', tools.report(list(rows.values())))
+		for gone in ('nmap', 'wpscan', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'testssl.sh'):  # the scan tools run on the Sentinels
+			self.assertNotIn(gone, rows)
 
 	def test_an_unreachable_site_is_unknown_not_a_crash(self):
 		def get(url, as_json=True):
@@ -51,7 +43,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 
 	def test_every_image_build_tool_is_pinned_to_a_version(self):
 		rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		for tool in ('nuclei', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'go (toolchain)', 'nmap', 'wpscan', 'testssl.sh'):
+		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
 			self.assertRegex(rows[tool]['pinned'], r'^\d+(\.\d+)+$', tool)
 
 	def test_a_tool_missing_from_the_checkout_is_skipped_but_a_required_one_is_not(self):
@@ -59,7 +51,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 			rows = tools.collect(lambda url, as_json=True: {})
 		names = {r['tool'] for r in rows}
 		self.assertNotIn('tailscale (sidecar image)', names)
-		self.assertIn('nmap', names)
+		self.assertIn('nuclei', names)
 
 	def exit_status(self, rows, *flags):
 		with mock.patch.object(tools, 'collect', return_value=rows), mock.patch.object(sys, 'argv', ['c', *flags]), \
@@ -82,13 +74,13 @@ class ToolVersionCheckTests(SimpleTestCase):
 		self.assertEqual(self.exit_status(missing_pin + unreachable), 0)
 
 	def test_a_renamed_pin_is_found_missing_by_collect(self):
-		with mock.patch.object(tools, 'pinned', side_effect=lambda path, pattern: None if 'NMAPVERSION' in pattern else '1.0'):
+		with mock.patch.object(tools, 'pinned', side_effect=lambda path, pattern: None if 'NUCLEI_VERSION' in pattern else '1.0'):
 			rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		self.assertIsNone(rows['nmap']['pinned'])
+		self.assertIsNone(rows['nuclei']['pinned'])
 
-	def test_nmap_has_a_checksum_for_the_amd64_rpm_and_for_the_source_tarball(self):
+	def test_the_go_toolchain_has_a_checksum_for_each_architecture(self):
 		dockerfile = open(os.path.join(os.path.dirname(PATH), '..', 'web', 'Dockerfile'), encoding='utf-8').read()
-		for name in ('NMAP_SHA256', 'NMAP_RPM_SHA256_AMD64'):
+		for name in ('GO_SHA256_AMD64', 'GO_SHA256_ARM64'):
 			self.assertRegex(dockerfile, rf'(?m)^ARG {name}=[0-9a-f]{{64}}$')
 
 	def test_the_github_token_goes_to_the_github_api_only(self):
@@ -101,13 +93,13 @@ class ToolVersionCheckTests(SimpleTestCase):
 			raise OSError('stop here')
 
 		with mock.patch.dict(os.environ, {'GITHUB_TOKEN': 'token-value'}), mock.patch.object(tools.urllib.request, 'urlopen', urlopen):
-			for url in ('https://api.github.com/repos/testssl/testssl.sh/tags', 'https://pypi.org/pypi/bbot/json', 'https://nmap.org/dist/'):
+			for url in ('https://api.github.com/repos/hevnsnt/CVEngine/tags', 'https://pypi.org/pypi/python-gvm/json', 'https://go.dev/dl/?mode=json'):
 				with self.assertRaises(OSError):
 					tools.fetch(url)
-		self.assertEqual(seen['https://api.github.com/repos/testssl/testssl.sh/tags'], 'Bearer token-value')
-		self.assertIsNone(seen['https://pypi.org/pypi/bbot/json'])
-		self.assertIsNone(seen['https://nmap.org/dist/'])
+		self.assertEqual(seen['https://api.github.com/repos/hevnsnt/CVEngine/tags'], 'Bearer token-value')
+		self.assertIsNone(seen['https://pypi.org/pypi/python-gvm/json'])
+		self.assertIsNone(seen['https://go.dev/dl/?mode=json'])
 		with mock.patch.dict(os.environ, {'GITHUB_TOKEN': ''}), mock.patch.object(tools.urllib.request, 'urlopen', urlopen):
 			with self.assertRaises(OSError):
-				tools.fetch('https://api.github.com/repos/testssl/testssl.sh/tags')
-		self.assertIsNone(seen['https://api.github.com/repos/testssl/testssl.sh/tags'])
+				tools.fetch('https://api.github.com/repos/hevnsnt/CVEngine/tags')
+		self.assertIsNone(seen['https://api.github.com/repos/hevnsnt/CVEngine/tags'])

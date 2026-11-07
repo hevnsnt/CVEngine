@@ -10,7 +10,7 @@ from cveFeed import host_context, port_inventory, probes, triage, validation, va
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth, Triage, TriageVerdict
 from reNgine import ai_providers
 from startScan.models import IpAddress, Port, Subdomain, Technology, Waf
-from tests.test_probes import answers, page
+from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_triage import reply
 from tests import ai_queue
@@ -308,12 +308,15 @@ class ValidationIntegrationTests(ContextFixture, TestCase):
     def test_the_runner_records_what_the_probe_found_and_reports_the_matching_version(self):
         self.sub.technologies.add(Technology.objects.create(name='nginx'))
         check = next(c for c in validation.plan_checks(self.subject(), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')
-        from tests import probe_scanner
-        from tests.fake_scanner import FakeScanner, LocalFallback
+        def nginx(task):  # the Sentinel's answer: what it read from the error page (the reading itself is the Sentinel's, cvengine_scanner.probes)
+            return {'outcome': 'done', 'touched': ['www.rt.test'], 'refused': [], 'probes': [
+                {'id': p['id'], 'observations': [{'kind': 'version', 'product': 'nginx', 'version': '1.24.0', 'variant': '', 'outcome': 'found', 'confidence': 0.9,
+                                                  'source': 'body:error-page', 'port': 0, 'url': '/', 'evidence': {}}]} for p in task['target']['probes']]}
         LocalFallback('none').apply(self)
-        get = answers({probes.PROBE_PATH: page(404, body='<hr><center>nginx/1.24.0</center>')})
-        with mock.patch('cveFeed.probes.recorrelate'), FakeScanner(kinds=['http_probe'], responders={'http_probe': lambda task: probe_scanner.result(task, get)}):
+        guard = assert_ran_nowhere_locally(self, 'http_probe')
+        with mock.patch('cveFeed.probes.recorrelate'), FakeScanner(kinds=['http_probe'], responders={'http_probe': nginx}) as fake:
             result = validation.run_fact_probe(check)
+        self.assertEqual((fake.served_kinds(), guard.calls), (['http_probe'], []))
         self.assertEqual((result['status'], result['observed']), ('observed', {'product': 'nginx', 'version': '1.24.0'}))
         self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', product='nginx', version='1.24.0').exists())
 
@@ -321,6 +324,14 @@ class ValidationIntegrationTests(ContextFixture, TestCase):
         check = next(c for c in validation.plan_checks(self.subject(), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')
         check['params']['host'] = 'gone.rt.test'
         self.assertEqual(validation.run_fact_probe(check)['status'], 'failed')
+
+    def test_with_no_scanner_able_to_take_it_the_probe_is_failed_and_nothing_runs_here(self):
+        check = next(c for c in validation.plan_checks(self.subject(), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')
+        LocalFallback('all').apply(self)  # even with every local fallback allowed: an http probe of a validation has none left in validation
+        guard = assert_ran_nowhere_locally(self, 'http_probe')
+        with mock.patch('cveFeed.probes.recorrelate'):
+            result = validation.run_fact_probe(check)
+        self.assertEqual((result['status'], guard.calls), ('failed', []))
 
     def test_probes_run_through_run_validation_with_the_same_gates(self):
         CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, matched_product='nginx', matched_version='', version_in_range=None, source='tech')

@@ -9,7 +9,7 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import probe_dispatch, probe_results
+from agentapi import probe_dispatch, probe_results, sentinel_dispatch
 from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError
@@ -1304,12 +1304,15 @@ class HygieneCheckStageTests(TestCase):
             hy.run_hygiene(self.domain.id)
         self.assertEqual(self.open_checks(), {'spf_softfail'})
 
-    def test_with_no_scanner_for_the_kind_and_the_fallback_allowed_it_runs_here_as_before(self):
+    def test_the_kind_never_runs_here_whatever_the_fallback_setting_says(self):
         LocalFallback('all').apply(self)
-        guard = mock.patch('cveFeed.hygiene._resolver', side_effect=RuntimeError('local DNS')).start()
-        out = hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda n, t: False)
-        self.assertEqual(out['tls_hosts'], 0)  # injected helpers keep the sweep here whatever scanners exist
-        guard.assert_not_called()
+        self.assertIn('hygiene_check', sentinel_dispatch.NEVER_LOCAL)
+        self.assertFalse(sentinel_dispatch.fallback_allowed('hygiene_check'))
+        with FakeScanner(kinds=['hygiene_check'], mode='offline') as fake:
+            counts = hy.run_hygiene(self.domain.id)
+        self.assertEqual((fake.served, self.guard.calls), ([], []))
+        self.assertIn('waiting for a scanner', counts['skipped'])
+        self.assertFalse(TlsCertificate.objects.exists())
 
 
 def timezone_now():
@@ -1431,9 +1434,15 @@ class DanglingDnsCheckTests(TestCase):
         self.assertIn('old.example.test', target['scope']['excluded'])
         self.assertEqual((got[0].severity, got[1]), (1, None))
 
-    def test_without_a_project_or_a_scanner_the_findings_are_assessed_here_as_before(self):
+    def test_the_kind_never_runs_here_whatever_the_fallback_setting_says(self):
         LocalFallback('all').apply(self)
-        with mock.patch.object(dangling_dns, 'assess', side_effect=lambda f, net=None: dangling_dns.Rating(note=f['host'])) as local:
-            got = dangling_dns.assess_all(self.findings, project=self.project)
-        self.assertEqual([r.note if r else None for r in got], ['app.example.test', 'old.example.test', None])
-        self.assertEqual(local.call_count, 2)
+        self.assertIn('dangling_dns_check', sentinel_dispatch.NEVER_LOCAL)
+        self.assertFalse(sentinel_dispatch.fallback_allowed('dangling_dns_check'))
+        with FakeScanner(kinds=['dangling_dns_check'], mode='offline') as fake:
+            self.assertEqual(dangling_dns.assess_all(self.findings, project=self.project), [None, None, None])
+        self.assertEqual((fake.served, self.guard.calls), ([], []))
+
+    def test_without_a_project_nothing_is_asked(self):
+        with FakeScanner(kinds=['dangling_dns_check'], responders={'dangling_dns_check': self.answer}) as fake:
+            self.assertEqual(dangling_dns.assess_all(self.findings), [None, None, None])
+        self.assertEqual((fake.served, self.guard.calls), ([], []))

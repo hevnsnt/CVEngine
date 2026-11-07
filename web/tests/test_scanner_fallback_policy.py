@@ -7,12 +7,16 @@ from django.test import SimpleTestCase
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
 from reNgine import resources
+from tests.fake_scanner import LocalCapable
 from tests.test_sentinel_dispatch import DispatchBase, _answer_queued_task
 
 ENV = dispatch.LOCAL_FALLBACK_ENV
 
 
 class PolicyParsingTests(SimpleTestCase):
+    def setUp(self):
+        LocalCapable('openvas').apply(self)  # openvas stands for a kind that may run here; in production it has no local path (NEVER_LOCAL)
+
     def kinds(self, value):
         with mock.patch.dict('os.environ', {ENV: value} if value is not None else {}, clear=False):
             if value is None:

@@ -22,7 +22,6 @@ DNS_TIMEOUT = 5
 TLS_TIMEOUT = 5
 TLS_PORTS = (443, 8443, 9443, 993, 995, 465, 636)
 MAX_TLS_TARGETS = 300
-TLS_WORKERS = 20
 # Mail providers rotate selector names; these cover Google, Microsoft 365, Mailchimp, SendGrid and the usual defaults.
 DKIM_SELECTORS = ('default', 'google', 'selector1', 'selector2', 'k1', 'k2', 'k3', 's1', 's2', 'dkim', 'mail', 'smtp',
                   'mandrill', 'mxvault', 'zoho', 'protonmail', 'fm1', 'fm2')
@@ -788,9 +787,6 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
     return stale
 
 
-REAL_NETWORK = (probe_tls, email_findings, has_record)  # the helpers run_hygiene's defaults are; a caller that injects any of them (tests) keeps the sweep here
-
-
 def _norm(name):
     return str(name or '').strip().lower().rstrip('.')
 
@@ -805,8 +801,8 @@ def _cert_info(host, port, cert):
 
 def _remote_review(domain, targets, hosts):
     """``(review, waiting)``: what a Sentinel's ``hygiene_check`` answered for the TLS endpoints ``targets`` and the mail names of ``domain`` (``hosts``
-    limits the run to those names), or ``(None, False)`` when no Sentinel can take the kind or one did not answer (the sweep checks here, as before), or
-    ``(None, True)`` when none can and the kind may not run here: nothing is recorded and the target stays due.
+    limits the run to those names), or ``(None, True)`` when no scanner can take the work (the kind never runs on this server): nothing is recorded and
+    the target stays due.
 
     ``review['infos']`` maps ``(host, port)`` to the certificate read, ``review['unknown_tls']`` holds the ``host:port`` of every endpoint the scanner
     did not answer for (not reported, refused by the policy or failed: never read as "nothing there"), ``review['mail']`` maps each reviewed name to
@@ -822,8 +818,6 @@ def _remote_review(domain, targets, hosts):
     except ScannerUnavailable as exc:
         logger.info('hygiene check of %s waits for a scanner: %s', domain.name, exc)
         return None, True
-    if result is None:
-        return None, False
     rows = {(_norm(c['host']), c['port']): c for c in result.get('certs') or []}
     review = {'infos': {}, 'unknown_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set()}
     for host, port in targets:
@@ -844,26 +838,23 @@ def _remote_review(domain, targets, hosts):
     return review, False
 
 
-def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_record, now=None, hosts=None):
+def run_hygiene(domain_id, now=None, hosts=None):
     """Check one target's certificates, TLS configuration and email authentication; upsert and resolve findings.
 
-    With the real network helpers (no injected ``probe``, ``emailer`` or ``mx``) the endpoints and mail names go to a Sentinel as one ``hygiene_check``
-    task when one can take it (``agentapi.probe_dispatch.try_hygiene``), and the server evaluates and stores what comes back exactly as it does its own
-    reads. An endpoint or a mail domain the scanner did not answer for is unknown: its open findings stay open. With no scanner able to take the work and
-    the kind off ``CVENGINE_LOCAL_FALLBACK`` nothing is recorded and the target stays due."""
+    The endpoints and mail names go to a Sentinel as one ``hygiene_check`` task (``agentapi.probe_dispatch.try_hygiene``); this server never reads a
+    certificate or a record itself. It evaluates and stores what comes back. An endpoint or a mail domain the scanner did not answer for is unknown: its
+    open findings stay open. With no scanner able to take the work (the kind is in ``sentinel_dispatch.NEVER_LOCAL``) nothing is recorded and the target
+    stays due."""
     from cveFeed import activity, changes
     from cveFeed.models import TlsCertificate
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
     project = domain.project_id
-    real_network = (probe, emailer, mx) == REAL_NETWORK  # compared with the helpers as defined, not the module names a test may have replaced
-    if probe is probe_tls:  # the project may authorise the tailnet devices of its own
-        probe = functools.partial(probe_tls, project=project)
     running = activity.log('hygiene', f'Checking TLS and email authentication for {domain.name}', project=project, status='running')
     found = []
 
     targets = tls_targets(domain, hosts=hosts)
-    review, waiting = _remote_review(domain, targets, hosts) if real_network else (None, False)
+    review, waiting = _remote_review(domain, targets, hosts)
     if waiting:
         activity.settle(running, 'done', message=f'Hygiene check of {domain.name}: waiting for a scanner, the target stays due', skipped=True)
         return {'tls_hosts': 0, 'mail_domains': 0, 'findings': 0, 'resolved': 0, 'cert_changes': 0, 'cleartext': 0,
@@ -871,26 +862,20 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     probed = 0
     cert_changes = 0
     existing = {(c.host, c.port): c for c in TlsCertificate.objects.filter(domain=domain)}  # one query; bounded by MAX_TLS_TARGETS
-    with concurrent.futures.ThreadPoolExecutor(max_workers=TLS_WORKERS) as pool:
-        for info in (review['infos'].values() if review is not None else pool.map(lambda t: probe(*t), targets)):
-            if not info:
-                continue
-            probed += 1
-            info = clip_certificate(info)  # the certificate is the scanned server's own text: fit it to the columns
-            prev = existing.get((info['host'], info['port']))
-            TlsCertificate.objects.update_or_create(
-                domain=domain, host=info['host'], port=info['port'],
-                defaults={**{k: info.get(k) or '' for k in ('subject', 'issuer', 'signature_algorithm', 'key_description', 'protocol',
-                                                            'cipher', 'chain_error')},
-                          'sans': info.get('sans') or [], 'not_before': info.get('not_before'), 'not_after': info.get('not_after'),
-                          'legacy_tls': bool(info.get('legacy_tls'))})
-            if changes.record_cert_change(domain, info['host'], info['port'], before=prev, after=info, project_id=project):
-                cert_changes += 1
-            found += evaluate_cert(info, now=now)
-    if review is not None:
-        mail_hosts, emailer = review['mail_hosts'], (lambda name: review['mail'][name])
-    else:
-        mail_hosts = email_domains(domain, mx) if hosts is None else ([domain.name] if domain.name in hosts and not is_ip(domain.name) else [])
+    for info in review['infos'].values():
+        probed += 1
+        info = clip_certificate(info)  # the certificate is the scanned server's own text: fit it to the columns
+        prev = existing.get((info['host'], info['port']))
+        TlsCertificate.objects.update_or_create(
+            domain=domain, host=info['host'], port=info['port'],
+            defaults={**{k: info.get(k) or '' for k in ('subject', 'issuer', 'signature_algorithm', 'key_description', 'protocol',
+                                                        'cipher', 'chain_error')},
+                      'sans': info.get('sans') or [], 'not_before': info.get('not_before'), 'not_after': info.get('not_after'),
+                      'legacy_tls': bool(info.get('legacy_tls'))})
+        if changes.record_cert_change(domain, info['host'], info['port'], before=prev, after=info, project_id=project):
+            cert_changes += 1
+        found += evaluate_cert(info, now=now)
+    mail_hosts, emailer = review['mail_hosts'], (lambda name: review['mail'][name])
     if mail_hosts:  # the email review includes the checks adapted from MailFail: credit it where people watch the work
         from cveFeed.mailfail import CREDIT
         shown = ', '.join(mail_hosts[:3]) + (f' and {len(mail_hosts) - 3} more' if len(mail_hosts) > 3 else '')
@@ -917,7 +902,7 @@ def run_hygiene(domain_id, probe=probe_tls, emailer=email_findings, mx=has_recor
     found += cleartext_found
 
     unanswered = None
-    if review is not None and (review['unknown_tls'] or review['unknown_mail']):
+    if review['unknown_tls'] or review['unknown_mail']:
         def unanswered(host, check):  # a certificate finding's host is 'name:port'; a mail finding's is the name or a record name under it
             if check.startswith('tls_'):
                 return host in review['unknown_tls']

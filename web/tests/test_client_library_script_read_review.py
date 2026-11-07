@@ -11,9 +11,8 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import detection, detection_author, js_libraries, local_egress, probes, triage, validation
+from cveFeed import detection, detection_author, js_libraries, local_egress, validation
 from cveFeed.models import CVEDetection, CVEEntry, CVEMatch, ServiceRun, Triage
-from targetApp.models import Domain
 from tests.test_client_library_validation import JQ, PAGE, STAYS_OPEN, Base, HotLaneTests, Site, alias_site, jquery_site, page, script
 
 VENDOR = 'https://www.v.test/assets/vendor.js'
@@ -268,19 +267,6 @@ class ModuleAndOtherSourceTests(Base):
 		self.assertFalse(validation.closed_by_script_read(m))
 		self.assertLessEqual(m.confidence, js_libraries.SHADOWED_CAP)  # an affected copy that may not run: kept as a capped candidate
 
-	def test_every_script_is_asked_for_in_full_never_revalidated_with_an_etag(self):
-		m = self.match()
-		js_libraries._remember(JQ, {'found': [['jquery', '3.6.0', 'banner']], 'truncated': False, 'sha256': 'x', 'etag': '"v1"', 'length': ''},
-							   self.project.id)
-		site, sent = jquery_site('3.6.0'), []
-
-		def get(url, headers=None):
-			sent.append(headers)
-			return site(url)
-		result = validation.run_script_read(RedirectScopeTests.check_for(self, m), get=get)
-		self.assertIn(JQ, site.calls)
-		self.assertEqual(sent, [None, None])  # the page and the script, neither with If-None-Match: a 304 leaves nothing to search
-		self.assertIn(STAYS_OPEN, result['summary'])  # read whole, no doubt left (a fixed version informs, never closes)
 
 
 def cache_clear():
@@ -308,83 +294,9 @@ class ManualValidateNowTests(Base):
 		self.assertEqual((ran, site.calls, result['reason']), ([], [], 'bounty_not_confirmed'))
 
 
-class Network:
-	"""``route_auth.probe_url`` for the real ``probes.fetch``: ``answers`` maps a URL to its answer, everything else is a 404."""
-	def __init__(self, answers):
-		self.answers, self.calls = answers, []
-
-	def __call__(self, url, max_bytes=None, browser=False, project=None, headers=None, **_kw):
-		self.calls.append(url)
-		answer = self.answers.get(url, {'status': 404, 'body': ''})
-		if isinstance(answer, Exception):
-			raise answer
-		return {'url': url, 'location': '', 'headers': {}, 'raw_headers': {}, 'title': '', **answer}
-
-
-class RedirectScopeTests(Base):
-	"""Every hop of the script read's own GETs, redirects included, passes the scope rules (F2), and a port this server holds is ``held`` (F4)."""
-
-	def check_for(self, m):
-		(row, _d), = triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain')))
-		return validation._script_read_check({**validation.subject_for(row, triage.load_findings([row])[0]), 'project_id': self.project.id},
-											 row.signature)
-
-	def read(self, net, check):
-		with mock.patch('cveFeed.route_auth.probe_url', net), mock.patch('cveFeed.route_auth.host_allowed', return_value=True), \
-				mock.patch('cveFeed.probes.time.sleep'):
-			return validation.run_script_read(check)
-
-	def test_a_script_redirect_to_a_host_outside_the_bug_bounty_scope_is_not_followed(self):
-		m = self.match()
-		apex = 'https://v.test/js/jquery.min.js'
-		net = Network({PAGE: {'status': 200, 'body': page('/js/jquery.min.js')['body']},
-					   JQ: {'status': 301, 'location': apex, 'body': ''}, apex: {'status': 200, 'body': script('3.6.0')}})
-		real = probes.scope_hop
-
-		def refusing(project_id, sub, unattended=True):
-			hop = real(project_id, sub, unattended=unattended)
-			return lambda host: 'outside the bug bounty scope' if host == 'v.test' else hop(host)
-		with mock.patch('cveFeed.probes.scope_hop', side_effect=refusing):
-			result = self.read(net, self.check_for(m))
-		self.assertIn(JQ, net.calls)
-		self.assertNotIn(apex, net.calls)  # v.test is in the host's name group, but the program's scope refuses it at the hop
-		self.assertNotIn('close_reason', result)
-
-	def test_the_bounty_gate_is_asked_at_every_hop(self):
-		m = self.match()
-		apex = 'https://v.test/js/jquery.min.js'
-		net = Network({PAGE: {'status': 200, 'body': page('/js/jquery.min.js')['body']},
-					   JQ: {'status': 301, 'location': apex, 'body': ''}, apex: {'status': 200, 'body': script('3.6.0')}})
-		asked = []
-
-		def refusal(_self, project_id, host=None, unattended=True, derived=False):
-			asked.append((host, unattended))
-			return 'not in the program scope' if host == 'v.test' else ''
-		with mock.patch('cveFeed.bounty_gate.Gate.refusal', refusal):
-			result = self.read(net, self.check_for(m))
-		self.assertIn(('v.test', True), asked)
-		self.assertNotIn(apex, net.calls)
-		self.assertNotIn('close_reason', result)
-
-	def test_a_host_scoped_target_reads_its_own_host_only_at_every_hop(self):
-		Domain.objects.filter(pk=self.domain.pk).update(name='www.v.test', scope_mode=Domain.SCOPE_HOST)
-		m = self.match()
-		apex = 'https://v.test/js/jquery.min.js'
-		net = Network({PAGE: {'status': 200, 'body': page('/js/jquery.min.js')['body']},
-					   JQ: {'status': 302, 'location': apex, 'body': ''}, apex: {'status': 200, 'body': script('3.6.0')}})
-		result = self.read(net, self.check_for(m))
-		self.assertIn(JQ, net.calls)
-		self.assertNotIn(apex, net.calls)
-		self.assertNotIn('close_reason', result)
-
-	def test_a_redirect_inside_the_scope_is_followed(self):
-		m = self.match()
-		moved = 'https://www.v.test/static/jquery.min.js'
-		net = Network({PAGE: {'status': 200, 'body': page('/js/jquery.min.js')['body']},
-					   JQ: {'status': 301, 'location': moved, 'body': ''}, moved: {'status': 200, 'body': script('3.6.0')}})
-		result = self.read(net, self.check_for(m))
-		self.assertIn(moved, net.calls)
-		self.assertIn(STAYS_OPEN, result['summary'])  # the moved file was read whole (a fixed version informs, never closes)
+class HeldPortTests(Base):
+	"""A script on a port this server held is ``held`` in a reading (``js_libraries.read_page``); the reads themselves, and every hop of them, are a
+	Sentinel's now (``page_read``) under the scope policy ``probe_scope.for_page_read`` builds (tests.test_page_read)."""
 
 	def test_a_script_on_a_held_port_is_held_not_unreachable(self):
 		reader = js_libraries.Reader(1, fresh=True)
@@ -396,19 +308,6 @@ class RedirectScopeTests(Base):
 		js_libraries.read_page(entries, PAGE, held, lambda url: '', {'left': 6}, reader=reader, report=report)
 		self.assertEqual(report['skipped'], [(JQ, 'held')])
 
-	def test_refetch_goes_through_the_vetters_port_rule_and_holds(self):
-		m = self.match()
-		calls = []
-
-		def get(url):
-			calls.append(url)
-			raise local_egress.PortHeld(443, 'skipped')
-		other_port = probes.refetch_script(self.project.id, m.subdomain, 'https://www.v.test:9443/js/jquery.min.js', get=get, page_url=PAGE)
-		self.assertEqual((other_port['whole'], calls), (False, []))
-		self.assertIn('port', other_port['error'])
-		held = probes.refetch_script(self.project.id, m.subdomain, JQ, get=get, page_url=PAGE)
-		self.assertTrue(held['held'])
-		self.assertEqual(calls, [JQ])
 
 
 class WholeBodyTests(TestCase):

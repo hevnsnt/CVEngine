@@ -24,6 +24,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import Subdomain
 from targetApp.models import Domain
 from tests.test_discovery_mode import call, tool
+from tests import hygiene_harness
 
 NOW = datetime.datetime(2026, 11, 4, 12, 0, tzinfo=datetime.timezone.utc)
 
@@ -262,7 +263,7 @@ class DnsConsensusTests(Base):
 		return functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)
 
 	def sweep(self, emailer):
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: False)
+		hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: False)
 		return {r.check_name: r for r in HygieneFinding.objects.filter(domain=self.domain, check_name__in=hy.ABSENCE_CHECKS)}
 
 	def test_a_one_off_failure_never_opens_a_finding(self):
@@ -414,7 +415,7 @@ class OrganizationalDomainTests(Base):
 			self.host(name)
 			zone[name] = ['v=spf1 -all']
 		emailer = functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: t == 'MX')
+		hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: t == 'MX')
 		rows = HygieneFinding.objects.filter(domain=self.domain, status='open', check_name='dmarc_none')
 		self.assertEqual([r.host for r in rows], ['example.com'])
 		self.assertEqual(sorted(rows[0].evidence['covers']), sorted(names))

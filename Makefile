@@ -17,7 +17,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-user openvas-down scanner-build scanner-logs
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-down scanner-build scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -96,9 +96,6 @@ test:			## Run the test suite (the stack must be running).
 openvas-up: check-env	## Start the optional OpenVAS (Greenbone) add-on (docs/OPENVAS.md). The first start loads the feeds for a long time and needs about 60 GB of Docker's disk; add COMPOSE_PROFILES=openvas to .env to keep it across updates.
 	@./scripts/openvas-disk-check.sh
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas up -d ${OPENVAS_SERVICES}
-
-openvas-user:	## Create the GVM user cvENGINE uses and save its generated login, encrypted (after make openvas-up).
-	./scripts/openvas-user.sh
 
 openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}

@@ -150,14 +150,20 @@ class FakeScanner:
             env = {name: '1' for name in ('CVENGINE_SENTINEL_CLAIM_TIMEOUT', 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT') if name not in os.environ}
             stack.enter_context(mock.patch.dict(os.environ, env))
             admin = self._admin()
-            state = builtin_scanner.ensure()['state']
-            if state != 'blob_written':
-                raise RuntimeError(f'the built-in enrollment did not write its blob: {state}')
-            with open(builtin_scanner.blob_path(), encoding='utf-8') as handle:
-                blob = sentinel_broker.decode_enrollment_blob(handle.read())
-            out = sentinel_broker.bootstrap({'enrollment_token': blob['enrollment_token'], 'name': 'fake-scanner', 'capabilities': self.kinds,
-                                             'max_concurrent': self.max_concurrent})
+            ensured = builtin_scanner.ensure()
+            state = ensured['state']
             from agentapi.models import Agent
+            if state == 'enrolled':  # a fake scanner of this test enrolled earlier and stopped: the same built-in Sentinel serves again, with this one's kinds
+                from agentapi import agent_scope as scope_lib
+                Agent.objects.filter(pk=ensured['agent_id']).update(capabilities=scope_lib.clean_capabilities(self.kinds), max_concurrent=self.max_concurrent)
+                out = {'id': ensured['agent_id']}
+            elif state != 'blob_written':
+                raise RuntimeError(f'the built-in enrollment did not write its blob: {state}')
+            else:
+                with open(builtin_scanner.blob_path(), encoding='utf-8') as handle:
+                    blob = sentinel_broker.decode_enrollment_blob(handle.read())
+                out = sentinel_broker.bootstrap({'enrollment_token': blob['enrollment_token'], 'name': 'fake-scanner', 'capabilities': self.kinds,
+                                                 'max_concurrent': self.max_concurrent})
             self.agent = Agent.objects.select_related('token__user').get(pk=out['id'])
             assert self.agent.token.user_id == admin.pk
             self.clock = _Clock(self)
@@ -376,6 +382,33 @@ class LocalFallback(contextlib.ContextDecorator):
         return self
 
 
+class LocalCapable(contextlib.ContextDecorator):
+    """``with LocalCapable('openvas'):`` takes the kinds out of ``sentinel_dispatch.NEVER_LOCAL`` for the block (or for a whole test with
+    ``LocalCapable('openvas').apply(self)`` in ``setUp``), so a test of the generic fallback machinery (the local-fallback list, the wording of a
+    run that falls back, the telemetry of the reason) has a kind that may still run here. No kind has a local path any more in production: this
+    exercises the policy code, not a scan. It drops ``scanner_state``'s cached answer on the way in and out, which is keyed by the policy."""
+
+    def __init__(self, *kinds):
+        self.kinds, self._patch = kinds, None
+
+    def __enter__(self):
+        from agentapi import sentinel_dispatch
+        self._patch = mock.patch.object(sentinel_dispatch, 'NEVER_LOCAL', tuple(k for k in sentinel_dispatch.NEVER_LOCAL if k not in self.kinds))
+        self._patch.start()
+        FakeScanner._forget_scanner_state()
+        return self
+
+    def __exit__(self, *exc):
+        self._patch.stop()
+        FakeScanner._forget_scanner_state()
+        return False
+
+    def apply(self, testcase):
+        self.__enter__()
+        testcase.addCleanup(self.__exit__, None, None, None)
+        return self
+
+
 class LocalRunDetected(AssertionError):
     """A scan tool was about to run on this server in a test that says it must not."""
 
@@ -397,13 +430,15 @@ LOCAL_RUNNERS = {
     'alive_check': (),  # likewise
     'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
     'route_probe_signed': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'page_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'openvas': (),  # likewise: no GMP session is opened here (cveFeed.openvas_scan.tick hands the batch to a Sentinel)
     'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'vhost_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'subdir_probe': (),  # likewise
-    'supplier_check': (),  # likewise
-    'hygiene_check': ('cveFeed.hygiene._fetch_cert', 'cveFeed.hygiene._resolver'),  # the certificate read and every DNS lookup of the sweep
-    'dangling_dns_check': ('cveFeed.dangling_dns.Net.ns', 'cveFeed.dangling_dns.Net.ask', 'cveFeed.dangling_dns.Net.registered', 'cveFeed.dangling_dns.Net.http_control'),
+    'vhost_probe': ('cveFeed.slow_web.get',),  # the GET every local virtual host and subdirectory request makes
+    'subdir_probe': ('cveFeed.slow_web.get',),
+    'supplier_check': ('cveFeed.supplier_scan.Network.fetch', 'cveFeed.supplier_scan.Network.tls', 'cveFeed.supplier_scan.Network.resolve'),
+    'hygiene_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'dangling_dns_check': (),  # likewise
     'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'waf': (),  # likewise
     'nmap_full': (),  # likewise
@@ -431,6 +466,8 @@ HEAVY_KINDS = {
     'alive_check': (),
     'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
     'route_probe_signed': (),
+    'page_read': (),
+    'openvas': (),
     'web_screenshot': (),
     'bucket_check': (),
     'vhost_probe': (),

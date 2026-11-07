@@ -728,8 +728,6 @@ class OpenvasTickTests(OpenvasFixture, TestCase):
 
     def test_one_line_per_tick_names_why_nothing_was_dispatched(self):
         FakeScanner(kinds=['openvas']).start_for(self)  # the built-in scanner has OpenVAS denied by default
-        self.settings.sentinel_only = True
-        self.settings.save()
         with self.assertLogs('cveFeed.openvas_scan', level=logging.INFO) as logs:
             out = self.tick()
         lines = [m for m in logs.output if 'OpenVAS tick' in m]
@@ -737,13 +735,11 @@ class OpenvasTickTests(OpenvasFixture, TestCase):
         self.assertIn('(disabled)', lines[0])
         self.assertIn('off on CVEngine Scanner', lines[0])
         self.assertIn('their hosts stay due', lines[0])
-        self.assertIn('Sentinel-only mode is on', out['skipped'])
+        self.assertIn('no opted-in host with an eligible Sentinel is due', out['skipped'])
         self.assertIn('OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner)', out['skipped'])
 
     def test_with_no_sentinel_at_all_the_returned_text_is_the_one_it_always_was(self):
-        self.settings.sentinel_only = True
-        self.settings.save()
         with self.assertLogs('cveFeed.openvas_scan', level=logging.DEBUG) as logs:  # debug: no Sentinel at all is the ordinary way to this server's own OpenVAS
             out = self.tick()
-        self.assertEqual(out, {'skipped': 'Sentinel-only mode is on and no opted-in host with an eligible Sentinel is due'})
+        self.assertEqual(out, {'skipped': 'no opted-in host with an eligible Sentinel is due'})
         self.assertIn('(never)', [m for m in logs.output if 'OpenVAS tick' in m][0])

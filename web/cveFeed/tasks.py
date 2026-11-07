@@ -131,7 +131,7 @@ def refresh_live_snapshots():
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which
-    polls the running task or starts the next due batch (see ``cveFeed.openvas_scan``). It has a queue of its own so it never holds up the
+    imports the running Sentinel task's report or hands the next due batch to a Sentinel (see ``cveFeed.openvas_scan``). It has a queue of its own so it never holds up the
     feed workers."""
     from cveFeed import openvas_scan
     return openvas_scan.tick()
@@ -144,14 +144,6 @@ def supplier_sweep():
     scans, enumerates or assesses anything. It has a queue of its own so a slow, deliberately paced sweep never holds up the feed workers."""
     from cveFeed import supplier_scan
     return supplier_scan.sweep_all()
-
-
-@app.task(name='openvas_check', bind=False, queue='cve_feed_queue')
-def openvas_check():
-    """Settings > OpenVAS' Test connection: only a worker has the sidecar's socket (the web container has none), so the page asks here. No
-    credential travels in the message: the worker reads the saved login itself."""
-    from cveFeed import openvas_scan
-    return openvas_scan.check_now()
 
 
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')

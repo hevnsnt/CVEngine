@@ -1891,7 +1891,7 @@ class OpenvasSettings(models.Model):
     The password is encrypted like every other stored secret and never leaves the server: the settings page says only whether it is set."""
 
     enabled = models.BooleanField(default=False)
-    sentinel_only = models.BooleanField(default=False)  # refuse the local gvmd fallback: a due batch with no eligible Sentinel stays due
+    sentinel_only = models.BooleanField(default=False)  # no longer read: OpenVAS only ever runs on a Sentinel (a due batch with no eligible Sentinel stays due)
     gmp_username = models.CharField(max_length=64, blank=True, default="")
     gmp_password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
     state = models.JSONField(default=dict, blank=True)  # the worker's last check: {checked_at, connected, gmp_version, error, feed: {...}}
