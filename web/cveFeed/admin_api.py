@@ -22,7 +22,7 @@ from django.utils.text import slugify
 from dashboard.models import (ApiCredential, AuditLog, Org, OrgMembership, Project, ProjectMembership, SystemTimings,
                               UserProfile)
 from tenancy import audit as audit_trail, roles
-from cveFeed import mailer, openvas_admin
+from cveFeed import mailer, openvas_admin, probe_cache
 
 
 class AdminError(Exception):
@@ -605,6 +605,29 @@ BEAT_FLUSH_SECONDS = 300
 BEAT_SILENT_SECONDS = 120
 
 
+WORKERS = {'discovery_worker': 'discovery_queue', 'cve_feed_worker': 'cve_feed_queue',
+           'validation_priority_worker': 'validation_priority_queue', 'classic_worker': 'api_queue'}  # the layout of celery-entrypoint.sh
+WORKER_PROBE_KEY = 'cvengine:admin:worker-probe'
+WORKER_PROBE_SECONDS = 30  # the workers' answer is served this long without asking again (and older ones at once, refreshed behind the request)
+
+
+def _inspect_workers(app, quick=False):
+    """What the workers say, as plain counts and names (task arguments never leave the worker): ``{'queues': {worker: [queue names]}, 'active': {worker:
+    running tasks}, 'active_warning': text}``. Celery waits out the whole 5 seconds when it does not know how many workers will answer, so the second
+    question names the workers that did answer (``destination``: it returns as soon as they all have); ``cveFeed.probe_cache`` keeps this off the request path."""
+    # ``quick`` (the one request with nothing held): stop waiting once as many workers as the layout has have answered; the refresh behind the next
+    # request waits the whole timeout, so a fifth worker that answered first cannot hide one of ours for longer than that
+    inspector = app.control.inspect(timeout=5, limit=len(WORKERS) if quick else None)
+    queues = {name: [q.get('name') for q in qs or []] for name, qs in (inspector.active_queues() or {}).items()}
+    active, warning = {}, ''
+    if queues:
+        try:
+            active = {name: len(tasks or []) for name, tasks in (app.control.inspect(timeout=5, destination=list(queues)).active() or {}).items()}
+        except Exception:  # queue routing remains observable even if the active-task query times out
+            warning = ' Active-task inspection did not respond.'
+    return {'queues': queues, 'active': active, 'active_warning': warning}
+
+
 def scheduler_health(request, actor):
     """Bounded, read-only scheduler and worker snapshot for the App Admin.
 
@@ -614,7 +637,7 @@ def scheduler_health(request, actor):
     """
     if not actor.is_superuser:
         raise AdminError(403, 'App Admin only')
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone as dt_timezone
     from django_celery_beat.models import PeriodicTask
     from cveFeed.models import (AutomaticValidation, DeferredRetest, OnDemandValidation, AgentActivity,
                                 ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
@@ -638,31 +661,25 @@ def scheduler_health(request, actor):
                           'next_due_state': 'past_due_unconfirmed' if overdue else ('estimated' if next_due else 'unknown'),
                           'dispatch_count': task.total_run_count,
                           'next_due_note': None if next_due else 'unknown for this schedule'})
-    expected = {'discovery_worker': 'discovery_queue', 'cve_feed_worker': 'cve_feed_queue',
-                'validation_priority_worker': 'validation_priority_queue', 'classic_worker': 'api_queue'}
+    expected = WORKERS
     worker_state = 'unknown'
     worker_note = 'No worker replied to the inspection within 5 seconds (all busy, or none running).'
     workers = []
+    workers_checked = None
     try:
-        inspector = app.control.inspect(timeout=5)
-        queues = inspector.active_queues() or {}
+        probe, workers_checked = probe_cache.cached_probe(WORKER_PROBE_KEY, lambda: _inspect_workers(app), fresh=WORKER_PROBE_SECONDS,
+                                                              first=lambda: _inspect_workers(app, quick=True))
+        queues, active, active_warning = probe['queues'], probe['active'], probe['active_warning']
         if queues:
-            active_warning = ''
             def is_worker_name(name, prefix):
                 # Celery deployments use both worker@host and celery@worker hostnames.
                 return prefix in str(name).split('@')
-            try:
-                active = inspector.active() or {}
-            except Exception:  # queue routing remains observable even if the active-task query times out
-                active = {}
-                active_warning = ' Active-task inspection did not respond.'
             for prefix, queue in expected.items():
                 names = [name for name in queues if is_worker_name(name, prefix)]
-                consuming = (any(any(q.get('name') == queue for q in queues.get(name) or []) for name in names)
-                             if names else None)
+                consuming = (any(queue in (queues.get(name) or []) for name in names) if names else None)
                 workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
                                 'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
-                                'active': sum(len(active.get(name) or []) for name in names) if active and names else None})
+                                'active': sum(active.get(name) or 0 for name in names) if active and names else None})
             missing = [row['worker'] for row in workers if row['consuming'] is not True]
             silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s']
             without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue']
@@ -719,7 +736,8 @@ def scheduler_health(request, actor):
     # beat writes its heartbeat every few seconds: silent for two minutes means it is not running (the schedule rows' last_run_at lags
     # by minutes even when it is); no heartbeat at all means beat predates it or Redis cannot be read, which proves nothing
     beat = {'state': 'unknown' if age is None else ('running' if age <= BEAT_SILENT_SECONDS else 'silent'), 'seconds_since_tick': age}
-    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers, 'beat': beat,
+    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers,
+            'workers_checked_at': datetime.fromtimestamp(workers_checked, tz=dt_timezone.utc).isoformat() if workers_checked else None, 'beat': beat,
             'scanning_paused': pause_requested(), 'archive_rediscovery': archive,
             'inactive_archive_review': inactive,
             'scheduler_process': 'unknown', 'scheduler_note': 'Last dispatch comes from Beat; this web request cannot inspect its process.',
