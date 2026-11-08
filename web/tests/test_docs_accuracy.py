@@ -160,12 +160,12 @@ class StaleClaimTests(SimpleTestCase):
             for phrase in stale:
                 self.assertFalse(phrase in text, f'{os.path.basename(name)} still says "{phrase}"')
 
-    def test_the_front_end_doc_names_the_six_rail_entries(self):
+    def test_the_front_end_doc_names_the_eight_rail_entries(self):
         text = doc_text('docs/FRONTEND.md')
         from cveFeed import nav
-        for label in ('Overview', 'Findings', 'Assets', 'Scans', 'Scanners', 'Bug bounty'):
+        for label in ('Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'):
             self.assertIn(f'**{label}**', text)
-        self.assertEqual(len(nav.SECTION_ICON), 6)
+        self.assertEqual(len(nav.SECTION_ICON), 8)
 
     def test_the_upgrade_notes_cover_1_4(self):
         text = doc_text('docs/UPGRADE.md')

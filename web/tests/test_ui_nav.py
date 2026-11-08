@@ -1,4 +1,4 @@
-"""The simplified shell: six rail entries, page tabs for the pages that moved under them, role-aware links, and the pages' small fixes.
+"""The simplified shell: eight rail entries (six, then Hygiene and Suppliers back), page tabs for the pages that moved under them, role-aware links, and the pages' small fixes.
 
 Every address that existed before the regroup still answers: the rail got shorter, no route went away.
 """
@@ -51,12 +51,12 @@ class ShellTests(TestCase):
 		self.assertEqual(r.status_code, 200, (path, r.status_code))
 		return r.content.decode()
 
-	def test_the_rail_has_six_entries_or_five_without_bug_bounty(self):
+	def test_the_rail_has_eight_entries_or_seven_without_bug_bounty(self):
 		self.assertEqual([label for label, _ in rail(self.get(self.root, '/cve/?project=alpha&skip=1'))],
-						['Overview', 'Findings', 'Assets', 'Scans', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
 		for user in (self.analyst, self.org_admin):
 			self.assertEqual([label for label, _ in rail(self.get(user, '/cve/?project=alpha&skip=1'))],
-							['Overview', 'Findings', 'Assets', 'Scans', 'Scanners'], user.username)
+							['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners'], user.username)
 		self.assertIn('Bug bounty', [label for label, _ in rail(self.get(self.pentester, '/cve/?project=alpha&skip=1'))])
 
 	def test_every_rail_entry_opens_a_page(self):
@@ -88,7 +88,8 @@ class ShellTests(TestCase):
 	def test_the_current_page_marks_its_entry_in_the_rail(self):
 		html = self.get(self.root, '/cve/alpha/hygiene/')
 		block = html[html.index('aria-label="Sections"'):html.index('<details class="acct">')]
-		self.assertRegex(block, r'data-nav="Findings"[^>]*aria-current="page"')
+		self.assertRegex(block, r'data-nav="Hygiene"[^>]*aria-current="page"')  # Hygiene has its own entry again, and it wins over Findings
+		self.assertNotRegex(block, r'data-nav="Findings"[^>]*aria-current')
 		self.assertNotRegex(block, r'data-nav="Assets"[^>]*aria-current')
 
 	def test_the_phone_bar_makes_findings_primary(self):
