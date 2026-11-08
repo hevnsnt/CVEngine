@@ -90,7 +90,7 @@ class EnrollmentNeedsAWriteTokenTests(SentinelBase):
         for token, paths in ((ro_root, ('/api/v1/sentinels/enroll', '/api/v1/orgs/one/sentinels/enroll', '/api/v1/projects/sen-a/sentinels/enroll')),
                              (ro_dana, ('/api/v1/orgs/one/sentinels/enroll', '/api/v1/projects/sen-a/sentinels/enroll'))):
             for path in paths:
-                for suffix in ('', '?format=blob'):
+                for suffix in ('', '?format=blob&network=external&profile=light'):
                     status, out = call(token, 'GET', path + suffix)
                     self.assertEqual(status, 403, (path, suffix, out))
         self.assertFalse(SentinelEnrollment.objects.exists())
@@ -469,7 +469,7 @@ class NetworkAuthorityTests(SentinelBase):
     """Whether a Sentinel sits inside a private network is the server's decision (its enrollment, or an administrator), never the Sentinel's claim."""
 
     def boot(self, network, caps=('nmap', 'nuclei_light', 'wpscan', 'network:internal')):
-        status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}')
+        status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}&profile=light')
         self.assertEqual(status, 201, out)
         self.assertEqual(SentinelEnrollment.objects.get(prefix=out['enrollment_token'][:10]).network, network)
         status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': f'net-{network}',

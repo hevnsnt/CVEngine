@@ -109,8 +109,15 @@ def _register_sentinel(request, ctx, **_):
 
 
 def _setup_choices(request):
-    """``(network, profile)`` from ``?network=external|internal&profile=full|light`` (each optional), for the Sentinel setup lines."""
-    return request.GET.get('network') or None, request.GET.get('profile') or None
+    """``(network, profile)`` from ``?network=external|internal&profile=full|light``, both required on ``?format=blob``: the
+    Provision form never picks for the person (Full runs OpenVAS and is heavy), so a missing or blank one is a 400, and
+    an invalid one is refused by ``clean_setup_choices``. The MCP tool keeps the Sentinel client's own defaults."""
+    network, profile = request.GET.get('network') or None, request.GET.get('profile') or None
+    if not network:
+        raise ApiError(400, 'network is required: external or internal (where the Sentinel runs)')
+    if not profile:
+        raise ApiError(400, 'profile is required: full or light (whether it also runs OpenVAS)')
+    return network, profile
 
 
 def _sentinel_enroll(request, ctx, slug, **_):

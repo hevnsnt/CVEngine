@@ -2387,3 +2387,11 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   a.sd-url{display:flex}
   .find>a,.host-head a.badge{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
 }
+/* Sentinels page: Provision form */
+.sentinels-grid{margin-top:0}
+.card-h{margin-bottom:var(--s-2)}
+.enroll-needs{margin-top:var(--s-5)}
+.enroll-intro{margin-bottom:var(--s-2)}
+.enroll-missing{margin:var(--s-2) 0 0}
+.enroll-missing[hidden],#enroll-out[hidden],#enroll-project-field[hidden],#enroll-org-field[hidden]{display:none}
+.btn[aria-disabled="true"]{cursor:not-allowed}
