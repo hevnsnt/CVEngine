@@ -66,28 +66,68 @@ def record_for(cve, detection_row=None):
     return record
 
 
-def export_seed(path, progress=None):
-    """Write the whole catalog to ``path`` (and ``path`` + ``.manifest.json`` beside it). Returns the manifest."""
+DROPPED_IDS_KEPT = 200
+
+
+def export_seed(path, progress=None, scrub=None, stage=None):
+    """Write the catalog to ``path`` (and ``path`` + ``.manifest.json`` beside it). Returns the manifest.
+
+    Nothing of this instance may leave with it (cveFeed.seed_scrub): a ``manual`` detection record is never written, and every string of
+    every record is scanned for this instance's own organizations, projects, domains, hosts and addresses and for secrets and internal
+    paths. A record whose CVE fields offend is dropped; one whose detection record offends is written without it. Both are counted in the
+    manifest's ``dropped`` (by reason, with the CVE ids; never the text found). ``scrub`` is a ``seed_scrub.Scrub`` (default: built from the
+    database); ``stage`` is called with a short description of what the export is doing."""
     from django.db.models import Max
-    detections = {d.cve_entry_id: d for d in CVEDetection.objects.exclude(strategy={}).iterator(chunk_size=2000)}
+    from cveFeed import seed_scrub
+    say = stage or (lambda text: None)
+    scrub = scrub if scrub is not None else seed_scrub.Scrub.from_database()
+    detections, manual = {}, 0
+    for d in CVEDetection.objects.exclude(strategy={}).iterator(chunk_size=2000):
+        if d.source == 'manual':  # a person's record is local to this instance
+            manual += 1
+        else:
+            detections[d.cve_entry_id] = d
+    if scrub.names or scrub.hosts or scrub.addresses:
+        say('Checking which of this instance\'s names also appear in public CVE text')
+        scrub.learn(seed_scrub.Scrub.feed_texts(record_for(c)) for c in CVEEntry.objects.order_by('id').iterator(chunk_size=2000))
     tiers, count = {'fire': 0, 'smoke': 0, 'ice': 0}, 0
+    written_detections = 0
+    dropped = {'records': 0, 'detections': 0, 'reasons': {}, 'ids': []}
+
+    def note(kind, cve_id, reasons):
+        dropped[kind] += 1
+        for reason in reasons:
+            dropped['reasons'][reason] = dropped['reasons'].get(reason, 0) + 1
+        if len(dropped['ids']) < DROPPED_IDS_KEPT:
+            dropped['ids'].append({'cve_id': cve_id, 'what': 'record' if kind == 'records' else 'detection', 'reasons': sorted(reasons)})
+
     # the newest publication time the snapshot holds: what a consumer may assume the feed is complete through (the export time says when
     # it was written, not what the catalog had read by then)
     covers_through = _iso(CVEEntry.objects.aggregate(newest=Max('published_at'))['newest'])
     directory = os.path.dirname(os.path.abspath(path))
     handle, tmp = tempfile.mkstemp(prefix='.cve-seed-', dir=directory)
     os.close(handle)
+    say('Writing the catalog')
     try:
         with gzip.open(tmp, 'wt', encoding='utf-8', compresslevel=9) as out:
             out.write(json.dumps({'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through,
                                   'detection_schema': detection.SCHEMA_VERSION}) + '\n')
-            for cve in CVEEntry.objects.order_by('id').iterator(chunk_size=2000):
+            for number, cve in enumerate(CVEEntry.objects.order_by('id').iterator(chunk_size=2000), 1):
                 record = record_for(cve, detections.get(cve.id))
+                whole, in_detection = scrub.check_record(record)
+                if whole:
+                    note('records', cve.cve_id, whole)
+                    continue
+                if in_detection:
+                    note('detections', cve.cve_id, in_detection)
+                    record.pop('detection', None)
                 tiers[record['tier']] += 1
+                written_detections += 'detection' in record
                 out.write(json.dumps(record, separators=(',', ':'), default=str) + '\n')
                 count += 1
-                if progress and count % 5000 == 0:
+                if progress and number % 5000 == 0:
                     progress(count)
+        say('Checking the file')
         digest = hashlib.sha256()
         with open(tmp, 'rb') as f:
             for block in iter(lambda: f.read(1 << 20), b''):
@@ -98,7 +138,8 @@ def export_seed(path, progress=None):
             os.unlink(tmp)
         raise
     manifest = {'format': FORMAT, 'generated_at': timezone.now().isoformat(), 'covers_through': covers_through, 'count': count, 'tiers': tiers,
-                'with_detection': sum(1 for d in detections.values()), 'bytes': os.path.getsize(path), 'sha256': digest.hexdigest()}
+                'with_detection': written_detections, 'manual_withheld': manual, 'dropped': dropped, 'bytes': os.path.getsize(path),
+                'sha256': digest.hexdigest()}
     with open(path + '.manifest.json', 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=1)
     return manifest
@@ -195,6 +236,37 @@ def iter_lines(path):
                 yield json.loads(line.decode('utf-8', errors='replace'))
             except ValueError:
                 continue
+
+
+def read_manifest_file(path):
+    """The manifest object in a ``.manifest.json`` file (size-capped); ValueError when it is missing or not understood."""
+    try:
+        with open(path, 'rb') as f:
+            body = f.read(MAX_MANIFEST_BYTES + 1)
+        manifest = json.loads(body.decode('utf-8')) if len(body) <= MAX_MANIFEST_BYTES else None
+    except (OSError, ValueError):
+        manifest = None
+    if not isinstance(manifest, dict) or manifest.get('format') != FORMAT:
+        raise ValueError('the seed manifest is missing or not understood')
+    return manifest
+
+
+def verify_seed(path, manifest):
+    """Check a seed file against its manifest (size, sha256, number of CVE lines) before anything is imported; ValueError on any difference."""
+    if not isinstance(manifest, dict) or manifest.get('format') != FORMAT or not re.fullmatch(r'[0-9a-f]{64}', str(manifest.get('sha256', ''))):
+        raise ValueError('the seed manifest is missing or not understood')
+    if os.path.getsize(path) != manifest.get('bytes'):
+        raise ValueError('the seed file is not the size its manifest says')
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            digest.update(block)
+    if digest.hexdigest() != manifest['sha256']:
+        raise ValueError('the seed does not match the checksum in its manifest')
+    lines = sum(1 for _ in iter_lines(path)) - 1  # the manifest line is not a CVE
+    if isinstance(manifest.get('count'), int) and lines != manifest['count']:
+        raise ValueError('the seed holds %d CVEs but its manifest says %d' % (lines, manifest['count']))
+    return manifest
 
 
 def import_seed(path, batch=1000, progress=None):

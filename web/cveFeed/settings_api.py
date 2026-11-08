@@ -11,7 +11,7 @@ import re
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
 from reNgine import ai_prompts
 from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
@@ -227,51 +227,113 @@ def ai_put(request):
     return ai_get(request)
 
 
-# --- the CVE catalog seed (build here, publish as the cve-seed release) --------------------------
+# --- the CVE catalog seed (create, download, import: cveFeed.seed_admin) --------------------------
 
-SEED_NAME = 'cve-seed.jsonl.gz'
-SEED_BUILDING = 'cvengine:cve-seed-building'
+SEED_NAME = seed_admin.SEED_NAME
+SEED_BUILDING = seed_admin.LOCK
 
 
 def seed_dir():
-    import os
-    from django.conf import settings
-    return os.path.join(getattr(settings, 'RENGINE_HOME', '/usr/src/app'), 'exports')
+    return seed_admin.seed_dir()
 
 
 def cve_seed_get(request):
-    """What the last build holds (count, tiers, how many carry a detection record, size, sha256) and whether one is running."""
-    import os
-    from django.core.cache import cache
-    path = os.path.join(seed_dir(), SEED_NAME)
-    manifest = None
-    try:
-        with open(path + '.manifest.json', encoding='utf-8') as f:
-            manifest = json.load(f)
-    except (OSError, ValueError):
-        pass
-    return {'built': manifest, 'building': bool(cache.get(SEED_BUILDING)), 'file': SEED_NAME if manifest and os.path.exists(path) else None}
+    """What the seed on disk holds (count, tiers, size, sha256, what the scrub dropped), when it is removed, and the running job's progress."""
+    return seed_admin.status()
 
 
 def cve_seed_build(request):
-    from django.core.cache import cache
     from cveFeed.admin_api import audit
     from cveFeed.tasks import build_cve_seed
-    if not cache.add(SEED_BUILDING, 1, 3600):
-        raise SettingsError(409, 'a seed is already being built')
-    build_cve_seed.delay()
+    if not seed_admin.begin('export', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    try:
+        build_cve_seed.delay(request.user.pk)
+    except Exception:
+        seed_admin.finish(error='the job could not be queued')
+        raise
     audit(request.user, 'cve_seed.build', SEED_NAME)
-    return {'building': True}
+    return seed_admin.status()
 
 
 def cve_seed_download(request, which):
+    """The seed or its manifest as an attachment, streamed from the private folder. App Admin only (checked by ``dispatch``), GET only,
+    a fixed file name (nothing in the request picks a path), and every download is audit-logged."""
     import os
-    path = os.path.join(seed_dir(), SEED_NAME)
-    path = path + '.manifest.json' if which == 'manifest' else path
-    if not os.path.isfile(path):
-        raise Http404('no seed has been built yet')
-    return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path),
-                        content_type='application/json' if which == 'manifest' else 'application/gzip')
+    from cveFeed.admin_api import audit
+    manifest, _ = seed_admin.built()
+    if manifest is None:
+        raise Http404('no seed has been created yet, or it was removed after 24 hours')
+    path = seed_admin.manifest_path() if which == 'manifest' else seed_admin.seed_path()
+    handle = open(path, 'rb')
+    response = FileResponse(handle, as_attachment=True, filename=os.path.basename(path),
+                            content_type='application/json' if which == 'manifest' else 'application/gzip')
+    response['Cache-Control'] = 'no-store'
+    response['X-Content-Type-Options'] = 'nosniff'
+    audit(request.user, 'cve_seed.download', os.path.basename(path), file=which, bytes=os.path.getsize(path), sha256=manifest.get('sha256'))
+    return response
+
+
+def cve_seed_import(request):
+    """Load a seed file uploaded by an App Admin. The file is the request body itself (``Content-Type: application/octet-stream``), read in
+    blocks straight to the private folder and never held in memory or parsed as a form: Django's CSRF check would otherwise parse a
+    multipart upload before this code could cap it. ``X-Seed-Manifest`` optionally carries the manifest's format, count, bytes and sha256
+    as JSON; with it the file is checked (size, sha256, count) before anything is imported. A worker then imports it with the same validation
+    as the command line (``seed.import_seed``)."""
+    import os
+    from cveFeed import seed
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import import_cve_seed_file
+    try:
+        declared = int(request.META.get('CONTENT_LENGTH') or 0)
+    except ValueError:
+        declared = 0
+    if declared > seed_admin.MAX_UPLOAD:
+        raise SettingsError(413, 'the file is larger than the %d MB limit' % (seed_admin.MAX_UPLOAD >> 20))
+    if request.content_type != 'application/octet-stream' or declared <= 0:
+        raise SettingsError(400, 'choose a seed file (cve-seed.jsonl.gz)')
+    manifest = None
+    raw_manifest = request.META.get('HTTP_X_SEED_MANIFEST')
+    if raw_manifest:
+        try:
+            manifest = json.loads(raw_manifest) if len(raw_manifest) <= 4096 else None
+        except ValueError:
+            manifest = None
+        if not isinstance(manifest, dict):
+            raise SettingsError(400, 'the seed manifest is missing or not understood')
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', request.META.get('HTTP_X_SEED_NAME', '') or 'seed')[:120]
+    if not seed_admin.begin('import', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    path = None
+    try:
+        path = seed_admin.save_stream(request, seed_admin.MAX_UPLOAD, 'incoming-seed')
+        with open(path, 'rb') as f:
+            if f.read(2) != b'\x1f\x8b':
+                raise ValueError('that is not a gzip file; choose cve-seed.jsonl.gz')
+        if manifest is not None:
+            seed.verify_seed(path, manifest)
+        else:
+            for _ in seed.iter_lines(path):  # the first line must be a seed manifest (format 1); nothing else is read yet
+                break
+    except (ValueError, OSError, EOFError) as exc:
+        seed_admin.finish(error=str(exc)[:300])
+        if path:
+            seed_admin._remove(path)
+        raise SettingsError(400, str(exc)[:300] or 'that file could not be read')
+    except BaseException:
+        seed_admin.finish(error='the upload failed')
+        if path:
+            seed_admin._remove(path)
+        raise
+    verified = manifest is not None
+    audit(request.user, 'cve_seed.import', name, bytes=os.path.getsize(path), verified=verified)
+    try:
+        import_cve_seed_file.delay(path, request.user.pk, verified)
+    except Exception:
+        seed_admin._remove(path)
+        seed_admin.finish(error='the job could not be queued')
+        raise
+    return seed_admin.status()
 
 
 def scan_policy_get(request):
@@ -1123,6 +1185,7 @@ ROUTES = [
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'cve_guidance/run', lambda r, **k: cve_guidance_run(r)),
     ('GET', r'cve_seed', lambda r, **k: cve_seed_get(r)), ('POST', r'cve_seed/build', lambda r, **k: cve_seed_build(r)),
+    ('POST', r'cve_seed/import', lambda r, **k: cve_seed_import(r)),
     ('GET', r'cve_seed/download/(?P<which>seed|manifest)', lambda r, which, **k: cve_seed_download(r, which)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),

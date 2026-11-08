@@ -323,22 +323,23 @@ class SeedAdminTests(TestCase):
 		import tempfile
 		from unittest import mock
 		self.dir = tempfile.mkdtemp()
-		patcher = mock.patch('cveFeed.settings_api.seed_dir', return_value=self.dir)
+		patcher = mock.patch('cveFeed.seed_admin.seed_dir', return_value=self.dir)
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		self.admin = User.objects.create_user('seed-admin', password='x', is_superuser=True)
 		self.client.force_login(self.admin)
 		from django.core.cache import cache
 		cache.delete('cvengine:cve-seed-building')
+		cache.delete('cvengine:cve-seed-job')
 
 	def test_build_queues_once_and_status_and_download_follow_the_files(self):
 		import os
 		from unittest import mock
 		from cveFeed import seed
-		self.assertEqual(self.client.get('/cve/api/settings/cve_seed').json(), {'built': None, 'building': False, 'file': None})
+		self.assertEqual(self.client.get('/cve/api/settings/cve_seed').json(), {'built': None, 'building': False, 'file': None, 'expires_at': None, 'job': None})
 		self.assertEqual(self.client.get('/cve/api/settings/cve_seed/download/seed').status_code, 404)
 		with mock.patch('cveFeed.tasks.build_cve_seed.delay') as delay:
-			self.assertEqual(self.client.post('/cve/api/settings/cve_seed/build', content_type='application/json').json(), {'building': True})
+			self.assertTrue(self.client.post('/cve/api/settings/cve_seed/build', content_type='application/json').json()['building'])
 			self.assertEqual(self.client.post('/cve/api/settings/cve_seed/build', content_type='application/json').status_code, 409)
 		delay.assert_called_once()
 		self.assertTrue(self.client.get('/cve/api/settings/cve_seed').json()['building'])
