@@ -489,7 +489,6 @@ const sections = {
       testNote,
       verified,
     );
-    modelsCard.style.maxWidth = "840px";
     modelsCard.classList.add("ai-models-card");
     const limitsCard = card(
       "Confirmation and limits",

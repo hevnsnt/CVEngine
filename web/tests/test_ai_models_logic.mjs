@@ -62,8 +62,8 @@ test('a reviewer row starts with Same as the default model, with no recommended 
 
 test('on Anthropic the empty choice of a reviewer row names the built-in model, because that is what it really uses', () => {
   const built = {review: 'claude-sonnet-5-5', ops: 'claude-haiku-5-5'};
-  assert.equal(M.sameLabel('anthropic', 'review', built), 'Built-in choice for this job: claude-sonnet-5-5');
-  assert.equal(M.sameLabel('anthropic', 'ops', built), 'Built-in choice for this job: claude-haiku-5-5');
+  assert.equal(M.sameLabel('anthropic', 'review', built), 'Built-in: claude-sonnet-5-5');
+  assert.equal(M.sameLabel('anthropic', 'ops', built), 'Built-in: claude-haiku-5-5');
   assert.equal(M.sameLabel('openai', 'review', built), 'Same as the default model');
   assert.equal(M.sameLabel('anthropic', 'review', null), 'Same as the default model');
 });

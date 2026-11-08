@@ -2300,10 +2300,8 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .ai-model input[aria-invalid="true"]{border-color:var(--fire);box-shadow:0 0 0 1px var(--fire)}
 .ai-model select[aria-busy="true"]{opacity:.7}
 .ai-inforce{margin:16px 0 0;padding:10px 12px;border-radius:var(--r);background:var(--sunk);color:var(--ink-2);font-size:14px;overflow-wrap:anywhere}
-.ai-savebar{position:sticky;bottom:calc(var(--tab) + env(safe-area-inset-bottom,0px));z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:16px;padding:12px 16px;max-width:640px;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r-l)}
+.ai-savebar{z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:16px;padding:12px 16px;max-width:640px;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r-l)}
 .ai-savebar .ai-dirty{margin:0}
 .ai-savebar .msg{flex:1 1 100%;margin:0}
-@media (min-width:640px){
-  .ai-jobs tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 24px}
-}
-@media (min-width:900px){.ai-savebar{bottom:0}}
+
+@media (min-width:900px){.ai-savebar{position:sticky;bottom:0}}

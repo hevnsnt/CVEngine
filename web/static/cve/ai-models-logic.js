@@ -80,7 +80,7 @@ export function checkModel(value) {
 
 // The words of the empty choice of a reviewer row. On Anthropic the reviewer has a model built in for each job; elsewhere it follows the default.
 export function sameLabel(provider, job, builtIn) {
-  if (provider === "anthropic" && builtIn && builtIn[job]) return `Built-in choice for this job: ${builtIn[job]}`;
+  if (provider === "anthropic" && builtIn && builtIn[job]) return `Built-in: ${builtIn[job]}`;
   return "Same as the default model";
 }
 
