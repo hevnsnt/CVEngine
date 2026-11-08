@@ -303,13 +303,16 @@ def classify(probe):
 def analyse(result):
     """Everything kept from one probe response: its state and evidence, and the kinds of sensitive data in it (counts and masked
     samples only). The body is read here and dropped, so a 64 KB page is not held until the stage ends."""
-    from cveFeed import sensitive
+    from cveFeed import secrets_catalog, sensitive
     state, evidence = classify(result)
     content_type = (result.get('content_type') or '')[:100]
     body = result.get('body') or ''
     found = sensitive.scan_text(body) if sensitive.is_text(content_type) else {}
     credentials = sensitive.credential_values(body) if any(t in found for t in sensitive.CREDENTIAL_TYPES) else []
+    # per credential, its line and the text around it with the value masked (cut here, while the body is in hand): what the secret's detail view shows
+    contexts = [secrets_catalog.context_snippet(body, value, secrets_catalog.classify(f'route:{name}', value).kind) for name, value in credentials]
     return {'credentials': credentials,  # raw values for the secrets inventory (_persist), held in memory, never stored
+            'credential_context': contexts,
             'status': result.get('status'), 'title': (result.get('title') or '')[:300], 'content_type': content_type,
             'state': state, 'evidence': evidence, 'sensitive': found, 'sensitive_score': sensitive.sensitive_score(found),
             # what the page was, for comparing it with the answer to a path that cannot exist (cvengine_scanner.soft404); held in memory, never stored
@@ -552,9 +555,10 @@ def _feed_inventory(scan, project, probed, now):
     seen = {}
     for url, result in probed.items():
         values = result.pop('credentials', None) or []
+        contexts = result.pop('credential_context', None) or []
         seen[url] = set()
         try:
-            seen[url].update(row.id for row in secrets_inventory.from_route(project, scan.domain_id, scan.id, url, values, now=now))
+            seen[url].update(row.id for row in secrets_inventory.from_route(project, scan.domain_id, scan.id, url, values, now=now, contexts=contexts))
         except Exception:  # noqa: BLE001 - an inventory problem must not lose the route check
             logger.exception('could not file the credentials served on %s in the secrets inventory', url)
     try:

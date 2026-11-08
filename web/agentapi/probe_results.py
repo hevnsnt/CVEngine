@@ -620,11 +620,19 @@ def _route_sensitive(raw):
 
 
 def _route_credentials(raw):
+    from cveFeed import secrets_catalog as catalog
     from cveFeed import sensitive
     out = []
     for item in raw[:MAX_ROUTE_CREDENTIALS] if isinstance(raw, list) else ():
         if isinstance(item, dict) and item.get('type') in sensitive.CREDENTIAL_TYPES and isinstance(item.get('value'), str) and 0 < len(item['value']) <= 8192:
-            out.append({'type': item['type'], 'value': item['value']})
+            row = {'type': item['type'], 'value': item['value']}
+            line = item.get('line')
+            if isinstance(line, int) and not isinstance(line, bool) and 1 <= line <= 10_000_000:
+                row['line'] = line
+            context = catalog.clean_context(item.get('context'))  # optional, masked by the Sentinel; masked again with the value in hand when it is filed
+            if context:
+                row['context'] = context
+            out.append(row)
     return out
 
 

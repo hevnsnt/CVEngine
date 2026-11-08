@@ -216,6 +216,8 @@ def persist(project, domain, scan_id, target, result, now=None):
     """File a cleaned ``secrets_scan`` result of hosts of ``domain`` (the target), read by scan ``scan_id`` (None for a validation a person asked
     for). Returns ``{'findings', 'secrets', 'validated'}``."""
     from cveFeed import secrets_inventory, secrets_validation
+    if result.get('values_scrubbed'):  # a result read again after its values were filed and dropped (``sentinel_broker.scrub_values``): nothing left to file
+        return {'findings': 0, 'secrets': 0, 'validated': False}
     now = now or timezone.now()
     validating = bool(target.get('validate'))
     findings = list(result.get('findings') or [])
@@ -231,7 +233,7 @@ def persist(project, domain, scan_id, target, result, now=None):
         outcome = secrets_validation.allowed_outcome(judged['rule_id'], (judged.get('validation') or {}).get('outcome'), validating)
         row = secrets_inventory.record(project.pk, host=_host_of(f['url']), url=f['url'], source='kingfisher', rule_id=f['rule_id'], value=f['secret'],
                                        domain_id=domain.pk, scan_id=scan_id, line=f.get('line'), confidence=f.get('confidence') or '',
-                                       outcome=outcome, meta=judged.get('validation_meta'), now=now)
+                                       outcome=outcome, meta=judged.get('validation_meta'), now=now, context=f.get('context') or '')
         if row is None:
             continue
         if key is not None and AWS_KEY_RULE not in row.rule_ids:
@@ -248,6 +250,9 @@ def persist(project, domain, scan_id, target, result, now=None):
     if filed:
         from cveFeed import scoring
         scoring.rescore_quietly(project.pk, sorted({_host_of(f['url']) for f in findings}))
+    if getattr(result, 'task_id', None):  # the values are filed (fingerprinted and masked): the task row does not keep them
+        from agentapi import sentinel_broker
+        sentinel_broker.scrub_values(result.task_id)
     return {'findings': len(findings), 'secrets': len(filed), 'validated': validated}
 
 
@@ -333,6 +338,9 @@ def clean_result(body, task_target=None):
         meta = secrets_inventory.clean_meta(item.get('validation_meta'))
         if meta:
             row['validation_meta'] = meta
+        context = catalog.clean_context(item.get('context'))  # optional, masked by the Sentinel; masked again with the value in hand when it is filed (secrets_inventory.record)
+        if context:
+            row['context'] = context
         findings.append(row)
     references = []
     for item in (body.get('references') or [])[:MAX_REFERENCES]:

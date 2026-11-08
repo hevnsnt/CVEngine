@@ -128,9 +128,11 @@ def _better(new, row):
 
 
 def record(project_id, *, host, url, source, rule_id, value, domain_id=None, scan_id=None, line=None, vulnerability_id=None, confidence='',
-           outcome='', meta=None, now=None):
+           outcome='', meta=None, now=None, context=''):
     """File one sighting of ``value``: the inventory row (made or updated) and its occurrence at ``url``. Returns the row, or None when the value or
-    the rule ID cannot be one (too short, too long, a malformed rule ID). ``outcome`` is Kingfisher's validation outcome, when it validated."""
+    the rule ID cannot be one (too short, too long, a malformed rule ID). ``outcome`` is Kingfisher's validation outcome, when it validated. ``context``
+    is the text around the value, if the caller has it: it is masked here (``secrets_catalog.mask_context``) whatever the caller did, and dropped
+    when the value could still be read in it."""
     from cveFeed.models import SecretFinding, SecretOccurrence
     if source not in SOURCES or not catalog.rule_id_ok(rule_id) or not usable(value):
         return None
@@ -141,6 +143,7 @@ def record(project_id, *, host, url, source, rule_id, value, domain_id=None, sca
     host = str(host or urlsplit(str(url or '')).hostname or '').strip().lower()[:255]
     url = clean_url(url) or host
     confidence = confidence if confidence in CONFIDENCE_RANK else ''
+    context = catalog.mask_context(context, value, kind.kind) if context else ''
     for attempt in range(2):
         try:
             with transaction.atomic():
@@ -173,13 +176,14 @@ def record(project_id, *, host, url, source, rule_id, value, domain_id=None, sca
                 occurrence, made = SecretOccurrence.objects.get_or_create(
                     finding=row, url=url, source=source, rule_id=rule_id,
                     defaults={'project_id': project_id, 'domain_id': domain_id, 'scan_id': scan_id, 'host': host, 'line': line,
-                              'vulnerability_id': vulnerability_id, 'first_seen': now, 'last_seen': now})
+                              'context': context, 'vulnerability_id': vulnerability_id, 'first_seen': now, 'last_seen': now})
                 if not made:
                     occurrence.last_seen, occurrence.retired_at = now, None
                     occurrence.scan_id = scan_id or occurrence.scan_id
                     occurrence.line = line if line is not None else occurrence.line
                     occurrence.vulnerability_id = vulnerability_id or occurrence.vulnerability_id
-                    occurrence.save(update_fields=['last_seen', 'retired_at', 'scan_id', 'line', 'vulnerability_id'])
+                    occurrence.context = context or occurrence.context  # a read that captured none keeps what an earlier one did
+                    occurrence.save(update_fields=['last_seen', 'retired_at', 'scan_id', 'line', 'vulnerability_id', 'context'])
                 _refresh_counts(row)
                 if row.remediation_status in CLOSED_REMEDIATION[:1] and row.status != 'revoked':
                     row.remediation_status = 'open'  # marked fixed, and served again
@@ -278,30 +282,35 @@ def rescore(row):
 # ----------------------------------------------------------------------------- scoring
 
 def host_secrets(project_id, hosts):
-    """``{host: [{severity, klass, path, label}]}``: the counting secrets each host serves now (occurrences not retired, of rows whose status counts),
+    """``{host: [{id, severity, klass, path, url, line, masked, basis, label}]}``: the counting secrets each host serves now (occurrences not retired, of rows whose status counts),
     and ``{host}`` of the hosts the inventory covers at all (any status), whose route samples then no longer score credentials."""
     from cveFeed.models import SecretOccurrence
     out, covered = {}, set()
     rows = (SecretOccurrence.objects.filter(project_id=project_id, host__in=hosts, retired_at__isnull=True)
-            .values('host', 'url', 'finding__severity', 'finding__klass', 'finding__status', 'finding__provider', 'finding__kind'))
+            .values('host', 'url', 'line', 'finding_id', 'finding__severity', 'finding__klass', 'finding__status', 'finding__provider', 'finding__kind',
+                    'finding__masked', 'finding__severity_basis')
+            .order_by('finding__severity', '-finding_id', 'id'))  # a stable order: the worst secret of equal rank is the same one on every pass
     for r in rows:
         covered.add(r['host'])
         if not catalog.counts(r['finding__status']):
             continue
         out.setdefault(r['host'], []).append({'severity': r['finding__severity'], 'klass': r['finding__klass'],
-                                              'path': urlsplit(r['url']).path or '/',
-                                              'label': f'{r["finding__provider"]} {r["finding__kind"]}'.strip()})
+                                              'path': urlsplit(r['url']).path or '/', 'id': r['finding_id'], 'url': r['url'], 'line': r['line'],
+                                              'masked': r['finding__masked'], 'basis': r['finding__severity_basis'],
+                                              'label': catalog.Kind(r['finding__provider'], r['finding__kind'], r['finding__klass'], '').label})
     return out, covered
 
 
 # ----------------------------------------------------------------------------- feeders
 
-def from_route(project_id, domain_id, scan_id, url, values, now=None):
-    """The credentials the route check read in one body (``sensitive.credential_values``: ``[(type, value)]``). Returns the rows."""
+def from_route(project_id, domain_id, scan_id, url, values, now=None, contexts=None):
+    """The credentials the route check read in one body (``sensitive.credential_values``: ``[(type, value)]``). ``contexts`` is, per value, the
+    ``(line, snippet)`` the route check cut from the body (``secrets_catalog.context_snippet``, the value already masked). Returns the rows."""
     rows = []
-    for name, value in values or ():
+    for index, (name, value) in enumerate(values or ()):
+        line, context = (contexts[index] if contexts and index < len(contexts) else None) or (None, '')
         row = record(project_id, host=urlsplit(url).hostname, url=url, source='route', rule_id=f'route:{name}', value=value, domain_id=domain_id,
-                     scan_id=scan_id, now=now)
+                     scan_id=scan_id, now=now, line=line, context=context)
         if row is not None:
             rows.append(row)
     return rows

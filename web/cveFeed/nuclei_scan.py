@@ -596,10 +596,11 @@ def _target_strings(sub):
     return list(dict.fromkeys(out))
 
 
-def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
+def run_cve_checks(scan, subs, ai=False, cve_runner=None, force=False):
     """For each host of the scan with CVE matches, run the CVE's template (installed, or AI-written and validated) against it.
     Only fire and smoke CVEs, at most MAX_CVES_PER_HOST per host, and a host this project already checked for that CVE inside
-    the TTL is left out (unless ``force``: a re-test after a change). Every CVE is its own non-fatal step. Returns ``{'cves': n, 'hosts': n, 'vulnerable': [...]}``."""
+    the TTL is left out (unless ``force``: a re-test after a change). ``ai`` is what ``templategen.run_cve_tests`` takes: whether an AI reviewer job may be
+    queued for a CVE with no safe installed template (the reviewer container writes the draft; nothing here holds a provider). Every CVE is its own non-fatal step. Returns ``{'cves': n, 'hosts': n, 'vulnerable': [...]}``."""
     from cveFeed import ledger
     from cveFeed.autofire import HOT_TIERS
     from cveFeed.nuclei_templates import MAX_CVES_PER_HOST
@@ -628,7 +629,7 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
         if not todo:
             continue
         try:
-            outcome = cve_runner(cve, todo, provider=provider, project=project)
+            outcome = cve_runner(cve, todo, ai=ai, project=project)
         except Exception:  # noqa: BLE001 - one CVE failing must not stop the rest
             logger.exception('CVE check %s failed for scan %s', cve.cve_id, scan.id)
             ledger.record(service, todo, project, scan, 'failed')
@@ -714,7 +715,9 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
         if out.get('error'):
             errors.append(out['error'])
     try:
-        checks = run_cve_checks(scan, subs, provider, cve_runner, force=force_cve_checks)
+        from cveFeed import ai_jobs
+        ai = provider is not None and ai_jobs.ai_on()  # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
+        checks = run_cve_checks(scan, subs, ai, cve_runner, force=force_cve_checks)
     except Exception as exc:  # noqa: BLE001
         logger.exception('CVE checks failed for scan %s', scan_id)
         checks = {'cves': 0, 'hosts': 0, 'vulnerable': []}

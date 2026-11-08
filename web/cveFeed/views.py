@@ -75,6 +75,17 @@ _SEV_NAME = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low', 0: 'info'}
 TIER_RANK = {FIRE: 3, SMOKE: 2, ICE: 1}
 
 
+SCORE_PARTS_MAX = 16
+
+
+def score_part(line):
+    """One stored score line as the dashboard and the host page read it: the label, the points, the plain sentence and the evidence it links to.
+    A line stored before the sentences existed has only a label and points."""
+    ref = line.get('ref')
+    return {'label': str(line.get('label', ''))[:200], 'points': int(line.get('points') or 0), 'kind': str(line.get('kind') or '')[:30],
+            'text': str(line.get('text') or '')[:600], 'ref': ref if isinstance(ref, dict) else None}
+
+
 def _host_tip(sub, live_matches, severities, aliases=()):
     """A compact summary for the attack-surface hover card: no extra queries, only the prefetched matches/ips and the
     host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
@@ -83,9 +94,10 @@ def _host_tip(sub, live_matches, severities, aliases=()):
         tier = match_heat(match)
         if worst is None or TIER_RANK.get(tier, 0) > TIER_RANK.get(worst[1], 0):
             worst = (match.cve_entry.cve_id, tier)
-    reasons = [r.get('label', '') for r in (sub.score_detail or [])][:3] if hasattr(sub, 'score_detail') else []
-    score_parts = [{'label': str(r.get('label', ''))[:140], 'points': int(r.get('points') or 0)}
-                   for r in (sub.score_detail or [])[:8]] if hasattr(sub, 'score_detail') else []
+    detail = sub.score_detail or [] if hasattr(sub, 'score_detail') else []
+    reasons = [r.get('label', '') for r in detail][:3]
+    # every line of the score, so the lines add up to the number on the tile (at most a dozen: one per component of cveFeed.scoring)
+    score_parts = [score_part(r) for r in detail[:SCORE_PARTS_MAX]]
     return {
         'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
         'org': (sub.target_domain.project.org.name if sub.target_domain_id and sub.target_domain.project_id
@@ -98,6 +110,8 @@ def _host_tip(sub, live_matches, severities, aliases=()):
         'max_sev': _SEV_NAME.get(max(severities), '') if severities else '',
         'reasons': [r for r in reasons if r],
         'score_parts': score_parts,
+        'score_sum': sum(p['points'] for p in score_parts),
+        'project_slug': sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
         'aliases': list(aliases)[:12],
     }
 

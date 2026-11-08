@@ -8,6 +8,10 @@ import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
+import { dialog } from "/staticfiles/cve/ui.js";
+import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -148,6 +152,9 @@ async function paintCoverage() {
     const approx = capped ? "~" : "";
     $("s-coverage").textContent = `${approx}${total - never}`;
     $("s-coverage_of").textContent = `of ${approx}${total}`;
+    // the hosts left out of "of N" are said, with how many, so 29 of 29 and 40 hosts elsewhere reconcile on the tile itself
+    const note = $("s-coverage_note");
+    if (note) note.textContent = noAddress ? `${noAddress} more with no address to scan` : never ? `${never} not scanned yet` : "";
     const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
     $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
       (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts are counted.` : "");
@@ -177,6 +184,14 @@ async function paintHygiene(open) {
       li.append(el("i", "hy-dot"), el("span", "", hyName(g.check)), el("b", "", String(g.n)));
       box.append(li);
     });
+    // the rows add up to the number above them: whatever is not in a row above is one more row (other checks, low severity)
+    const shownN = top.reduce((n, g) => n + g.n, 0);
+    const restN = Number(open) - shownN;
+    if (top.length && restN > 0) {
+      const li = el("li", "sev-rest");
+      li.append(el("i", "hy-dot"), el("span", "", "Other checks and low severity"), el("b", "", String(restN)));
+      box.append(li);
+    }
     if (!top.length) box.append(el("li", "hy-none", open ? "Low severity only" : "All clear"));
   } catch (_) {
     hygieneSig = null;
@@ -293,13 +308,48 @@ function fillTip(cell) {
     tip.append(el("div", "tip-vuln", `Worst finding: ${info.max_sev}`));
   }
   if ((info.score_parts || []).length) {
-    (info.score_parts || []).forEach((part) => tip.append(el("div", "tip-reason", `${part.label}: +${part.points}`)));
+    // every line of the score, so the lines add up to the number in the header; a click on the tile opens each one with its evidence
+    const view = scoreLines(info.score_parts, {});
+    view.lines.forEach((part) => tip.append(el("div", "tip-reason", `${part.label}: +${part.points}`)));
+    tip.append(el("div", "tip-sum", view.capped ? `Lines add up to ${view.sum}, capped at 100` : `Lines add up to ${view.total}`));
+    tip.append(el("div", "tip-hint", "Click for what each line means"));
   } else {
     (info.reasons || []).slice(0, 3).forEach((r) => tip.append(el("div", "tip-reason", r)));
   }
 }
 tip.hidden = true;
 document.body.append(tip);
+
+// "Why does this host score N": every line of the score with what it means and a link to its evidence, then a way into the host
+function openScore(cell) {
+  let info = {};
+  try { info = JSON.parse(cell.dataset.info || "{}"); } catch (_) {}
+  const project = info.project_slug || slug;
+  const name = cell.dataset.name;
+  const dlg = dialog(`Why ${name} scores ${cell.dataset.score || 0}`, (body, close) => {
+    body.classList.add("score-dlg");
+    body.append(el("p", "note", [info.org, info.project].filter(Boolean).join(" / ") || "The score is the sum of these lines, at most 100."));
+    body.append(scoreList(info.score_parts || [], { slug: project, host: name }, {
+      score: Number(cell.dataset.score || 0),
+      // a secret opens in its side panel, over this dialog's page, without leaving the dashboard
+      onOpen: (l) => {
+        if (!l.ref || l.ref.type !== "secret" || !l.ref.id) return false;
+        close();
+        openSecret(project, l.ref.id);
+        return true;
+      },
+    }));
+    const actions = el("div", "actions");
+    const done = el("button", "btn ghost sm", "Close", { type: "button" });
+    done.onclick = close;
+    actions.append(done, el("a", "btn sm", "Open host", { href: hostsHref(name, project) }));
+    body.append(actions);
+  });
+  // focus starts on the title, not on the first link: a screen reader reads what the dialog is before it reads a line
+  const title = dlg.querySelector("h2");
+  title.tabIndex = -1;
+  title.focus();
+}
 
 // The dashboard spans every project the viewer can see, so a host opens in its own project, not the selected one
 function hostsHref(name, project) {
@@ -451,8 +501,14 @@ function hostDetails(info) {
   if (info.findings) box.append(el("span", "hx-d", `${info.findings} finding${info.findings === 1 ? "" : "s"}`));
   if (info.ips) box.append(el("span", "hx-d", `${info.ips} IP${info.ips === 1 ? "" : "s"}`));
   if ((info.aliases || []).length) box.append(el("span", "hx-d", `Also ${info.aliases.slice(0, 3).join(", ")}${info.aliases.length > 3 ? ` +${info.aliases.length - 3}` : ""}`));
-  const reasons = (info.score_parts || []).length ? info.score_parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
+  const parts = info.score_parts || [];
+  const reasons = parts.length ? parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
   reasons.slice(0, 3).forEach((r) => box.append(el("span", "hx-d hx-why", r)));
+  if (parts.length > 3) {
+    // the lines the tile has no room for are one row with their own total, so the visible lines and this row add up to the score
+    const rest = parts.slice(3);
+    box.append(el("span", "hx-d hx-why hx-more", `${rest.length} more line${rest.length === 1 ? "" : "s"} +${rest.reduce((n, p) => n + p.points, 0)}`));
+  }
   return box;
 }
 
@@ -521,6 +577,13 @@ function drawMap(nodes) {
         tip.style.left = `${Math.max(8, x)}px`;
         tip.style.top = `${Math.max(8, y)}px`;
       };
+      cell.addEventListener("click", (e) => {
+        // a plain click explains the score; a new-tab click, or the "Open host" link in the dialog, goes to the host
+        if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        tip.hidden = true;
+        openScore(cell);
+      });
       cell.addEventListener("mouseenter", (e) => { fillTip(cell); tip.hidden = false; place(e); });
       cell.addEventListener("mousemove", place);
       cell.addEventListener("mouseleave", () => (tip.hidden = true));
