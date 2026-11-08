@@ -323,6 +323,7 @@ AI_ERROR_HINTS = {
     'provider_json': 'the address answered, but not with an AI API: check that it is the server\'s API address (often ending in /v1)',
     'provider_shape': 'the address answered, but not in the shape this provider type uses: check that the provider type matches the server',
     'output_truncated': 'the reply was cut off at the reply limit: raise "Reply limit" (a reasoning model spends part of it thinking)',
+    'refused': 'the model declined to answer (stop reason: refusal): asking again does not change that; check the model and what it was asked',
     'empty_response': 'the model answered with nothing: a reasoning model may have used the whole reply limit thinking, so raise "Reply limit" or lower "Reasoning"',
 }
 

@@ -682,7 +682,11 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
     profiles = {sub.name: host_profile(sub, light.get(sub.name, ())) for sub in subs}
     from agentapi import stage_runs
     # asked once: when the pass waits on Sentinels and a later pass continues it (agentapi.stage_runs), the plan is the one the AI gave first
-    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider))
+    ai_notes = []
+    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider, notes=ai_notes))
+    for note in ai_notes[:1]:  # asked once, so said once: a later pass of the run has no notes
+        activity.log('run_check', f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates',
+                     project=project, scan_id=scan.id)
     result = {'targets': 0, 'findings': 0, 'groups': len(groups), 'hosts': len(profiles) - len(skipped), 'skipped': len(skipped),
               'reused': 0}
     errors = []

@@ -7,6 +7,11 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 
+def plain_failure(category, stop_reason=''):
+    from reNgine.ai_providers import plain_failure as say
+    return say(category, stop_reason, fix=True)
+
+
 def _iso(value):
     return value.isoformat() if value else None
 
@@ -75,7 +80,8 @@ def snapshot(days=7):
                   .order_by('-attempts')[:30])
     recent = [{'at': _iso(r.started_at), 'provider': r.provider, 'model': r.model,
                'actual_model': r.actual_model, 'stage': r.stage, 'status': r.status,
-               'error_category': r.error_category, 'input_tokens': r.input_tokens,
+               'error_category': r.error_category, 'stop_reason': r.stop_reason,
+               'reason': plain_failure(r.error_category, r.stop_reason) if r.status == 'failed' else '', 'input_tokens': r.input_tokens,
                'output_tokens': r.output_tokens, 'cache_read_tokens': r.cache_read_tokens,
                'cache_write_tokens': r.cache_write_tokens, 'duration_ms': r.duration_ms}
               for r in qs.order_by('-started_at', '-id')[:50]]
