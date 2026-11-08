@@ -30,8 +30,7 @@ STEPS = ('seed', 'plan', 'scanners', 'extras', 'build')
 PLANS = ('internal', 'both', 'external')
 WHERES = ('internal', 'external', 'both')
 EXTRAS = ('ai', 'notify', 'timezone', 'password')
-DEFAULT_DWELL_SECONDS = 90
-ENOUGH_HOSTS = 10  # findings that end the wait early: the dashboard already has something to show
+DEFAULT_DWELL_SECONDS = 60  # the most the last wizard screen ever stays up, and only while no host has been found at all
 LIVE_WINDOW = timedelta(minutes=3)  # a Sentinel heard from this recently is live (the broker's own window)
 REQUEUE_EVERY = 30  # seconds between two tries to start a discovery that found no scanner
 MAX_ENROLLMENTS_SHOWN = 5
@@ -648,7 +647,7 @@ def skip_step(request):
 # --- the building screen -------------------------------------------------------------------------------------------------------------------
 
 def dwell_seconds():
-    """How long a discovery is given before the dashboard opens with nothing found yet (``CVENGINE_SETUP_DWELL_SECONDS``, default 90, 0 turns the wait off)."""
+    """The most the last screen ("Getting everything ready") stays up while no host exists yet (``CVENGINE_SETUP_DWELL_SECONDS``, default 60, 0 turns the screen off)."""
     try:
         return max(0, min(900, int(os.environ.get('CVENGINE_SETUP_DWELL_SECONDS', DEFAULT_DWELL_SECONDS))))
     except ValueError:
@@ -671,9 +670,7 @@ def progress(request, now=None):
     live = live_sentinels(now)
     if not live['builtin']:
         kick_builtin_scanner()
-    out = {'sentinel': {**live, 'builtin_state': builtin_state()}, 'discovery': None, 'dwell': {'min_seconds': dwell_seconds()}}
-    started = _parse(disc.get('started_at'))
-    elapsed = int((now - started).total_seconds()) if started else None
+    out = {'sentinel': {**live, 'builtin_state': builtin_state()}, 'discovery': None, 'build': {'seconds': dwell_seconds()}}
     found = 0
     if disc.get('scan_id'):
         scan = ScanHistory._base_manager.filter(pk=disc['scan_id']).select_related('domain').only(
@@ -691,12 +688,19 @@ def progress(request, now=None):
     if disc.get('pending') and not disc.get('scan_id'):  # held until a scanner is live: shown as queued, with no scan in the list yet
         out['discovery'] = {'scan_id': None, 'domain': disc.get('domain'), 'state': 'queued', 'hosts': 0, 'recent': [], 'queue_position': None, 'error': '',
                             'text': discovery_text('queued', disc.get('domain'), 0, False)}
-    over = elapsed is None or elapsed >= out['dwell']['min_seconds']
-    finished = bool(out['discovery'] and out['discovery']['state'] in ('done', 'ended'))
-    ready = over or found >= ENOUGH_HOSTS or finished
-    out['dwell'].update(elapsed=elapsed, ready=bool(ready), hold=not ready,
-                        reason=('' if ready else 'Discovery found nothing yet, so the dashboard would open empty: giving it a little longer.' if not found
-                                else f'Discovery has found {found} so far: giving it a little longer so the dashboard opens with more in it.'))
+    # The last screen exists only to cover a first minute with nothing to show. One host anywhere (this discovery's, or any already on the install)
+    # and there is nothing to cover: the dashboard opens at once. With none, it stays at most ``seconds``, counted from the first time this screen
+    # asked (stored, so a reload does not restart the clock), and never when no discovery was started at all (nothing is coming).
+    hosts_present = found > 0 or Subdomain._base_manager.exists()
+    expecting = bool(out['discovery'] and out['discovery']['state'] not in ('done', 'ended'))  # a discovery that already ended has nothing more coming
+    cap = out['build']['seconds']
+    since = _parse(data.get('build_started_at'))
+    if request.GET.get('build') == '1' and since is None and not hosts_present and expecting and cap:
+        since = now
+        _store(row, build_started_at=now.isoformat())
+    waited = max(0, int((now - since).total_seconds())) if since else 0
+    out['build'].update(hosts_present=hosts_present, elapsed=waited, show=bool(expecting and not hosts_present and waited < cap and cap))
+    out['discovery_scan'] = out['discovery']['scan_id'] if out['discovery'] else None
     out['next'] = next_step(data)
     out['completed'] = bool(row.completed_at)
     return out
@@ -730,7 +734,7 @@ def finish(request):
     steps = (row.data or {}).get('steps') or {}
     for step in STEPS[1:-1]:
         steps.setdefault(step, 'skipped')
-    _store(row, steps=steps)
+    _store(row, steps=steps, build_started_at=None)
     apply_scanner_policy(row, request.user, final=True)
     if not row.completed_at:
         row.completed_at, row.completed_by = timezone.now(), request.user.username
