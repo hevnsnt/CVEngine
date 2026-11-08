@@ -416,16 +416,17 @@ class _Dispatch:
 
     @property
     def result(self):
-        return Result(self.task.result, agent_id=self.task.agent_id) if self.task.status == 'done' else None
+        return Result(self.task.result, agent_id=self.task.agent_id, task_id=self.task.pk) if self.task.status == 'done' else None
 
 
 class Result(dict):
     """A dispatched task's typed result, as the plain dict every caller reads, plus ``agent_id``: which Sentinel ran it. The built-in scanner scans from
     this server's own network (it shares celery's network namespace), so a stage treats what it measured as measured here (``ran_here``)."""
 
-    def __init__(self, data, agent_id=None):
+    def __init__(self, data, agent_id=None, task_id=None):
         super().__init__(data or {})
         self.agent_id = agent_id
+        self.task_id = task_id  # the row the result is stored in: ``sentinel_broker.scrub_values`` drops the values from it once they are filed
 
     @property
     def ran_here(self):
