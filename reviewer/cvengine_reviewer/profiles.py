@@ -209,8 +209,8 @@ def reasoning_plan(provider_id, model, level, max_tokens=None):
 STAGE_ANSWER_CAPS = {
     'finding_triage': 400, 'finding_triage_repair': 400,  # a short JSON object
     'local_check_suggestion': 1024, 'rdp_screenshot': 1024, 'validation_plan': 1024, 'operations_check': 4000,
-    'finding_review': 4000, 'nuclei_tag_selection': 1024, 'nuclei_targeting': 2048, 'autotune_advisor': 2000, 'cve_detection': 8192,
-    'template_generation': 6144,  # a whole nuclei template (YAML with requests, matchers and extractors)
+    'finding_review': 4000, 'autotune_advisor': 2000, 'cve_detection': 8192,
+    'template_generation': 6144,  # a whole detection template (YAML with requests, matchers and extractors)
 }
 # The reasoning of a model (a thinking block, or a local model's reasoning) is paid from the reply limit on Anthropic and on the self-hosted
 # servers. Without room of its own it can take the whole limit before the first word of the answer (stop reason max_tokens, no text), so
