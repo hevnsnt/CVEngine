@@ -292,7 +292,7 @@ class Command(BaseCommand):
             token = ApiToken.objects.create(user=admin, name=f'scale-sentinel-{i}', key_hash=agent_auth.hash_token(raw), prefix=raw[:8],
                                             scope='sentinel')
             sentinels.append(Agent.objects.create(token=token, name=f'scale-sentinel-{i}', kind='scanner', status='active', last_seen=now,
-                                                  capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl', 'waf', 'discover', 'secrets_scan'],
+                                                  capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'http_probe', 'waf', 'discover', 'secrets_scan'],
                                                   max_concurrent=4, scope={'projects': [SLUG]}, info={'version': '1.4.0'}))
         out['sentinels'] = len(sentinels)
         self.seed_tasks(project, sentinels, by_dom, domains, host_defs, n_tasks, task_days, rng)
@@ -306,7 +306,7 @@ class Command(BaseCommand):
         One INSERT ... SELECT generate_series (a few hundred thousand rows in seconds); ``result`` is a small typed record like a Sentinel's."""
         from agentapi.models import SentinelTask
         table = SentinelTask._meta.db_table
-        kinds = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl', 'waf', 'discover', 'secrets_scan')
+        kinds = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'http_probe', 'waf', 'discover', 'secrets_scan')
         scan_ids = [by_dom[d.id][-1].id for d in domains]
         agent_ids = [a.id for a in sentinels] or [None]
         n_hosts = len(host_defs)

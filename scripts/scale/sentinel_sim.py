@@ -60,6 +60,9 @@ def loop(i, args, end, stats, lock):
             call('heartbeat', 'POST', 'sentinel/heartbeat', {'running': []})
         r = call('tasks/next', 'POST', 'sentinel/tasks/next', {'wait': args.poll_wait, 'kinds': KINDS})
         task = None
+        if r is not None and r.status_code == 429:  # the per-token rate limit: wait as the answer says, as the shipped client does
+            time.sleep(float(r.headers.get('Retry-After', 1) or 1))
+            continue
         if r is not None and r.status_code == 200:
             task = (r.json() or {}).get('task')
         if task:
@@ -88,6 +91,7 @@ def main():
     ap.add_argument('--every', type=float, default=3.0)
     ap.add_argument('--heartbeat', type=float, default=60.0)
     ap.add_argument('--work', type=float, default=2.0)
+    ap.add_argument('--slots', type=int, default=1, help='tasks one Sentinel works at once (threads sharing its token)')
     ap.add_argument('--out', default='')
     args = ap.parse_args()
     host = urllib.parse.urlparse(args.url).hostname or ''
@@ -95,7 +99,7 @@ def main():
         raise SystemExit('refusing: the simulator only talks to a loopback or private address')
     stats, lock = {}, threading.Lock()
     end = time.monotonic() + args.seconds
-    threads = [threading.Thread(target=loop, args=(args.first + i, args, end, stats, lock), daemon=True) for i in range(args.sentinels)]
+    threads = [threading.Thread(target=loop, args=(args.first + i, args, end, stats, lock), daemon=True) for i in range(args.sentinels) for _ in range(args.slots)]
     for t in threads:
         t.start()
     for t in threads:
