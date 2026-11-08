@@ -119,6 +119,19 @@ def _env_in_force():
     return {name: os.environ.get(env_name, '').strip() for name, env_name in SETTING_ENV.items() if os.environ.get(env_name, '').strip()}
 
 
+def _nuclei_in_force(cfg):
+    """The model the Nuclei tag choice uses now, from what is known without asking the provider (the page asks for the list itself): a
+    chosen model, else the cheapest haiku of a list read in the last ten minutes, else '' (the page says the default is found when it loads)."""
+    if (cfg.nuclei_model or '').strip():
+        return cfg.nuclei_model.strip()
+    from reNgine import ai_nuclei_model
+    from reNgine.ai_providers import get_provider
+    try:
+        return ai_nuclei_model.haiku_default(get_provider(cfg.provider, api_key=cfg.api_key or 'x', base_url=cfg.base_url or None), fetch=False) or ''
+    except Exception:  # noqa: BLE001 - a stored provider this version does not know
+        return ''
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
@@ -128,7 +141,8 @@ def ai_get(request):
            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
-           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
+           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS, 'nuclei_model': cfg.nuclei_model,
+           'nuclei_model_in_force': _nuclei_in_force(cfg),
            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
     # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
     # `provider_defaults` and `effective`, which says where each value in force comes from).
@@ -172,6 +186,30 @@ def _ai_runtime_values(data):
     return out
 
 
+def _nuclei_model_value(raw, cfg, old_connection, old_value):
+    """The validated model for the Nuclei tag choice: '' (the default) or a model the provider lists. Checked against the provider's list
+    only when it changes, so saving the rest of the page never fails because the provider is slow."""
+    if raw is None:
+        raw = ''
+    if not isinstance(raw, str):
+        raise SettingsError(400, 'nuclei_model must be a model name, or empty for the default')
+    value = raw.strip()
+    if value == (old_value or '') and (cfg.provider, cfg.base_url) == (old_connection[0], old_connection[2]):
+        return value
+    if not value:
+        return ''
+    if not MODEL_NAME.match(value):
+        raise SettingsError(400, 'a model name is letters, digits and . _ : / @ + - (at most 100), or empty for the default')
+    key = cfg.api_key if (cfg.api_key != old_connection[3] or same_service(old_connection[0], old_connection[2], cfg.provider, cfg.base_url)) else ''  # a stored key goes only where it was saved for
+    try:
+        listed = _models_hit(cfg.provider, (cfg.base_url or '').strip(), key or '')['models']
+    except SettingsError as exc:
+        raise SettingsError(400, f'could not check the Nuclei model against the provider\'s list: {exc}')
+    if value not in {m['id'] for m in listed}:
+        raise SettingsError(400, 'the Nuclei model must be one the provider lists: choose it from the list')
+    return value
+
+
 def ai_put(request):
     from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
@@ -190,6 +228,11 @@ def ai_put(request):
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
+    old_nuclei = cfg.nuclei_model
+    if 'nuclei_model' in data:
+        cfg.nuclei_model = _nuclei_model_value(data['nuclei_model'], cfg, old_connection, old_nuclei)
+    elif (cfg.provider, cfg.base_url) != (old_connection[0], old_connection[2]):
+        cfg.nuclei_model = ''  # a model belongs to the provider it was chosen from
     old_runtime = {name: getattr(cfg, name) for name in AI_RUNTIME_FIELDS}
     runtime_changes = _ai_runtime_values(data)  # validated before anything is stored
     for name, value in runtime_changes.items():
@@ -221,6 +264,9 @@ def ai_put(request):
     changed = [name for name in AI_RUNTIME_FIELDS if getattr(cfg, name) != old_runtime[name]]
     connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
                   ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
+    nuclei = ['nuclei_model'] if cfg.nuclei_model != old_nuclei else []
+    if nuclei:
+        audit(request.user, 'ai.nuclei_model', cfg.provider, changed=nuclei, nuclei_model=cfg.nuclei_model or 'default')  # a model name, never a key
     if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
         audit(request.user, 'ai.settings', cfg.provider, changed=connection + changed, **{name: getattr(cfg, name) for name in changed})
     return ai_get(request)
@@ -337,28 +383,12 @@ def _clean_models(listed):
     return out
 
 
-def ai_models(request):
-    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
-    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
-    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
-    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+def _models_hit(provider, base_url, key, refresh=False):
+    """The provider's model list as ``ai_models`` answers it (cached per provider, address and key hash): ``{models, recommended,
+    nuclei_default}``. Raises SettingsError(400) with the plain reason when the list cannot be read."""
     from django.core.cache import cache
-    from reNgine.ai_providers import DEFAULT_MODELS, SELECTABLE, SERVER_URL_PROVIDERS, AIProviderError, get_provider, pick_cheapest_newest
-    data = _body(request)
-    cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    provider = data.get('provider') or cfg.provider
-    if provider not in DEFAULT_MODELS:
-        raise SettingsError(400, 'unknown provider')
-    base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
-    if base_url and not re.match(r'^https?://', base_url, re.I):
-        raise SettingsError(400, 'the server URL must start with http:// or https://')
-    if base_url and ai_url_blocked(base_url):
-        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
-    if provider in SERVER_URL_PROVIDERS and not base_url:
-        raise SettingsError(400, 'enter the address of the server first')
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
+    from reNgine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
     cache_key = _models_cache_key(provider, base_url, key)
-    refresh = data.get('refresh') is True
     hit = None
     if not refresh:
         try:
@@ -370,7 +400,10 @@ def ai_models(request):
             raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
             listed = _clean_models(raw)
             recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
-            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else ''}
+            from reNgine import ai_nuclei_model
+            haiku = ai_nuclei_model.remember(provider, base_url, raw)
+            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
+                   'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
             ttl = MODELS_CACHE_SECONDS
         except AIProviderError as exc:
             words = MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''))
@@ -387,7 +420,30 @@ def ai_models(request):
             pass
     if 'error' in hit:
         raise SettingsError(400, hit['error'])
-    return {'models': hit['models'], 'recommended': hit['recommended']}
+    return hit
+
+
+def ai_models(request):
+    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
+    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
+    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
+    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+    from reNgine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
+    data = _body(request)
+    cfg = AIProviderSettings.objects.first() or AIProviderSettings()
+    provider = data.get('provider') or cfg.provider
+    if provider not in DEFAULT_MODELS:
+        raise SettingsError(400, 'unknown provider')
+    base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and not re.match(r'^https?://', base_url, re.I):
+        raise SettingsError(400, 'the server URL must start with http:// or https://')
+    if base_url and ai_url_blocked(base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
+    if provider in SERVER_URL_PROVIDERS and not base_url:
+        raise SettingsError(400, 'enter the address of the server first')
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
+    hit = _models_hit(provider, base_url, key, refresh=data.get('refresh') is True)
+    return {'models': hit['models'], 'recommended': hit['recommended'], 'nuclei_default': hit.get('nuclei_default', '')}
 
 
 AI_ERROR_HINTS = {

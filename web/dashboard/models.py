@@ -100,6 +100,9 @@ class AIProviderSettings(models.Model):
 	structured_mode = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', auto, all, off
 	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
 	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
+	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
+	# cheapest haiku the provider lists as available, else the model above (reNgine/ai_nuclei_model.py). Never written by a migration.
+	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
