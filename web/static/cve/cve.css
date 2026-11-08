@@ -2354,6 +2354,6 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 
 /* ---- a finger, for the pages other PRs added after the slice above was written: About's table and fact links, a score line's link and a secret's place URL ---- */
 @media (pointer:coarse){
-  .about-table td a,.about-table th a,.about-facts dd a,a.score-label,a.sd-url{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit);max-width:100%}
+  .about-table td a,.about-table th a,.about-text>a:only-child,.about-facts dd a,a.score-label,a.sd-url{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit);max-width:100%}
   a.sd-url{display:flex}
 }
