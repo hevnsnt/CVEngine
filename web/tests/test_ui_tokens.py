@@ -78,3 +78,26 @@ class TokenTests(SimpleTestCase):
             for v in re.findall(r'border-radius:\s*([^;!}]+)', decl):
                 for part in v.split():
                     self.assertTrue(part in ('0', '50%', '999px') or part.startswith('var(--r'), '%s: %s' % (sel, v))
+
+
+class SpacingTests(SimpleTestCase):
+    PROP = r'(?<![\w-])((?:padding|margin)(?:-(?:top|right|bottom|left|block|inline)(?:-(?:start|end))?)?|gap|row-gap|column-gap)\s*:\s*([^;}]+)'
+
+    def test_padding_margin_and_gap_literals_are_on_the_4px_grid(self):
+        off = []
+        for sel, decl in scale_rules():
+            for prop, val in re.findall(self.PROP, decl):
+                val = re.sub(r'(?:calc|clamp|min|max|env|var)\([^()]*(?:\([^()]*\)[^()]*)*\)', '', val)  # functions are checked by their own tokens
+                for px in re.findall(r'(?<![\w.])(-?\d+(?:\.\d+)?)px', val):
+                    n = abs(float(px))
+                    if n not in (0, 2) and n % 4:
+                        off.append('%s {%s:%s}' % (sel, prop, val.strip()))
+        self.assertEqual(off, [])
+
+    def test_a_host_row_and_a_rail_link_are_each_defined_once_with_a_fixed_height(self):
+        self.assertEqual(len(re.findall(r'(?m)^\.host-row\{all:unset', CSS)), 1)
+        self.assertEqual(len(re.findall(r'(?m)^\.host-row\{', CSS)), 1)
+        self.assertEqual(len(re.findall(r'(?m)^  \.rail-nav a\{', CSS)), 1)
+        self.assertIn('.host-row:has(>.hr-top){height:var(--row-h)}', CSS)
+        self.assertIn('--row-h:64px;--nav-h:36px', CSS)
+        self.assertRegex(CSS, r'\.rail-nav a\{[^}]*height:var\(--nav-h\)')
