@@ -98,3 +98,19 @@ class EmptyReportSweepTests(UdpBase):
             self.assertEqual(udp_scan._empty_count('a', now=udp_scan.EMPTY_TTL + 11), 1)
             udp_scan._empty_reset('a')
             self.assertEqual(udp_scan._empty_count('a', now=5), 1)
+
+
+# Reports captured from the real nmap 7.99 in the Sentinel image (``nmap -6 -sU -Pn -n ... -oX -``), trimmed to what is read.
+REAL_NO_ROUTE = ('<?xml version="1.0"?><nmaprun scanner="nmap" args="nmap -6 -sU -Pn -n -p U:53 -oX - 2600:1900:4001:370:8000:1a0::">'
+                 '<scaninfo type="udp" protocol="udp" numservices="1" services="53"/><verbose level="0"/><debugging level="0"/>'
+                 '<runstats><finished time="1794110654" exit="success" elapsed="0.05"/><hosts up="0" down="0" total="0"/></runstats></nmaprun>')
+REAL_DOWN_ON_LINK = REAL_NO_ROUTE.replace('up="0" down="0" total="0"', 'up="0" down="1" total="1"')
+
+
+class RealReportTests(UdpBase):
+    def test_the_report_of_a_scanner_with_no_ipv6_route_is_not_a_result(self):
+        with self.assertRaises(udp_scan.UdpScanError):
+            udp_scan.host_from_report(REAL_NO_ROUTE, '2600:1900:4001:370:8000:1a0::')
+
+    def test_the_report_of_a_down_on_link_host_is_a_clean_empty_result(self):
+        self.assertEqual(udp_scan.host_from_report(REAL_DOWN_ON_LINK, 'fd00:dead:beef:77::99')['status'], 'down')

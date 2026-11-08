@@ -576,7 +576,7 @@ def scan_ip(ip, pipeline=None):
                         'the address stays due until one can')
         return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'waiting': True}
     except Exception as exc:  # noqa: BLE001 - failure stays visible, and the address is asked again tomorrow
-        logger.warning('background UDP scan of %s failed', address, exc_info=True)
+        logger.warning('background UDP scan of %s failed: %s', address, exc, exc_info=not isinstance(exc, UdpScanError))  # a UdpScanError says all there is
         if not isinstance(exc, (MemoryBusy, ScanAborted)):
             ledger.record(FAILED_SERVICE, [asset])
         activity.settle(running, 'failed', message=activity.diagnostic(f'Background UDP scan of {address}', f'{type(exc).__name__}: {exc}',
