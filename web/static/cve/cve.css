@@ -188,6 +188,7 @@ svg{flex:none}
     linear-gradient(var(--t),var(--t)) 100% 100%/12px 1px no-repeat,linear-gradient(var(--t),var(--t)) 100% 100%/1px 12px no-repeat}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:16px}
 .grid{display:grid;gap:14px}
+.grid>*{min-width:0} /* a grid item may shrink below its longest unbroken word (token names, hostnames) instead of widening the page */
 .sub{color:var(--muted);font-size:14px;margin:6px 0 0;max-width:68ch}
 .sub a{color:var(--ink-2);display:inline-block;padding:9px 0;margin:-9px 0}
 .note{font-size:13px;color:var(--muted)}
@@ -407,6 +408,7 @@ a.cve-link{font-family:var(--mono)}
 .acct-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .acct .chev{width:16px;height:16px;stroke:var(--muted);fill:none;stroke-width:2}
 .avatar{display:grid;place-items:center;width:30px;height:30px;border-radius:6px;background:var(--ink);color:var(--on-ink);font:700 13px var(--font)}
+.avatar[data-initial]::before{content:attr(data-initial)} /* the initial is drawn, not text, so it is not read as part of the menu's visible name */
 .menu{position:absolute;left:0;right:0;bottom:calc(100% + 6px);background:var(--surface);border:1px solid var(--ink);box-shadow:var(--pop);border-radius:var(--r-l);padding:6px;display:flex;flex-direction:column;animation:rise .15s ease}
 .menu a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--r-s);text-decoration:none;font-size:14px;font-weight:600;color:var(--ink)}
 .menu a svg,.menu button svg{width:18px;height:18px;color:var(--muted)}
@@ -551,6 +553,11 @@ circle.pop{animation:popin .5s ease}
 .feed li::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ice)}
 .feed li[data-tier="fire"]::before{background:var(--fire)}.feed li[data-tier="smoke"]::before{background:var(--smoke)}@media (hover:hover) and (pointer:fine){.feed li:hover{background:var(--surface-2)}}
 .feed li:last-child{border-bottom:0}
+/* Sentinels of one project: a long unbroken name or capability list wraps inside the row instead of stretching the page (the row is one grid track, and the name and the buttons may wrap) */
+#section:not([data-kind]) .feed li{grid-template-columns:minmax(0,1fr)}
+#section:not([data-kind]) .feed li>div{flex-wrap:wrap;min-width:0}
+#section:not([data-kind]) .feed li>div>div{min-width:0}
+#section:not([data-kind]) .feed .cve-id,#section:not([data-kind]) .feed .meta{overflow-wrap:anywhere}
 .feed li[hidden]{display:none}
 .cve-id{font:700 13.5px var(--mono)}
 .cve-title{grid-column:2;color:var(--ink-2);font-size:14px;overflow-wrap:anywhere}
@@ -2050,10 +2057,12 @@ section.internal[hidden]{display:none}
 
 /* settings: the tabs grouped in a column beside the panel; on a narrow screen the groups wrap into rows above it */
 .set-layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:24px;align-items:start}
-.set-nav[role=tablist]{display:flex;flex-direction:column;gap:14px;margin:0;padding:10px;overflow:visible;position:sticky;top:16px;border-radius:var(--r-l)}
+.set-nav{display:flex;flex-direction:column;gap:14px;margin:0;padding:10px;max-width:100%;background:var(--sunk);overflow:visible;position:sticky;top:16px;border-radius:var(--r-l)}
 .set-group{display:flex;flex-direction:column;gap:2px}
 .set-group-title{font:600 10px/1.3 var(--mono);text-transform:uppercase;letter-spacing:.14em;color:var(--muted);padding:0 10px 4px}
-.set-nav [role=tab]{justify-content:flex-start;text-align:left;width:100%;padding:0 10px!important}
+.set-nav button[data-tab]{flex:none;justify-content:flex-start;text-align:left;width:100%;background:transparent!important;border:0!important;box-shadow:none!important;transform:none!important;color:var(--muted)!important;min-height:34px!important;padding:0 10px!important;border-radius:7px!important;font-weight:650!important}
+@media (hover:hover) and (pointer:fine){.set-nav button[data-tab]:hover{color:var(--ink)!important}}
+.set-nav button[data-tab][aria-current="true"]{background:var(--ink)!important;color:var(--on-ink)!important}
 .set-group-items{display:flex;flex-direction:column;gap:2px}
 .set-group-items[hidden]{display:none}
 .set-toggle{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;cursor:pointer;text-align:left;text-transform:none;letter-spacing:.04em;font-size:12px}
@@ -2063,11 +2072,11 @@ section.internal[hidden]{display:none}
 .set-panel{min-width:0}
 @media (max-width:900px){
   .set-layout{grid-template-columns:minmax(0,1fr);gap:12px}
-  .set-nav[role=tablist]{position:static;gap:8px}
+  .set-nav{position:static;gap:8px}
   .set-group{flex-direction:row;flex-wrap:wrap;align-items:center}
   .set-group-title{width:100%;padding:0 4px 2px}
   .set-group-items{flex-direction:row;flex-wrap:wrap;align-items:center}
-  .set-nav [role=tab]{width:auto}
+  .set-nav button[data-tab]{width:auto}
 }
 
 /* the Live tile that names the longest unfixed issue: two lines at most */
