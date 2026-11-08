@@ -73,6 +73,18 @@ class LiveExternalsTests(Env, PolicyBase):
         call_command('external_sentinels', stdout=out)
         self.assertEqual(out.getvalue().strip(), 'EXTERNAL_SENTINELS_LIVE 2')
 
+    def test_a_database_not_yet_migrated_is_counted_with_the_filter_that_names_only_old_columns(self):
+        from io import StringIO
+        from django.db import ProgrammingError
+        self.external('Remote-1')
+        self.external('Remote-2')
+        stale = self.external('Remote-3')
+        type(stale).objects.filter(pk=stale.pk).update(last_seen=timezone.now() - sb.LIVE_WINDOW - timedelta(seconds=5))
+        with mock.patch.object(sb, 'live_externals', side_effect=ProgrammingError('column agentapi_agent.managed_settings does not exist')):
+            out = StringIO()
+            call_command('external_sentinels', stdout=out)
+        self.assertEqual(out.getvalue().strip(), 'EXTERNAL_SENTINELS_LIVE 2')  # the same two the last-resort rule counts
+
     def test_with_no_sentinels_of_your_own_it_says_zero(self):
         from io import StringIO
         out = StringIO()
