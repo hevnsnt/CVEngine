@@ -160,7 +160,7 @@ def generate_candidate(project_id, cve, provider):
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='succeeded', finished_at=timezone.now())
         return {'status': 'queued', 'job': job.pk,
                 'reason': 'the AI reviewer container writes the draft; it is validated when it lands and is never run on this host',
-                'provenance': 'AI-authored draft; static, syntax and benign fixture gates only'}
+                'provenance': 'AI-authored draft; static, syntax and benign control gates; automatic fixture test and second-pass review follow'}
     except Exception:
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='failed', finished_at=timezone.now())
         return {'status': 'failed', 'reason': 'template generation could not be queued'}

@@ -61,6 +61,7 @@ HANDLERS = {
     'autotune_advice': 'cveFeed.autotune',
     'rdp_screenshot': 'cveFeed.rdp_shot',
     'template_generation': 'cveFeed.templategen',
+    'template_validation': 'cveFeed.templatevalidate',
 }
 
 

@@ -485,7 +485,6 @@ def review_summary(triage_id):
 ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
-DRAFT_WAIT = timedelta(days=3)
 
 
 def _admin():
@@ -515,7 +514,7 @@ def ops_checks(now=None, templates_release=None):
     from agentapi.models import SentinelTask
     from agentapi.services import Ctx
     from agentapi.system_status import system_status
-    from cveFeed.models import AgentActivity, AIUsage, GeneratedTemplate
+    from cveFeed.models import AgentActivity, AIUsage
     from django.db.models import Count
     now = now or timezone.now()
     admin = _admin()
@@ -612,11 +611,12 @@ def ops_checks(now=None, templates_release=None):
     checks.append(_check('system', 'problem' if problems else 'ok', 'cvENGINE reports problems' if problems else 'cvENGINE reports no problems',
                          '\n'.join(problems), {'problems': problems}))
 
-    # AI-written templates waiting for a person
-    drafts = GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_DRAFT, created_at__lte=now - DRAFT_WAIT).count()
-    checks.append(_check('generated_templates', 'warning' if drafts else 'ok', 'AI-written nuclei templates wait for review',
-                         f'{drafts} draft template(s) have waited more than three days for a person to review them.' if drafts else '',
-                         {'waiting': drafts}, severity='info'))
+    # AI-written templates are validated by the system (cveFeed.templatevalidate), never by a person: only a real problem it cannot fix itself is reported
+    from cveFeed import templatevalidate
+    stuck = templatevalidate.problem(now)
+    checks.append(_check('generated_templates', 'warning' if stuck else 'ok',
+                         stuck['title'] if stuck else 'AI-written nuclei templates are validated automatically',
+                         stuck['detail'] if stuck else '', stuck['facts'] if stuck else {}))
 
     # AI calls failing
     ai_failed = list(AIUsage.objects.filter(status='failed', started_at__gte=now - timedelta(days=1))
