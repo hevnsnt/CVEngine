@@ -13,9 +13,10 @@ from django.utils import timezone
 
 from cveFeed import templategen
 from cveFeed.models import TriageCall
+from reNgine import ai_prompts
 from reNgine.ai_providers import clean_text, untrusted_block
 
-SYSTEM = ("You investigate whether a CVE really applies to one product on one host. First read host_metadata: every technology with "
+SYSTEM = ai_prompts.compose('validation_plan', "First read host_metadata: every technology with "
           "its version and where it was seen, the ports with product, version, extra info and banners, the front page headers, any CDN, "
           "WAF or hosting edge, certificates, the operating system guess, earlier probe and check results and the host's other CVE "
           "matches. Then say which missing fact decides the question: the product's version, which look-alike product it is (nginx, "

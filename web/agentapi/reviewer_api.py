@@ -64,6 +64,15 @@ def ops_report(request, ctx, body):
         raise ApiError(exc.status, str(exc))
 
 
+def usage(request, ctx, body):
+    from cveFeed import reviewer
+    _require_reviewer(ctx)
+    try:
+        return reviewer.record_usage(body)
+    except reviewer.VerdictError as exc:
+        raise ApiError(exc.status, str(exc))
+
+
 def next_jobs(request, ctx):
     from cveFeed import ai_jobs
     _require_reviewer(ctx)

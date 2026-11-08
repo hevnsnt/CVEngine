@@ -22,6 +22,7 @@ import re
 import yaml
 
 from cveFeed.safeyaml import load_template
+from reNgine import ai_prompts
 from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,8 @@ ALLOWED_TOP_KEYS = ALLOWED_PROTOCOLS | {"id", "info", "variables", "self-contain
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,100}$")
 SEVERITIES = {"info", "low", "medium", "high", "critical", "unknown"}
 
-SYSTEM_PROMPT = (
-    "You write nuclei v3 detection templates in YAML. Output ONLY one YAML document, "
+SYSTEM_PROMPT = ai_prompts.compose('template_generation',
+    "Write it as nuclei v3 YAML. Output ONLY one YAML document, "
     "no prose. Rules: id must be the lowercase CVE id (e.g. cve-2024-1234); include "
     "info.name, info.author: cvengine-ai, info.severity, info.description, "
     "info.reference, info.tags including the CVE id; use ONLY the http or network "
