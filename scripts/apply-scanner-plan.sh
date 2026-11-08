@@ -4,7 +4,7 @@
 # The web container cannot touch Docker or .env, so the page leaves a one-word request (web/.scanner-plan-wanted: internal, both or external) and
 # scripts/update-watch.sh starts this within seconds. It writes the choice with the same rules the updater and install.sh use (scripts/host-fit.sh), waits
 # until no scan is running (the server's processes are recreated to read the new setting; it exits 3 and the watcher asks again a little later), recreates web,
-# the workers and Beat, then removes the built-in scanner (external) or starts it again (internal, both). The answer is published for the page
+# the workers and Beat, then removes the built-in scanner (external) or starts it again (internal, both; it waits for the scanner's first heartbeat). The answer is published for the page
 # (web/.scanner-plan-applied.json) and the request removed, so it runs once. Safe to run by hand.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -51,7 +51,9 @@ if [ "$was" != "$now" ]; then
     exit 1
   fi
   for _ in $(seq 1 60); do "${COMPOSE[@]}" exec -T web python3 manage.py check >/dev/null 2>&1 && break; sleep 2; done
-  "${COMPOSE[@]}" exec -T web python3 manage.py ensure_builtin_scanner >>"$LOG" 2>&1 || true  # revokes the built-in scanner's token (off) or prepares its enrollment (on)
+  # Not run by hand here: Beat, just recreated, runs ensure_builtin_scanner at once (it revokes the built-in scanner's token when off, writes its enrollment when on), and a
+  # second run beside it can delete the enrollment the first one wrote, leaving the scanner a blob the server no longer knows. The scanner waits for the file;
+  # cvengine_scanner_start below waits for its first heartbeat.
   cvengine_scanner_fetch "${COMPOSE[@]}" >>"$LOG" 2>&1 || true
   [ "$now" = off ] || cvengine_scanner_start "${COMPOSE[@]}" >>"$LOG" 2>&1 || true
   [ "$now" = on ] || note="$note; the built-in scanner was removed"

@@ -444,6 +444,7 @@ class ScannerPlanRequestTests(FitCase):
         self.assertEqual(self.keys()['CVENGINE_BUILTIN_SCANNER'], '1')
         self.assertEqual(self.keys()['SCANNER_MEM_LIMIT'], '1g')
         self.assertEqual(self.answer()['plan'], 'both')
+        self.assertFalse(any('ensure_builtin_scanner' in c for c in self.calls()))  # Beat's own run does it; two at once can orphan the enrollment
 
     def test_the_watcher_starts_it_without_a_command_line(self):
         text = (SCRIPTS / 'update-watch.sh').read_text()
