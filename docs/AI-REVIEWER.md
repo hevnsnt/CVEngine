@@ -106,7 +106,7 @@ when it lands.
 1. **The stage queues a job.** It does everything it did before the call (the budgets, the caps, the deterministic ceilings, the claim on
    the evidence signature) and then queues one job: the stage's fixed system prompt; its parts in order, text cvENGINE wrote itself and
    data that came from a scanned host, a scanner or a feed; the answer schema; the request options (a pinned temperature and seed for a
-   self-hosted server, the stage's own reply limit, whether a reply cut off at the limit is asked once more with twice the limit); and, for
+   self-hosted server, the stage's own reply limit, the answer room of the stage, and the one automatic retry of a reply cut off at the limit, with twice the room plus the thinking room, up to 32768 tokens); and, for
    the RDP reading, one bounded image. Every string is masked for secrets first, as every prompt was. What the continuation needs (the claim,
    the rows, the facts the question was asked on) stays on the server and never leaves it.
 2. **The container takes it.** `GET /api/v1/reviewer/jobs/next` hands out up to 20 queued jobs, most urgent and oldest first, each leased
@@ -230,7 +230,7 @@ the numbers behind that state, and the actions it allows:
 | `scan_errors` | Failed lines in the activity feed in the last six hours, by kind | none |
 | `system` | Any problem `system_status` reports (workers, beat, disk, memory, feeds, certificates…) | none |
 | `generated_templates` | A real problem validating AI-written templates that the system cannot fix itself: drafts waiting more than six hours because no Sentinel that runs template checks is online or the AI provider is off, or every AI-written template rejected for a week (five or more, none valid). It never asks anyone to review a template; with nothing wrong there is no alert | none |
-| `ai_errors` | AI calls failed in the last 24 hours, by error category | none |
+| `ai_errors` | AI calls that failed in the last 24 hours, by stage and error category. A cut-off reply that the automatic retry answered is not a failure and is not counted (its number is in the facts as `cut_off_answered_by_retry`); `output_truncated` here means the reply was cut off again after the retry, and the alert says which stage and names the next step (lower **Reasoning**, or a model that thinks less). Warns from 10 failures | none |
 
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. An admin can dismiss an alert, and it stays dismissed until the problem changes.

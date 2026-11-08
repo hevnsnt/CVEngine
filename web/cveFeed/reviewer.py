@@ -618,13 +618,30 @@ def ops_checks(now=None, templates_release=None):
                          stuck['title'] if stuck else 'AI-written nuclei templates are validated automatically',
                          stuck['detail'] if stuck else '', stuck['facts'] if stuck else {}))
 
-    # AI calls failing
-    ai_failed = list(AIUsage.objects.filter(status='failed', started_at__gte=now - timedelta(days=1))
-                     .values('error_category').annotate(n=Count('id')).order_by('-n')[:8])
+    # AI calls failing, by stage and category. A reply that was cut off and then answered by the automatic retry is recorded as
+    # ``truncated_retried`` and is not a failure: only a cut-off that survived the retry counts here, and the stage is named.
+    since = now - timedelta(days=1)
+    ai_failed = list(AIUsage.objects.filter(status='failed', started_at__gte=since).exclude(error_category='truncated_retried')
+                     .values('stage', 'error_category').annotate(n=Count('id')).order_by('-n')[:12])
     total = sum(r['n'] for r in ai_failed)
-    checks.append(_check('ai_errors', 'warning' if total >= 10 else 'ok', 'AI calls are failing',
-                         ', '.join(f"{r['n']} {r['error_category'] or 'unknown'}" for r in ai_failed) + ' in the last 24 hours.' if total >= 10 else '',
-                         {'by_category': {r['error_category'] or 'unknown': r['n'] for r in ai_failed}}))
+    recovered = AIUsage.objects.filter(status='failed', started_at__gte=since, error_category='truncated_retried').count()
+    by_stage = {}
+    for r in ai_failed:
+        by_stage.setdefault(r['stage'] or 'unspecified', {})[r['error_category'] or 'unknown'] = r['n']
+    by_category = {}
+    for r in ai_failed:
+        by_category[r['error_category'] or 'unknown'] = by_category.get(r['error_category'] or 'unknown', 0) + r['n']
+    detail = ''
+    if total >= 10:
+        detail = ', '.join(f"{r['n']} {r['error_category'] or 'unknown'} in {r['stage'] or 'unspecified'}" for r in ai_failed) + ' in the last 24 hours.'
+        if 'output_truncated' in by_category:
+            detail += (' output_truncated: the reply was cut off even after the automatic retry with twice the room (up to 32768 tokens), so the model '
+                       'is spending the room on thinking. Next step: lower Reasoning for this model (Settings, AI model), or choose a model that '
+                       'thinks less; the stage is named above.')
+        if recovered:
+            detail += f' {recovered} other cut-off repl{"y was" if recovered == 1 else "ies were"} answered by the automatic retry and are not counted.'
+    checks.append(_check('ai_errors', 'warning' if total >= 10 else 'ok', 'AI calls are failing', detail,
+                         {'by_category': by_category, 'by_stage': by_stage, 'cut_off_answered_by_retry': recovered, 'automatic_retry': True}))
     return checks
 
 

@@ -124,9 +124,9 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
                    'safe_template': bool(template[0]), 'template_unavailable_reason': template[1] if not template[0] else ''}
         # templategen's prompt cleaner treats CVE feed text as hostile input. The hostname and IP are excluded.
         safe = templategen._clean_value(context, 500)
-        from reNgine.ai_providers import usage_stage
+        from reNgine.ai_providers import complete_with_headroom, usage_stage
         with usage_stage('validation_plan'):
-            decision = parse_plan(provider.complete(SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
+            decision = parse_plan(complete_with_headroom(provider, SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
         missing = [kind for kind in probe_kinds if kind not in (decision or {}).get('check_kinds', [])]
         if decision and missing:
             decision['check_kinds'] += missing  # an empty or narrow plan never ends a request while a probe can still find the fact

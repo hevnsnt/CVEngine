@@ -65,23 +65,25 @@ class RetryTests(Isolated):
             except ai.AIProviderError as error:
                 return error, fake
 
-    def test_a_cut_off_with_no_text_is_asked_once_more_with_four_times_the_room(self):
+    def test_a_cut_off_with_no_text_is_asked_once_more_with_twice_the_room_and_the_thinking_room(self):
         out, fake = self.run_with([SHAPES['thinking_only_max_tokens'](), SHAPES['text_only']('{"ok": 1}')])
         self.assertEqual(out, '{"ok": 1}')
-        self.assertEqual(fake.limits, [2048, 8192])
+        self.assertEqual(fake.limits, [4096, 6144])  # 2048 answer + 2048 thinking room; then 2 x 2048 + 2048
         self.assertEqual([r.stop_reason for r in AIUsage.objects.order_by('id')], ['max_tokens', 'end_turn'])  # both are in the usage table
 
     def test_only_one_retry_then_the_error_stands(self):
         out, fake = self.run_with([SHAPES['thinking_only_max_tokens']()])
         self.assertIsInstance(out, ai.AIProviderError)
-        self.assertEqual((out.category, fake.limits), ('output_truncated', [2048, 8192]))
+        self.assertEqual((out.category, fake.limits), ('output_truncated', [4096, 6144]))
         self.assertEqual(AIUsage.objects.count(), 2)
 
     def test_the_retry_is_capped_and_skipped_when_it_would_not_be_larger(self):
         out, fake = self.run_with([SHAPES['thinking_only_max_tokens']()], CVENGINE_AI_MAX_TOKENS='3000')
-        self.assertEqual(fake.limits, [3000, 8192])  # 12000 asked for, 8192 the ceiling
+        self.assertEqual(fake.limits, [5048, 8048])  # the owner's 3000 is the answer room: 3000 + 2048 thinking; then 2 x 3000 + 2048
         out, fake = self.run_with([SHAPES['thinking_only_max_tokens']()], CVENGINE_AI_MAX_TOKENS='8192')
-        self.assertEqual(fake.limits, [8192])
+        self.assertEqual(fake.limits, [10240, 18432])  # past the old 8192 ceiling: the hard ceiling is 32768
+        out, fake = self.run_with([SHAPES['thinking_only_max_tokens']()], CVENGINE_AI_MAX_TOKENS='20000')
+        self.assertEqual(fake.limits, [22048, 32768])
         out, fake = self.run_with([SHAPES['thinking_only_max_tokens']()], CVENGINE_AI_MAX_TOKENS='32768')
         self.assertEqual(fake.limits, [32768])
 
@@ -244,7 +246,8 @@ class ReasonShownTests(Isolated):
         row = snapshot()['recent'][0]
         self.assertEqual((row['stop_reason'], row['error_category']), ('max_tokens', 'output_truncated'))
         self.assertTrue(row['reason'].startswith('The model answered with no text (it stopped at the token limit)'))
-        self.assertIn('CVENGINE_AI_MAX_TOKENS', row['reason'])
+        self.assertIn('Reasoning', row['reason'])  # the real next step; the automatic retry already asks for more room
+        self.assertNotIn('CVENGINE_AI_MAX_TOKENS', row['reason'])
         self.assertNotIn('private reasoning', json.dumps(snapshot(), default=str))
 
     def test_a_success_has_no_reason(self):
