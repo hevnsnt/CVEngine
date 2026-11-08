@@ -121,7 +121,7 @@ class BuiltinScannerComposeTests(unittest.TestCase):
         self.assertEqual(self.scanner['restart'], 'unless-stopped')
 
     def test_it_has_a_memory_limit(self):
-        self.assertEqual(self.scanner['mem_limit'], '${SCANNER_MEM_LIMIT:-2g}')
+        self.assertEqual(self.scanner['mem_limit'], '${SCANNER_MEM_LIMIT:-3g}')
 
     def test_the_host_network_overlay_points_it_at_a_published_web(self):
         overlay = (ROOT / 'docker-compose.hostnet.yml').read_text()  # read as text: it uses Compose's own !reset tag

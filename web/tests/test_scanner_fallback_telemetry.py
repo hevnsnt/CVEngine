@@ -226,4 +226,4 @@ class SystemStatusBlockTests(Base):
 
     def test_the_scanner_reading_is_exactly_the_scanner_state(self):
         out = system_status._scanner(True)
-        self.assertEqual(set(out) - {'messages', 'message', 'disabled_message', 'never_seen_message'}, {'offline', 'kinds', 'never_seen'})
+        self.assertEqual(set(out) - {'messages', 'message', 'cooling_message', 'disabled_message', 'never_seen_message'}, {'offline', 'kinds', 'never_seen'})

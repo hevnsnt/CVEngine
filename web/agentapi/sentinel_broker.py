@@ -173,12 +173,27 @@ def _end_unreported(agent_id, running):
     return ended
 
 
-def _limit(token, action):
-    """Count one call of ``action`` against the token's window and its user's (``agent_broker._limit``'s rule, for this module's own ``RATES``)."""
-    limit, window = RATES[action]
+CLAIM_BASE, CLAIM_PER_SLOT = 60, 30  # mirrored by the Sentinel client (client.config.claim_limit): its pacing stays under this
+
+
+def claim_limit(max_concurrent):
+    """Claim-endpoint calls (a poll and an accept each count) one Sentinel of this concurrency may make per window: a flat 60 a minute refused a well behaved
+    Sentinel with ten slots and short tasks (each task costs two calls), so the allowance grows with its slots, never below the old 60."""
+    try:
+        slots = max(1, int(max_concurrent))
+    except (TypeError, ValueError):
+        slots = 1
+    return max(CLAIM_BASE, CLAIM_PER_SLOT * slots)
+
+
+def _limit(token, action, limit=None):
+    """Count one call of ``action`` against the token's window and its user's (``agent_broker._limit``'s rule, for this module's own ``RATES``), 429 past either.
+    ``limit`` replaces the table's number (the claim endpoint scales with the Sentinel's slots). The refusal carries ``Retry-After``: the seconds the window has left."""
+    base, window = RATES[action]
+    limit = limit or base
     if not (broker._hit(f'agentapi:{action}:{token.key_hash[:16]}', limit, window)
             and broker._hit(f'agentapi:{action}:user:{token.user_id}', limit * broker.USER_RATE_FACTOR, window)):
-        raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds')
+        raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(f'agentapi:{action}:{token.key_hash[:16]}', window))
 
 
 def _template_bundle(ctx, action):
@@ -1728,7 +1743,7 @@ def next_task(ctx, body=None):
         raise ApiError(400, f'kinds must be a list drawn from {", ".join(SentinelTask.KINDS)}')
     kinds = set(raw_kinds) if raw_kinds else set(SentinelTask.KINDS)
     wait = min(MAX_WAIT, broker._whole(body.get('wait', 0), 'wait'))
-    broker._limit(agent.token, 'claim')
+    _limit(agent.token, 'claim', claim_limit(agent.max_concurrent))
     deadline = time.monotonic() + wait
     held = False
     # a long poll holds a web thread: the instance cap holds for every Sentinel but the built-in one, and no Sentinel counts against its user's
@@ -1792,7 +1807,7 @@ def _ensure_eligible(agent, task):
 
 def accept_task(ctx, task_id):
     agent = _sentinel_agent(ctx)
-    broker._limit(agent.token, 'claim')
+    _limit(agent.token, 'claim', claim_limit(agent.max_concurrent))
     now = timezone.now()
     broker._touch(agent, now)
     reap_expired(now)
@@ -2489,6 +2504,12 @@ def clean_result(kind, body, task=None):
 _KILLED = re.compile(r'(?:exited|exit(?:ed)? code|status)\D{0,12}(?:-9|-137|137)\b|\bkilled\b', re.I)
 
 
+APPARMOR_WORDS = ("the host's AppArmor profile blocks Chromium's sandbox: run the scanner with an AppArmor profile that allows user namespaces "
+                  '(config/apparmor/cvengine-scanner, docs/DEPLOYMENT.md "Screenshots and AppArmor")')
+_APPARMOR = re.compile(r'credentials\.cc|permission denied \(13\)', re.I)
+_BROWSER_GONE = re.compile(r'target page, context or browser has been closed', re.I)
+
+
 def explain_error(text):
     """The error of a failed task in words that say what happened. A tool's own warning that came first (nuclei prints one about its JSON library
     on newer Go releases) is dropped: it was never the reason. A tool killed by the system (status -9 or 137, SIGKILL) almost always ran out of
@@ -2497,6 +2518,13 @@ def explain_error(text):
     kept = [line for line in lines if not re.match(r'(?:\[wrn\]|(?:warning|warn)\b)', line, re.I)]
     # a one-line message holds the warning after a colon ("nuclei exited with status -9: WARNING: sonic/ast ..."): cut it there
     message = re.sub(r':\s*(?:\[wrn\]|warning\b).*$', '', ' '.join(kept or lines), flags=re.I | re.S).strip()
+    if message.lower().startswith('out of memory, retry later'):  # the Sentinel's own plain words (client.tools.ToolOOMError): nothing to add
+        return message[:300]
+    if _APPARMOR.search(' '.join(lines)):  # an older Sentinel reports Chromium's own log line; the cause is the host's AppArmor profile, not the page
+        return APPARMOR_WORDS[:300]
+    if _BROWSER_GONE.search(message):  # the same refusal when the log was cut off: the browser died at launch
+        return (message[:120] + ' (the browser exited at launch: on a host with AppArmor this is usually its profile refusing the user namespace Chromium sandboxes '
+                'with, docs/DEPLOYMENT.md "Screenshots and AppArmor")')[:300]
     if _KILLED.search(message):
         return (message + ' (killed by the system, usually out of memory on the Sentinel\'s machine: give it more memory or lower its '
                 'concurrency)')[:300]

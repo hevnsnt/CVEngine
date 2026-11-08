@@ -252,6 +252,29 @@ class HotValidationTests(TestCase):
         self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'completed')
         self.assertEqual((row.classification, row.reason), ('likely', 'earlier answer'))
 
+    def _feed_lines_for(self, provider, run_triage):
+        from cveFeed import tasks
+        from cveFeed.models import AgentActivity
+        row = Triage.objects.get(vulnerability=self.high)
+        job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id, signature=row.signature, priority=6)
+        with mock.patch('cveFeed.validation_authority.require_authority'), \
+                mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
+                mock.patch('cveFeed.triage._resolve_provider', return_value=provider), \
+                mock.patch('cveFeed.triage.run_triage', return_value=run_triage):
+            tasks.automatic_validate_finding(job.pk)
+        return list(AgentActivity.objects.filter(detail__job_id=job.pk).order_by('id').values_list('message', flat=True))
+
+    def test_with_no_ai_model_a_finding_costs_one_activity_line_not_four(self):
+        lines = self._feed_lines_for(None, {'not_triaged': 1})
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn('no AI model is connected', lines[0])
+        self.assertNotIn('AI unavailable', lines[0])
+
+    def test_with_an_ai_model_the_progress_lines_are_still_written(self):
+        lines = self._feed_lines_for(object(), {'asked': 1})
+        self.assertGreaterEqual(len(lines), 3, lines)
+        self.assertTrue(any('AI review started' in line for line in lines))
+
     def test_backfill_existing_untracked_findings(self):
         Triage.objects.all().delete()
         with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'), \

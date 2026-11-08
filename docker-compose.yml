@@ -251,6 +251,8 @@ services:
   # The built-in scanner ("CVEngine Scanner", docs/BUILTIN-SCANNER.md): the cvENGINE Sentinel image running next to the server, enrolled by it with nobody
   # typing a secret, and where every scan tool runs (docs/SCANNER-ARCHITECTURE.md). On by default; CVENGINE_BUILTIN_SCANNER=0 in .env turns it off (the
   # server then writes no enrollment and revokes the scanner's token, and the container idles).
+  # No container_name: it was a fixed name that a second stack on the same host collided with. Compose names the container <project>-scanner-1; every
+  # script and doc reaches it by the service name (`make scanner-logs`, `docker compose logs scanner`).
   # The image is the one scanner.lock.json pins BY DIGEST (scripts/scanner_lock.py keeps this default equal to it). The update scripts pull it, start it
   # and keep it only once it reaches the server, else they put the previous image back (CVENGINE_SCANNER_ROLLBACK_IMAGE, which they write and clear).
   # CVENGINE_SCANNER_IMAGE in .env runs another image (a `make scanner-build` from source). It never updates itself.
@@ -260,14 +262,15 @@ services:
   scanner:
     image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:685ddb251bf69ba552f68f6ef38203e7bc7afd75cdd668de600b45e6c7620a34}}"
     pull_policy: missing
-    container_name: cvengine-scanner
     restart: unless-stopped
     init: true
     network_mode: "service:celery"
     stop_grace_period: 75s
     pids_limit: 512
-    # About 2 GB: nuclei and nmap over a chunk of 64 addresses at the scanner's concurrency. Lower it on a small host (docs/DEPLOYMENT.md, Memory).
-    mem_limit: "${SCANNER_MEM_LIMIT:-2g}"
+    # 3 GB. The scanner weighs every kind of work against this limit and never starts one that would not fit (the Sentinel's client/admission.py: one nuclei run
+    # measured 500-730 MB, the screenshot browser 224+ MB, nmap 70 MB), so a lower limit makes it run fewer things at once, not die. 2 GB is enough to run two
+    # nuclei and a browser together; 3 GB runs three nuclei and a browser at once, the mix that was once killed at 2 GB. Lower it on a small host (docs/DEPLOYMENT.md, Memory).
+    mem_limit: "${SCANNER_MEM_LIMIT:-3g}"
     # nmap's SYN scan and OS detection, naabu's SYN scan and the UDP sweep send raw packets. Only nmap and naabu hold these (file capabilities in the
     # image); the daemon runs as an unprivileged user with none, and the kernel refuses to start a binary whose file capabilities it cannot grant.
     cap_add:
@@ -279,8 +282,13 @@ services:
     # unshare), vendored unchanged from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). The browser runs in this container and nowhere else; without
     # the profile the scanner's sandbox proof fails and it takes no picture, with the reason shown. `make up` and the update scripts recreate this
     # container, so an upgrade applies it with no manual step.
+    # On a host whose AppArmor refuses user namespaces (Ubuntu 24.04+, recent Debian and Kali) the browser still cannot start: load
+    # config/apparmor/cvengine-scanner (`sudo apparmor_parser -r -W config/apparmor/cvengine-scanner`) and use docker-compose.apparmor.yml (or
+    # uncomment the line below, which edits a tracked file the updater then refuses to fast-forward over). `apparmor=unconfined` also works but removes the container's AppArmor confinement altogether. docs/DEPLOYMENT.md,
+    # "Screenshots and AppArmor".
     security_opt:
       - seccomp=./config/seccomp/playwright-chromium.json
+      # - apparmor=cvengine-scanner
     healthcheck:
       # Healthy while its heartbeats reach the server (python3 -m client.control health); it also restarts itself after three minutes without one.
       test: ["CMD", "python3", "-m", "client.control", "health"]

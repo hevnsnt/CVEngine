@@ -80,6 +80,18 @@ def _without_expiry(name):
         return False
 
 
+def _window_left(name, window):
+    """Whole seconds until the counter ``name`` expires (what a refused caller should wait: ``Retry-After``), ``window`` when the cache cannot say."""
+    try:
+        key = cache.make_key(name)
+        left = cache._cache.get_client(key, write=True).ttl(key)
+        if isinstance(left, int) and left > 0:
+            return min(int(window), left)
+    except Exception:  # noqa: BLE001 - a hint: never let it break the refusal it belongs to
+        pass
+    return int(window)
+
+
 def _hit(name, limit, window):
     """Count one call against a window and say whether it is within ``limit``. One INCR, so concurrent callers cannot all pass the check.
     A counter over its limit is looked at once more (only then, so the common call costs nothing extra): one that has lost its expiry is
