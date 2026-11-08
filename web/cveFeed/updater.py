@@ -135,6 +135,32 @@ def host_updater():
     return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
 
 
+DISK_STALE_SECONDS = 15 * 60  # the host measures once a minute; older than this is a host that stopped, and then nothing is said about disk
+
+
+def disk_sentence(need_mb, free_mb):
+    """The one sentence the Update screen and the updater (scripts/update-disk.sh) both say when there is not room for an update."""
+    return (f'This update needs about {-(-int(need_mb) // 1000)} GB of free disk; this server has {int(free_mb) // 1000} GB free. '
+            'Free some space or add disk, then try again.')
+
+
+def disk():
+    """Whether there is room for the next update, as the host measured it (``.update-disk.json``, written by scripts/update-watch.sh; the web container
+    cannot ask Docker where its data is). ``known`` is False when the host has not said or has not said lately: nothing is blocked on a guess.
+    ``short`` is True when free space is under what the update needs; ``text`` is then the sentence to show."""
+    unknown = {'known': False, 'short': False, 'free_mb': None, 'need_mb': None, 'text': ''}
+    try:
+        with open(_file('.update-disk.json')) as f:
+            data = json.load(f)
+        free, need, at = int(data['free_mb']), int(data['need_mb']), float(data['at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return unknown
+    if free < 0 or need < 0 or not math.isfinite(at) or time.time() - at > DISK_STALE_SECONDS or at - time.time() > 60:
+        return unknown
+    short = free < need
+    return {'known': True, 'short': short, 'free_mb': free, 'need_mb': need, 'text': disk_sentence(need, free) if short else ''}
+
+
 CERT_WARN_DAYS = 30  # the host renews the web interface certificate with this many days left (scripts/renew-certs.sh); a warning at that point means it did not
 CERT_STALE_SECONDS = 3 * 86400  # the host checks twice a day; this is days of silence
 
@@ -214,6 +240,8 @@ def auto_approve(row):
     """In automatic mode, approve the version the check just found, as the administrator would have. Returns whether it did."""
     if read_mode() != 'auto' or state(row)['status'] != 'available':
         return False
+    if disk()['short']:
+        return False  # nobody is there to read the sentence; the Update screen says it, and the next check tries again
     approve(row, 'automatic')
     return True
 
@@ -387,6 +415,9 @@ def approve(row, user, plan=None):
         raise UpdateError('there is no update to approve; run a check first')
     if not update_available(row, installed_sha()):
         raise UpdateError('this installation is already up to date, or cannot tell whether it is (see its status)')
+    room = disk()
+    if room['short']:
+        raise UpdateError(room['text'])
     own = local_commits(row)
     if own:
         raise UpdateError(f'this server has {own} commit{"s" if own != 1 else ""} of its own, so the update cannot be applied for you (it moves the checkout '
@@ -468,6 +499,7 @@ def state(row):
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
         'host_updater': host_updater(),
+        'disk': disk(),
         'certificate': certificate(),
         'mode': read_mode(),
     }
