@@ -986,6 +986,7 @@ def validate_match_on_demand(request_id):
                   'check_notes': plan_notes, 'classification': row.classification or None,
                   'ai_status': row.status, 'validation_status': row.validation_status,
                   'assessment_status': 'unsupported_external' if no_check and not candidate else 'checked' if checks else 'inconclusive'}
+        from cveFeed import hot_validation
         from cveFeed.hot_validation import retry_after
         broken = bool(check_result.get('failed') or check_result.get('blocked') or ai_state == 'failed')
         capped_only = bool(check_result.get('capped')) and not broken
@@ -1036,8 +1037,9 @@ def validate_match_on_demand(request_id):
                 triage.track(triage.with_cves([match]))
             except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
                 logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
-        activity.settle(progress, 'failed' if status == 'failed' else 'done',
-                        f'Validation request #{job.pk} {status} for {cve_id}'
+        really = bool(check_result.get('failed')) or ai_state == 'failed'
+        activity.settle(progress, hot_validation.line_status(status == 'failed', really),
+                        f'Validation request #{job.pk} {hot_validation.outcome_words(status == "failed", really, capped_only)} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
                         + f'; AI review {ai_state}', check_state=result['check_state'], ai_state=ai_state)
         return result
@@ -1321,8 +1323,9 @@ def automatic_validate_finding(job_id):
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
             status=status, result=result, finished_at=timezone.now(),
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
-        activity.settle(progress, 'failed' if failed else 'done',
-                        f'Automatic validation #{job.pk} {status}: checks {check_state}; ' +
+        outcome = hot_validation.outcome_words(failed, bool(checks.get('failed')) or ai_state == 'failed', capped_only)
+        activity.settle(progress, hot_validation.line_status(failed, bool(checks.get('failed')) or ai_state == 'failed'),
+                        f'Automatic validation #{job.pk} {outcome}: checks {check_state}; ' +
                         ('no AI model is connected, so no AI review' if not ai_connected and ai_state == 'unavailable' else f'AI {ai_state}'),
                         check_state=check_state, ai_state=ai_state)
         return result

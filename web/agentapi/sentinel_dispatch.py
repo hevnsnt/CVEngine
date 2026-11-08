@@ -18,6 +18,7 @@ import contextlib
 import ipaddress
 import logging
 import os
+import re
 import time
 
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
@@ -1322,11 +1323,32 @@ def waf_outcome(result):
 
 # nmap_full and nmap_verify: one address, the raw report read by the scanner library's parse_xml --------------------------------------------------
 
+TARPIT_PORTS = 100  # the most open ports kept of one address: more is a tarpit or a filtering device that answers on nearly every port
+TARPIT_NOTE = 'port list truncated: this host answers on an unusually large number of ports (tarpit or filtering device)'
+_TARPIT_ELEMENT = re.compile(r'<cvengine-note kind="port-list-truncated" open-ports="([0-9]{1,6})"')
+
+
 def nmap_hosts(xml, address):
     """The host records of a Sentinel's raw report, read by the scanner library's ``parse_xml`` (strict, hardened against a custom ENTITY
-    declaration) and cut to ``address``: a report that names any other host never puts it in the inventory."""
+    declaration) and cut to ``address``: a report that names any other host never puts it in the inventory. A host with more than ``TARPIT_PORTS``
+    open TCP ports keeps the lowest ``TARPIT_PORTS`` and carries ``port_list_truncated`` (True) and ``open_ports_seen`` (how many open ports the scan
+    counted, at least that many when the Sentinel cut its report): a Sentinel's own ``cvengine-note`` element says so, and a report from one that does
+    not (an older Sentinel, up to the size cap) is cut here the same way. No field is added to the wire: the note is inside the report text."""
     from cveFeed.port_inventory import parse_xml
-    return [h for h in parse_xml(xml or '', strict=True) if h.get('ip') == address]
+    text = xml or ''
+    hosts = [h for h in parse_xml(text, strict=True) if h.get('ip') == address]
+    note = _TARPIT_ELEMENT.search(text)
+    reported = int(note.group(1)) if note else 0
+    for host in hosts:
+        ports = host.get('ports') or []
+        open_tcp = [p for p in ports if p.get('state', 'open') == 'open' and p.get('protocol', 'tcp') in ('', 'tcp')]
+        if note is None and len(open_tcp) <= TARPIT_PORTS:
+            continue
+        keep = {p['number'] for p in sorted(open_tcp, key=lambda p: p['number'])[:TARPIT_PORTS]}
+        host['ports'] = [p for p in ports if p not in open_tcp or p['number'] in keep]
+        host['port_list_truncated'] = True
+        host['open_ports_seen'] = max(reported, len(open_tcp))
+    return hosts
 
 
 def _scanner_first(project, kind):

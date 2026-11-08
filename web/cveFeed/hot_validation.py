@@ -45,6 +45,23 @@ def min_gap_hours():
     return max(0.0, float(tunables.value('validate_min_gap_hours', MIN_GAP_HOURS)))
 
 
+def line_status(job_failed, really_failed):
+    """The status of a validation's activity line. The job is ``failed`` (and retried) also when it was only held: its checks were blocked by scope or
+    policy, or the day's cap was reached. Neither is a failure of the scan, and the status check counts every ``failed`` line of a kind as one
+    (``cveFeed.reviewer.ops_checks``, \"Scans and tasks are failing\"), so only a check or an AI review that really failed makes the line ``failed``."""
+    return 'failed' if job_failed and really_failed else 'done'
+
+
+def outcome_words(job_failed, really_failed, capped_only):
+    """What the line says happened: ``failed``, ``deferred (daily cap reached, retried after the reset)``, ``held (nothing was run: blocked by scope or
+    policy; retried later)`` or ``completed``."""
+    if not job_failed:
+        return 'completed'
+    if really_failed:
+        return 'failed'
+    return 'deferred (daily cap reached, retried after the reset)' if capped_only else 'held (nothing was run: blocked by scope or policy; retried later)'
+
+
 def retry_after(attempts, capped_only=False):
     """When a failed validation of the same evidence may be queued again. Stopped only by the per-day caps: once the caps reset,
     without spending an attempt. Otherwise an exponential backoff (5 min, doubling, at most 6 h), and None once MAX_ATTEMPTS

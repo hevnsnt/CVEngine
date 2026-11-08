@@ -408,6 +408,41 @@ class HotValidationTests(TestCase):
         self.assertNotEqual(AutomaticValidation.objects.get(pk=job.pk).signature, old_signature)
         self.assertEqual(hot_validation.enqueue(Triage.objects.get(pk=row.pk), 'smoke'), 'fresh')
 
+    def _route_job(self):
+        route = RouteAuth.objects.create(project=self.project, domain=self.domain, host=self.sub.name,
+            url='https://www.a.example/admin', path='/admin', auth_state='open', http_status=200)
+        row = triage.track([route])[0][0]
+        with mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async'):
+            self.assertEqual(hot_validation.enqueue(row, 'smoke'), 'queued')
+        return row, AutomaticValidation.objects.get(triage=row)
+
+    def _run_job(self, row, job, checks):
+        from cveFeed.models import AgentActivity
+        from cveFeed.tasks import automatic_validate_finding
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
+                mock.patch('cveFeed.validation.run_validation', return_value=checks), \
+                mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+            automatic_validate_finding(job.pk)
+        return AgentActivity.objects.filter(kind='validate', detail__job_id=job.pk).exclude(status='running').order_by('-id').first()
+
+    def test_a_validation_held_by_the_cap_or_by_policy_is_not_a_failed_line(self):
+        for checks, words in (({'ran': 0, 'capped': 1}, 'daily cap'), ({'ran': 0, 'blocked': 1}, 'blocked by scope or policy')):
+            with self.subTest(words=words):
+                Triage.objects.all().delete()
+                RouteAuth.objects.filter(path="/admin").delete()
+                row, job = self._route_job()
+                line = self._run_job(row, job, checks)
+                self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'failed')  # the job is still retried
+                self.assertEqual(line.status, 'done')
+                self.assertIn(words, line.message)
+                self.assertNotIn('failed', line.message)
+
+    def test_a_check_that_really_failed_is_still_a_failed_line(self):
+        row, job = self._route_job()
+        line = self._run_job(row, job, {'ran': 0, 'failed': 1})
+        self.assertEqual(line.status, 'failed')
+        self.assertIn('failed', line.message)
+
     def test_route_worker_real_plan_and_result_path_with_fixture_runner(self):
         from cveFeed.tasks import automatic_validate_finding
         from cveFeed import validation
