@@ -22,6 +22,8 @@ from types import SimpleNamespace
 logger = logging.getLogger(__name__)
 
 LOOKUP_ONLY = ('dns_resolve',)  # asks DNS for names, contacts no address: allowed through, its answers are checked as they come in
+FINDS_NAMES = ('bbot_discovery', 'discover')  # kinds that run to learn where names point: a name with no known address is their input (the scope they carry denies the listed networks)
+LOOKUP_KEYS = ('mail', 'dns', 'names')  # target keys whose names are only looked up in DNS (an email-authentication check, a record read), never connected to
 IGNORED_KEYS = ('scope', 'template', 'token', 'api_keys', 'presets', 'require_flags', 'exclude_modules')  # target keys that carry no address of work
 RESULT_KEYS = ('ip', 'address', 'host', 'addresses', 'ips', 'hosts', 'ip_address', 'matched-at', 'target', 'url')  # result keys read for the addresses a Sentinel reached
 NAME_KEYS = ('name', 'host', 'hostname', 'domain', 'url', 'address', 'ip')  # target keys, at any depth, whose string is a host the task reaches
@@ -115,13 +117,24 @@ def _networks_overlap(project_id, cidr):
     return exclusions.Refusal(f"{wanted} overlaps {net}, which is on the organization's do-not-scan list", entry=str(net)) if net else None
 
 
-def _refusals(project_id, values, resolved=None):
+def _lookup_names(target):
+    """The names a target only asks DNS about (``LOOKUP_KEYS``: an email-authentication name, a record read): not connected to, so an unknown address is no reason to wait."""
+    out = set()
+    for key in LOOKUP_KEYS:
+        for item in (target or {}).get(key) or []:
+            name = item.get('name') if isinstance(item, dict) else item
+            if isinstance(name, str):
+                out.add(name.strip())
+    return out
+
+
+def _refusals(project_id, values, resolved=None, unknown=()):
     """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``."""
     from cveFeed import exclusions
     networks = [v for v in values if '/' in v and '://' not in v and _is_address_like(v)]
     out = {}
     plain = [v for v in values if v not in networks]
-    out.update(exclusions.address_refusals(project_id, plain, resolved))
+    out.update(exclusions.address_refusals(project_id, plain, resolved, unknown=unknown))
     for cidr in networks:
         try:
             refusal = _networks_overlap(project_id, cidr)
@@ -136,12 +149,17 @@ def _project_id(project):
     return getattr(project, 'pk', project)
 
 
-def task_refusals(project, kind, target, host='', ips=None, resolved=None):
+def task_refusals(project, kind, target, host='', ips=None, resolved=None, wait_for_unknown=True):
     """``{value: Refusal}`` for a task as it would be (or was) created. Empty when the task may run (and for a lookup-only kind at dispatch)."""
     project_id = _project_id(project)
     if not project_id:
         return {}
-    return _refusals(project_id, task_values(kind, target, host, ips), resolved)
+    values = task_values(kind, target, host, ips)
+    unknown = ()
+    if wait_for_unknown and kind not in FINDS_NAMES and kind not in LOOKUP_ONLY:  # work that connects to a name needs its address known: a name nothing resolved yet waits for the lookup
+        lookups = _lookup_names(target)
+        unknown = {v for v in values if v not in lookups and not _is_address_like(v)}
+    return _refusals(project_id, values, resolved, unknown=unknown)
 
 
 def dispatch_refusal(project, kind, target, host='', ips=None, scan=None, note=True):
@@ -156,11 +174,12 @@ def dispatch_refusal(project, kind, target, host='', ips=None, scan=None, note=T
     return next(iter(refusals.values()))
 
 
-def task_refusal(task):
-    """The first ``Refusal`` for a stored task (at claim, and at ingestion), or None."""
+def task_refusal(task, wait_for_unknown=True):
+    """The first ``Refusal`` for a stored task, or None. At claim a name with no known address waits (``wait_for_unknown``); at ingestion and when the list
+    changes only a definite match counts (the work was already allowed, and a result is never dropped for what the inventory did not know)."""
     if task.kind in LOOKUP_ONLY:
         return None
-    refusals = task_refusals(task.project_id, task.kind, task.target, task.host, task.ips)
+    refusals = task_refusals(task.project_id, task.kind, task.target, task.host, task.ips, wait_for_unknown=wait_for_unknown)
     return next(iter(refusals.values())) if refusals else None
 
 
@@ -191,7 +210,7 @@ def result_refusal(task, result):
     if task.kind in LOOKUP_ONLY:
         note_resolved(task, result)
         return None
-    refusal = task_refusal(task)
+    refusal = task_refusal(task, wait_for_unknown=False)
     if refusal:
         return refusal
     refusals = _refusals(task.project_id, result_addresses(result))
@@ -309,7 +328,7 @@ def cancel_pending(org_id, actor=None, reason=None):
     active = SentinelTask._base_manager.filter(project_id__in=project_ids, status__in=sentinel_broker.SENTINEL_ACTIVE_STATUSES).select_related('project')
     cancelled = 0
     for task in active:
-        refusal = task_refusal(task)
+        refusal = task_refusal(task, wait_for_unknown=False)
         if refusal is None or getattr(refusal, 'unreadable', False):
             continue
         sentinel_broker.expire(task, reason=reason or f'cancelled: {refusal}', actor=actor)

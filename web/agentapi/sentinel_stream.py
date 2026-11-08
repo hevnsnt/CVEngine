@@ -352,7 +352,7 @@ def report_partial(ctx, task_id, body):
                                                                              error=f'a partial result was rejected: {exc.message}'[:300])
         raise
     from agentapi import address_guard
-    refusal = address_guard.task_refusal(task)
+    refusal = address_guard.task_refusal(task, wait_for_unknown=False)
     if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
         broker.expire(task, f'cancelled: {refusal}')
         raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')

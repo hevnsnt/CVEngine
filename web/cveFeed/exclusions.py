@@ -178,11 +178,13 @@ def _names_resolving_into(project_id, networks):
     return {n.strip().lower().rstrip('.') for n in names}
 
 
-def address_refusals(project_id, values, resolved=None, networks=None):
+def address_refusals(project_id, values, resolved=None, networks=None, unknown=()):
     """``{value: Refusal}`` for each of ``values`` (addresses, ``host:port``, URLs, host names) that must not be worked on for this project: THE rule of the
     do-not-scan list, for one value or a whole task (the lookups are batched, not per name). A value inside a listed network is refused, and so is a name
     with a stored address inside one, or one that ``resolved`` (``{name: [addresses]}``, what a task resolved the name to itself) places inside one.
-    Fails closed: a list that cannot be read refuses EVERY value, with a ``Refusal`` whose ``unreadable`` is set. A project without an org has no list."""
+    ``unknown``: the names (of ``values``) that work is about to connect to: one with no known address at all (nothing stored, nothing resolved) cannot be checked
+    against the list, so it is refused until a lookup has told where it points. Fails closed: a list that cannot be read refuses EVERY value, with a ``Refusal``
+    whose ``unreadable`` is set. A project without an org has no list."""
     values = [v for v in values if isinstance(v, str) and v.strip()]
     if not project_id or not values:
         return {}
@@ -215,6 +217,10 @@ def address_refusals(project_id, values, resolved=None, networks=None):
                 if net:
                     out[value] = Refusal(f"{name} resolves to {ip}, which is on the organization's do-not-scan list ({net})", entry=str(net))
                     break
+            else:
+                if value in unknown and not told and not known.get(name):
+                    out[value] = Refusal(f"{name} has no known address yet, so it cannot be checked against the organization's do-not-scan list; it is scanned once a lookup has resolved it",
+                                         entry='')
     return out
 
 

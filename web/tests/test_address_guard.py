@@ -201,6 +201,32 @@ class Dispatch(World):
             dispatch.dispatch_or_none(self.project, 'discover', {'cidr': '198.51.0.0/16'}, internal=True) or (_ for _ in ()).throw(AddressExcluded('discover', 'x'))
         self.assertIsNone(address_guard.dispatch_refusal(self.project, 'discover', {'cidr': '203.0.113.0/24'}))
 
+    def test_a_name_with_no_known_address_waits_for_a_lookup_unless_the_work_only_asks_dns_or_finds_names(self):
+        for kind, target in (('nuclei_light', {'targets': ['https://new.example.com']}), ('hygiene_check', {'tls': [{'host': 'new.example.com', 'port': 443}], 'mail': []})):
+            with self.assertRaises(AddressExcluded, msg=kind) as caught:
+                dispatch.dispatch_or_none(self.project, kind, target, host='new.example.com')
+            self.assertIn('no known address yet', str(caught.exception))
+        self.assertFalse(SentinelTask.objects.exists())
+        # work that only asks DNS, and the runs that find where names point, are not held back by it
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'hygiene_check', {'mail': [{'name': 'new.example.com'}]}))
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'dns_resolve', {'names': ['new.example.com']}))
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'bbot_discovery', {'domain': 'new.example.com', 'scope': {'in_scope_domains': ['new.example.com']}}))
+        self.host('known.example.com', OUT)  # a name that resolved somewhere else is fine
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'nuclei_light', {'targets': ['https://known.example.com']}))
+
+    def test_a_queued_task_for_a_name_with_no_known_address_is_left_queued_not_cancelled(self):
+        _, raw = self.sentinel(['nuclei_light'])
+        ExcludedAddress.objects.all().delete()
+        queued = SentinelTask.objects.create(project=self.project, kind='nuclei_light', target={'targets': ['https://later.example.com']})
+        self.exclude('198.51.100.0/24')
+        status, out = call(raw, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        self.assertIsNone(out['task'])
+        queued.refresh_from_db()
+        self.assertEqual(queued.status, 'queued')
+        self.host('later.example.com', OUT)  # a lookup has told where it points
+        status, out = call(raw, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        self.assertEqual(out['task']['id'], queued.pk)
+
     def test_the_model_is_the_backstop_for_any_other_way_of_making_a_task(self):
         with self.assertRaises(AddressExcluded):
             SentinelTask.objects.create(project=self.project, kind='openvas', ips=[IN], host='survey.example.com', target={'hosts': {IN: 'survey.example.com'}})

@@ -1724,6 +1724,8 @@ def _claim(agent, kinds, now):
             if refusal:
                 if getattr(refusal, 'unreadable', False):
                     held_back.setdefault(task.kind, 'the do-not-scan address list could not be read, so no address work is handed out')
+                elif not getattr(refusal, 'entry', ''):  # a name with no known address yet: left queued until a lookup has told where it points
+                    held_back.setdefault(task.kind, 'a host has no known address yet, so it cannot be checked against the do-not-scan list')
                 else:
                     expire(task, reason=f'cancelled: {refusal}')
                 continue
