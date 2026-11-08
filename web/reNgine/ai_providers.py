@@ -424,7 +424,7 @@ def guarded_request(method, url, headers=None, **kwargs):
 	for _hop in range(MAX_REDIRECTS + 1):
 		try:
 			resp = getattr(requests, method)(url, headers=headers, allow_redirects=False, **kwargs)
-		except (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema):
+		except ValueError:  # InvalidURL, InvalidSchema and MissingSchema are ValueErrors; so is an unparseable address (Invalid IPv6 URL)
 			# requests parses the Location of a redirect it was told not to follow, and fails on one it cannot read: that is a refused redirect
 			# when the address we asked is itself well formed, and an ordinary bad address otherwise
 			if _well_formed(url):
