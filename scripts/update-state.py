@@ -253,6 +253,9 @@ def main():
         elif action == 'openvas-restarted':
             # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
             publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
+        elif action == 'scanner-update-done':
+            # scripts/update-watch.sh started the scanner update the app asked for (web/.scanner-update-requested): one marker, so one request runs once
+            publish(web_fd, '.scanner-update-done', [json.dumps({'at': int(time.time())}).encode('ascii') + b'\n'])
         elif action == 'openvas-log':
             # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:

@@ -69,7 +69,7 @@ while :; do
   # build behind the newest published one): run the scanner update in the background. scripts/scanner-update.sh waits for the scanner to finish its tasks, keeps
   # the new image only once it has checked in, puts the old one back otherwise, and takes its own lock. The answer marker is touched first, so one request runs once.
   if [ -f web/.scanner-update-requested ] && [ ! -L web/.scanner-update-requested ] && [ web/.scanner-update-requested -nt web/.scanner-update-done ] && [ -f scripts/scanner-update.sh ]; then
-    : >web/.scanner-update-done 2>/dev/null || true
+    python3 scripts/update-state.py scanner-update-done >/dev/null 2>&1 || true  # published like every other state file: no redirection into the shared mount
     setsid nohup scripts/scanner-update.sh >>"$STATE/scanner-update.log" 2>&1 </dev/null &
   fi
   pause=2
