@@ -27,13 +27,17 @@ from dashboard.models import AuditLog, Org, Project, ProjectMembership
 from tests.fake_scanner import FakeScanner
 from tests.test_secrets_scan import HOST, StageBase
 
-try:  # the masking the Sentinel library does (its PR; the server's pin in web/requirements.txt moves to it after that merges)
+sentinel_context = sentinel_kf = sentinel_routes = None
+try:  # the masking the Sentinel does (its PR; the server's pin in web/requirements.txt moves to it after that merges)
     from cvengine_scanner import context as sentinel_context
     from cvengine_scanner import secrets as sentinel_kf
     from cvengine_scanner.probes import routes as sentinel_routes
 except ImportError:
-    sentinel_context = sentinel_kf = sentinel_routes = None
-needs_sentinel = unittest.skipUnless(sentinel_context is not None, 'needs the Sentinel library that sends the masked context (re-pin web/requirements.txt after its PR merges)')
+    pass
+_NEEDS = 'needs the Sentinel library that sends the masked context (re-pin web/requirements.txt after its PR merges)'
+needs_sentinel = unittest.skipUnless(sentinel_context is not None and hasattr(sentinel_context, 'mask_context'), _NEEDS)
+needs_sentinel_routes = unittest.skipUnless(sentinel_context is not None and sentinel_routes is not None and hasattr(sentinel_routes, 'analyse')
+                                            and hasattr(sentinel_routes, '_row'), _NEEDS)
 
 CANARY = 'AIza' + 'SyD-CANARYfakeLABkey01234567890Zq9w'  # 39 characters, a Google key's shape
 OTHER = 'ghp_' + 'Fak3Canary0ther' + 'TokenAbCdEfGhIjKlMnOpQrSt'
@@ -281,19 +285,25 @@ class CanaryFromTheRealSentinel(CanaryTests, CanaryBase):
 
 
 class CanaryOnTheRouteCheck(TestCase):
-    """The route_probe path: a credential row with its line and masked context, cleaned by the broker and filed by the route stage."""
+    """The route_probe path: a credential row with its line and masked context, cleaned by the broker and filed by the route stage.
+    The row is made by hand here (what a Sentinel with the context code sends); the same test over the library's own row is the subclass below."""
+    URL = 'https://www.rt.test/'
+    PAGE = f'<html>\n<script>\nvar cfg = {{mapsKey: "{CANARY}", zoom: 4}};\n</script></html>\n'
+    MASKED = f'var cfg = {{mapsKey: "AIza…{CANARY[-4:]}", zoom: 4}};'
+
+    def sent_row(self):
+        """The credential fields a Sentinel sends for ``PAGE``, made by hand: the masked context and the line, never the value in them."""
+        return {'credentials': [{'rule_id': 'betterleaks.gcp-api-key', 'secret': CANARY, 'line': 3, 'context': self.MASKED}], 'sensitive': []}
 
     def test_a_route_credentials_context_is_filed_and_the_canary_is_nowhere_else(self):
         from tests.test_probe_kinds import RouteProbeStageTests
         suite = RouteProbeStageTests('test_a_credential_the_scanner_read_goes_to_the_inventory_and_is_never_stored_in_the_route')
         suite.setUp()
         self.addCleanup(suite.doCleanups)
-        page = f'<html>\n<script>\nvar cfg = {{mapsKey: "{CANARY}", zoom: 4}};\n</script></html>\n'
-        analysed = sentinel_routes.analyse({'url': 'https://www.rt.test/', 'status': 200, 'content_type': 'text/html', 'body': page, 'title': 'T', 'headers': {}})
-        sent = sentinel_routes._row('https://www.rt.test/', analysed)
+        sent = self.sent_row()
         self.assertEqual(sent['credentials'][0]['line'], 3)
         self.assertNotIn(CANARY, sent['credentials'][0]['context'])
-        row = {**suite.row('https://www.rt.test/', 'open', 200), 'credentials': sent['credentials'], 'sensitive': sent['sensitive'], 'sensitive_score': 25}
+        row = {**suite.row(self.URL, 'open', 200), 'credentials': sent['credentials'], 'sensitive': sent['sensitive'], 'sensitive_score': 25}
         log = []
         handler = logging.Handler()
         handler.emit = lambda record: log.append(record.getMessage() + ' ' + str(record.args))
@@ -306,7 +316,7 @@ class CanaryOnTheRouteCheck(TestCase):
                     'routes': [row if u == 'https://www.rt.test/' else suite.row(u) for u in urls]}
         suite.run_stage(suite.scan(), serve)
         occurrence = SecretOccurrence.objects.get(source='route')
-        self.assertEqual((occurrence.line, occurrence.context), (3, f'var cfg = {{mapsKey: "AIza…{CANARY[-4:]}", zoom: 4}};'))
+        self.assertEqual((occurrence.line, occurrence.context), (3, self.MASKED))
         with connection.cursor() as cursor:
             tables = connection.introspection.table_names()
             dump = []
@@ -316,3 +326,12 @@ class CanaryOnTheRouteCheck(TestCase):
         text = '\n'.join(dump) + '\n'.join(log)
         for piece in PIECES:
             self.assertNotIn(piece, text)
+
+
+@needs_sentinel_routes
+class CanaryOnTheRouteCheckFromTheRealSentinel(CanaryOnTheRouteCheck):
+    """The same test over the row the Sentinel library itself makes from the page."""
+
+    def sent_row(self):
+        analysed = sentinel_routes.analyse({'url': self.URL, 'status': 200, 'content_type': 'text/html', 'body': self.PAGE, 'title': 'T', 'headers': {}})
+        return sentinel_routes._row(self.URL, analysed)
