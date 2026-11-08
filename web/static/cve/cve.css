@@ -2387,3 +2387,9 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   a.sd-url{display:flex}
   .find>a,.host-head a.badge{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
 }
+
+/* current page in the account control: a utility page (Administration, Settings, Help, My account) highlights the account, not a rail entry */
+.acct summary[aria-current="page"],.menu a[aria-current="page"]{background:var(--sunk);box-shadow:inset 3px 0 0 var(--brand)}
+.menu a[aria-current="page"]{color:var(--ink)}
+.sheet-list a[aria-current="page"],.sheet-grid a[aria-current="page"]{color:var(--ink);box-shadow:inset 3px 0 0 var(--brand)}
+@media (pointer:coarse){.rail-nav a,.menu a,.menu button,.sheet-grid a{min-height:var(--hit)}}
