@@ -17,6 +17,7 @@ ROOT = SCRIPTS.parent
 
 WRAPPER = '''#!/usr/bin/env bash
 case " $* " in
+  *"print(ScanHistory.objects.filter(scan_status=1).count())"*) cat "$STUB_DIR/scan_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -q --status running db "*) if [ -e "$STUB_DIR/db_down" ]; then exit 0; fi; echo dbid; exit 0;;
   *" exec -T web python3 manage.py external_sentinels "*|*" run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels "*)
     echo "docker $*" >> "$STUB_DIR/calls"
@@ -102,6 +103,8 @@ class HostSizeRuleTests(FitCase):
         result = self.update(4608)
         self.assertEqual(self.keys()['SCANNER_MEM_LIMIT'], '2g')
         self.assertIn('SCANNER_MEM_LIMIT=2g is already set, so it is left as it is', result.stdout)
+        again = self.update(4608)  # a value of the rule's own (1g) is not mentioned again
+        self.assertIn('2g is already set', again.stdout)
 
     def test_an_owners_limit_in_the_environment_is_never_changed_either(self):
         self.update(4608, SCANNER_MEM_LIMIT='3g')
@@ -122,6 +125,7 @@ class HostSizeRuleTests(FitCase):
         self.assertEqual(self.env_text(), once)
         self.assertEqual(once.count('SCANNER_MEM_LIMIT='), 1)
         self.assertNotIn('was written', again.stdout)
+        self.assertNotIn('already set', again.stdout)  # a value the rule itself gave has nothing to say
 
     def test_the_env_file_compose_reads_gets_it_too(self):
         (self.work / '.env.vps').write_text('X=1\n')
@@ -154,6 +158,7 @@ class ChoiceOfScannersTests(FitCase):
         self.assertNotIn('CVENGINE_BUILTIN_SCANNER', keys)  # never removed without an answer
         self.assertIn('You have 2 Sentinels of your own that are live.', result.stdout)
         self.assertIn('It was kept, because a scanner is never removed without your answer.', result.stdout)
+        self.assertIn('holds up to 1 GB of memory', result.stdout)
         self.assertIn('Settings > Sentinels', result.stdout)
         self.assertIn('scripts/update.sh --sentinels external', result.stdout)
         notice = (self.work / 'web' / '.update-notice.json').read_text()
@@ -196,6 +201,16 @@ class ChoiceOfScannersTests(FitCase):
                 self.update(16384, '--sentinels', plan)
                 self.assertEqual(self.keys()['CVENGINE_BUILTIN_SCANNER'], '1')
                 self.assertEqual(self.keys()['CVENGINE_SENTINEL_PLAN'], plan)
+
+    def test_turning_the_scanner_back_on_sizes_it_for_the_host(self):
+        (self.work / '.env').write_text(self.env_text() + 'CVENGINE_BUILTIN_SCANNER=0\n')
+        self.update(4608, '--sentinels', 'both')
+        self.assertEqual(self.keys()['CVENGINE_BUILTIN_SCANNER'], '1')
+        self.assertEqual(self.keys()['SCANNER_MEM_LIMIT'], '1g')  # not the 3g default on a host of 4.5 GB
+
+    def test_the_answer_external_writes_no_memory_limit(self):
+        self.update(4608, '--sentinels', 'external')
+        self.assertNotIn('SCANNER_MEM_LIMIT', self.keys())
 
     def test_a_choice_that_is_not_one_of_the_three_is_refused_before_anything_happens(self):
         result = self.run_update('--sentinels', 'everything')
@@ -356,3 +371,81 @@ class InAppPathTests(unittest.TestCase):
         self.assertLess(text.index('cvengine_scanner_start'), text.index('cvengine_fit_budget'))
         self.assertIn('sentinels-choice', text)
         self.assertIn('cvengine_fit_run', (SCRIPTS / 'update.sh').read_text())
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('git') and shutil.which('flock'), 'needs bash, git and flock')
+class ScannerPlanRequestTests(FitCase):
+    """Settings > Sentinels: the page leaves web/.scanner-plan-wanted, the watcher runs scripts/apply-scanner-plan.sh, which applies it and answers."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ('apply-scanner-plan.sh', 'host-fit.sh', 'init-env.sh', 'scanner.sh', 'scanner_lock.py', 'compose-layout.sh', 'update-state.py'):
+            shutil.copy(SCRIPTS / name, self.work / 'scripts' / name)
+        shutil.copy(ROOT / 'scanner.lock.json', self.work / 'scanner.lock.json')
+        (self.stub / 'has_scanner').touch()
+
+    def run_plan(self, **env):
+        return subprocess.run(['bash', 'scripts/apply-scanner-plan.sh'], cwd=self.work, env={**self.env, 'CVENGINE_HOST_MEM_MB': '4608', **env},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def want(self, word):
+        (self.work / 'web' / '.scanner-plan-wanted').write_text(word + '\n')
+
+    def answer(self):
+        import json
+        return json.loads((self.work / 'web' / '.scanner-plan-applied.json').read_text())
+
+    def test_external_is_written_the_scanner_removed_and_the_answer_published_once(self):
+        self.want('external')
+        out = self.run_plan()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.keys()['CVENGINE_BUILTIN_SCANNER'], '0')
+        self.assertEqual(self.keys()['CVENGINE_SENTINEL_PLAN'], 'external')
+        answer = self.answer()
+        self.assertEqual((answer['plan'], answer['ok']), ('external', True))
+        self.assertIn('the built-in scanner was removed', answer['note'])
+        self.assertFalse((self.work / 'web' / '.scanner-plan-wanted').exists())  # carried out once
+        calls = self.calls()
+        self.assertTrue(any(' rm -sf scanner' in c for c in calls), calls)
+        self.assertTrue(any('up -d --no-deps web celery-beat celery' in c for c in calls), calls)  # the server's processes read the new setting
+        self.assertEqual(self.run_plan().returncode, 0)  # nothing wanted now: nothing happens
+        self.assertEqual(self.keys()['CVENGINE_SENTINEL_PLAN'], 'external')
+
+    def test_a_running_scan_makes_it_wait_and_changes_nothing(self):
+        (self.stub / 'scan_count').write_text('2\n')
+        self.want('external')
+        before = self.env_text()
+        out = self.run_plan()
+        self.assertEqual(out.returncode, 3, out.stdout + out.stderr)
+        self.assertEqual(self.env_text(), before)
+        self.assertTrue((self.work / 'web' / '.scanner-plan-wanted').exists())  # the watcher asks again later
+        self.assertFalse((self.work / 'web' / '.scanner-plan-applied.json').exists())
+
+    def test_a_word_that_is_not_a_choice_is_dropped_without_touching_anything(self):
+        self.want('everything')
+        before = self.env_text()
+        self.assertEqual(self.run_plan().returncode, 0)
+        self.assertEqual(self.env_text(), before)
+        self.assertFalse((self.work / 'web' / '.scanner-plan-wanted').exists())
+
+    def test_a_planted_link_is_not_followed(self):
+        (self.tmp / 'host-only').write_text('external\n')
+        (self.work / 'web' / '.scanner-plan-wanted').symlink_to(self.tmp / 'host-only')
+        before = self.env_text()
+        self.run_plan()
+        self.assertEqual(self.env_text(), before)
+        self.assertEqual((self.tmp / 'host-only').read_text(), 'external\n')
+
+    def test_back_to_both_starts_the_scanner_again_and_sizes_it(self):
+        (self.work / '.env').write_text(self.env_text() + 'CVENGINE_BUILTIN_SCANNER=0\nCVENGINE_SENTINEL_PLAN=external\n')
+        self.want('both')
+        out = self.run_plan()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.keys()['CVENGINE_BUILTIN_SCANNER'], '1')
+        self.assertEqual(self.keys()['SCANNER_MEM_LIMIT'], '1g')
+        self.assertEqual(self.answer()['plan'], 'both')
+
+    def test_the_watcher_starts_it_without_a_command_line(self):
+        text = (SCRIPTS / 'update-watch.sh').read_text()
+        self.assertIn('web/.scanner-plan-wanted', text)
+        self.assertIn('scripts/apply-scanner-plan.sh', text)

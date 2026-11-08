@@ -38,6 +38,15 @@ cvengine_fit_rule_table() {
   echo '7 GB or more              default (3g), nothing written'
 }
 
+cvengine_fit_limit_words() {  # a Compose limit as people say it: 1g -> "1 GB", 512m -> "512 MB"
+  local v=$1
+  case $v in
+    *[gG]) printf '%s GB' "${v%?}" ;;
+    *[mM]) printf '%s MB' "${v%?}" ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
 cvengine_fit_gb() {  # KB: "4.5 GB"
   awk -v kb="${1:-0}" 'BEGIN { v = kb / 1048576; s = sprintf("%.1f", v); sub(/\.0$/, "", s); print s " GB" }'
 }
@@ -82,18 +91,19 @@ cvengine_fit_write() {  # KEY VALUE ENVFILE [NOTE]: into .env and, when differen
 }
 
 # Host-size rule. Prints one line when it wrote, one when an owner's own value is left (only on a host the rule would have changed).
-cvengine_fit_memory() {  # ENVFILE
-  local file=$1 kb limit own
+cvengine_fit_memory() {  # ENVFILE [answered]: with an answer that turns the scanner on (internal, both) the switch is the answer's own, not a reason to leave the limit
+  local file=$1 answered=${2:-} kb limit own
   kb=$(cvengine_fit_mem_kb)
   (( kb > 0 )) || return 0
   limit=$(cvengine_fit_scanner_limit "$kb")
   [[ -n $limit ]] || return 0
+  [[ -n $answered || -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$file") ]] || return 0  # somebody already decided about the scanner itself (off: no memory to size)
   own=$(cvengine_fit_value SCANNER_MEM_LIMIT "$file")
   if [[ -n $own ]]; then
-    _cv_fit_say "SCANNER_MEM_LIMIT=$own is already set, so it is left as it is (a host with $(cvengine_fit_gb "$kb") of memory would get $limit)."
+    # said once, and only when the value is not what the rule gives (an update run again, or one that already wrote it, has nothing to say)
+    [[ $own == "$limit" ]] || _cv_fit_say "SCANNER_MEM_LIMIT=$own is already set, so it is left as it is (a host with $(cvengine_fit_gb "$kb") of memory would get $limit)."
     return 0
   fi
-  [[ -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$file") ]] || return 0  # somebody already decided about the scanner itself
   cvengine_fit_write SCANNER_MEM_LIMIT "$limit" "$file" "written by the updater: this host has $(cvengine_fit_gb "$kb") of memory (under 7 GB: the built-in scanner gets 1g)"
   cv_fit_short="the built-in scanner is limited to $limit for this host's memory"
   _cv_fit_say "This host has $(cvengine_fit_gb "$kb") of memory, so SCANNER_MEM_LIMIT=$limit was written to .env: the built-in scanner may use at most 1 GB (hosts under 7 GB get 1g; docs/DEPLOYMENT.md#memory)."
@@ -152,7 +162,7 @@ cvengine_fit_run() {  # PLAN COMPOSE...
       fi
       [[ ! -f scripts/update-state.py ]] || python3 scripts/update-state.py notice clear >/dev/null 2>&1 || true
     fi
-    cvengine_fit_memory "$file"
+    case $plan in internal|both) cvengine_fit_memory "$file" answered ;; *) cvengine_fit_memory "$file" ;; esac
     return 0
   fi
   cvengine_fit_memory "$file"
@@ -165,7 +175,7 @@ cvengine_fit_run() {  # PLAN COMPOSE...
   fi
   if (( live >= 2 )); then
     limit=$(cvengine_fit_value SCANNER_MEM_LIMIT "$file"); limit=${limit:-3g}
-    _cv_fit_say "You have $live Sentinels of your own that are live. The built-in scanner is only their last resort, but it holds up to ${limit} of memory. It was kept, because a scanner is never removed without your answer. To free the memory, choose Sentinels only in Settings > Sentinels; from the command line: scripts/update.sh --sentinels external."
+    _cv_fit_say "You have $live Sentinels of your own that are live. The built-in scanner is only their last resort, but it holds up to $(cvengine_fit_limit_words "$limit") of memory. It was kept, because a scanner is never removed without your answer. To free the memory, choose Sentinels only in Settings > Sentinels; from the command line: scripts/update.sh --sentinels external."
     cv_fit_short="the built-in scanner was kept; you have $live Sentinels of your own (Settings > Sentinels)"
     [[ ! -f scripts/update-state.py ]] || python3 scripts/update-state.py notice scanner_kept "$(printf '%s' "$limit" | tr '[:upper:]' '[:lower:]')" "$live" >/dev/null 2>&1 || true
   fi
