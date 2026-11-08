@@ -62,7 +62,7 @@ class VersionlessNoiseTests(TestCase):
 		CVEMatch.objects.create(cve_entry=in_range, subdomain=self.sub, matched_product='nginx', confidence=0.9,
 			version_in_range=True)
 		asked = []
-		runner = lambda cve, hosts, provider=None, project=None: asked.append(cve.cve_id) or {'results': []}
+		runner = lambda cve, hosts, ai=False, project=None: asked.append(cve.cve_id) or {'results': []}
 		with mock.patch.object(nuclei_templates, 'MAX_CVES_PER_HOST', 1):
 			nuclei_scan.run_cve_checks(self.scan, [self.sub], None, cve_runner=runner)
 		self.assertEqual(asked, ['CVE-2099-17'])
