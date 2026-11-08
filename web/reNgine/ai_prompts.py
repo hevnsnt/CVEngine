@@ -86,7 +86,7 @@ CONNECTION_TEST_USER = 'ping'
 
 # Stages sent with a TASK LINE ONLY, no shared preamble (so not in TASKS, built by compose()), with the reason. The text is in
 # cveFeed/nuclei_templates.py (TARGETING_TASK, TAG_SELECTION_TASK). Measured on the real provider (11/8, probe ~/re-tools/ai-prompts/probe.py,
-# 5 repeats per job and model): with the shared preamble Sonnet refused both nuclei jobs; the owner's task sentence alone answered
+# 5 repeats per job and model): with the shared preamble Sonnet refused both of these jobs; the owner's task sentence alone answered
 # nuclei_targeting 5/5 (old text 3/5) and nuclei_tag_selection 5/5. The preamble raises refusals on these two, so they do not get it.
 UNFRAMED = {
     'nuclei_tag_selection': 'task line only, measured: the shared preamble raised refusals; the task line alone answered 5/5 on Sonnet',
