@@ -232,6 +232,7 @@ const steps = {
       syncMaster();
       card.append(head, el('p', '', f.about), ul); list.append(card);
     });
+    list.append(el('p', 'note', 'Some address must never be touched? List it (or its network) under Administration, Organizations, "Addresses we must never scan". Nothing is scanned there, and nothing is scanned at a host name that resolves to it, whichever scanners are on.', { style: 'margin:12px 0' }));
     // OpenVAS is its own group, off unless asked for, with its real cost and where it runs.
     const ov = state.openvas;
     const vas = el('div', 'fam vas');
