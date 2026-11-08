@@ -27,6 +27,7 @@ import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discove
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 import { secretsPage } from "/staticfiles/cve/secrets.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
@@ -3654,6 +3655,10 @@ const pages = {
             score: h.score,
             // a line that points at a tab of this very page opens it in place
             onOpen: (l) => {
+              if (l.ref && l.ref.type === "secret" && l.ref.id) {
+                openSecret(projectOf(h), l.ref.id);
+                return true;
+              }
               if (!l.ref || l.ref.type !== "host_tab" || !(l.ref.tab in S)) return false;
               openTab(l.ref.tab);
               pane.scrollIntoView({ block: "start" });

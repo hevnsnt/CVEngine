@@ -276,3 +276,70 @@ def status_after_validation(current, outcome):
     if current in ('public_by_design', 'accepted', 'revoked', 'false_positive'):
         return current
     return OUTCOME_STATUS.get(outcome, current)
+
+
+# ----------------------------------------------------------------------------- plain words (the secret's detail view)
+
+# What a class of secret is, what anyone who reads it can do with it, and what to do about it. The detail view says these in full sentences next to the
+# provider's own remediation (``Kind.remediation``); nothing here depends on a value.
+CLASS_EXPLAIN = {
+    'S': {'what': 'a server credential: a key or token that proves who you are to a provider',
+          'abuse': 'Anyone who loads the page can copy it and call the provider as you: read or change what the account holds and run up its bill, '
+                   'for as long as the credential stays valid.',
+          'fix': 'Rotate it at the provider now: make a new one, switch your server to it, then revoke this one. After that move the call that '
+                 'needs it to your server, so the value is never sent to a browser, and check the provider\'s logs for use you do not recognise.'},
+    'P': {'what': 'a browser key: a key that is meant to sit in a page, and is protected by the restrictions you set at its provider, not by being secret',
+          'abuse': 'Anyone can use it from their own page or script and spend your quota; if the provider does not restrict it, they can also run '
+                   'up charges on APIs you pay for.',
+          'fix': 'Restrict it at the provider: allow only your site\'s referrers (or your app) and only the APIs the site uses, and set a quota. '
+                 'If it is meant to be public and is already restricted, mark it as an intended public key.'},
+    'I': {'what': 'a token or identifier: it names an account, a client or a session at a provider',
+          'abuse': 'On its own it tells an attacker which account to target; if it is a token that has not expired it may also act for that account.',
+          'fix': 'Review it: find out what it identifies and whether it grants access by itself. Revoke it if it does. If it is only an identifier, '
+                 'mark it accepted, or an intended public key if it is meant to be public.'},
+}
+SOURCE_WORDS = {'kingfisher': 'Kingfisher scan of the page and its scripts', 'route': 'route read (the web route check read this page)',
+                'nuclei': 'Nuclei token template', 'bbot': 'bbot discovery module'}
+MAX_CONTEXT = 300
+CONTEXT_WIDTH = 80  # characters kept either side of the value
+_CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+
+def mask_context(context, value, kind=''):
+    """``context`` (text around a secret) with ``value`` replaced by its mask, every other well-known secret shape redacted, control characters
+    removed and the length clipped. The only form of context anything stores or shows. Returns ``''`` when ``value`` could still be read in the result
+    (a variant this function does not know): a snippet that cannot be proved clean is not kept."""
+    from cveFeed import secret_redaction
+    text = _CONTROL.sub(' ', str(context or ''))
+    needle = normalise(value)
+    if needle:
+        masked = mask(needle, kind)
+        for variant in dict.fromkeys((needle, needle.replace('/', '\\/'), needle.replace('\\', '\\\\'), needle.replace('"', '\\"'))):
+            text = text.replace(variant, masked)
+    text = secret_redaction.redact_text(text)
+    shown = mask(needle, kind) if needle else ''  # words of the mask itself (a PEM header) are no leak
+    if needle and (needle in text or any(piece in text and piece not in shown
+                                          for piece in (needle[i:i + 12] for i in range(0, max(1, len(needle) - 11), 4)))):
+        return ''  # the value, or a piece of 12 characters of it, is still readable: a snippet that cannot be proved clean is not kept
+    return re.sub(r'\s+', ' ', text).strip()[:MAX_CONTEXT]
+
+
+def context_snippet(text, value, kind='', width=CONTEXT_WIDTH):
+    """``(line, snippet)`` for the first place ``value`` is in ``text``: its 1-based line and the stretch of that line around it (``width`` characters
+    either side) with the value masked (``mask_context``). ``(None, '')`` when the value is not in the text or cannot be shown safely."""
+    text = str(text or '')
+    needle = normalise(value)
+    if len(needle) < 8:
+        return None, ''
+    at = text.find(needle)
+    if at < 0:
+        return None, ''
+    line = text.count('\n', 0, at) + 1
+    start = text.rfind('\n', 0, at) + 1
+    end = text.find('\n', at + len(needle))
+    end = len(text) if end < 0 else end
+    low, high = max(start, at - width), min(end, at + len(needle) + width)
+    snippet = mask_context(text[low:high], needle, kind)
+    if not snippet:
+        return line, ''
+    return line, ('... ' if low > start else '') + snippet + (' ...' if high < end else '')
