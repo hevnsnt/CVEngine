@@ -205,7 +205,7 @@ def _note_unnamed_stage():
 		where = ' < '.join(reversed(frames[-4:]))
 		if where not in _UNNAMED_SEEN and len(_UNNAMED_SEEN) < 50:
 			_UNNAMED_SEEN.add(where)
-			logger.warning('AI call with no usage stage (recorded as "unspecified"), called from %s: wrap it in usage_stage() and name the job in reNgine/ai_prompts.py', where)
+			logging.getLogger('reNgine.ai_usage_stage').warning('AI call with no usage stage (recorded as "unspecified"), called from %s: wrap it in usage_stage() and name the job in reNgine/ai_prompts.py', where)
 	except Exception:  # noqa: BLE001 - diagnostics never change a call
 		pass
 

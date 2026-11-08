@@ -330,7 +330,7 @@ class UnnamedStageTests(TestCase):
     def test_an_unnamed_call_is_logged_once_with_its_caller_and_no_text(self):
         ai_providers._UNNAMED_SEEN.clear()
         self.addCleanup(ai_providers._UNNAMED_SEEN.clear)
-        with self.assertLogs('reNgine.ai_providers', 'WARNING') as logs:
+        with self.assertLogs('reNgine.ai_usage_stage', 'WARNING') as logs:
             self.run_call(named=False)
         self.assertEqual(len(logs.records), 1)
         self.assertIn('test_ai_prompts.py', logs.output[0])
@@ -338,5 +338,5 @@ class UnnamedStageTests(TestCase):
 
     def test_a_named_call_logs_nothing(self):
         ai_providers._UNNAMED_SEEN.clear()
-        with self.assertNoLogs('reNgine.ai_providers', 'WARNING'):
+        with self.assertNoLogs('reNgine.ai_usage_stage', 'WARNING'):
             self.run_call(named=True)
