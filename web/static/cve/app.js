@@ -31,6 +31,7 @@ import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
+import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -248,6 +249,8 @@ function createList({
   onReset,
   prepare, // async (items) before the rows are drawn: what they need to know first (a project's SLA)
   pageSize = 30, // a number, or a function for a list that asks for more at a time when a filter narrows it
+  noun = "item", // for the "Loaded 30 more items, 90 of 217 shown" message
+  plural = "items",
 }) {
   let page = 1;
   let timer = null;
@@ -258,7 +261,56 @@ function createList({
   let seq = 0; // the newest request: an answer to an older one (an earlier filter, a slower response) is dropped
   const body = el("div");
   const more = el("div", "more-row");
-  mount.append(body, more);
+  // the polite live region: what a press of "Load more" added
+  const say = el("p", "sr", "", { role: "status", "aria-live": "polite", "aria-atomic": "true" });
+  mount.append(body, more, say);
+  let moreBtn = null; // the button under the rows: the same element from page to page, so a reader's place and focus stay on it
+  const announce = (text) => {
+    say.textContent = "";
+    setTimeout(() => (say.textContent = text), 30); // a changed node is what a screen reader reads out
+  };
+  function ensureBtn() {
+    if (moreBtn && moreBtn.isConnected) return;
+    more.textContent = "";
+    moreBtn = el("button", "btn ghost", "", { type: "button" });
+    moreBtn.onclick = () => {
+      const focused = document.activeElement === moreBtn;
+      page += 1;
+      busyMore();
+      load(false, false, focused);
+    };
+    more.append(moreBtn);
+  }
+  // the button while a page is on its way: disabled, aria-busy, saying how many are coming
+  function busyMore() {
+    const size = typeof pageSize === "function" ? pageSize() : pageSize;
+    const total = lastCount == null ? 0 : lastCount;
+    const view = LM.moreView({ phase: "busy", total, page: Math.max(1, page - 1), size: lastSize || size });
+    ensureBtn();
+    moreBtn.disabled = true;
+    moreBtn.setAttribute("aria-busy", "true");
+    moreBtn.textContent = view.kind === "button" ? view.label : LM.busyLabel(size);
+  }
+  // after a page arrived: the button says how many are left, or "All N shown" takes its place
+  function paintMore(data, added, hadFocus) {
+    const view = LM.moreView({ total: data.count, page: data.page, size: data.page_size });
+    if (view.kind !== "button") {
+      more.textContent = "";
+      moreBtn = null;
+      if (view.kind === "done") {
+        const done = el("p", "note more-done", view.label, { tabindex: "-1" });
+        more.append(done);
+        if (hadFocus) done.focus({ preventScroll: true });
+      }
+    } else {
+      ensureBtn();
+      moreBtn.disabled = false;
+      moreBtn.removeAttribute("aria-busy");
+      moreBtn.textContent = view.label;
+      if (hadFocus) moreBtn.focus({ preventScroll: true });
+    }
+    if (added) announce(LM.loadedMessage(added, LM.shownCount(data.count, data.page, data.page_size), data.count, noun, plural));
+  }
 
   // The auto-refresh of a list that is waiting on something (a running scan): quiet, only while the tab is visible and the reader has
   // not asked for more rows, and backing off after a failure. A hidden tab resumes on visibilitychange.
@@ -284,7 +336,7 @@ function createList({
   }
 
   // quiet: a refresh the reader did not ask for. The rows are swapped when the answer arrives, with no skeleton in between.
-  async function load(reset, quiet = false) {
+  async function load(reset, quiet = false, hadFocus = false) {
     const mine = ++seq;
     if (reset) page = 1;
     if (reset && !quiet) {
@@ -293,7 +345,10 @@ function createList({
       body.setAttribute("aria-busy", "true");
       body.append(...loadingSkeleton(skeleton));
     }
-    more.textContent = "";
+    if (reset) {
+      more.textContent = "";
+      moreBtn = null;
+    } else if (!moreBtn || !moreBtn.isConnected) busyMore(); // a retry, or the gallery asking for more: the same busy button
     try {
       const size = typeof pageSize === "function" ? pageSize() : pageSize;
       const data = await api("GET", `${path}?${query({ ...params(), page, page_size: size })}`);
@@ -311,20 +366,7 @@ function createList({
       if (reset && !items.length) body.append(emptyNode(empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset, quiet);
-      more.textContent = "";
-      if (data.page * data.page_size < data.count) {
-        const b = el(
-          "button",
-          "btn ghost",
-          `Load more (${data.count - data.page * data.page_size} left)`,
-        );
-        b.type = "button";
-        b.onclick = () => {
-          page += 1;
-          load(false);
-        };
-        more.append(b);
-      }
+      paintMore(data, reset ? 0 : items.length, hadFocus);
       disarm();
       refreshing = Boolean(autoRefresh && autoRefresh(items));
       if (refreshing) arm(REFRESH_MS);
@@ -340,7 +382,9 @@ function createList({
       if (!reset) {
         // a failed "Load more" keeps the rows already shown and offers the same page again
         page = Math.max(1, page - 1);
-        more.append(loadError(err, () => { page += 1; load(false); }, true));
+        more.textContent = "";
+        moreBtn = null;
+        more.append(loadError(err, () => { page += 1; load(false, false, true); }, true));
         return;
       }
       if (onReset) onReset();
@@ -360,6 +404,7 @@ function createList({
     // the next page of rows, for a view that shows the same rows another way (the host gallery)
     more: () => {
       page += 1;
+      busyMore();
       return load(false);
     },
     left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * lastSize)),
@@ -634,6 +679,109 @@ function select(label, options, onChange) {
   );
   s.addEventListener("change", onChange);
   return s;
+}
+
+// The head of a split list (Findings, CVE matches, Hosts): a search line and one line of buttons stay in view, and every other filter
+// (chip groups, dropdowns, saved views) sits in a panel that opens OVER the rows, so the rows keep the column. The filters that are
+// not at their first option show as removable chips; "Filters (3)" counts them. Open or closed is remembered per page.
+// `lead`: nodes for the search line (the Filters button joins them). `panelNodes`: everything else. `meta`: the count and tools row, which gets the chips.
+// A button with data-flag is a standalone on/off filter (Show every host); in a .picker the first button is the unfiltered one.
+function listHead({ page, lead, panelNodes, meta }) {
+  const key = `cvengine.filters.${page}`;
+  const id = `filters-${page}`;
+  const head = el("div", "list-head");
+  const bar = el("div", "list-bar");
+  bar.append(...lead.filter(Boolean));
+  const btn = el("button", "filters-btn btn sm ghost", "Filters", { type: "button", "aria-expanded": "false", "aria-controls": id });
+  const pop = el("div", "filters-pop", null, { id, role: "group", "aria-label": "Filters" });
+  pop.hidden = true;
+  pop.append(...panelNodes.filter(Boolean));
+  const chips = el("div", "active-chips", null, { "aria-label": "Active filters" });
+  chips.hidden = true;
+  bar.append(btn);
+  meta.prepend(chips); // the chips sit on the count line, wrapping with it
+  head.append(bar, pop, meta);
+  const labelOf = (b) => [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim() || b.textContent.trim();
+  const active = () => {
+    const out = [];
+    pop.querySelectorAll(".picker").forEach((p) => {
+      if (p.hidden) return;
+      const bs = [...p.querySelectorAll("button:not([data-flag])")];
+      const at = bs.findIndex((b) => b.getAttribute("aria-pressed") === "true");
+      if (at > 0) out.push({ label: labelOf(bs[at]), group: p.getAttribute("aria-label") || "", clear: () => bs[0].click() });
+    });
+    pop.querySelectorAll("button[data-flag]").forEach((b) => {
+      if (b.getAttribute("aria-pressed") === "true") out.push({ label: labelOf(b), group: "", clear: () => b.click() });
+    });
+    pop.querySelectorAll("select:not([data-quiet])").forEach((sel) => {
+      if (sel.selectedIndex > 0) out.push({ label: sel.options[sel.selectedIndex].text, group: sel.getAttribute("aria-label") || "", clear: () => { sel.selectedIndex = 0; sel.dispatchEvent(new Event("change", { bubbles: true })); } });
+    });
+    return out;
+  };
+  const refresh = () => {
+    const now = active();
+    chips.textContent = "";
+    now.forEach((a) => {
+      const c = el("button", "chip-x", null, { type: "button", "aria-label": `Remove filter ${a.group ? `${a.group}: ` : ""}${a.label}`, title: "Remove this filter" });
+      c.append(a.label, el("span", "", "\u00d7", { "aria-hidden": "true" }));
+      c.onclick = () => {
+        a.clear();
+        btn.focus();
+      };
+      chips.append(c);
+    });
+    chips.hidden = !now.length;
+    btn.textContent = now.length ? `Filters (${now.length})` : "Filters";
+  };
+  const setOpen = (open, focus = false) => {
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    head.classList.toggle("filters-open", open);
+    try {
+      localStorage.setItem(key, open ? "1" : "0");
+    } catch {}
+    if (focus) (open ? pop.querySelector("input, select, button") || pop : btn).focus();
+  };
+  btn.onclick = () => setOpen(pop.hidden, true);
+  head.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || pop.hidden) return;
+    e.stopPropagation();
+    setOpen(false, true);
+  });
+  const outside = (e) => {
+    if (!head.isConnected) return document.removeEventListener("pointerdown", outside, true);
+    if (!pop.hidden && !head.contains(e.target)) setOpen(false);
+  };
+  document.addEventListener("pointerdown", outside, true);
+  let queued = false;
+  const later = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      refresh();
+    });
+  };
+  new MutationObserver(later).observe(pop, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["aria-pressed", "hidden"] });
+  pop.addEventListener("change", later);
+  // the rows scroll under this head: how tall it is says how far a row must be kept from the top when it scrolls into view
+  if (window.ResizeObserver) new ResizeObserver(() => head.parentElement && head.parentElement.style.setProperty("--head-h", `${head.offsetHeight}px`)).observe(head);
+  let was = false;
+  try {
+    was = localStorage.getItem(key) === "1";
+  } catch {}
+  if (was) setOpen(true);
+  refresh();
+  return { head, refresh, setOpen };
+}
+
+// A row the reader picked opens its detail at the top: the list stays pinned while the page scrolls, so the pane's top may be above the
+// screen. Only for a pick (a click), never for the first row the page selects by itself.
+function revealPane(pane) {
+  const bar = document.querySelector(".topbar");
+  const edge = (bar ? bar.offsetHeight : 56) + 8;
+  const top = pane.getBoundingClientRect().top;
+  if (top < edge) window.scrollBy({ top: top - edge - 8 });
 }
 
 // --- asset changes (the Changes page and the host pane share these) ------------------------------
@@ -2148,8 +2296,11 @@ function findingPage(mount, cfg) {
     );
   }
   if (bulk) metaTools.append(bulk.toggle);
-  metaRow.append(el("span"), metaTools);
-  side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
+  const countLine = el("span", "list-count note");
+  metaRow.append(countLine, metaTools);
+  const isSearch = (n) => n instanceof Element && n.matches("input[type=search]");
+  const lh = listHead({ page: cfg.seenPage || cfg.kind || "findings", lead: cfg.filters.filter(isSearch), panelNodes: cfg.filters.filter((n) => !isSearch(n)), meta: metaRow });
+  side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
   const byId = new Map();
   let current = null;
   let token = 0;
@@ -2230,7 +2381,13 @@ function findingPage(mount, cfg) {
     path: cfg.path,
     params: cfg.params,
     empty: cfg.empty,
-    onLoaded: cfg.onLoaded,
+    noun: cfg.noun,
+    plural: cfg.plural,
+    onLoaded: (data, reset, quiet) => {
+      countLine.textContent = `${data.count} ${data.count === 1 ? cfg.noun : cfg.plural}`;
+      lh.refresh();
+      if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
+    },
     prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
     render: (_, items, reset) => {
       if (reset) {
@@ -2308,6 +2465,7 @@ function findingPage(mount, cfg) {
           if (e.target.closest("a, summary, details")) return; // a link inside the row goes where it points; a group's host list opens in place
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
+          revealPane(pane);
         };
         if (bulk) bulk.decorate(row, item, keyOf(item));
         rows.append(row);
@@ -2888,14 +3046,13 @@ const pages = {
     );
     sortBy.value = readParam("sort", "score", ["score", "name"]);
     const rows = el("div", "host-rows");
-    const controls = el("div", "list-tools");
-    controls.append(q, sortBy);
+    sortBy.dataset.quiet = "1"; // an order, not a filter: no chip, not counted
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
     // ?exposed=1: only the hosts the dashboard's Exposed hosts tile counts (an open CVE match the AI has not ruled out, or an open medium-or-worse finding)
     let exposedFilter = readParam("exposed", "0", ["0", "1"]) === "1";
-    const exposedBtn = el("button", "", "Exposed only", { type: "button", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
+    const exposedBtn = el("button", "", "Exposed only", { type: "button", "data-flag": "1", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
     exposedBtn.onclick = () => {
       exposedFilter = !exposedFilter;
       exposedBtn.setAttribute("aria-pressed", String(exposedFilter));
@@ -3196,7 +3353,8 @@ const pages = {
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
+    const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), heatChips, scopeChips], meta: metaRow });
+    side.append(lh.head, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
     let hostTab = new URLSearchParams(location.search).get("tab") || "overview"; // ?tab=web: a link from a score line opens that tab
@@ -3828,6 +3986,8 @@ const pages = {
     const list = createList({
       mount: side,
       skeleton: "rows",
+      noun: "host",
+      plural: "hosts",
       onReset: () => {
         rows.textContent = "";
         byId.clear();
@@ -3918,6 +4078,7 @@ const pages = {
             if (link) e.preventDefault();
             history.replaceState(null, "", `#${h.id}`);
             showHost(h);
+            revealPane(pane);
           };
           rows.append(row);
         });
@@ -3957,6 +4118,7 @@ const pages = {
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
+      "data-flag": "1",
       "aria-pressed": String(groupMode === FG.EVERY_HOST),
       title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
     });

@@ -846,6 +846,32 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
 .about-filter label{font-size:13px;color:var(--ink-2)}
 .about-filter input{width:100%;min-height:40px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;font-size:14px}
 .about-filter .note{margin:0;min-height:20px}
+/* ---- split lists (Findings, CVE matches, Hosts): the rows own the column. The head (search line, Filters button, count, tools) stays in view; the other
+   filters open as a panel OVER the rows (static/cve/app.js listHead). At 900px and up the column is the one scroll container, the full height under the
+   top bar; below that the page scrolls. Selectors carry .split> so they hold over the base rules above without editing them. ---- */
+.split>.split-list>.list-head{position:sticky;top:-10px;z-index:6;display:flex;flex-direction:column;gap:4px;margin:-10px -10px 0;padding:6px 10px 4px;background:var(--surface);border-bottom:1px solid var(--line);border-radius:var(--r) var(--r) 0 0}
+.list-head .list-bar{display:flex;gap:8px;min-width:0}
+.list-head .list-bar>input{flex:1;min-width:0;height:36px;min-height:36px;padding-top:0;padding-bottom:0;font-size:16px}
+.list-head .list-bar>.list-tools{flex:1;min-width:0}
+.list-head .list-tools>input,.list-head .list-tools>select{min-height:36px}
+.list-head .list-meta{flex-wrap:wrap;justify-content:flex-start;gap:6px 8px;min-height:0}
+.list-head .list-meta .list-count{margin:0 auto 0 0;white-space:nowrap}
+.list-head .list-meta .meta-tools{margin-left:auto}
+.list-head .filters-btn{flex:none;min-height:36px;padding:0 12px}
+.list-head .active-chips{display:contents}
+.list-head .active-chips[hidden]{display:none}
+.list-head .chip-x{display:inline-flex;align-items:center;gap:6px;min-height:26px;max-width:100%;padding:0 6px 0 10px;border:1px solid var(--line-2);border-radius:999px;background:var(--sunk);color:var(--ink);font:650 12.5px var(--font);cursor:pointer}
+.list-head .chip-x span{font-size:15px;line-height:1;color:var(--muted)}
+.list-head .filters-pop{position:absolute;left:0;right:0;top:100%;z-index:7;display:flex;flex-direction:column;gap:10px;margin:0 10px;padding:12px;max-height:calc(100dvh - var(--bar) - 170px);overflow-y:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:var(--pop)}
+.list-head .filters-pop[hidden]{display:none}
+.split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}
+.split>.split-list>.host-rows .host-row{scroll-margin-top:calc(var(--head-h,130px) + 8px)}
+.split>.split-list>.more-row{margin:0;padding:2px 0 8px}
+.split>.split-list .more-done{margin:0;text-align:center}
+@media (min-width:900px){
+  .split>.split-list{overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;top:calc(var(--bar) + 4px);height:calc(100dvh - var(--bar) - 8px)}
+}
+@media (pointer:coarse){.list-head .chip-x,.list-head .filters-btn{min-height:44px;min-width:44px}}
 .about-group{border-top:1px solid var(--line);min-width:0}
 .about-group>summary{display:flex;align-items:center;gap:4px;min-height:48px;cursor:pointer;font-weight:600;font-size:15px;list-style:none}
 .about-group>summary::-webkit-details-marker{display:none}
