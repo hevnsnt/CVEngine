@@ -257,6 +257,8 @@ ROUTES = [
                                                       with_aliases=bool(_body(r).get('with_aliases')))),
     ('GET', r'projects/(?P<slug>[-\w]+)/exclusions', 'Hosts excluded for this project\'s organization (never scanned again)',
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/excluded-addresses', 'The organization\'s do-not-scan address list (IPv4/IPv6 addresses and CIDR networks, stored normalised, with note, who and when): no Sentinel task is created, leased or kept for an address inside one, nor for a host that resolves into one. Read only; organization admins edit it in Administration. Add ?host=<name or address> to ask whether one is covered ({host, excluded, reason})',
+     lambda r, c, slug, **k: hosts.list_excluded_addresses(c, slug, r.GET.get('host'))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
     ('POST', r'projects/(?P<slug>[-\w]+)/inventory', 'Post a host inventory report (inventory v1 JSON from scripts/inventory; the only route a reporter token can call). 201 for a machine\'s first report, 200 after; the answer says matched, created or unmatched, never which host',

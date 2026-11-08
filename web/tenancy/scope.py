@@ -93,6 +93,7 @@ UNSCOPED = {
     'dashboard.AuditLog': 'organization level trail, read through its own organization filter',
     'startScan.IpAddress': 'per organization, shared by the organization\'s projects',
     'cveFeed.HostExclusion': 'per organization',
+    'cveFeed.ExcludedAddress': 'per organization',
     'cveFeed.OpenvasOrg': 'per organization',
     'cveFeed.ServiceRun': 'engine bookkeeping (nmap rows are global), never read for a user',
     'cveFeed.TriageVerdict': 'one answer shared by every finding with the same evidence; project only records where it was reached, so '

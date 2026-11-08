@@ -727,6 +727,28 @@ class HostExclusion(models.Model):
         return f"{self.host} (org {self.org_id})"
 
 
+class ExcludedAddress(models.Model):
+    """An address or network an organization must never have scanned (the "do not scan these addresses" list). Org-wide, like HostExclusion,
+    but matched on the ADDRESS: the entry itself, any host name whose resolved addresses (the inventory's stored ones, or the answer of a lookup
+    a task made) fall inside it, and any task that names an address inside it. ``cidr`` is stored normalised (``cveFeed.exclusions.parse_entry``:
+    a bare address is a /32 or /128, host bits are cleared, IPv6 is compressed), so the same network is one row however it was typed. Private
+    ranges are valid entries. Read and written only through cveFeed.exclusions and agentapi.excluded_addresses, which always filter by the
+    organization, so it cannot leak across orgs; scanners read it unscoped (Celery has no request scope) through the project's own org."""
+
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="excluded_addresses")
+    cidr = models.CharField(max_length=64, default="", db_default="")
+    note = models.CharField(max_length=300, blank=True, default="", db_default="")
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["org", "cidr"], name="uniq_excludedaddress_org_cidr")]
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.cidr} (org {self.org_id})"
+
+
 class HostState(models.Model):
     """What CVEngine last knew about one host of a project: the snapshot the next scan is diffed against.
     One row per (project, host); Port/IpAddress rows are shared and rewritten in place, so this is the only

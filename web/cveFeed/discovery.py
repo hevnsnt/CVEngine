@@ -295,6 +295,8 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
     domain = scan.domain
     api_keys = bool(extra_args and any(a != bbot_lib.TRUFFLEHOG_FLAG for a in extra_args))
     trufflehog = bbot_lib.TRUFFLEHOG_FLAG in extra_args
+    from agentapi import address_guard
+    address_guard.resolve_before_discovery(scan, domain)  # a single-host target that points into the do-not-scan list is never handed to the scanner
     target = sentinel_stream.bbot_target(domain, mode, discovery_timeout(), api_keys=api_keys, trufflehog=trufflehog)
     state = {'stored': stored}
 
@@ -362,8 +364,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
     except ScannerUnavailable as exc:  # no Sentinel could take it and it may not run here: nothing ran, the target stays due
-        status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
-        logger.warning('discovery of scan %s is waiting for a scanner: %s', scan_id, exc)
+        status, error = FAILED, (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'waiting for a scanner: {exc}')[:290]  # a do-not-scan refusal is not a wait
+        logger.warning('discovery of scan %s did not run: %s', scan_id, exc)
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
@@ -558,7 +560,7 @@ def seed_from_scan(scan, source):
     originals = list(Subdomain.objects.filter(scan_history=source).filter(under)
                      .prefetch_related('ip_addresses', 'technologies').order_by('id'))
     from cveFeed.exclusions import excluded_names
-    banned = excluded_names(scan.domain.project_id)  # an excluded host is never copied back into the inventory
+    banned = excluded_names(scan.domain.project_id, names_only=True)  # an excluded host is never copied back into the inventory
     originals = [o for o in originals if o.name.lower().rstrip('.') not in banned]
     copies = Subdomain.objects.bulk_create([
         Subdomain(scan_history=scan, target_domain=scan.domain, **{f: getattr(o, f) for f in fields}) for o in originals])
@@ -628,7 +630,7 @@ def _waiting_for_scanner(scan, what, exc, result):
     """A stage no scanner could take, and whose kind never runs on this server: nothing ran, nothing is recorded in
     the ledger (the targets stay due) and the stage is not a failure. ``result`` (no ``error``) is what the stage reports, plus why it did not run."""
     from cveFeed import activity
-    message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
+    message = (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'no scanner could take this work ({exc.kind}); the targets stay due until one can')
     logger.warning('%s of scan %s is waiting for a scanner: %s', what, scan.id, exc)
     activity.log('run_check', f'{what} for {scan.domain.name} is waiting: {message}', project=scan.domain.project_id, scan_id=scan.id)
     return {**result, 'skipped': message}

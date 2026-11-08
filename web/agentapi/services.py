@@ -491,7 +491,7 @@ def _create_domains(project, names, description='', excluded=None, discovery_mod
     from startScan.ip_rows import org_id_of_project
     names = list(dict.fromkeys(names))
     org_id = org_id_of_project(project.id)
-    banned = excluded_names(project.id)
+    banned = excluded_names(project.id, names_only=True)  # adding a target is not scanning it: an address-excluded name is added, then never scanned
     if banned:
         skipped = [n for n in names if normalize(n) in banned]
         if excluded is not None:
@@ -577,6 +577,9 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
         out['endpoints'] = EndPoint.objects.filter(scan_history=s).count()
         out['severity_counts'] = {SEVERITY_NAMES[k]: Vulnerability.objects.filter(scan_history=s, severity=k).count()
                                   for k in (4, 3, 2, 1, 0)}
+        from cveFeed.models import AgentActivity  # the hosts this scan did not touch because of the organization's do-not-scan list, and why
+        out['not_scanned'] = [{'message': a.message, 'hosts': (a.detail or {}).get('hosts', [])} for a in
+                              AgentActivity.objects.filter(detail__scan_id=s.id, detail__address_excluded=True).order_by('id')[:20]]
     return out
 
 
@@ -740,9 +743,12 @@ def _internal_scan(ctx, project, domain):
 
 def _refuse_excluded(project, domain):
     """409 when the target itself is a host its organization excluded for good."""
-    from cveFeed.exclusions import is_excluded
-    if is_excluded(project.id, domain.name):
+    from cveFeed.exclusions import address_excluded, is_excluded
+    if is_excluded(project.id, domain.name, names_only=True):
         raise ApiError(409, f'{domain.name} is excluded for this organization and is not scanned')
+    refusal = address_excluded(project.id, domain.name)
+    if refusal:
+        raise ApiError(409, f'{domain.name} is not scanned: {refusal}')
 
 
 def _abort_scan(scan, user=None):
@@ -1620,10 +1626,31 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             # what a person calls the host and wrote about it (display only; ``aliases`` above are the other DNS names on its addresses)
             **alias_and_note(sub, others, (shared or {}).get('tags') or {}),
             'inventory': _host_inventory(sub, others, shared)}
+    row['scan_blocked'] = _scan_blocked(sub, host_key[0], list(ips), shared)
     if (shared or {}).get('coverage') is not None:
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
                                                  probe_rows, root, shared.get('coverage_rich', False))
     return row
+
+
+def _scan_blocked(sub, project_id, addresses, shared):
+    """Why this host is not scanned: ``''`` when it is, else the plain reason (an address of it is on the organization's do-not-scan list, or the list could not be
+    read). One list read per project per page (``shared`` carries it)."""
+    from cveFeed import exclusions
+    try:
+        cache = shared.setdefault('address_networks', {}) if isinstance(shared, dict) else {}
+        if project_id not in cache:
+            cache[project_id] = exclusions.address_networks(project_id)
+        refusals = exclusions.address_refusals(project_id, addresses, networks=cache[project_id])
+    except Exception:  # noqa: BLE001 - the list could not be read: say so rather than show the host as scanned
+        return exclusions.UNREADABLE
+    if not refusals:
+        return ''
+    first = next(iter(refusals.values()))
+    if first.unreadable:
+        return str(first)
+    ip = next(iter(refusals))
+    return f"{sub.name} is not scanned: it resolves to {ip}, which is on the organization's do-not-scan list ({first.entry})"
 
 
 def _check_coverage(loaded, sub, others, project_id, excluded, hosting_info, reasons, unverified, probe_rows, root, rich):

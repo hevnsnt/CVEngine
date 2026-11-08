@@ -338,7 +338,8 @@ class RealTargetBuilderTests(SimpleTestCase):
             seen.append((kind, target))
             return None
         with mock.patch.object(broker_dispatch, 'any_scanner_for', return_value=True), \
-                mock.patch.object(broker_dispatch, 'dispatch_or_none', side_effect=fake_dispatch):
+                mock.patch.object(broker_dispatch, 'dispatch_or_none', side_effect=fake_dispatch), \
+                mock.patch('agentapi.address_guard.task_refusals', return_value={}):  # this class has no database: the do-not-scan list is tested in test_address_guard
             call()
         return seen
 

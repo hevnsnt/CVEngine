@@ -220,7 +220,7 @@ def run_ct_watch(domain_id, fetch=fetch_ct_names):
     from cveFeed import ledger
     ledger.record('ct-watch', [domain.name], domain.project_id)  # the sweep skips targets checked in the last 24 hours
     from cveFeed.exclusions import drop_excluded
-    new_names = drop_excluded(domain.project_id, sorted(found - known))[:MAX_NEW_PER_RUN]  # an excluded host is never re-created
+    new_names = drop_excluded(domain.project_id, sorted(found - known), names_only=True)[:MAX_NEW_PER_RUN]  # an excluded host is never re-created
     if not new_names:
         return {'checked': len(found), 'new': 0}
     created = []

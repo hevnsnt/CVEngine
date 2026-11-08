@@ -161,6 +161,17 @@ class SentinelTask(models.Model):
                    models.Index(fields=['finished_at'], name='sentineltask_finished_idx', condition=models.Q(finished_at__isnull=False)),
                    models.Index(fields=['claimed_at'], name='sentineltask_claimed_idx', condition=models.Q(claimed_at__isnull=False))]
 
+    def save(self, *args, **kwargs):
+        """A new task is checked against the organization's do-not-scan address list before it is written, whoever creates it: the one place a kind added
+        later cannot go around (``agentapi.address_guard``). Raises ``reNgine.resources.AddressExcluded``; nothing is stored."""
+        if self._state.adding and self.project_id:
+            from agentapi import address_guard
+            refusal = address_guard.dispatch_refusal(self.project_id, self.kind, self.target, self.host, self.ips, scan=self.scan if self.scan_id else None)
+            if refusal:
+                from reNgine.resources import AddressExcluded
+                raise AddressExcluded(self.kind, refusal)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f'sentinel task #{self.pk} {self.kind} ({self.status})'
 
