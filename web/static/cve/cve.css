@@ -2501,8 +2501,35 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .table-page .table td+td{border-top:0}
   .table-page .table td::before{font-size:var(--fs-1)}
   .table-page .table td[data-label="Severity"]::before,.table-page .table td[data-label="Secret"]::before,.table-page .table td[data-label="Found at"]::before,.table-page .table td[data-label="#"]::before,.table-page .table td[data-label="Target"]::before,.table-page .table td[data-label="Status"]::before,.table-page .table td[data-label="Provider"]::before,.table-page .table td[data-label="Kind"]::before{display:none}
-  .table-page .table td.clip{flex-basis:100%;max-width:none}
+  .table-page .table td.clip{max-width:none}
+  .table-page .table td[data-label="Found at"]{flex-basis:100%}
   .table-page .table td[data-label=""]{margin-left:auto}
   .table-page .supplier-head{flex-wrap:wrap;gap:var(--s-1) var(--s-2)}
   .table-page .supplier-actions{flex:1 0 100%;margin-left:0;flex-wrap:wrap}
+}
+@media (max-width:639px){
+  /* the count and the tools share a line (the older phone rule gave the tools a line of their own) */
+  .list-head .list-meta .meta-tools{width:auto;margin-left:auto;justify-content:flex-end}
+  /* the tabs say which page this is, so on a phone the title is read aloud and not drawn, and the rows start higher */
+  .wrap:has(#view>.split,#view>.table-page) .page-head{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  /* scans: number, target and status on one line, the numbers under it, the findings and Stop last */
+  #section[data-kind="scans"] .table-page .table tr{padding:var(--s-1) var(--s-3) var(--s-2) var(--s-4);gap:var(--s-1) var(--s-3);grid-template-columns:auto minmax(0,1fr) auto}
+  #section[data-kind="scans"] .table-page .table td[data-label="#"]{grid-row:1;grid-column:1}
+  #section[data-kind="scans"] .table-page .table td[data-label="Target"]{grid-row:1;grid-column:2;font-size:var(--fs-3)}
+  #section[data-kind="scans"] .table-page .table td[data-label="Findings"]{grid-row:3;grid-column:1/3}
+  #section[data-kind="scans"] .table-page .table td[data-label=""]{grid-row:3;grid-column:3;grid-row-end:auto}
+}
+@media (max-width:899px){
+  /* a split list's count line is one line that scrolls sideways when the chips and tools do not fit, so the rows do not move down */
+  .split>.split-list>.list-head .list-meta{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .split>.split-list>.list-head .list-meta::-webkit-scrollbar{display:none}
+  .split>.split-list>.list-head .list-meta>*,.split>.split-list>.list-head .active-chips>*{flex:none}
+  .split>.split-list>.list-head .list-meta .meta-tools{display:flex;flex-wrap:nowrap}
+  .split>.split-list>.list-head .active-chips{display:contents}
+}
+.secrets-top{display:inline-block}
+@media (max-width:899px){
+  /* on a phone a panel from the count line spans the screen under the head, like the Filters panel */
+  .table-page .what-is{position:static}
+  .table-page .what-body{left:var(--gutter);right:var(--gutter);top:100%;width:auto;max-height:calc(100dvh - var(--bar) - 140px);overflow-y:auto}
 }

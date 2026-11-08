@@ -318,5 +318,5 @@ export async function suppliersPage(mount, { slug, all, listHead }) {
   addButton.onclick = () => addDialog(slug, state.limits, () => { run(); paintFacets(); });
   await run();
   paintFacets();
-  search.focus();
+  if (!matchMedia("(pointer:coarse)").matches) search.focus(); // a phone's keyboard would cover the list
 }

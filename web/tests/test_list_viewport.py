@@ -17,7 +17,7 @@ SCRIPT = (ROOT.parent / 'scripts' / 'ui_list_viewport.py').read_text()
 class ListViewportTests(SimpleTestCase):
 	def test_findings_matches_and_hosts_share_one_head(self):
 		self.assertEqual(len(re.findall(r'function listHead\(', APP)), 1)
-		self.assertEqual(len(re.findall(r'= listHead\(\{', APP)), 2)  # findingPage (Findings, CVE matches) and Hosts
+		self.assertEqual(len(re.findall(r'= listHead\(\{', APP)), 3)  # findingPage (Findings, CVE matches), Hosts and Scans; Secrets and Third parties get the same function passed in
 		self.assertIn('side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);', APP)
 		self.assertIn('side.append(lh.head, bulk.bar, rows, gallery);', APP)
 
@@ -59,3 +59,39 @@ class ListViewportTests(SimpleTestCase):
 		self.assertIn('.wrap:has(#view>.split:not(.gallery)){display:grid;', CSS)
 		self.assertIn('.split>.split-list{grid-column:1;grid-row:1/span 6}', CSS.replace('.wrap:has(#view>.split:not(.gallery)) ', ''))
 		self.assertIn('side.style.setProperty("--fit"', APP)  # the column ends at the screen's bottom wherever the page is scrolled
+
+	def test_the_table_lists_use_the_same_head_and_keep_the_intro_behind_a_button(self):
+		secrets = (STATIC / 'secrets.js').read_text()
+		suppliers = (STATIC / 'suppliers.js').read_text()
+		self.assertIn('secretsPage(mount, { slug, all: ALL, canWrite: !ALL, listHead })', APP)
+		self.assertIn('suppliersPage(mount, { slug, all: ALL, listHead })', APP)
+		for src, page in ((secrets, 'secrets'), (suppliers, 'suppliers')):
+			self.assertIn(f'listHead({{ page: "{page}"', src)
+			self.assertIn('whatIs(', src)  # the intro is one tap away, not a paragraph above the rows
+			self.assertNotIn('page-intro', src)
+		self.assertIn('listHead({ page: "scans"', APP)
+		self.assertEqual(len(re.findall(r'function listHead\(', secrets + suppliers)), 0)  # reused, not forked
+		ui = (STATIC / 'ui.js').read_text()
+		self.assertIn('export function disclosure(', ui)
+		self.assertIn('export const whatIs', ui)
+
+	def test_the_table_head_and_the_table_header_are_sticky_and_the_rows_start_high(self):
+		self.assertIn('.table-page>.list-head{position:sticky;top:calc(var(--bar)', CSS)
+		self.assertIn('.table-page .table th{top:calc(var(--bar)', CSS)
+		self.assertIn('.table-page .table-wrap{overflow:visible', CSS)
+		self.assertIn('.wrap:has(#view>.table-page){display:flex;', CSS)  # title and tabs on one line at 900px and up
+
+	def test_a_finding_row_is_two_lines_and_nothing_is_lost(self):
+		self.assertIn('.split>.split-list>.host-rows .host-row:not(:has(>.hr-top))>.host-why{display:none}', CSS)
+		self.assertIn('white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:20px', CSS)
+		# the host and product open the meta line; the description and every badge are in the row's tooltip and in the pane
+		self.assertIn('if (hostLine) meta.append(hostLine);', APP)
+		self.assertIn('row.title = [title.textContent,', APP)
+
+	def test_on_a_phone_the_project_is_in_the_top_bar_and_the_status_strip_is_one_tap(self):
+		self.assertIn('.scope-row{position:sticky;top:0;z-index:21;height:0;', CSS)
+		self.assertIn('.stage:has(>.scope-row) .topbar .brand.compact{display:none}', CSS)
+		self.assertIn('.list-head .list-meta .meta-tools{width:auto;margin-left:auto', CSS)
+		strip = (STATIC / 'statusstrip.js').read_text()
+		self.assertIn('if (!e.target.closest("button")) toggle.click();', strip)
+
