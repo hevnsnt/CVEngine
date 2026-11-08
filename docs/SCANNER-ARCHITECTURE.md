@@ -298,7 +298,7 @@ The built-in scanner shares celery's network namespace and is sent this server's
 Waiting is visible, not a pause. `agentapi/scanner_state.py` derives, from the Sentinels' own heartbeats and with nothing written, which kinds
 are waiting: every kind (`waiting_kinds()`, none but `discover` runs here) for which no live, active Sentinel on the instance declares
 the capability right now. It is cached for 15 seconds, and until the built-in scanner has enrolled for the first time it is empty and costs no query (a fresh install's stages wait all the same). `state()` adds `never_seen`: the
-waiting kinds for which no Sentinel that could run them has ever registered, in any status (revoked and suspended ones count as seen), a `problems` line in the system status for an App Admin.
+waiting kinds for which no Sentinel that could run them has ever registered, in any status (revoked and suspended ones count as seen), a `problems` line in the system status for an App Admin. OpenVAS is an opt-in add-on that is off by default, so its absence is not said (`OPTIONAL_KINDS`): it is left out of `kinds`, `never_seen` and every sentence until an `openvas` task is queued or a project or organization has switched the add-on on (and the instance switch is on); an OpenVAS scanner that registered and went offline is always said.
 
 It is shown as a `scanning.scanner` block in the system status, a note ("Scanner offline: ... Nothing has failed; it resumes automatically when a scanner
 reconnects.") and, for an App Admin, the never-seen sentence, and as a strip on every page (`static/cve/scannerbar.js`, `/cve/api/scanner`) with a

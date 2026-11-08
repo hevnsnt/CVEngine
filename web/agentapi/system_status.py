@@ -546,6 +546,40 @@ def _work():
     return out
 
 
+CONDUCTOR_STALE_SECONDS = 5 * 60  # the conductor is scheduled every minute: no round for five means its task is not running, whatever beat says
+
+
+def _ago(seconds):
+    """``seconds`` as a plain span, so no time zone is needed to read it."""
+    if seconds is None:
+        return 'never'
+    minutes = seconds // 60
+    if minutes < 1:
+        return 'less than a minute ago'
+    if minutes < 120:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    return f'{minutes // 60} hours ago'
+
+
+def _work_problem(work, beat_state=None):
+    """The one sentence for a stuck work conductor, or None. Nothing running or queued is normal when no target is due (every target scanned inside the
+    minimum gap, set to manual, excluded, ...): that is the conductor doing its job (``conductor.next_targets`` is the single definition of due). A
+    problem is a target that is due while nothing runs or waits, a last round older than ``CONDUCTOR_STALE_SECONDS`` while beat is ticking (a silent beat
+    has its own line), or a last round that ended in an error. Times are spans, not clock times: the server does not know the reader's time zone."""
+    if not isinstance(work, dict) or 'error' in work or not work.get('wanted_depth') or work.get('paused'):
+        return None
+    last = work.get('last_round') or {}
+    age = work.get('last_round_age_seconds')
+    ran = f'the work conductor last ran {_ago(age)}' if last else 'the work conductor has not run yet'
+    if last.get('error'):
+        return f"work: the last round of the work conductor failed ({last['error']}); first check the worker's log for a line starting 'work conductor'"
+    if work.get('targets') and work.get('due') and not work.get('running') and not work.get('queued'):
+        return f'work: a target is due for a scan but nothing is running or queued; {ran}; first check that the celery worker for the cve_feed_queue is up and that celery beat is running'
+    if age is not None and age > CONDUCTOR_STALE_SECONDS and beat_state != 'silent':
+        return f'work: {ran}, though it is scheduled every minute; first check that the celery worker for the cve_feed_queue is consuming (docker compose logs celery)'
+    return None
+
+
 def _system(user, problems, notes):
     out = {}
     out['database'] = _probe(problems, 'database', _database)
@@ -569,12 +603,10 @@ def _system(user, problems, notes):
         elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
     out['work'] = _probe(problems, 'work', _work)
-    work = out['work']
-    if isinstance(work, dict) and 'error' not in work and work.get('wanted_depth') and not work.get('paused') \
-            and work.get('targets') and not work.get('running') and not work.get('queued'):
-        problems.append('work: nothing is running or queued although there are targets to scan; the work conductor '
-                        + ('has not run yet' if not work.get('last_round') else f"last ran at {work['last_round'].get('at')}")
-                        + ' (is celery beat running?)')
+    beat_state = ((out.get('schedules') or {}).get('beat') or {}).get('state')
+    problem = _work_problem(out['work'], beat_state)
+    if problem:
+        problems.append(problem)
     out['memory'] = _probe(problems, 'memory', _memory)
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
