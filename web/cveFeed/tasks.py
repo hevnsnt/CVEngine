@@ -888,7 +888,7 @@ def validate_match_on_demand(request_id):
                             f'Validation request #{job.pk}: template candidate {candidate["status"]}; '
                             'not run on the host', candidate_id=candidate.get('id'))
         if not checks and template[1] == 'no template covers this CVE':
-            plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
+            plan_notes.append('No permitted template covers this CVE; an AI draft runs on a host only after it passes the automatic fixture test and second-pass review.')
         if not checks:
             plan_notes.append(plan['reason'])
         if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
@@ -1967,6 +1967,14 @@ def ai_jobs_housekeeping():
     a week expire and their stage asks again (``cveFeed.ai_jobs.housekeeping``)."""
     from cveFeed import ai_jobs
     return ai_jobs.housekeeping()
+
+
+@app.task(name="validate_template_drafts", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def validate_template_drafts():
+    """Every five minutes: AI-written template drafts go through the automatic gates (``cveFeed.templatevalidate``): they are validated,
+    rejected with a reason, or expired. Queues AI jobs for the reviewer container and Sentinel tasks, runs nothing itself."""
+    from cveFeed import templatevalidate
+    return templatevalidate.run_pending()
 
 
 @app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")

@@ -34,6 +34,12 @@ def _estimate(row, rate):
     return str(amount.quantize(Decimal('0.000001')))
 
 
+def _templates():
+    """The AI-written checks by outcome, with the plain reasons of rejections (the system validates them itself: cveFeed.templatevalidate)."""
+    from cveFeed import templatevalidate
+    return templatevalidate.summary()
+
+
 def snapshot(days=7):
     from dashboard.models import AIProviderSettings
     from cveFeed.models import AIPriceRate, AIUsage
@@ -125,7 +131,7 @@ def snapshot(days=7):
             'priced_attempts': priced_attempts,
             'unknown_cost_attempts': unknown_cost_attempts, 'models': models,
             'daily': [{'day': _iso(d['day']), 'attempts': d['attempts'], 'errors': d['errors']} for d in daily],
-            'stages': stages, 'recent': recent,
+            'stages': stages, 'recent': recent, 'templates': _templates(),
             'rates': [{'provider': r.provider, 'model': r.model, 'input_per_million_usd': str(r.input_per_million_usd),
                        'output_per_million_usd': str(r.output_per_million_usd), 'cache_read_per_million_usd':
                        str(r.cache_read_per_million_usd) if r.cache_read_per_million_usd is not None else None,
