@@ -370,7 +370,10 @@ def ai_models(request):
             hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else ''}
             ttl = MODELS_CACHE_SECONDS
         except AIProviderError as exc:
-            hit = {'error': MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''), 'it did not answer')}
+            words = MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''))
+            if words is None and 'requires an API key' in str(exc):  # no key typed, and the saved one belongs to another address
+                words = 'there is no API key for this address: type one (a saved key is only used for the address it was saved for)'
+            hit = {'error': words or 'it did not answer'}
             ttl = MODELS_FAIL_SECONDS
         except (AttributeError, KeyError, TypeError, ValueError):  # a shape the provider class did not expect: not a list of models
             hit = {'error': MODELS_FAIL_WORDS['provider_shape']}

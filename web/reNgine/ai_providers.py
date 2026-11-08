@@ -591,7 +591,7 @@ class OpenAIProvider(AIProvider):
 				price = float(price) * 1_000_000 if price is not None else None
 			except (TypeError, ValueError):
 				price = None
-			if m.get('id'):
+			if isinstance(m.get('id'), str) and m['id']:
 				models.append({'id': m['id'], 'created': _epoch(m.get('created')), 'price': price})
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
