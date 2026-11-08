@@ -49,3 +49,12 @@ class AccessibleNameTests(SimpleTestCase):
         css = (STATIC / 'cve.css').read_text()
         self.assertRegex(css, r'#section:not\(\[data-kind\]\) \.feed li\{grid-template-columns:minmax\(0,1fr\)\}')
         self.assertIn('.grid>*{min-width:0}', css)
+
+    def test_the_alias_button_name_starts_with_the_words_on_the_button(self):
+        app = (STATIC / 'app.js').read_text()
+        self.assertIn('"aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}`', app)
+
+    def test_a_long_unbroken_name_in_any_list_wraps(self):
+        css = (STATIC / 'cve.css').read_text()
+        self.assertIn('.feed li>*{min-width:0}', css)
+        self.assertIn('.feed .meta,.feed .cve-id{overflow-wrap:anywhere}', css)

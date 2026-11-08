@@ -2624,7 +2624,7 @@ const pages = {
           render: (t) => {
             const box = named(hostLink(t.name), t);
             // the edit sits with the name it labels (the actions column is already full)
-            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}` });
             edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
             edit.onclick = () => editLabel(t);
             box.append(el("br"), edit);

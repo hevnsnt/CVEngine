@@ -558,6 +558,8 @@ circle.pop{animation:popin .5s ease}
 #section:not([data-kind]) .feed li>div{flex-wrap:wrap;min-width:0}
 #section:not([data-kind]) .feed li>div>div{min-width:0}
 #section:not([data-kind]) .feed .cve-id,#section:not([data-kind]) .feed .meta{overflow-wrap:anywhere}
+.feed li>*{min-width:0}  /* a long unbroken name in any list (tokens, agents, hostnames) wraps inside its row instead of scrolling the list or the page */
+.feed .meta,.feed .cve-id{overflow-wrap:anywhere}
 .feed li[hidden]{display:none}
 .cve-id{font:700 13.5px var(--mono)}
 .cve-title{grid-column:2;color:var(--ink-2);font-size:14px;overflow-wrap:anywhere}
