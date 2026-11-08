@@ -110,6 +110,11 @@ DATABASES = {
         # overestimates their cost, so it compiled each one with LLVM before running it: a 0.1 s query took 2 s here and up to a minute
         # on a busy 3-core server, which is what made a 2,000-host project's dashboard slow to open. The queries themselves are cheap.
         'OPTIONS': {'options': '-c jit=off'},
+        # A new connection costs 3.8 ms and a backend process on the database (a dozen Sentinels and a few browsers polling every few seconds opened and
+        # closed one per request). The web container sets this to 60 (docker-compose.yml): its 2 x 8 threads then hold at most 16 connections. Left at 0 for the
+        # Celery workers, whose gevent greenlets would each keep one.
+        'CONN_MAX_AGE': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0),
+        'CONN_HEALTH_CHECKS': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0) > 0,  # a ping before reuse; with 0 (workers, tests) it would only add a statement
         # 'OPTIONS':{
         #     'sslmode':'verify-full',
         #     'sslrootcert': os.path.join(BASE_DIR, 'ca-certificate.crt')

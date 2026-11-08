@@ -4,7 +4,9 @@ services:
     image: "postgres:18-alpine"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
-    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
+              "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
+              "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -137,6 +139,7 @@ services:
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - GUNICORN_WORKERS=2
+      - CVENGINE_DB_CONN_MAX_AGE=${CVENGINE_DB_CONN_MAX_AGE:-60}  # web threads keep their database connection for a minute (16 at most); workers do not (docs/DEPLOYMENT.md, Small hosts)
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}

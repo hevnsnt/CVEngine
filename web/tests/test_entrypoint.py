@@ -54,7 +54,12 @@ class EntrypointTests(SimpleTestCase):
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
         for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
-            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]', (root / name).read_text(), name)
+            text = (root / name).read_text()
+            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"', text, name)
+            # the memory settings a 2 GB host needs (docs/DEPLOYMENT.md, Small hosts), each overridable from .env, with defaults that are safe from 1 GB up
+            for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
+                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}'):
+                self.assertIn(setting, text, name)
         # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
         for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
             text = (root / 'scripts' / name).read_text()

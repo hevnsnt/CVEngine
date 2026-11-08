@@ -2,6 +2,24 @@
 
 cvENGINE is one Docker Compose deployment: `db`, `redis`, `web`, `celery`, `celery-beat`, `proxy`, the AI reviewer (`reviewer`, [AI-REVIEWER.md](AI-REVIEWER.md)) and the built-in scanner (`scanner`, [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)), which runs the scan tools ([ARCHITECTURE.md](ARCHITECTURE.md)). Two optional parts ship in the same file as Compose profiles and are **off by default**: a `tailscale` service ([TAILSCALE.md](TAILSCALE.md)) and the old in-stack OpenVAS containers, 15 Greenbone services the application no longer uses (OpenVAS runs on a Sentinel, [OPENVAS.md](OPENVAS.md)). Until you switch one on, none of its containers exist, run, publish a port or use memory. Sentinels, the scanner agents you run on other machines, are not part of this stack: each runs from its own repository and calls this server over HTTPS on 443. The [install steps](#install) are below. Size the server for your scans: 4 GB of RAM is the least (the installer warns below that) and 8 GB is comfortable with the built-in scanner, and heavy jobs queue by memory use ([Memory](#memory), [CONFIGURATION.md](CONFIGURATION.md#memory-and-workers)). Images build for amd64 and arm64.
 
+## Small hosts (1 to 2 GB)
+
+The defaults below were measured on a 3000-target stack (3000 hosts, 18,000 findings, 1,500 secrets, 300,000 Sentinel task rows, 50 Sentinels polling every 3 seconds and 10 dashboard tabs) with every container limited as listed. Peak resident memory seen under that load: `web` 560 MB, `celery` 900 MB (four worker pools, idle plus discovery), `celery-beat` 134 MB, `db` 460 MB (of which the shared buffers), `redis` 10 MB. A report PDF of the whole 3000-host project peaks at 350 MB in a child of the worker (it was 2.9 GB before the renderer cut the report into chunks).
+
+| Setting (`.env`) | Default | Small host (2 GB) | Why |
+| --- | --- | --- | --- |
+| `POSTGRES_SHARED_BUFFERS` | `256MB` | `256MB` (`128MB` at 1 GB) | The working set of the dashboard, hosts and Sentinel queries was 100% cache hits (`pg_stat_database`: 65% at the PostgreSQL default of 128 MB before the new indexes, 100% after). |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | `768MB` | `768MB` | What the planner assumes the operating system caches; no memory is reserved. |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | `64MB` | `64MB` | Index builds (an update builds its new indexes concurrently) and autovacuum. |
+| `POSTGRES_RANDOM_PAGE_COST` | `1.1` | `1.1` | The data directory is on an SSD; the PostgreSQL default of 4 favours sequential scans of the 300,000-row task table. Use `4` on a spinning disk. |
+| `POSTGRES_MAX_CONNECTIONS` | `300` | `100` | The web container holds at most 16 persistent connections, the workers about 30 at their busiest, beat one. Lower it only if you also keep the worker pools small. |
+| `CVENGINE_DB_CONN_MAX_AGE` | `60` (web only) | `60` | A request that opened a connection spent 3.8 ms of a 5 to 60 ms answer on it, and the database forked a backend each time. `0` brings the old behaviour back. |
+| `WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`, `BEAT_MEM_LIMIT` | `1g`, `4g`, `512m` | `1g`, `2g`, `256m` | Container ceilings. Report PDFs, discovery and feed workers share the celery ceiling; lower `DISCOVERY_CONCURRENCY` (default 8) to 4 on a 2 GB host. |
+| `CVENGINE_AGENT_TASK_RETENTION_DAYS` | `30` | `7` to `14` | A Sentinel task row is about a kilobyte: a week of scanning 3000 targets was 300,000 rows (300 MB with indexes). Also on Settings, configMaxxing, **Data retention**. |
+| `CVENGINE_REPORT_MAX_HOSTS`, `CVENGINE_REPORT_MAX_FINDINGS` | `500`, `1000` | defaults | Bound the PDF. They are no longer a memory guard (the renderer works in chunks) but keep a report readable and its render time near 25 s. |
+
+Changing a `POSTGRES_*` value recreates the `db` container once on the next update or `docker compose up -d` (a few seconds of downtime, no data change).
+
 ## Ports
 
 | Port | Bound to | Service |
