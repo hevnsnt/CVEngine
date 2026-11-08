@@ -35,6 +35,45 @@ def endpoints():
     s = SLUG
     since = (timezone.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     p = f'/api/v1/projects/{s}'
+    return fixed_endpoints(s, since, p) + extra_endpoints(s, p)
+
+
+def extra_endpoints(s, p):
+    """Pages and APIs a person or a Sentinel touches that the matrix above does not: host detail, scan detail, secrets, the activity feed, the
+    Sentinels and secrets pages, the setup wizard's poll. Ids come from the database, so it works on any size."""
+    from agentapi.models import SentinelTask
+    from cveFeed.models import SecretFinding
+    from startScan.models import ScanHistory, Subdomain, Vulnerability
+    sub = Subdomain.objects.filter(target_domain__project__slug=s).order_by('-id').values_list('id', 'name').first()
+    scan = ScanHistory.objects.filter(domain__project__slug=s, scan_status=2).order_by('-id').values_list('id', flat=True).first()
+    vuln = Vulnerability.objects.filter(target_domain__project__slug=s).order_by('-id').values_list('id', flat=True).first()
+    sec = SecretFinding.objects.filter(project__slug=s).order_by('id').values_list('id', flat=True).first()
+    rows = [
+        ('round2', 'scans (page 1, 50)', f'{p}/scans?page=1&page_size=50'),
+        ('round2', 'scans (running)', f'{p}/scans?status=running&page_size=50'),
+        ('round2', 'activity (api)', f'{p}/activity?page_size=50'),
+        ('round2', 'sentinels page shell', '/cve/sentinels/'),
+        ('round2', 'secrets page shell', f'/cve/{s}/secrets/'),
+        ('round2', 'secrets (page 1, 50)', f'{p}/secrets?status=open&page_size=50'),
+        ('round2', 'secrets (all, page 30)', f'{p}/secrets?status=all&page=30&page_size=50'),
+        ('round2', 'welcome progress (wizard poll)', '/cve/api/welcome/progress'),
+        ('round2', 'welcome state', '/cve/api/welcome/state'),
+        ('round2', 'sentinel-tasks (page 1)', f'{p}/sentinel-tasks?page_size=50'),
+        ('round2', 'sentinels defaults', '/api/v1/sentinels/defaults'),
+    ]
+    if sub:
+        rows += [('round2', 'host detail (inventory)', f'{p}/hosts/{sub[1]}/inventory'), ('round2', 'host detail (screenshots)', f'{p}/hosts/{sub[0]}/screenshots')]
+    if scan:
+        rows += [('round2', 'scan detail', f'{p}/scans/{scan}'), ('round2', 'scan page', f'/cve/{s}/scans/{scan}/'),
+                 ('round2', 'scan subdomains', f'{p}/scans/{scan}/subdomains?page_size=50'), ('round2', 'scan activity', f'{p}/scans/{scan}/activity')]
+    if vuln:
+        rows.append(('round2', 'finding detail', f'{p}/findings/vulnerability/{vuln}'))
+    if sec:
+        rows.append(('round2', 'secret detail', f'{p}/secrets/{sec}'))
+    return rows
+
+
+def fixed_endpoints(s, since, p):
     return [
         # the dashboard: the shell, then everything dashboard.js polls
         ('dashboard', 'dashboard page shell', f'/cve/?project={s}&skip=1'),
