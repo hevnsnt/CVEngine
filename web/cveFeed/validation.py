@@ -8,14 +8,14 @@ check exist.
   lives in the generated-templates directory. Either must be read-only by its own text (methods GET, HEAD or OPTIONS, no payloads,
   attack, fuzzing or body, no code, file or out-of-band protocols); anything else is refused ("template not validated").
 * ``nmap_sv``: ``nmap -sV`` against the single port the finding names.
-* ``http_head``: one HEAD (a GET only when the server answers 405 to HEAD), through the route check's probe: no cookies, no
+* ``http_head``: one HEAD (a GET only when the server answers 405 to HEAD), read by a Sentinel (``page_read``, op ``head``): no cookies, no
   credentials, no redirects, the body never kept.
 * ``db_probe``: the existing single credential-less database exposure check.
 * ``fact_probe``: a version or identity probe from the catalogue in ``cveFeed.probes`` (a few GETs with the front page's headers, an
-  error page signature, a framework script, or ``nmap -sV --version-all`` on one port). It finds the fact an advisory depends on (the
+  error page signature, a framework script, or a service-version scan of one port), run by a Sentinel (``http_probe``, ``nmap_verify``). It finds the fact an advisory depends on (the
   version, which look-alike product runs, what answers behind a CDN) and records it; it never exploits anything.
 * ``script_read``: for a match on a client-side JavaScript library (``cveFeed.detection.client_libraries``), the html-libraries read of every
-  web base's front page again (``probes.read_host_libraries``: the pages, then their scripts through ``js_libraries``' vetter and budgets),
+  web base's front page again, by a Sentinel (``page_read``, op ``libraries``: the pages, then their scripts through ``js_libraries``' vetter and budgets),
   which states the version from the file itself and which copy runs. nmap and a HEAD cannot see a library inside a page, so for such a
   match this replaces them. A version still inside the range is ``reaffirmed`` (never a hit: a version is not an exploitable page), and
   reopens a match an earlier script read closed. Only what is truly false closes the match, through the guarded closure
@@ -26,7 +26,8 @@ check exist.
   says why.
 
 Everything is read-only; every host goes through the scannable-host filter and must belong to the finding's project; work is
-dispatched per project; each check waits its turn for memory (heavy_job), is kept off the ledger while fresh (CVENGINE_TTL_VALIDATE),
+dispatched per project; no check sends anything to a target from this server (the template, service, banner, database, probe and page checks are
+all a Sentinel's, and with no scanner able to take one the check is ``failed``: retried later, never read as clean); each check is kept off the ledger while fresh (CVENGINE_TTL_VALIDATE),
 and counts against per-run, per-project and per-day caps. The stop flag is honoured, every check is non-fatal, and an error or a
 timeout is "failed" and retried later, never "clean".
 
@@ -41,7 +42,6 @@ import logging
 import os
 import re
 import shlex
-import subprocess
 from datetime import timedelta
 from urllib.parse import urljoin, urlparse
 
@@ -257,21 +257,31 @@ def _check(kind, label, argv, display, target, asset, signature, timeout, **para
             'service': f'validate:{kind}:{signature[:16]}:{revision}', 'timeout': timeout, 'params': params}
 
 
+def _template_check(path, host, cve_id, signature, **params):
+    """The ``nuclei_template`` check of one CVE's template against one host: it runs on the built-in scanner (``templategen.run_template``), so it has no
+    argv; ``display`` names the template file and the host, for a person reading the step."""
+    from cveFeed import templategen
+    display = f'template check {os.path.basename(path)} against {host}'
+    return _check('nuclei_template', f'template check for {cve_id}', [], display, host, host, signature, templategen.RUN_TIMEOUT,
+                  template=path, cve_id=cve_id, **params)
+
+
+def _sv_argv(ip, port):
+    """The service detection command line of an ``nmap_sv`` check, for a person to repeat (a scanner runs it, never this server)."""
+    return ['nmap', '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+
+
 def plan_checks(subject, signature, template=('', '')):
     """``(checks, notes)`` for one finding. ``subject`` is a plain dict (see ``subject_for``), ``template`` the ``(path, reason)`` of
     ``resolve_template`` for a CVE match. A check is ``{kind, label, argv, display, target, asset, service, timeout, params}``: ``argv``
     is what runs (never through a shell) and ``display`` the command a person can repeat. ``notes`` says why a check that could have
     applied was not planned (a template that is not read-only, for instance). Pure: no database, no network."""
-    from cveFeed import nmap_scan, templategen
     checks, notes = [], []
     host, kind = subject.get('host') or '', subject['kind']
     if kind == 'cve_match':
         path, why = template
         if path and _safe_host(host):
-            argv = [templategen.NUCLEI_BIN, '-t', path, '-u', host, '-ni', '-rl', templategen.RATE_LIMIT, '-timeout', '10',
-                    '-retries', '0', '-duc']
-            checks.append(_check('nuclei_template', f'nuclei template for {subject["cve_id"]}', argv, shlex.join(argv), host, host,
-                                 signature, templategen.RUN_TIMEOUT, template=path, cve_id=subject['cve_id']))
+            checks.append(_template_check(path, host, subject['cve_id'], signature, project_id=subject.get('project_id')))
         elif why and why != 'no template covers this CVE':
             notes.append(why)
         if subject.get('local_component_only'):
@@ -293,11 +303,11 @@ def plan_checks(subject, signature, template=('', '')):
             for ip, port in list(dict.fromkeys(candidates))[:4]:
                 if not _safe_ip(ip) or not isinstance(port, int) or not 0 < port < 65536:
                     continue
-                argv = [nmap_scan.NMAP_BIN, '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+                argv = _sv_argv(ip, port)
                 checks.append(_check('nmap_sv', f'nmap service detection on observed port {port}', argv, shlex.join(argv),
-                                     f'{ip}:{port}', f'{ip}:{port}', signature, NMAP_TIMEOUT, ip=ip, port=port))
+                                     f'{ip}:{port}', f'{ip}:{port}', signature, NMAP_TIMEOUT, ip=ip, port=port, project_id=subject.get('project_id')))
             if subject.get('source') == 'tech' and subject.get('url'):
-                checks.append(_http_check(subject['url'], signature))
+                checks.append(_http_check(subject['url'], signature, subject.get('unattended', True)))
             checks += _probe_checks(subject, signature)
     elif kind == 'db_exposure':
         ip, port, label = subject.get('ip'), subject.get('port'), (subject.get('db') or '').lower()
@@ -306,11 +316,11 @@ def plan_checks(subject, signature, template=('', '')):
                 display = DB_EQUIVALENT[label].format(ip=ip, port=port)
                 checks.append(_check('db_probe', f'unauthenticated {label} check', [], display, f'{ip}:{port}', f'{ip}:{port}', signature,
                                      30, ip=ip, port=port, db=label, equivalent=True))
-            argv = [nmap_scan.NMAP_BIN, '-sV', '--version-intensity', '5', '-Pn', '-p', str(port), '--host-timeout', '60s', '-oX', '-', ip]
+            argv = _sv_argv(ip, port)
             checks.append(_check('nmap_sv', f'nmap service detection on port {port}', argv, shlex.join(argv), f'{ip}:{port}', f'{ip}:{port}',
-                                 signature, NMAP_TIMEOUT, ip=ip, port=port))
+                                 signature, NMAP_TIMEOUT, ip=ip, port=port, project_id=subject.get('project_id')))
     elif kind == 'route_auth' and subject.get('url'):
-        checks.append(_http_check(subject['url'], signature))
+        checks.append(_http_check(subject['url'], signature, subject.get('unattended', True)))
     return checks, notes
 
 
@@ -326,7 +336,8 @@ def _probe_checks(subject, signature):
         where = f"{target['base'].rstrip('/')}/#{entry['probe']}" if target.get('base') else f"{target['ip']}:{target['port']}"
         checks.append(_check('fact_probe', f"Version and identity probe: {entry['label']}", argv, display, where, where, signature + entry['probe'],
                              probes.NMAP_TIMEOUT if entry['family'] == 'nmap' else 90, probe=entry['probe'], probe_target=target,
-                             project_id=subject.get('project_id'), domain_id=subject.get('domain_id'), host=subject.get('host'), product=subject.get('product') or ''))
+                             project_id=subject.get('project_id'), domain_id=subject.get('domain_id'), host=subject.get('host'), product=subject.get('product') or '',
+                             unattended=subject.get('unattended', True)))
     return checks
 
 
@@ -353,12 +364,12 @@ def _script_read_check(subject, signature):
                   seen_urls=subject.get('seen_urls') or [], unattended=subject.get('unattended', True))
 
 
-def _http_check(url, signature):
+def _http_check(url, signature, unattended=True):
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https') or not _safe_host(parsed.hostname or ''):
         return None
-    argv = ['curl', '-g', '-I', '-k', '--max-time', '6', url]  # -g: brackets and braces in a URL are not curl ranges
-    return _check('http_head', 'HTTP banner check (HEAD, GET only if HEAD is refused)', argv, shlex.join(argv), url, url, signature, 15, url=url)
+    argv = ['curl', '-g', '-I', '-k', '--max-time', '6', url]  # the equivalent a person can repeat (-g: brackets and braces in a URL are not curl ranges); the check itself is a Sentinel's page_read
+    return _check('http_head', 'HTTP banner check (HEAD, GET only if HEAD is refused)', argv, shlex.join(argv), url, url, signature, 15, url=url, unattended=bool(unattended))
 
 
 def _probe_plan(finding, evidence):
@@ -439,22 +450,28 @@ def _trim(value, limit=EVIDENCE_CAP):
 
 
 def run_nuclei_template(check):
-    """Run the planned template against the one host (see templategen.run_template: -ni, -rl 10, -timeout 10, no retries)."""
+    """Run the planned template against the one host, on the built-in scanner (see ``templategen.run_template``)."""
     from cveFeed import templategen
-    outcome = templategen._run_template_with_retry(check['params']['template'], [check['target']])[0]
+    outcome = templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
     if outcome.get('vulnerable') and not outcome.get('error'):
         outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
     return _result_from_outcome(outcome)
 
 
 def run_nmap_sv(check):
-    from cveFeed import local_egress, nmap_scan
+    """Service detection on the one port the finding names, run by a scanner (an ``nmap_verify`` task at intensity 5). With no scanner able to take it
+    the check ``failed`` (retried later, never read as clean): it never runs here."""
+    from agentapi import sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
+    params = check['params']
+    port = params['port']
     try:
-        out = nmap_scan.run_nmap_args(check['argv'][1:], label=check['target'], timeout=check['timeout'])
-    except local_egress.PortHeld as exc:  # the opt-in skip list or the egress governor: nothing was sent, nothing is concluded
-        return {'status': 'failed', 'error': str(exc), 'summary': f'not run from this server: {exc}'}
+        target = sentinel_dispatch.nmap_verify_target(params['ip'], [port], intensity=5, host_timeout=60)
+        hosts = sentinel_dispatch.try_nmap_verify(sentinel_dispatch._project_of(params.get('project_id')), target)
+    except ScannerUnavailable as exc:
+        return {'status': 'failed', 'error': str(exc), 'summary': f'not run: no scanner could take this work ({exc.kind})'}
     port = check['params']['port']
-    record = next((p for host in nmap_scan.parse_xml(out) for p in host['ports'] if p['number'] == port), None)
+    record = next((p for host in hosts for p in host['ports'] if p['number'] == port), None)
     if record is None or record['state'] != 'open':
         return {'status': 'no_match', 'summary': f'port {port} was not open at the time of the check',
                 'output_excerpt': f'port {port} not open'}
@@ -466,16 +483,42 @@ def run_nmap_sv(check):
             'observed': observed}
 
 
+def _current_host(params):
+    """The host's row in the current inventory of the project, or None (a read is made only for a host that is still there)."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    return (Subdomain.objects.filter(target_domain__project_id=params['project_id'], name=params['host']).filter(latest_scan_q())
+            .prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('-id').first())
+
+
+def _no_scanner(exc):
+    """The result of a check no scanner could take: ``failed`` (retried later, never read as clean). Nothing was sent."""
+    return {'status': 'failed', 'error': str(exc), 'summary': f'not run: no scanner could take this work ({getattr(exc, "kind", "")})'}
+
+
 def run_http_head(check):
-    """HEAD the URL; GET only when the server answers 405. Keeps the status, Server, X-Powered-By and title, never the body."""
-    from cveFeed import route_auth
-    from reNgine import resources
-    url = check['params']['url']
-    with resources.heavy_job('route-probe', label=check['target']):
-        probe = route_auth.probe_url(url, method='HEAD')
-        used = 'HEAD'
-        if probe.get('status') == 405:
-            probe, used = route_auth.probe_url(url, method='GET'), 'GET'
+    """HEAD the URL; GET only when the server answers 405. Keeps the status, Server, X-Powered-By and title, never the body. Made by a Sentinel
+    (``page_read``, op ``head``), under the scope policy of the host: this server sends nothing. ``failed`` when no scanner could take it."""
+    from agentapi import probe_dispatch
+    from cveFeed import probe_scope
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
+    params = check['params']
+    url = params['url']
+    host = (urlparse(url).hostname or '').lower().rstrip('.')
+    params.setdefault('host', host)
+    sub = _current_host({**params, 'host': host})
+    if sub is None:
+        return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
+    project = Project.objects.get(pk=params['project_id'])
+    read = {'id': f'head:{url}'[:200], 'op': 'head', 'host': host, 'url': url}
+    try:
+        row = probe_dispatch.try_page_read(project, read, probe_scope.for_page_read(project.pk, sub, unattended=params.get('unattended', True)))
+    except ScannerUnavailable as exc:
+        return _no_scanner(exc)
+    except RuntimeError as exc:
+        return {'status': 'failed', 'error': str(exc)[:200], 'summary': 'the scanner could not make the request'}
+    probe, used = row['head'], row['head']['method']
     server = probe.get('server') or ''
     found = SERVER_RE.match(server)
     summary = f'{used} answered {probe.get("status")}' + (f', Server: {server}' if server else '')
@@ -487,19 +530,34 @@ def run_http_head(check):
 
 
 def run_fact_probe(check):
-    """Run one catalogued probe (cveFeed.probes) on the host's current row, store what it found as host facts and say it in one line. A
-    probe that reads a version gives ``observed`` with that version (``interpret`` then tests it against the finding's range); one that finds
-    the product states none, or only an edge, still answers: the version is hidden from outside, which is a result, not a failure."""
+    """Run one catalogued probe (cveFeed.probes) on a Sentinel (an http probe is an ``http_probe`` task, a port probe an ``nmap_verify`` one), store what
+    it found as host facts and say it in one line. A probe that reads a version gives ``observed`` with that version (``interpret`` then tests it against
+    the finding's range); one that finds the product states none, or only an edge, still answers: the version is hidden from outside, which is a result,
+    not a failure. With no scanner able to take it the check is ``failed``: it never runs here, and is never read as clean."""
+    from agentapi import probe_dispatch
     from cveFeed import probes
-    from cveFeed.correlation import latest_scan_q
-    from startScan.models import Subdomain
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
     params = check['params']
-    sub = (Subdomain.objects.filter(target_domain__project_id=params['project_id'], name=params['host']).filter(latest_scan_q())
-           .prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').order_by('-id').first())
+    sub = _current_host(params)
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
-    # a validation re-test reads past the script cache (sending the stored ETag), so a fixed library is seen as fixed now
-    found = probes.run_one(params['project_id'], params['domain_id'], sub, {'probe': params['probe'], 'target': params['probe_target']}, fresh=True)
+    entry = {'probe': params['probe'], 'target': params['probe_target']}
+    try:
+        if probes.BY_ID[entry['probe']]['family'] == 'nmap':
+            found = probes.run_one(params['project_id'], params['domain_id'], sub, entry, fresh=True)  # a service-version scan: the nmap_verify kind, never here
+        else:
+            project = Project.objects.get(pk=params['project_id'])
+            asset = probes.asset_key(sub.name, entry)
+            answered = probe_dispatch.try_http_probes(project, None, [(sub, asset, entry)], unattended=params.get('unattended', True))
+            found = answered.get(asset)  # try_http_probes raises ScannerUnavailable when no Sentinel took it or its task ended with no result: nothing ran
+            if found is None:
+                raise ScannerUnavailable('http_probe', 'no scanner returned a result for this probe')
+            if isinstance(found, Exception):
+                return {'status': 'failed', 'error': str(found)[:200], 'summary': 'the scanner could not run the probe'}
+            found = probes.apply_remote(params['project_id'], params['domain_id'], sub, entry, found)
+    except ScannerUnavailable as exc:
+        return _no_scanner(exc)
     product = re.sub(r'[^a-z0-9]', '', params.get('product', '').lower())
     versions = [o for o in found if o['kind'] == 'version' and o['outcome'] == 'found' and o['version']]
     pick = next((o for o in versions if product and (product in re.sub(r'[^a-z0-9]', '', o['product'].lower())
@@ -512,15 +570,20 @@ def run_fact_probe(check):
 
 
 def run_db_probe(check):
+    """The one credential-less attempt, made by a Sentinel (``db_probe``): this server opens no connection. ``failed`` (never ``no_match``) when no
+    scanner answered or the scanner has no client for this database."""
+    from agentapi import sentinel_dispatch
     from cveFeed import db_exposure
+    from dashboard.models import Project
     params = check['params']
-    _label, fn = db_exposure.CHECKS[params['db']]
-    db_exposure.EVIDENCE.pop((params['ip'], params['port']), None)
-    opened = fn(params['ip'], params['port'])
-    reply = db_exposure.EVIDENCE.pop((params['ip'], params['port']), '')
-    if opened is None:
-        return {'status': 'failed', 'error': 'the client library for this check is not installed', 'summary': 'not run'}
-    if opened:
+    label, _fn = db_exposure.CHECKS[params['db']]
+    project = Project.objects.get(pk=params['project_id'])
+    result = sentinel_dispatch.dispatch_or_none(project, 'db_probe', {'address': params['ip'], 'port': params['port'], 'db': db_exposure.DB_KEYS[label]},
+                                                host=f'{label} on {params["ip"]}:{params["port"]}', ips=[params['ip']])  # ScannerUnavailable: no scanner can take it
+    if result is None or result.get('open') is None:
+        return {'status': 'failed', 'error': 'no scanner could run this check', 'summary': 'not run'}
+    reply = str(result.get('evidence') or '')
+    if result.get('open') is True:
         return {'status': 'hit', 'summary': 'the service answered with no credentials' + (f': {reply}' if reply else ''),
                 'output_excerpt': _trim(reply, OUTPUT_CAP), 'evidence': {'reply': _trim(reply, 300)}}
     return {'status': 'no_match', 'summary': 'the service did not answer without credentials at the time of the check'}
@@ -562,9 +625,9 @@ def script_read_held_back(project_id, sub, unattended=True):
 READ_REUSE_SECONDS = 600  # one fresh read of a host serves every library match of it validated within this window
 
 
-def _reading_key(project_id, host, bases):
+def _reading_key(project_id, host, bases, library='', seen_urls=()):
     import hashlib
-    return 'cvengine:script-read:v1:' + hashlib.sha256(json.dumps([project_id, host, sorted(bases)]).encode()).hexdigest()[:32]
+    return 'cvengine:script-read:v2:' + hashlib.sha256(json.dumps([project_id, host, sorted(bases), library, sorted(seen_urls)]).encode()).hexdigest()[:32]
 
 
 def _current_roots(project_id, host):
@@ -574,28 +637,30 @@ def _current_roots(project_id, host):
         project_id=project_id, host=host, path='/', retired_at__isnull=True).only('url', 'http_status', 'redirect_to')]
 
 
-def run_script_read(check, get=None):
-    """Read every web base's front page and the scripts it loads again (``probes.read_host_libraries``), past the script cache, and say what
-    that means for the match (``library_outcome``). Nothing is fetched for a host ``script_read_held_back`` refuses. One read of a host is
-    reused by every library match of it for READ_REUSE_SECONDS, so a host with several jQuery CVEs is read once; a person's own request
-    (``unattended`` False: Validate now) always reads again. A file the host was seen to load the library from (``seen_urls``: the match's
-    own script, the copies its evidence names) that the pages did not load is fetched too, within what is left of the same script budget,
-    so a fixed version can be weighed against it. ``get`` replaces the network (tests)."""
+def run_script_read(check):
+    """Read every web base's front page and the scripts it loads again, on a Sentinel (``page_read``, op ``libraries``), past every cache, and say what
+    that means for the match (``library_outcome``). Nothing is fetched for a host ``script_read_held_back`` refuses, and nothing is ever fetched by this
+    server: with no scanner able to take the read the check is ``failed`` (retried later, never read as clean). One read of a host is reused by every
+    match of the same library on it for READ_REUSE_SECONDS, so a host with several jQuery CVEs is read once; a person's own request (``unattended`` False:
+    Validate now) always reads again. The files the host was seen to load the library from (``seen_urls``: the match's own script, the copies its evidence
+    names) that the pages did not load are fetched by the Sentinel too, within what is left of the same script budget, so a fixed version can be weighed
+    against them."""
     from django.core.cache import cache
-    from cveFeed import probes
-    from cveFeed.correlation import latest_scan_q
-    from startScan.models import Subdomain
+    from agentapi import probe_dispatch
+    from cveFeed import probe_scope
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
     params = check['params']
     unattended = params.get('unattended', True)
-    sub = (Subdomain.objects.filter(target_domain__project_id=params['project_id'], name=params['host']).filter(latest_scan_q())
-           .prefetch_related('technologies').select_related('target_domain').order_by('-id').first())
+    sub = _current_host(params)
     if sub is None:
         return {'status': 'failed', 'error': 'the host is no longer in the current inventory', 'summary': 'host not found'}
     held = script_read_held_back(params['project_id'], sub, unattended=unattended)
     if held:
         return {'status': 'blocked', 'summary': f'not read: {held}', 'library': {'held_back': held}}
     bases = params.get('bases') or [params['base']]
-    key = _reading_key(params['project_id'], sub.name.lower(), bases)
+    seen_urls = [u for u in params.get('seen_urls') or [] if isinstance(u, str)][:20]
+    key = _reading_key(params['project_id'], sub.name.lower(), bases, params['library'], seen_urls)
     reading = None
     if unattended:
         try:
@@ -604,14 +669,21 @@ def run_script_read(check, get=None):
             reading = None
     reused = reading is not None
     if not reused:
-        reading = probes.read_host_libraries(params['project_id'], sub, bases, get=get, unattended=unattended)
-    reading = {**reading, 'extra': dict(reading.get('extra') or {})}
-    fetched = _fetch_seen(params, reading, sub, get)
-    if not reused or fetched:
+        project = Project.objects.get(pk=params['project_id'])
+        host = sub.name.lower().rstrip('.')
+        read = {'id': f'libraries:{host}'[:200], 'op': 'libraries', 'host': host, 'bases': [b for b in bases if isinstance(b, str)][:6],
+                'library': params['library'], 'seen_urls': seen_urls}
+        try:
+            reading = probe_dispatch.try_page_read(project, read, probe_scope.for_page_read(project.pk, sub, unattended=unattended))['reading']
+        except ScannerUnavailable as exc:
+            return _no_scanner(exc)
+        except RuntimeError as exc:
+            return {'status': 'failed', 'error': str(exc)[:200], 'summary': 'the scanner could not read the page'}
         try:
             cache.set(key, reading, READ_REUSE_SECONDS)
         except Exception:  # noqa: BLE001
             pass
+    reading = {**reading, 'extra': dict(reading.get('extra') or {})}
     reading = {**reading, 'roots': _current_roots(params['project_id'], sub.name.lower()), 'reused': reused}
     reading['inventoried_hosts'] = _inventoried(params['project_id'], reading)
     return library_outcome(params, reading)
@@ -628,29 +700,6 @@ def _inventoried(project_id, reading):
         return []
     return sorted(set(Subdomain.objects.filter(target_domain__project_id=project_id, name__in=sorted(targets)).filter(latest_scan_q())
                       .values_list('name', flat=True)))
-
-
-def _fetch_seen(params, reading, sub, get=None):
-    """Fetch, within the read's remaining script budget, each file the host was seen to load the library from (``seen_urls``) that the
-    pages' read did not fetch, when a page still shows the library (otherwise nothing can close and nothing is asked). Each lands in
-    ``reading['extra']``; one the budget does not cover is recorded as not read. Returns how many were fetched."""
-    from cveFeed import probes
-    scanned = reading.get('scanned') or {}
-    wanted = [u for u in params.get('seen_urls') or [] if u not in scanned and u not in reading['extra']]
-    if not wanted or not _library_records(reading, params['library']):
-        return 0
-    page = next((p.get('final_url') or p.get('base') for p in reading.get('pages') or [] if p.get('outcome') == 'read'), None)
-    from cveFeed.js_libraries import MAX_SCRIPTS_PER_HOST
-    fetched = 0
-    for url in wanted[:MAX_SCRIPTS_PER_HOST]:
-        if reading.get('budget_left', 0) <= 0:
-            reading['extra'][url] = {'status': 0, 'whole': False, 'error': 'page host limit'}
-            continue
-        reading['budget_left'] = reading.get('budget_left', 0) - 1
-        reading['extra'][url] = probes.refetch_script(params['project_id'], sub, url, get=get, page_url=page,
-                                                      unattended=params.get('unattended', True))
-        fetched += 1
-    return fetched
 
 
 def _in_ranges(version, entries):
@@ -711,7 +760,7 @@ def _alias_of(params, reading):
 
 
 def _scan_of(reading, url):
-    """What a whole read of ``url`` found in this script read (``probes._scanned``), or None when it was not fetched."""
+    """What a whole read of ``url`` found in this script read (the Sentinel's ``page_read._scanned``), or None when it was not fetched."""
     return (reading.get('scanned') or {}).get(url) or (reading.get('extra') or {}).get(url)
 
 
@@ -1236,10 +1285,7 @@ def record_template_outcomes(cve, outcomes, project, template_path):
         outcome = by_host.get(row.host)
         if outcome is None:
             continue
-        argv = [templategen.NUCLEI_BIN, '-t', template_path, '-u', row.host, '-ni', '-rl', templategen.RATE_LIMIT, '-timeout', '10',
-                '-retries', '0', '-duc']
-        check = _check('nuclei_template', f'nuclei template for {cve.cve_id}', argv, shlex.join(argv), row.host, row.host, row.signature,
-                       templategen.RUN_TIMEOUT, template=template_path, cve_id=cve.cve_id)
+        check = _template_check(template_path, row.host, cve.cve_id, row.signature)
         result = _result_from_outcome(outcome)
         result['recorded'] = True
         apply_validation(row, check, result)
@@ -1573,12 +1619,11 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                         row.save(update_fields=['validation_status', 'updated_at'])
                     continue
                 try:
+                    check['params'].setdefault('project_id', project_id)  # the runners that need a scanner say which project asks
                     result = interpret(subject, check, runners[check['kind']](check))
                 except resources.ScanAborted:
                     stats['stopped'] = True
                     break
-                except subprocess.TimeoutExpired:
-                    result = {'status': 'failed', 'error': 'the check timed out', 'summary': 'timed out'}
                 except Exception as exc:  # noqa: BLE001 - one check failing must not stop the others; it is "failed", never "clean"
                     logger.exception('validation check %s failed for %s', check['kind'], row.host)
                     from cveFeed import activity

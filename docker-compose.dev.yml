@@ -4,7 +4,9 @@ services:
     image: "postgres:18-alpine"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
-    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
+              "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
+              "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -40,12 +42,6 @@ services:
     init: true  # tini as PID 1; the entrypoint turns SIGTERM into a warm worker shutdown and exits when a worker dies (see docker-compose.yml)
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
-    # Chromium's sandbox for the web screenshots (cveFeed/web_shot.py) needs user namespaces, which Docker's default seccomp profile refuses. This is
-    # Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and unshare), vendored unchanged
-    # from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). Without it the sandbox cannot start and screenshots stay off, with the reason shown
-    # (docs/PIPELINE.md, "Web screenshots"); `make up` and the update scripts recreate this container, so an upgrade applies it with no manual step.
-    security_opt:
-      - seccomp=./config/seccomp/playwright-chromium.json
     # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
     volumes:
       - ./web:/usr/src/app

@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import assessment_review as ar
+from cveFeed import coverage_topup
 from cveFeed import conductor, counts, views
 from cveFeed.models import AgentActivity, CVEEntry, CVEMatch, DiscoveryEvent
 from dashboard.models import Org, Project, ProjectMembership
@@ -44,7 +44,7 @@ class CoverageInventoryTests(Fixture):
 		self.host('gone.eff.example', old)
 		self.host('kept.eff.example', old)
 		kept = self.host('kept.eff.example', new)
-		count, ids = ar.host_coverage_due(self.project, NOW, limit=10)
+		count, ids = coverage_topup.host_coverage_due(self.project, NOW, limit=10)
 		self.assertEqual((count, ids), (1, [kept.pk]))
 
 
@@ -135,18 +135,3 @@ class NextTargetsTests(Fixture):
 		self.assertEqual(conductor.next_targets(5, now=NOW), [self.other_domain.id, self.domain.id])
 		self.scan(hours=1)
 		self.assertEqual(conductor.next_targets(5, now=NOW), [self.other_domain.id])
-
-	def test_three_hour_review_uses_full_discovery_recency(self):
-		from cveFeed.discovery import HOST_PIPELINE_TASK
-		old = self.scan(hours=24 * 8)
-		ScanHistory.objects.filter(pk=old.pk).update(stop_scan_date=NOW - timedelta(days=8))
-		partial = self.scan(hours=1)
-		ScanHistory.objects.filter(pk=partial.pk).update(tasks=[HOST_PIPELINE_TASK], stop_scan_date=NOW - timedelta(hours=1))
-		_, facts, offered = ar.project_facts(self.project.id, NOW - timedelta(hours=3), NOW)
-		self.assertEqual(facts['due_discovery_target_id'], self.domain.id)
-		self.assertIn('discover', offered)
-		full = self.scan(hours=1)
-		ScanHistory.objects.filter(pk=full.pk).update(stop_scan_date=NOW - timedelta(hours=1))
-		_, facts, offered = ar.project_facts(self.project.id, NOW - timedelta(hours=3), NOW)
-		self.assertIsNone(facts['due_discovery_target_id'])
-		self.assertNotIn('discover', offered)

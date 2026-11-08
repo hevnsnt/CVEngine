@@ -1,4 +1,4 @@
-"""Rating bbot's baddns dangling-DNS findings by what an outsider can actually claim.
+"""Rating the discovery's baddns dangling-DNS findings by what an outsider can actually claim.
 
 baddns rates every dangling record medium, so cvENGINE showed them all as smoke: a claimable zone takeover and a stale CNAME no one else can
 use looked the same. Each finding is checked again here when it is stored (``reNgine.tasks._persist_bbot_findings``) and by the
@@ -26,7 +26,6 @@ import json
 import logging
 import os
 import re
-import secrets
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -35,9 +34,6 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), 'data', 'takeover_providers.
 FIRE_SEVERITY, SMOKE_SEVERITY, ICE_SEVERITY = 3, 2, 1  # high, medium, low: cveFeed.threat.SEVERITY_HEAT
 KIND_NS, KIND_NXDOMAIN, KIND_HTTP = 'ns', 'cname_nxdomain', 'cname_http'
 NOTE_MARKER = '\n\ncvENGINE check: '  # what assess() adds to the stored description; parse() reads only what is before it
-DNS_TIMEOUT = 3.0
-HTTP_TIMEOUT = 8
-MAX_BODY = 64 * 1024
 MAX_SERVERS = 4  # name servers asked per level before the level counts as unanswered
 LAME_RCODES = ('REFUSED', 'SERVFAIL')
 
@@ -100,7 +96,7 @@ def _field(text, name, following):
 
 def parse(description):
     """The parts of a baddns description that the rating reads, or None for a finding it does not rate (MX, TXT, a whois finding...).
-    bbot writes ``<description>. Confidence: [..] Signature: [..] Indicator: [..] Trigger: [a, b] baddns Module: [..]``."""
+    The discovery writes ``<description>. Confidence: [..] Signature: [..] Indicator: [..] Trigger: [a, b] baddns Module: [..]``."""
     text = str(description or '').split(NOTE_MARKER, 1)[0]
     head = text.split('. Confidence: [', 1)[0].strip()
     if head.startswith('Dangling NS Records'):
@@ -130,104 +126,6 @@ class Reply:
     def values(self, owner, rtype, sections=('answer', 'authority')):
         owner = _clean(owner)
         return [v for s in sections for o, t, v in getattr(self, s) if o == owner and t == rtype]
-
-
-class Net:
-    """The lookups the rating makes. DNS questions go straight to the name servers being evaluated, recursion off; addresses that are
-    loopback, private or otherwise not scannable are never asked. The HTTP control goes through ``cveFeed.pinned_transport`` (vetted
-    addresses, Settings > Proxy)."""
-
-    def __init__(self):
-        self._addresses = {}
-
-    def _resolver(self):
-        from cveFeed.hygiene import _resolver
-        return _resolver()
-
-    def ns(self, name):
-        """The NS host names of ``name`` from the recursive resolver ([] when there are none or DNS fails)."""
-        from cveFeed.hygiene import fetch_records
-        return [_clean(v) for v in fetch_records(name, 'NS', resolver=self._resolver())]
-
-    def addresses(self, host):
-        host = _clean(host)
-        if host not in self._addresses:
-            from cveFeed.hygiene import fetch_records
-            from targetApp.target_types import is_scannable_ip
-            self._addresses[host] = [ip for ip in fetch_records(host, 'A', resolver=self._resolver()) if is_scannable_ip(ip)]
-        return self._addresses[host]
-
-    def ask(self, server, qname, rdtype):
-        """One non-recursive question to one server address, or None when it gave no answer."""
-        import dns.exception
-        import dns.flags
-        import dns.message
-        import dns.query
-        from targetApp.target_types import is_scannable_ip
-        if not is_scannable_ip(server):
-            return None
-        query = dns.message.make_query(qname, rdtype)
-        query.flags &= ~dns.flags.RD
-        try:
-            response = dns.query.udp(query, server, timeout=DNS_TIMEOUT)
-            if response.flags & dns.flags.TC:
-                response = dns.query.tcp(query, server, timeout=DNS_TIMEOUT)
-        except (dns.exception.DNSException, OSError, ValueError):
-            return None
-        return reply_from(response)
-
-    def registered(self, domain):
-        """True when ``domain`` is registered, False when its registry says it is not, None when that cannot be told. A domain with name
-        servers is registered; only an NXDOMAIN is asked of the registry (RDAP), and only its explicit "not found" counts."""
-        import dns.exception
-        import dns.resolver
-        try:
-            self._resolver().resolve(domain, 'NS')
-            return True
-        except dns.resolver.NoAnswer:
-            return True
-        except dns.resolver.NXDOMAIN:
-            from cveFeed.mailfail import rdap_registered
-            return rdap_registered(domain)
-        except (dns.exception.DNSException, OSError):
-            return None
-
-    def http_control(self, host):
-        """``(real, control, control_name)``: the answer to ``GET /`` for ``host`` and for a random name sent to the same addresses, each
-        ``(status, body)``; plain HTTP first, then HTTPS (certificate not checked: the provider's default certificate is the point). None when
-        neither got an answer."""
-        from cveFeed import pinned_transport
-        control = f'cvengine-control-{secrets.token_hex(6)}.{_clean(host)}'
-        for port, tls in ((80, False), (443, True)):
-            try:
-                addresses = pinned_transport.resolve(_clean(host), port)
-            except (ValueError, OSError):
-                return None
-            real = self._get(_clean(host), port, addresses, tls)
-            if real is None:
-                continue
-            other = self._get(control, port, addresses, tls)
-            return (real, other, control) if other is not None else None
-        return None
-
-    def _get(self, name, port, addresses, tls):
-        import http.client
-        import ssl
-
-        from cveFeed import pinned_transport
-        context = None
-        if tls:
-            context = ssl.create_default_context()
-            context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
-        connection = pinned_transport.HTTPConnection(name, port, addresses, HTTP_TIMEOUT, context=context)
-        try:
-            connection.request('GET', '/', headers={'User-Agent': 'cvENGINE takeover check', 'Accept': '*/*', 'Accept-Encoding': 'identity'})
-            response = connection.getresponse()
-            return response.status, pinned_transport.read_body(response, MAX_BODY)
-        except (OSError, ValueError, http.client.HTTPException):
-            return None
-        finally:
-            connection.close()
 
 
 def reply_from(response):
@@ -333,16 +231,17 @@ class Rating:
     zone: str = ''
 
 
-def assess(finding, net=None):
-    """The rating of one bbot finding (a dict with ``host``, ``description``, ``module``), or None when it is not a baddns finding this rates,
-    the checks are off or the network gave no usable answer. Never raises."""
+def assess(finding, net):
+    """The rating of one discovery finding (a dict with ``host``, ``description``, ``module``), or None when it is not a baddns finding this rates,
+    the checks are off or ``net`` gave no usable answer. Never raises. ``net`` is the object that answers the questions (``ns``, ``addresses``, ``ask``,
+    ``registered``, ``http_control``): this server has none of its own, the lookups run on a Sentinel (``dangling_dns_check``, ``assess_all``), so only
+    the rules live here."""
     if not enabled() or (finding.get('module') or 'baddns') != 'baddns':
         return None
     parsed = parse(finding.get('description'))
     host = _clean(finding.get('host'))
     if parsed is None or not host:
         return None
-    net = net or Net()
     try:
         return {KIND_NS: _assess_ns, KIND_NXDOMAIN: _assess_nxdomain, KIND_HTTP: _assess_http}[parsed.kind](host, parsed, net)
     except Exception:  # noqa: BLE001 - a check that fails leaves baddns's rating, it never loses the finding
@@ -422,6 +321,53 @@ def _assess_http(host, parsed, net):
             f'A control request to the same addresses with a random host name ({control_name}) got the same answer (HTTP {real[0]}, same '
             f'body): the provider answers every host name this way, claimed or not, so the matched text says nothing about {host}.'))
     return None
+
+
+def providers_doc():
+    """The provider lists as a ``dangling_dns_check`` task carries them (the contract's ``providers``): this server's one copy, which a Sentinel applies."""
+    with open(DATA_FILE, encoding='utf-8') as handle:
+        data = json.load(handle)
+    return {'cname': [{'service': p['service'], 'suffixes': list(p['suffixes'])} for p in data['cname']],
+            'nameservers': [{'service': p['service'], 'patterns': list(p['patterns'])} for p in data['nameservers']]}
+
+
+def _rating_from(row):
+    """The ``Rating`` of a Sentinel's reported row (``probe_results.clean_dangling_dns_check``), or None when it had no usable answer."""
+    if not isinstance(row, dict) or row.get('state') != 'rated':
+        return None
+    severity = row.get('severity')
+    return Rating(severity=severity if severity in (ICE_SEVERITY, SMOKE_SEVERITY, FIRE_SEVERITY) else None, drop=bool(row.get('drop')),
+                  note=row.get('note') or '', zone=row.get('zone') or '')
+
+
+def assess_all(findings, project=None):
+    """``[rating or None]`` for each of ``findings`` (``assess``'s dicts), in order: the same answer ``assess`` gives each, but the lookups run on a Sentinel
+    when one can take ``dangling_dns_check`` (``agentapi.probe_dispatch``). A finding the Sentinel could not answer, or did not report, is None: baddns's
+    own rating stands, never a drop or a lower severity. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): with no Sentinel able to take
+    the work (``ScannerUnavailable``) every finding keeps baddns's rating, and ``rerate_dangling_dns`` rates them later. Without a ``project`` nothing is
+    asked and every entry is None."""
+    findings = list(findings)
+    out = [None] * len(findings)
+    if not findings or not enabled():
+        return out
+    plan = []
+    for index, finding in enumerate(findings):
+        if (finding.get('module') or 'baddns') != 'baddns':
+            continue
+        parsed, host = parse(finding.get('description')), _clean(finding.get('host'))
+        if parsed is not None and host:
+            plan.append((index, {'id': str(index), 'host': host[:260], 'kind': parsed.kind, 'triggers': [t[:260] for t in parsed.triggers[:10]]}))
+    if project is not None and plan:
+        from agentapi import probe_dispatch
+        from reNgine.resources import ScannerUnavailable
+        try:
+            answered = probe_dispatch.try_dangling(project, [check for _i, check in plan], providers_doc())
+        except ScannerUnavailable as exc:
+            logger.info('dangling DNS rating of project %s waits for a scanner: %s', project.pk, exc)
+            return out
+        for index, check in plan:
+            out[index] = _rating_from(answered.get(check['id']))
+    return out
 
 
 def with_note(description, rating):

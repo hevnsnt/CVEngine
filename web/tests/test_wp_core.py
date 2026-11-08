@@ -4,6 +4,7 @@ from django.test import SimpleTestCase, TestCase
 
 from cveFeed import probes, wp_core
 from startScan.models import Vulnerability
+from tests import probe_scanner
 from tests.test_probes import answers, page
 from tests.test_wordpress import LINK, WordPressFixture
 
@@ -41,7 +42,7 @@ class ClassifyDirTests(SimpleTestCase):
 class ProbeTests(SimpleTestCase):
     def detect(self, table):
         table = {'/wp-login.php': page(200, headers=LINK, body=LOGIN), **table}
-        return probes.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test', 'rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test', 'rt.test'}, get=answers(table))
 
     def test_a_wordpress_site_is_asked_for_the_upgrade_directory_and_the_wordpress_observation_stays_first(self):
         found = self.detect({'/wp-content/upgrade/': page(200, body=LISTING)})
@@ -58,13 +59,13 @@ class ProbeTests(SimpleTestCase):
         def get(url):
             asked.append(url)
             return answers({'/wp-login.php': page(200, headers=LINK, body=LOGIN), '/wp-content/upgrade/': page(200, body='')})(url)
-        found = probes.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get)
         self.assertTrue(any(u.endswith(wp_core.UPGRADE_MISSING) for u in asked))
         self.assertEqual(found[1]['variant'], 'reachable')  # the missing path answered 404, so the empty page is the directory's own
 
     def test_a_catch_all_empty_page_is_not_reported_as_reachable(self):
         table = {'/wp-login.php': page(200, headers=LINK, body=LOGIN), '/wp-content/upgrade/': page(200, body=''), wp_core.UPGRADE_MISSING: page(200, body='')}
-        found = probes.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
         self.assertEqual((found[1]['variant'], found[1]['outcome']), ('unknown', 'hidden'))
 
     def test_a_site_that_is_not_wordpress_is_not_asked(self):
@@ -73,7 +74,7 @@ class ProbeTests(SimpleTestCase):
         def get(url):
             asked.append(url)
             return page(404, body='not found')
-        found = probes.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('wordpress-detect', 'https://www.rt.test', {'www.rt.test'}, get=get)
         self.assertFalse(any('/wp-content/upgrade' in u for u in asked))
         self.assertEqual([o['kind'] for o in found], ['wordpress'])
         self.assertEqual(found[0]['outcome'], 'absent')

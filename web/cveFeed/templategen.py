@@ -1,14 +1,16 @@
 """AI nuclei-template generation for CVEs no installed template covers.
 
 Flow (PIPELINE.md stage 7): use an approved installed template when available.
-Otherwise the AI may write a draft and test its syntax and false positives against
-a benign local fixture. A draft is never executed on a customer host merely because
-its YAML parsed and Nuclei accepted its syntax.
+Otherwise the AI may write a draft, whose syntax and false positives are tested against
+a benign local fixture on the built-in scanner (``sentinel_dispatch.try_nuclei_validate``).
+A draft is never executed on a customer host merely because its YAML parsed and the
+scanner accepted its syntax. The server runs no template itself: every check and every test
+goes to a scanner, and with none live the work waits (``ScannerUnavailable``).
 
 Sandbox: model output is untrusted. ``static_check`` only admits passive-ish
 protocols (http/network/dns/ssl/tcp), rejects ``code``/``javascript``/``headless``/
 ``file`` (arbitrary execution or local file access) and anything off-schema, and
-nuclei runs with code templates disabled, a timeout, and a rate limit, only
+a scanner runs templates with code templates disabled, a timeout, and a rate limit, only
 against hosts already in the inventory.
 """
 import datetime
@@ -16,13 +18,12 @@ import json
 import logging
 import os
 import re
-import subprocess
-import tempfile
 
 import yaml
 
 from cveFeed.safeyaml import load_template
-from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text, untrusted_block
+from reNgine import ai_prompts
+from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,9 @@ TEMPLATES_ROOT = os.environ.get("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates"
 # Deliberately NOT under TEMPLATES_ROOT: the blanket `nuclei -l` pass loads everything in the default template
 # directory, which would run an AI-written template against every tenant's hosts. These run only via explicit -t.
 GENERATED_DIR = os.environ.get("CVENGINE_GENERATED_TEMPLATES_DIR", "/root/cvengine-generated-templates")
-NUCLEI_BIN = "nuclei"
 MAX_TEMPLATE_BYTES = 20000
-VALIDATE_TIMEOUT = 60
 RUN_TIMEOUT = 180
-CHUNK_HOSTS = 100  # hosts per nuclei process; halved when the process has to be stopped for memory
-RATE_LIMIT = "10"
+CHUNK_HOSTS = 100  # hosts per template check
 
 ALLOWED_PROTOCOLS = {"http", "requests", "network", "tcp", "dns", "ssl"}
 FORBIDDEN_PROTOCOLS = {"code", "javascript", "headless", "file", "workflows", "flow"}
@@ -43,8 +41,8 @@ ALLOWED_TOP_KEYS = ALLOWED_PROTOCOLS | {"id", "info", "variables", "self-contain
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,100}$")
 SEVERITIES = {"info", "low", "medium", "high", "critical", "unknown"}
 
-SYSTEM_PROMPT = (
-    "You write nuclei v3 detection templates in YAML. Output ONLY one YAML document, "
+SYSTEM_PROMPT = ai_prompts.compose('template_generation',
+    "Write it as nuclei v3 YAML. Output ONLY one YAML document, "
     "no prose. Rules: id must be the lowercase CVE id (e.g. cve-2024-1234); include "
     "info.name, info.author: cvengine-ai, info.severity, info.description, "
     "info.reference, info.tags including the CVE id; use ONLY the http or network "
@@ -67,9 +65,10 @@ def _clean_value(value, limit, depth=0):
     return value
 
 
-def build_prompt(cve_info):
+def prompt_parts(cve_info):
+    """The user message of a template draft (cveFeed.ai_jobs): the request, and the CVE feed's data fenced by the AI reviewer container."""
     safe = {k: _clean_value(v, 4000 if isinstance(v, str) else 500) for k, v in cve_info.items()}
-    return "Write a nuclei detection template for this CVE:\n" + untrusted_block("CVE", safe)
+    return [{'text': 'Write a nuclei detection template for this CVE:'}, {'fence': 'CVE', 'data': safe}]
 
 
 def extract_yaml(text):
@@ -650,60 +649,20 @@ def find_existing_template(cve_id, roots=None):
     return sorted(_template_index(roots).get(cve_id.lower(), []))
 
 
-def _run(cmd, timeout):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-
-
-def validate_with_nuclei(path):
-    proc = _run([NUCLEI_BIN, "-validate", "-t", path, "-duc", "-silent"], VALIDATE_TIMEOUT)
-    output = (proc.stdout + proc.stderr).strip()
-    return proc.returncode == 0 and "error" not in output.lower(), output[-2000:]
-
-
-def test_benign_fixture(path):
-    """A bounded localhost false-positive smoke test. It cannot prove a true-positive match."""
-    import http.server
-    import threading
-
-    class Benign(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'CVEngine benign fixture: resource not found')
-
-        do_HEAD = do_GET
-        do_OPTIONS = do_GET
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Benign)
-    server.daemon_threads = True
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        proc = _run([NUCLEI_BIN, '-t', path, '-u', f'http://127.0.0.1:{server.server_port}', '-jsonl', '-silent',
-                     '-duc', '-ni', '-rl', '2', '-timeout', '2', '-retries', '0'], 30)
-        if proc.returncode != 0:
-            return False, 'local fixture execution failed'
-        for line in proc.stdout.splitlines():
-            if line.strip():
-                try:
-                    if is_hit(json.loads(line)):
-                        return False, 'matched a benign local fixture (possible false positive)'
-                except ValueError:
-                    return False, 'local fixture returned malformed output'
-        return True, 'no match on benign local fixture; positive detection remains unverified'
-    except (OSError, subprocess.TimeoutExpired):
-        return False, 'local fixture test unavailable or timed out'
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+def validate_anywhere(text, project=None):
+    """The syntax check and the benign loopback fixture of a new template, ``(valid, output)``, on the built-in scanner (a ``nuclei_validate`` task in
+    mode ``validate``). The kind never runs on this server: a check no scanner could take is not a verdict on the template,
+    ``ScannerUnavailable`` goes to the caller."""
+    from agentapi import sentinel_dispatch
+    valid, output, fixture_ok, fixture_note = sentinel_dispatch.try_nuclei_validate(text, project)
+    if valid:
+        output = (output + '\n' + (fixture_note or 'the benign local fixture was not run')).strip()
+        valid = fixture_ok is True
+    return valid, output
 
 
 def _host_key(value):
-    """The bare lowercase hostname of a host or URL, to pair a nuclei result with the host that was asked about."""
+    """The bare lowercase hostname of a host or URL, to pair a template result with the host that was asked about."""
     value = str(value or "").strip().lower()
     value = value.split("://", 1)[-1].split("/", 1)[0]
     if value.startswith("["):
@@ -711,134 +670,42 @@ def _host_key(value):
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
-def run_template(path, hosts, secret_file=None, redact=()):
-    """``_run_template`` after one more look at the names: a name a tenant controls can answer a public address when the host list
-    is vetted and an internal one later, so the names are resolved again here, at launch, and one that now resolves to a blocked
-    address is reported as not tested instead of being handed to nuclei. (The name is still resolved by nuclei itself a moment later:
-    this narrows the window, it does not close it.)"""
+def run_template(path, hosts, project=None):
+    """Run one approved template against ``hosts`` on the built-in scanner (a ``nuclei_validate`` task in mode ``test``, filed under ``project``,
+    the one the hosts belong to: never another tenant's); returns a ``{host, vulnerable, output}`` per host, in order. The scanner runs exactly the
+    bytes ``approved_template`` inspected. Nothing runs on this server: a host no scanner took, or a call with no project, is reported as not
+    tested (an error outcome) and stays due.
+
+    One more look at the names first: a name a tenant controls can answer a public address when the host list is vetted and an internal one later,
+    so the names are resolved again here, at launch, and one that now resolves to a blocked address is reported as not tested instead of being
+    sent to a scanner. (The scanner resolves the name itself a moment later: this narrows the window, it does not close it.)"""
     from targetApp.target_types import IP, bare_host, blocked_names, classify_target
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
     names = {bare_host(h) for h in hosts}
     blocked = blocked_names([n for n in names if n and classify_target(n) != IP]) if hosts else set()
-    if not blocked:
-        return _run_template(path, hosts, secret_file=secret_file, redact=redact)
     allowed = [h for h in hosts if bare_host(h) not in blocked]
-    ran = iter(_run_template(path, allowed, secret_file=secret_file, redact=redact) if allowed else [])
+    ran = iter(_run_on_scanner(path, allowed, project) if allowed else [])
     return [{"host": h, "vulnerable": False, "output": "", "error": "the host name now resolves to an address that may not be scanned"}
             if bare_host(h) in blocked else next(ran) for h in hosts]
 
 
-def _run_template(path, hosts, secret_file=None, redact=()):
-    """Run one template against ``hosts`` (one nuclei process, ``-l`` a host file); returns a
-    {host, vulnerable, output} per host, in order. Waits its turn for memory; if it had to be stopped to protect the
-    container it raises reNgine.resources.MemoryKill. ``secret_file`` (a nuclei secrets file, see cveFeed.auth_nuclei) makes it a signed-in
-    check without redirects, and ``redact`` lists the secret values to strip from every line of output and from an error message."""
-    from reNgine import resources
-    hosts = [hosts] if isinstance(hosts, str) else list(hosts)
+def _run_on_scanner(path, hosts, project):
+    """The outcomes of the template at ``path`` over ``hosts``, from the built-in scanner (``sentinel_dispatch.try_template_test``), one per host."""
+    if project is None:
+        return [{"host": host, "vulnerable": False, "output": "", "error": "not tested: a template check needs the project the host belongs to"}
+                for host in hosts]
     from cveFeed.validation import approved_template
     text, problem = approved_template(path)
     if problem:
         return [{"host": host, "vulnerable": False, "output": "", "error": problem} for host in hosts]
-    if not hosts:
-        return []
-    timeout = min(RUN_TIMEOUT + 10 * len(hosts), 1800)
-    # Execute exactly the bytes the policy inspected, not a mutable shared file.
-    with tempfile.TemporaryDirectory(prefix="cvengine-template-run-") as scratch:
-        template_path = os.path.join(scratch, "approved.yaml")
-        host_path = os.path.join(scratch, "hosts.txt")
-        with open(template_path, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        with open(host_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(hosts) + "\n")
-        cmd = [NUCLEI_BIN, "-t", template_path, "-l", host_path, "-jsonl", "-silent", "-duc", "-ni",
-               "-rl", RATE_LIMIT, "-timeout", "10", "-retries", "0"]
-        if secret_file:
-            cmd += ["-sf", secret_file, "-dr"]
-        from cveFeed import egress_proxy
-        try:
-            cmd += egress_proxy.for_tool("nuclei", hosts)  # Settings > Proxy: these hosts are scan targets (loopback stays direct)
-        except egress_proxy.ProxyUnavailable as exc:
-            return [{"host": host, "vulnerable": False, "output": "", "error": str(exc)} for host in hosts]
-        with resources.heavy_job("template-test", label=hosts[0] if len(hosts) == 1 else f"{len(hosts)} hosts") as job:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-            job.attach(proc)
-            try:
-                out, err = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                resources.terminate_group(proc, grace=5)
-                proc.communicate()
-                raise
-            job.raise_if_killed()
-            if proc.returncode != 0:
-                reason = (err or f'nuclei exited with status {proc.returncode}').strip()[-300:]
-                if redact:
-                    from cveFeed.auth_checks import redact_text
-                    reason = redact_text(reason, redact)
-                return [{"host": host, "vulnerable": False, "output": "", "error": reason} for host in hosts]
-    hits, rows, malformed = {}, {}, False
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            malformed = True
-            continue
-        if not isinstance(row, dict):
-            malformed = True
-            continue
-        if not is_hit(row):
-            continue
-        if redact:
-            from cveFeed.auth_checks import redact_obj
-            row = redact_obj(row, redact)
-            line = json.dumps(row)
-        key = _host_key(row.get("host") or row.get("matched-at") or row.get("ip"))
-        hits.setdefault(key, []).append(line)
-        rows.setdefault(key, row)
-    if malformed:
-        return [{"host": host, "vulnerable": False, "output": "", "error": "nuclei returned malformed JSON output"} for host in hosts]
-    return [{"host": host, "vulnerable": bool(hits.get(_host_key(host))),
-             "output": "\n".join(hits.get(_host_key(host), []))[-2000:],
-             "hit": _trim_hit(rows.get(_host_key(host)))} for host in hosts]
+    from agentapi import sentinel_dispatch
+    return sentinel_dispatch.try_template_test(text, hosts, project)
 
 
-def is_hit(row):
-    """Whether a nuclei result line is a matcher hit. nuclei also reports extractor-only output (a value it pulled out of
-    a response), which says what a host runs but not that it is vulnerable: a line counts when a matcher fired
-    (matcher-name, or matcher-status true) and not when matcher-status is false or only extracted values are present."""
-    if row.get("matcher-status") is False:
-        return False
-    if row.get("matcher-name") or row.get("matcher-status") is True:
-        return True
-    return False
-
-
-def _trim_hit(row):
-    """The first result line of a host, with its request and response bounded: evidence for a Vulnerability row."""
-    if not row:
-        return None
-    return {k: (v[:8000] if isinstance(v, str) and k in ("request", "response", "curl-command") else v)
-            for k, v in row.items()}
-
-
-def _run_template_with_retry(path, hosts, attempts=2):
-    """The check for a chunk of hosts. If its process is stopped to protect the container's memory the chunk is halved and
-    each half queues again (the gate waits for room); a single host gets ``attempts`` tries before it is reported as not
-    tested."""
-    from reNgine.resources import MemoryKill
+def _test_chunk(path, hosts, project=None):
+    """The check for a chunk of hosts, run by a scanner (``run_template``). A host the scanner could not test comes back as an error outcome."""
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
-    try:
-        return run_template(path, hosts)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return [{"host": host, "vulnerable": False, "output": "", "error": f"not tested: {type(exc).__name__}"} for host in hosts]
-    except MemoryKill:
-        if len(hosts) > 1:
-            mid = len(hosts) // 2
-            return _run_template_with_retry(path, hosts[:mid], attempts) + _run_template_with_retry(path, hosts[mid:], attempts)
-        if attempts > 1:
-            return _run_template_with_retry(path, hosts, attempts - 1)
-        return [{"host": hosts[0], "vulnerable": False, "output": "", "error": "not tested: the server ran low on memory"}]
+    return run_template(path, hosts, project=project)
 
 
 def templates_dir_problem(generated=None, root=None):
@@ -908,57 +775,6 @@ def restore_missing_files():
     return {'restored': restored, 'skipped': skipped}
 
 
-def approve_reviewed_template(template_pk):
-    """Promote a draft only after a checked-in, independent CVE fixture detects
-    the positive response and rejects the negative response on loopback.
-
-    This is an explicit maintainer operation. It does not execute on a customer
-    target, and a passing fixture does not prove a live host is affected.
-    """
-    from django.db import transaction
-    from django.utils import timezone
-    from cveFeed.models import GeneratedTemplate
-    from cveFeed import template_fixtures
-
-    with transaction.atomic():
-        tmpl = GeneratedTemplate.objects.select_for_update().select_related('cve_entry').get(pk=template_pk)
-        if tmpl.status != GeneratedTemplate.STATUS_DRAFT or tmpl.path:
-            return False, 'only an uninstalled draft can be reviewed'
-        fixture, provenance, reason = template_fixtures.load(tmpl.cve_entry.cve_id)
-        if reason:
-            return False, reason
-        ok, reason = static_check(tmpl.yaml, expected_cve_id=tmpl.cve_entry.cve_id)
-        if not ok:
-            return False, f'static safety gate failed: {reason}'
-        with tempfile.TemporaryDirectory(prefix='cvengine-reviewed-') as scratch:
-            candidate = os.path.join(scratch, f'{tmpl.template_id}.yaml')
-            with open(candidate, 'x') as stream:
-                stream.write(tmpl.yaml)
-            try:
-                valid, output = validate_with_nuclei(candidate)
-            except (OSError, subprocess.TimeoutExpired):
-                return False, 'Nuclei syntax validation unavailable or timed out'
-            if not valid:
-                return False, f'Nuclei syntax validation failed: {output[-300:]}'
-            verified, reason = template_fixtures.verify(candidate, tmpl.yaml, fixture)
-            if not verified:
-                return False, reason
-        # Coverage lookup indexes filenames by CVE ID. Exclusive creation
-        # prevents another draft from replacing an approved detector.
-        try:
-            installed = save_template_file(tmpl.cve_entry.cve_id.lower(), tmpl.yaml)
-        except FileExistsError:
-            return False, 'a generated template already exists for this CVE; review it before replacing anything'
-        tmpl.path = installed
-        tmpl.status = GeneratedTemplate.STATUS_VALID
-        tmpl.positive_fixture_verified_at = timezone.now()
-        tmpl.positive_fixture_source = provenance
-        tmpl.validation_output = (tmpl.validation_output + '\n' + reason)[-2000:]
-        tmpl.save(update_fields=['path', 'status', 'positive_fixture_verified_at',
-                                 'positive_fixture_source', 'validation_output'])
-        return True, reason
-
-
 def cve_info_for(cve):
     from cveFeed.correlation import prepared_ranges  # the ranges as matching reads them: a branch the CVE List split in two is one range
     affected = cve.affected
@@ -1003,72 +819,88 @@ def _generation_lease(cve):
     last = recent.order_by('-created_at').first()
     if last is not None:
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} was already attempted on {last.created_at:%Y-%m-%d} ({last.status})')
-    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+    from cveFeed.models import AIJob
+    asked = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), status__in=AIJob.OPEN).count()
+    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
         raise TemplateBudgetExceeded('the daily AI template budget is spent')
+    if AIJob.objects.filter(kind='template_generation', dedupe=f'template:{cve.pk}', status__in=AIJob.OPEN).exists():
+        raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
     key = f'cvengine:templategen:{cve.pk}'
     if not cache.add(key, 1, timeout=15 * 60):
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
     return key
 
 
-def generate_template(cve, provider, project=None, candidate_only=True):
-    """Ask the AI for a template and gate it. On-demand candidates stay drafts after a benign fixture test. Raises
-    TemplateBudgetExceeded instead of calling the AI when the generation budget does not allow an attempt."""
+def generate_template(cve, project=None, candidate_only=True):
+    """Ask the AI for a template: one job queued for the AI reviewer container (cveFeed.ai_jobs). When it lands, ``job_answer`` gates it
+    (static check, the syntax check and the benign fixture on a scanner) and keeps it as a draft: an AI template is never installed or run on a host
+    without independently reviewed positive fixture evidence. Raises TemplateBudgetExceeded instead of asking when the generation budget
+    does not allow an attempt, and ScannerUnavailable (before the AI is asked) when no scanner could check the template it would write.
+    Returns the job."""
     if not candidate_only:
         raise ValueError('an AI template requires independently reviewed positive fixture evidence before installation')
     from django.core.cache import cache
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity, ai_jobs
     key = _generation_lease(cve)
     try:
-        return _generate_template(cve, provider, project)
+        sentinel_dispatch.nuclei_validate_ready(project)  # raises ScannerUnavailable before the AI is asked for a template nothing could check
+        # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the
+        # prompt is masked
+        job = ai_jobs.enqueue('template_generation', 'template_generation', system=SYSTEM_PROMPT, parts=prompt_parts(cve_info_for(cve)),
+                              options={'redact_reply': False}, context={'cve': cve.pk, 'project': project}, project=project,
+                              dedupe=f'template:{cve.pk}', priority=7)
+        activity.log('write_check', f'Asked the AI reviewer container to write a nuclei check for {cve.cve_id}', project=project,
+                     cve_id=cve.cve_id)
+        return job
     finally:
         cache.delete(key)
 
 
-def _generate_template(cve, provider, project):
-    from cveFeed.models import GeneratedTemplate
+def _job_model(job):
+    return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
 
+
+def job_answer(job, text):
+    """The model's template arrived: gated as before (static check, then the syntax check and the benign fixture on a scanner:
+    nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid."""
+    from cveFeed.models import CVEEntry, GeneratedTemplate
     from cveFeed import activity
-    with activity.step('write_check', f'Writing a nuclei check for {cve.cve_id} with {provider.name}',
-                       project=project, cve_id=cve.cve_id) as handle:
-        from reNgine.ai_providers import request_options, usage_stage
-        try:
-            # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the prompt is masked
-            with usage_stage('template_generation'), request_options(redact_reply=False):
-                text = extract_yaml(provider.complete(SYSTEM_PROMPT, build_prompt(cve_info_for(cve))))
-        except Exception as exc:
-            # a failed provider call is still a billable attempt: leave the ledger row, so the next run does not retry this CVE at once
-            GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID,
-                                             ai_model=f"{provider.name}:{provider.model}"[:128],
-                                             validation_output=f'the AI provider call failed ({type(exc).__name__}); no template was written')
-            raise
-        handle.done_message = f'Wrote a nuclei check for {cve.cve_id}'
+    from reNgine.resources import ScannerUnavailable
+    cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
+    if cve is None:
+        return None
+    project = job.context.get('project')
+    text = extract_yaml(text)
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
-    tmpl = GeneratedTemplate(
-        cve_entry=cve, yaml=text, ai_model=f"{provider.name}:{provider.model}",
-        template_id=(load_template(text) or {}).get("id", "") if ok else "")
+    tmpl = GeneratedTemplate(cve_entry=cve, yaml=text, ai_model=_job_model(job)[:128],
+                             template_id=(load_template(text) or {}).get("id", "") if ok else "")
     if not ok:
         tmpl.status, tmpl.validation_output = GeneratedTemplate.STATUS_INVALID, f"static check: {reason}"
         tmpl.save()
-        return tmpl
+        activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
+        return None
     with activity.step('validate', f'Validating the check for {cve.cve_id} (safety gate and nuclei -validate)',
                        project=project, cve_id=cve.cve_id) as handle:
-        # validated in a private scratch directory: nothing unvalidated ever exists under GENERATED_DIR
-        with tempfile.TemporaryDirectory(prefix="cvengine-validate-") as scratch:
-            candidate = os.path.join(scratch, f"{tmpl.template_id}.yaml")
-            with open(candidate, "w") as f:
-                f.write(text)
-            valid, output = validate_with_nuclei(candidate)
-            if valid:
-                fixture_ok, fixture_note = test_benign_fixture(candidate)
-                output = (output + '\n' + fixture_note).strip()
-                if not fixture_ok:
-                    valid = False
+        try:
+            valid, output = validate_anywhere(text, project)
+        except ScannerUnavailable as exc:  # the scanner went away between the check above and now: never a draft without its check
+            valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
     tmpl.validation_output = (output + '\nRequires a reviewed positive fixture before execution on a customer host.'
                               if valid else output)
     tmpl.save()
-    return tmpl
+    return None
+
+
+def job_failure(job, category, detail):
+    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once."""
+    from cveFeed.models import CVEEntry, GeneratedTemplate
+    cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
+    if cve is not None:
+        GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID, ai_model=_job_model(job)[:128],
+                                         validation_output=f'the AI provider call failed ({category}); no template was written')
 
 
 def _severity_of(cvss, fallback):
@@ -1084,7 +916,7 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
     tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
     the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
-    testssl): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
+    the TLS audit): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
     one nothing is guessed.
 
     A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or
@@ -1151,12 +983,13 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     return saved
 
 
-def run_cve_tests(cve, hosts, provider=None, project=None):
-    """Stage 7: test with a policy-approved installed template, or save an unrun draft.
+def run_cve_tests(cve, hosts, ai=False, project=None):
+    """Stage 7: test with a policy-approved installed template, or (``ai``) ask for an unrun draft.
 
     Returns {'source': 'existing'|'candidate'|'none', 'template': path/id, 'results': [...]}.
     """
     from cveFeed import activity
+    from reNgine.resources import ScannerUnavailable
     with activity.step('run_check', f'Checking nuclei template coverage for {cve.cve_id}', project=project,
                        cve_id=cve.cve_id) as handle:
         from cveFeed.validation import resolve_template
@@ -1165,15 +998,16 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
     if safe_path:
         path, source, tmpl = safe_path, "existing", None
     else:
-        if provider is None:
+        if not ai:
             return {"source": "none", "template": "", "results": [], "reason": reason or "no AI provider configured"}
         try:
-            tmpl = generate_template(cve, provider, project=project, candidate_only=True)
-        except TemplateBudgetExceeded as exc:
-            activity.log('write_check', f'Not writing a nuclei check for {cve.cve_id}: {exc}', project=project, cve_id=cve.cve_id)
-            return {"source": "none", "template": "", "results": [], "reason": str(exc)}
-        return {"source": "candidate" if tmpl.status == tmpl.STATUS_DRAFT else "none",
-                "template": tmpl.template_id, "results": [], "reason": tmpl.validation_output}
+            job = generate_template(cve, project=project, candidate_only=True)
+        except (TemplateBudgetExceeded, ScannerUnavailable) as exc:
+            reason = str(exc) if isinstance(exc, TemplateBudgetExceeded) else f'no scanner could check it now ({exc.kind})'
+            activity.log('write_check', f'Not writing a nuclei check for {cve.cve_id}: {reason}', project=project, cve_id=cve.cve_id)
+            return {"source": "none", "template": "", "results": [], "reason": reason}
+        return {"source": "candidate", "template": "", "results": [], "job": job.pk,
+                "reason": "an AI draft is being written; it is validated when it lands and is never run on a host before a person reviews it"}
     results = []
     evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
     from targetApp.target_types import scannable_hosts
@@ -1183,9 +1017,7 @@ def run_cve_tests(cve, hosts, provider=None, project=None):
         label = chunk[0] if len(chunk) == 1 else f'{len(chunk)} hosts'
         with activity.step('run_check', f'Running the {cve.cve_id} check against {label}', project=project,
                            cve_id=cve.cve_id) as handle:
-            outcomes = _run_template_with_retry(path, chunk)
-            from cveFeed import auth_nuclei  # a stored sign-in adds a signed-in run for the hosts it covers
-            outcomes = auth_nuclei.merge_template_outcomes(path, chunk, outcomes, project)
+            outcomes = _test_chunk(path, chunk, project=getattr(project, 'pk', project))
             for outcome in outcomes:
                 outcome['template_evidence'] = evidence
             errors = sum(bool(o.get('error')) for o in outcomes)

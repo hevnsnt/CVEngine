@@ -54,7 +54,12 @@ class EntrypointTests(SimpleTestCase):
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
         for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
-            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]', (root / name).read_text(), name)
+            text = (root / name).read_text()
+            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"', text, name)
+            # the memory settings a 2 GB host needs (docs/DEPLOYMENT.md, Small hosts), each overridable from .env, with defaults that are safe from 1 GB up
+            for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
+                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}'):
+                self.assertIn(setting, text, name)
         # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
         for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
             text = (root / 'scripts' / name).read_text()
@@ -138,11 +143,10 @@ class WorkerSupervisionTests(SimpleTestCase):
         self.assertNotIn('manage.py loaddata', text)  # it overwrote edited engines at every start; load_default_fixtures only adds what is missing
         self.assertIn('manage.py load_default_fixtures', text)
 
-    def test_the_screenshot_sandbox_is_checked_before_the_workers_and_the_scan_results_are_closed_to_nobody(self):
+    def test_the_scan_results_are_closed_to_everyone_but_root_and_the_proxy_and_no_browser_is_started_here(self):
         text = SCRIPT.read_text()
-        check = text.index('python3 manage.py check_screenshot_sandbox ||')  # a failed check never stops the workers from starting
-        self.assertLess(check, text.index('eval "$commands"'))
         self.assertIn('chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results', text)  # root and the proxy's nginx only
+        self.assertNotIn('check_screenshot_sandbox', text)  # the screenshot browser runs on a Sentinel, which proves its sandbox itself
 
 
 WEB_SCRIPT = Path(__file__).resolve().parent.parent / 'entrypoint.sh'

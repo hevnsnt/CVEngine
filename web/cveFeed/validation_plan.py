@@ -13,9 +13,10 @@ from django.utils import timezone
 
 from cveFeed import templategen
 from cveFeed.models import TriageCall
+from reNgine import ai_prompts
 from reNgine.ai_providers import clean_text, untrusted_block
 
-SYSTEM = ("You investigate whether a CVE really applies to one product on one host. First read host_metadata: every technology with "
+SYSTEM = ai_prompts.compose('validation_plan', "First read host_metadata: every technology with "
           "its version and where it was seen, the ports with product, version, extra info and banners, the front page headers, any CDN, "
           "WAF or hosting edge, certificates, the operating system guess, earlier probe and check results and the host's other CVE "
           "matches. Then say which missing fact decides the question: the product's version, which look-alike product it is (nginx, "
@@ -152,13 +153,14 @@ def generate_candidate(project_id, cve, provider):
         return {'status': 'deferred', 'reason': why}
     try:
         try:
-            candidate = templategen.generate_template(cve, provider, project=project_id, candidate_only=True)
-        except templategen.TemplateBudgetExceeded as exc:  # no AI call was made, so the planning budget is not charged
+            job = templategen.generate_template(cve, project=project_id, candidate_only=True)
+        except templategen.TemplateBudgetExceeded as exc:  # no AI question was queued, so the planning budget is not charged
             TriageCall.objects.filter(pk=claim.pk).delete()
             return {'status': 'deferred', 'reason': str(exc)}
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='succeeded', finished_at=timezone.now())
-        return {'id': candidate.pk, 'status': candidate.status, 'reason': candidate.validation_output[:500],
+        return {'status': 'queued', 'job': job.pk,
+                'reason': 'the AI reviewer container writes the draft; it is validated when it lands and is never run on this host',
                 'provenance': 'AI-authored draft; static, syntax and benign fixture gates only'}
     except Exception:
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='failed', finished_at=timezone.now())
-        return {'status': 'failed', 'reason': 'template generation or validation failed'}
+        return {'status': 'failed', 'reason': 'template generation could not be queued'}

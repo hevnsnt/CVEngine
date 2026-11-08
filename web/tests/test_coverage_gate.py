@@ -11,7 +11,6 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 from django.utils import timezone
 
-from cveFeed import assessment_review as ar
 from cveFeed import coverage_topup, fullscan, udp_scan
 from cveFeed.models import ScanControl
 from dashboard.models import Org, Project
@@ -24,7 +23,7 @@ def fully_covered(domain, engine, host):
     """A Subdomain with every core stage completed: not part of any backlog."""
     scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=2, results_dir='/tmp')
     sub = Subdomain.objects.create(target_domain=domain, scan_history=scan, name=host)
-    for stage in ar.HOST_STAGES:
+    for stage in coverage_topup.HOST_STAGES:
         ScanActivity.objects.create(scan_of=scan, name=stage, title=stage, status=2, time=timezone.now())
     return sub
 
@@ -105,21 +104,19 @@ class FullScanGateTests(TestCase):
 
     def test_the_full_port_sweep_is_skipped_while_backlog_exists(self):
         Subdomain.objects.create(target_domain=self.domain, name='due.fullgate.example')
-        runner = mock.Mock()
-        out = fullscan.run(runner=runner)
+        out = fullscan.run()
         self.assertEqual(out, {'skipped': 'coverage backlog: first-pass hosts are still outstanding'})
-        runner.assert_not_called()
 
     def test_the_full_port_sweep_proceeds_once_the_backlog_is_empty(self):
         fully_covered(self.domain, self.engine, 'covered.fullgate.example')
-        out = fullscan.run(runner=mock.Mock())
+        out = fullscan.run()
         self.assertNotEqual(out.get('skipped'), 'coverage backlog: first-pass hosts are still outstanding')
 
     def test_the_deferral_is_logged_once_not_on_every_firing(self):
         from cveFeed.models import AgentActivity
         Subdomain.objects.create(target_domain=self.domain, name='due.fullgate.example')
-        fullscan.run(runner=mock.Mock())
-        fullscan.run(runner=mock.Mock())
+        fullscan.run()
+        fullscan.run()
         notes = AgentActivity.objects.filter(message__startswith='Full-port scan deferred')
         self.assertEqual(notes.count(), 1)
         self.assertIn('1 host', notes.first().message)
@@ -147,12 +144,10 @@ class UdpScanGateTests(TestCase):
         other = Project.objects.create(name='Gate udp other', slug='gate-udp-other', org=other_org, insert_date=timezone.now())
         other_domain = Domain.objects.create(name='other.udpgate.example', project=other, insert_date=timezone.now())
         Subdomain.objects.create(target_domain=other_domain, name='due.other.udpgate.example')
-        runner = mock.Mock()
-        out = udp_scan.run(runner=runner)
+        out = udp_scan.run()
         self.assertEqual(out, {'skipped': 'coverage backlog: first-pass hosts are still outstanding'})
-        runner.assert_not_called()
 
     def test_the_udp_sweep_proceeds_once_the_backlog_is_empty(self):
         fully_covered(self.domain, self.engine, 'covered.udpgate.example')
-        out = udp_scan.run(runner=mock.Mock())
+        out = udp_scan.run()
         self.assertNotEqual(out.get('skipped'), 'coverage backlog: first-pass hosts are still outstanding')

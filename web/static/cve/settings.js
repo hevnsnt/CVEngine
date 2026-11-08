@@ -1,12 +1,16 @@
 // Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
+import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
+import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
 import "/staticfiles/cve/autotune-card.js"; // registers the Auto-tuning card first: the mode sits at the top of configMaxxing
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
 import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initialDrafts, labelOf, warnings } from "/staticfiles/cve/ai-settings-logic.js";
+import { OWN_SERVER, readyToFetch, sameLabel as sameLabelOf } from "/staticfiles/cve/ai-models-logic.js";
+import { autoLoad, connectionStatus, modelPicker, newSource } from "/staticfiles/cve/ai-models.js";
 import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
 import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
@@ -110,10 +114,56 @@ const card = (title, ...kids) => {
   return c;
 };
 
+// The AI reviewer (docs/AI-REVIEWER.md): its own container. Its two models are chosen in "Which model does which job" with the default model;
+// what is left here is when it works. Plain text everywhere; nothing here renders HTML. The page's one Save sends `body()`.
+function reviewerPanel(r, markDirty) {
+  const on = check("Review findings and check operations with the AI reviewer", r.enabled);
+  const close = check("Close the findings it finds to be false positives (off: record its verdicts only)", r.auto_close);
+  const daily = text(r.review_daily_max, { type: "number", min: "0", max: "20000" });
+  const hours = text((r.ops_hours || []).join(", "), { placeholder: (r.default_ops_hours || []).join(", ") });
+  const status = el("p", "note");
+  const waiting = el("p", "note");
+  const draw = (now) => {
+    const container = now.container || {};
+    const inForce = now.models_in_force || {};
+    status.textContent = !now.env_enabled ? "Turned off on the server (CVENGINE_REVIEWER=0)."
+      : !container.token ? "Waiting for the server to hand the reviewer container its token."
+      : `${now.working ? "Working" : "Not working (see the connection above, or a pause)"}. ${inForceText(inForce)} Reviewed today: ${now.reviews_today}. `
+        + `Last call from the container: ${container.last_seen || "never"}. Last operations check: ${now.last_ops_at || "never"}.`;
+    const jobs = now.ai_jobs || {};
+    waiting.textContent = jobs.message || `AI jobs queued for the container: ${jobs.queued || 0}.`;
+  };
+  draw(r);
+  const panel = card(
+    "AI reviewer",
+    el("p", "note", "A separate, locked-down container reviews every open finding once (again only when its host or evidence changes) and checks the server's operations a few times a day, raising admin alerts. It closes a false positive only when the server finds no hard evidence, nobody worked the finding, and no text aimed at AI agents in its evidence. It also answers the questions the AI triage queues for it; while it is off they wait. Its models are chosen above, in the table."),
+    status,
+    waiting,
+    on.wrap,
+    close.wrap,
+    field("Findings reviewed per day at most", daily),
+    field("Operations check hours (UTC, comma separated)", hours),
+  );
+  return {
+    card: panel,
+    draw,
+    body() {
+      const list = hours.value.split(",").map((h) => h.trim()).filter(Boolean).map(Number);
+      return { enabled: on.box.checked, auto_close: close.box.checked, review_daily_max: Number(daily.value), ops_hours: list };
+    },
+  };
+}
+
+// "Findings are reviewed by X; operations checks use Y." from the models the server reports in force.
+function inForceText(inForce) {
+  if (!inForce || (!inForce.review && !inForce.ops)) return "No model is in force for the reviewer yet.";
+  return `Findings are reviewed by ${inForce.review || "no model"}; operations checks use ${inForce.ops || "no model"}.`;
+}
+
 // --- sections ------------------------------------------------------------------
 const sections = {
   async ai(m) {
-    const s = await api("GET", "ai");
+    const [s, r] = await Promise.all([api("GET", "ai"), api("GET", "reviewer")]);
     const provider = el("select");
     const listed = new Set(s.providers);
     const grouped = GROUPS.map(([title, ids]) => [title, ids.filter((id) => listed.has(id))]);
@@ -128,13 +178,11 @@ const sections = {
       provider.append(g);
     });
     provider.value = s.provider;
-    const model = text(s.model, { list: "ai-models", autocomplete: "off" });
-    const models = el("datalist", "", null, { id: "ai-models" });
-    const modelNote = el("p", "note", "", { style: "margin:6px 0 0" });
     const key = secret(s.has_key, "API key");
-    const base = text(s.base_url);
+    const base = text(s.base_url, { autocomplete: "off", spellcheck: "false" });
     const keyField = field("API key", key);
     const baseField = field("Base URL", base);
+    const needsUrl = s.needs_url || OWN_SERVER;
     const BASE_HINT = {
       ollama: "required, e.g. http://100.64.0.5:11434 (Tailscale or remote), or http://localhost:11434 if it runs on this server",
       vllm: "required, e.g. http://100.64.0.5:8000/v1 (vLLM) or http://localhost:8080/v1 (llama.cpp's llama-server, LiteLLM or any OpenAI-compatible server); the API key is only needed if the server asks for one",
@@ -143,16 +191,43 @@ const sections = {
       openai: "optional, empty uses OpenAI (https://api.openai.com/v1); set it for a LiteLLM proxy or another OpenAI-compatible service, which then gets the key you type here",
       anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
+    // What is stored now, per job, so that a change of provider can be undone by choosing the old one again and a save can say what changed.
+    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "", nuclei: s.nuclei_model || "" };
+    let dirty = false;
     let refreshHints = () => {}; // set below, once the request settings exist
+    let drawInForce = () => {};
+    const source = newSource();
+    const readiness = () => {
+      const p = provider.value;
+      return readyToFetch({ provider: p, typedKey: key.value, hasKey: s.has_key, baseUrl: base.value, keyless: s.keyless, needsUrl, sameAsSaved: p === s.provider });
+    };
+    const readNow = () => ({ ...readiness(), provider: provider.value, api_key: key.value.trim(), base_url: base.value.trim() });
+    const context = () => {
+      const ready = readiness();
+      return { provider: provider.value, baseUrl: base.value, selectable: s.selectable, label: labelOf(provider.value), needsKey: !!ready.needsKey, needsAddress: !!ready.needsAddress };
+    };
+    const connection = connectionStatus(source, context);
+    const defaultPick = modelPicker({ source, context, job: "default", saved: savedModels.default, onChange: () => markDirty() });
+    const reviewPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.review, onChange: () => markDirty(),
+      sameLabel: (c) => sameLabelOf(c.provider, "review", r.default_models), recommendFor: (_st, c) => (c.provider === "anthropic" ? r.default_models.review : ""),
+    });
+    const opsPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.ops, onChange: () => markDirty(),
+      sameLabel: (c) => sameLabelOf(c.provider, "ops", r.default_models), recommendFor: (_st, c) => (c.provider === "anthropic" ? r.default_models.ops : ""),
+    });
+    // The Nuclei job: empty is the default, the cheapest haiku the provider lists (the server finds it in the list), else the default model.
+    const nucleiPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.nuclei, onChange: () => markDirty(),
+      sameLabel: () => (source.state.nucleiDefault ? `Default: ${source.state.nucleiDefault}` : "Default: same as Everything else"),
+      recommendFor: (st) => st.nucleiDefault || "",
+    });
+    const advancedAddress = el("details", "ai-adv");
+    advancedAddress.open = !!s.base_url;
+    advancedAddress.append(el("summary", "", "Advanced: use a gateway or proxy address"), baseField);
     const sync = () => {
       const p = provider.value;
-      const pick = s.selectable.includes(p);
-      model.placeholder = pick
-        ? "choose a model (Load models)"
-        : "automatic: newest, cheapest";
-      modelNote.textContent = pick
-        ? `${labelOf(p)} serves whichever models you pick or host, so choose one.`
-        : `Leave blank for the newest cheapest ${labelOf(p)} model, or choose another.`;
+      const own = needsUrl.includes(p);
       key.placeholder = s.keyless.includes(p)
         ? "optional"
         : s.has_key && p === s.provider
@@ -160,35 +235,25 @@ const sections = {
           : "API key";
       base.placeholder = BASE_HINT[p] || "optional";
       keyField.style.display = p === "ollama" ? "none" : "";
+      // the address is part of the connection where the server is yours (required: plain box), under Advanced where a vendor has its own
+      advancedAddress.classList.toggle("ai-adv-own", own);
+      advancedAddress.querySelector("summary").textContent = own ? "Server address" : "Advanced: use a gateway or proxy address";
+      if (own) advancedAddress.open = true;
       refreshHints();
     };
-    const load = async () => {
-      const r = await api("POST", "ai/models", {
-        provider: provider.value,
-        api_key: key.value,
-        base_url: base.value,
-      });
-      models.textContent = "";
-      r.models.forEach((x) =>
-        models.append(
-          Object.assign(el("option"), {
-            value: x.id,
-            label:
-              x.price != null ? `${x.id} ($${x.price.toFixed(2)}/M in)` : x.id,
-          }),
-        ),
-      );
-      modelNote.textContent =
-        `${r.models.length} models available.` +
-        (r.recommended ? ` Newest cheapest: ${r.recommended}.` : "");
-      if (r.recommended && !model.value) model.placeholder = r.recommended;
-    };
     provider.addEventListener("change", () => {
-      model.value = "";
-      models.textContent = "";
+      const same = provider.value === s.provider;
       base.value = provider.value === s.provider ? (s.base_url || "") : ""; // an address belongs to the service it was saved for
+      if (!same) advancedAddress.open = false;
+      defaultPick.set(same ? savedModels.default : ""); // a model belongs to the provider it was chosen from
+      reviewPick.set(same ? savedModels.review : "");
+      opsPick.set(same ? savedModels.ops : "");
+      nucleiPick.set(same ? savedModels.nuclei : "");
       sync();
+      drawInForce();
     });
+    // The list is fetched when the page opens, and when the provider, the key or the address changes (the source waits for typing to pause).
+    const loader = autoLoad(source, readNow, [{ el: provider }, { el: key }, { el: base }]);
     // --- how a request is made: timeouts, reply limit, context window, JSON mode, reasoning, keep-alive -----------------------------------
     // An empty box follows the server's environment variable and then the provider's default; the line under each box says which one applies.
     const inputs = {};
@@ -269,7 +334,7 @@ const sections = {
     const guideNote = el("p", "note", gp
       ? `${gp.cves.toLocaleString()} CVEs: guidance written by rules for ${gp.rules.toLocaleString()}, by the model for ${gp.ai.toLocaleString()}, by a person for ${gp.manual.toLocaleString()}. ${gp.local_only.toLocaleString()} are only usable from the host itself and never matched. ${gp.ai_pending.toLocaleString()} still wait for the model${gp.days_left ? `: about ${gp.days_left.toLocaleString()} day${gp.days_left === 1 ? "" : "s"} at ${gp.daily_budget.toLocaleString()} a day` : ""}. The model handled ${gp.ai_last_day.toLocaleString()} in the last day.`
       : "CVE guidance progress is not available yet.");
-    const guideNow = text("200", { type: "number", min: "1", max: "5000" });
+    const guideNow = text("200", { type: "number", min: "1", max: "5000", "aria-label": "How many CVEs to write guidance for now" });
     const guideRun = button("Write now", async () => {
       const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
       guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
@@ -287,6 +352,14 @@ const sections = {
       status.className = `msg ${ok ? "ok" : "err"}`;
       status.textContent = message || "";
     };
+    const dirtyNote = el("p", "note ai-dirty", "", { role: "status", "aria-live": "polite" });
+    const markDirty = () => {
+      dirty = true;
+      dirtyNote.textContent = "You have unsaved changes.";
+    };
+    m.addEventListener("input", (e) => { if (!e.target.closest("[data-nodirty]")) markDirty(); });
+    m.addEventListener("change", (e) => { if (!e.target.closest("[data-nodirty]")) markDirty(); });
+    const reviewerP = reviewerPanel(r, markDirty);
     const save = async () => {
       const { values, errors } = collect(s, drafts(), provider.value); // only what the chosen provider uses: a hidden box cannot be fixed
       const bad = FIELDS.find((f) => errors[f.key]);
@@ -298,13 +371,27 @@ const sections = {
         say(message, false); // beside the toast, which goes after 3.5 seconds
         throw new Error(message);
       }
+      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"], [nucleiPick, "the Nuclei targeting model"]]) {
+        if (pick.error) {
+          pick.focus();
+          say(`Fix ${name}: ${pick.error}`, false);
+          throw new Error(`Fix ${name}: ${pick.error}`);
+        }
+      }
+      if (enabled.box.checked && s.selectable.includes(provider.value) && !defaultPick.value) {
+        defaultPick.focus();
+        const message = `${labelOf(provider.value)} serves whichever models you pick or host: choose the default model before turning confirmation on.`;
+        say(message, false);
+        throw new Error(message);
+      }
       const saved = await api("PUT", "ai", {
         ...values,
         cve_guidance_daily: guideDaily.value,
         plan_daily_total: planTotal.value,
         plan_daily_per_project: planProject.value,
         provider: provider.value,
-        model: model.value,
+        model: defaultPick.value,
+        nuclei_model: nucleiPick.value,
         api_key: key.value,
         base_url: base.value,
         enabled: enabled.box.checked,
@@ -312,104 +399,155 @@ const sections = {
         auto_fire_max_scans: max.value,
       });
       Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
+      savedModels.default = s.model || "";
+      savedModels.nuclei = s.nuclei_model || "";
       key.value = "";
       key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
+      let after;
+      try {
+        after = await api("PUT", "reviewer", { ...reviewerP.body(), review_model: reviewPick.value, ops_model: opsPick.value });
+      } catch (err) {
+        throw new Error(`The connection and the default model were saved, but the reviewer settings were not: ${err.message}`);
+      }
+      Object.assign(r, after);
+      savedModels.review = r.review_model || "";
+      savedModels.ops = r.ops_model || "";
+      defaultPick.set(savedModels.default, { stored: true });
+      reviewPick.set(savedModels.review, { stored: true });
+      opsPick.set(savedModels.ops, { stored: true });
+      nucleiPick.set(savedModels.nuclei, { stored: true });
+      reviewerP.draw(r);
       showVerified();
       refreshHints();
+      dirty = false;
+      dirtyNote.textContent = "";
+      drawInForce();
+      loader.ask(true);
     };
-    m.append(
-      card(
-        "AI model",
-        field("Provider", provider),
-        (() => {
-          const f = field("Model", model);
-          f.append(models, modelNote, button("Load models", load, "btn ghost sm"));
-          return f;
-        })(),
-        keyField,
-        baseField,
-        adv,
-        enabled.wrap,
-        field("Validation planning requests per day, all projects", planTotal),
-        field("Validation planning requests per day, one project", planProject),
-        (() => {
-          const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
-          f.append(guideNote);
-          const row = el("div", "tools guide-now");
-          row.append(el("span", "note", "Or, from what is left of today's budget, write the next"), guideNow, el("span", "note", "CVEs now"), guideRun);
-          f.append(row);
-          return f;
-        })(),
-        verified,
-        button("Save", async () => {
-          say("");
-          await save();
-          toast("Saved");
-        }),
-        document.createTextNode(" "),
-        button(
-          "Save and test",
-          async () => {
-            say("");
-            await save();
-            say("Testing the connection…", true);
-            try {
-              const r = await api("POST", "ai/test");
-              say(`Connection OK. The model answered: ${r.reply}`, true);
-            } catch (err) {
-              say(err.message, false); // stays on the page: the sentence says what to change
-            }
-            Object.assign(s, await api("GET", "ai")); // verified_at moved
-            showVerified();
-          },
-          "btn ghost",
-        ),
-        status,
-      ),
+    // What is in force, in words: the saved default, and the models the server reports for the reviewer.
+    const inForce = el("p", "ai-inforce", "", { role: "status", "aria-live": "polite" });
+    drawInForce = () => {
+      const named = s.model || (provider.value === s.provider && source.state.recommended ? `${source.state.recommended} (the newest cheapest)` : "the newest cheapest model");
+      const nuclei = s.nuclei_model || (provider.value === s.provider ? source.state.nucleiDefault || s.nuclei_model_in_force : "") || "the default model, once the list loads";
+      inForce.textContent = `In force now: everything else uses ${named}${provider.value === s.provider ? "" : " once you save"}. Nuclei targeting and tag selection uses ${nuclei}. ${r.models_in_force ? inForceText(r.models_in_force) : "The reviewer has no model until a connection is saved."}`;
+    };
+    source.subscribe(drawInForce);
+    drawInForce();
+    const jobRow = (title, about, pick) => {
+      const id = `ai-job-${(uid += 1)}`;
+      pick.select.id = id;
+      const name = el("th", "ai-job", null, { scope: "row" });
+      name.append(el("label", "ai-job-name", title, { for: id }), el("p", "note ai-job-about", about));
+      const cell = el("td", "ai-job-pick");
+      cell.append(pick.wrap);
+      const tr = el("tr");
+      tr.append(name, cell);
+      return tr;
+    };
+    const jobs = el("table", "ai-jobs", null, { "aria-label": "Which model does which job" });
+    const jobsBody = el("tbody");
+    jobsBody.append(
+      jobRow("Everything else", "The default model. Triages every finding, confirms CVE matches, plans validation checks and Nuclei scans, and writes CVE guidance. It runs on every scan in many small requests, so this is where most of the spend goes: a cheap model is the right choice. The daily caps are under AI spend.", defaultPick),
+      jobRow("Nuclei targeting and tag selection", "Chooses which detection templates apply to the software found. A smaller, faster model works well here and avoids refusals.", nucleiPick),
+      jobRow("Finding review", "The AI reviewer. Reads each open finding once, and again only when its host or evidence changes, up to the daily limit below. One larger request per finding, so a stronger model costs the most here.", reviewPick),
+      jobRow("Operations check", "The AI reviewer. Looks over the work queue, the scanners and the errors a few times a day (four by default) and writes an alert for each problem. A handful of small requests a day, so the cost hardly matters.", opsPick),
     );
+    jobs.append(jobsBody);
+    const testNote = el("p", "note", "", { role: "status", "aria-live": "polite" });
+    const refreshLink = el("button", "ai-link", "Refresh list", { type: "button" });
+    refreshLink.onclick = async () => {
+      const ask = readNow();
+      if (!ask.ok) return connection.draw();
+      await loader.refresh();
+    };
+    const connectionCard = card(
+      "Connection",
+      field("Provider", provider),
+      keyField,
+      advancedAddress,
+      connection.node,
+      (() => {
+        const row = el("div", "ai-actions");
+        row.append(
+          button("Test connection", async () => {
+            if (!readNow().ok) return connection.draw();
+            await loader.refresh();
+          }, "btn ghost"),
+        );
+        return row;
+      })(),
+    );
+    const modelsCard = card(
+      "Which model does which job",
+      el("p", "note", "Each job can use its own model. The lists are the models your provider offers right now. A model you choose here is used from the next request; nothing already running is changed."),
+      jobs,
+      inForce,
+      (() => {
+        const row = el("div", "ai-actions");
+        row.append(refreshLink, button("Send a test message", async () => {
+          if (dirty) throw new Error("Save first: the test message uses the saved settings.");
+          testNote.textContent = "Sending a test message...";
+          try {
+            const res = await api("POST", "ai/test");
+            testNote.textContent = `The model answered: ${res.reply}`;
+            say(`Connection OK. The model answered: ${res.reply}`, true);
+          } catch (err) {
+            testNote.textContent = err.message; // stays on the page: the sentence says what to change
+            say(err.message, false);
+          }
+          Object.assign(s, await api("GET", "ai")); // verified_at moved
+          showVerified();
+        }, "btn ghost"));
+        return row;
+      })(),
+      testNote,
+      verified,
+    );
+    modelsCard.classList.add("ai-models-card");
+    const limitsCard = card(
+      "Confirmation and limits",
+      enabled.wrap,
+      field("Validation planning requests per day, all projects", planTotal),
+      field("Validation planning requests per day, one project", planProject),
+      (() => {
+        const f = field("CVE guidance written by the model per day (each CVE is one paid request; 0 turns it off)", guideDaily);
+        f.append(guideNote);
+        const row = el("div", "tools guide-now", null, { "data-nodirty": "" });
+        row.append(el("span", "note", "Or, from what is left of today's budget, write the next"), guideNow, el("span", "note", "CVEs now"), guideRun);
+        f.append(row);
+        return f;
+      })(),
+      adv,
+    );
+    m.append(connectionCard, el("div", "", null, { style: "height:16px" }), modelsCard, el("div", "", null, { style: "height:16px" }), limitsCard);
+    sync();
+    loader.ask(true); // the page opens with its lists filled: nothing to press
     const seedState = await api("GET", "cve_seed");
-    const seedNote = el("p", "note", "");
-    const showSeed = (st) => {
-      const b = st.built;
-      seedNote.textContent = st.building
-        ? "Building the seed: this takes a few minutes. Refresh to see it."
-        : b
-          ? `Last build ${new Date(b.generated_at).toLocaleString()}: ${b.count.toLocaleString()} CVEs (fire ${b.tiers.fire.toLocaleString()}, smoke ${b.tiers.smoke.toLocaleString()}, ice ${b.tiers.ice.toLocaleString()}), ${b.with_detection.toLocaleString()} with guidance, ${Math.round(b.bytes / 1048576)} MB.`
-          : "No seed has been built on this server yet.";
-    };
-    showSeed(seedState);
-    const seedLinks = el("div", "tools");
-    if (seedState.file) {
-      seedLinks.append(
-        el("a", "btn ghost sm", "Download the seed", { href: "/cve/api/settings/cve_seed/download/seed" }),
-        el("a", "btn ghost sm", "Download its manifest", { href: "/cve/api/settings/cve_seed/download/manifest" }),
-      );
-    }
-    m.append(
-      el("div", "", null, { style: "height:16px" }),
-      card(
-        "CVE catalog seed",
-        el("p", "note", "A new install loads this file on first start, so it begins with every CVE and its guidance instead of rebuilding them one by one. Build it here once the guidance is written, then attach both files to the cve-seed release on GitHub (scripts/publish-cve-seed.sh does it from a machine with gh)."),
-        seedNote,
-        button("Build the seed", async () => {
-          showSeed(await api("POST", "cve_seed/build").then(() => ({ building: true })));
-          toast("Building the seed");
-        }),
-        seedLinks,
-      ),
-    );
+    m.append(el("div", "", null, { style: "height:16px" }), seedCard({ el, api, toast, card, csrf, apiBase: API, initial: seedState }));
+    const seedParts = [m.children[m.children.length - 2], m.lastChild]; // the seed build is not a setting: it goes below the settings, before the Save bar
     m.append(
       el("div", "", null, { style: "height:16px" }),
       card(
         "Auto-fire",
         fire.wrap,
         field("Max hosts tested per CVE", max),
-        button("Save", async () => {
-          await save();
-          toast("Saved");
-        }),
       ),
+      el("div", "", null, { style: "height:16px" }),
+      reviewerP.card,
+      ...seedParts,
     );
+    const bar = el("div", "ai-savebar");
+    bar.append(
+      button("Save AI settings", async () => {
+        say("");
+        await save();
+        say(`Saved. ${inForce.textContent}`, true);
+        toast("Saved");
+      }),
+      dirtyNote,
+      status,
+    );
+    m.append(bar);
   },
 
   async updates(m) {
@@ -569,6 +707,7 @@ const sections = {
         }
         if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer", style: "display:block;margin:0 0 14px" }));
       }
+      if (s.scanner_notice) kids.push(el("p", "msg", `${s.scanner_notice.text} `, { style: "margin-top:10px", role: "status" }), el("a", "note", "Open Sentinels", { href: "/cve/sentinels/" }), document.createTextNode(" "));
       if (s.branch_warning) kids.push(el("p", "msg err", s.branch_warning, { style: "margin-top:10px" }));
       if (s.status === "approved") {
         kids.push(
@@ -576,16 +715,31 @@ const sections = {
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
-        kids.push(
-          button("Approve update", async () => {
+        // Not enough disk for this update (measured by the host): say so in plain words and keep the button off, with the reason on it
+        if (s.disk && s.disk.short) kids.push(el("p", "msg err", s.disk.text, { id: "update-disk-short", role: "alert" }));
+        const approveButton = button("Approve update", async () => {
+            // the question worth asking first (which scanners run), asked by the server's facts; no question, no dialog: the button just updates
+            const fresh = await api("GET", "updates");
+            if (fresh.scanner_choice && fresh.scanner_choice.needs_choice) {
+              const plan = await askScannerPlan(fresh.scanner_choice);
+              if (!plan) return;
+              draw(await api("POST", "updates/approve", { sentinels: plan }));
+              toast("Approved");
+              return;
+            }
             const note = (s.branch_warning ? s.branch_warning + " " : "") + (hu.alive
               ? "Scans are paused, running ones finish, then the host rebuilds and restarts the services."
               : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).");
             if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");
-          }),
-        );
+        });
+        if (s.disk && s.disk.short) {
+          approveButton.disabled = true;
+          approveButton.title = s.disk.text;
+          approveButton.setAttribute("aria-describedby", "update-disk-short");
+        }
+        kids.push(approveButton);
         if (s.status === "available")
           kids.push(document.createTextNode(" "), button("Dismiss", async () => { draw(await api("POST", "updates/dismiss")); }, "btn ghost"));
       }
@@ -1222,6 +1376,46 @@ const sections = {
     await draw();
   },
 
+  // Settings > Sentinels: the one instance switch of "keep Sentinels on the newest version" (agentapi/sentinel_autoupdate.py). Per Sentinel, the Sentinels page has
+  // "Update now" and the self-update setting (Off is the opt-out).
+  async sentinels(m) {
+    const v1 = async (method, body) => {
+      const res = await fetch("/api/v1/sentinels/defaults", {
+        method,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        /* empty */
+      }
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      return data;
+    };
+    const s = await v1("GET");
+    const keep = check("Keep Sentinels on the newest version", s.keep_newest);
+    keep.wrap.style.minHeight = "44px";
+    keep.box.style.cssText = "width:24px;height:24px;min-height:0;flex:none";
+    m.append(
+      card(
+        "Sentinels",
+        el(
+          "p",
+          "note",
+          "On by default. When a Sentinel runs a build behind the newest published one, cvENGINE asks it to update: at most once every 6 hours per Sentinel, never while it runs a long task, never to a build this server cannot run yet, and every request is in the audit log. The built-in scanner is updated through this server's host updater. Turn it off here for all Sentinels, or set one Sentinel's self-update to Off on the Sentinels page to keep just that one where it is.",
+          { style: "margin:0 0 14px" },
+        ),
+        keep.wrap,
+        button("Save", async () => {
+          const next = await v1("PUT", { keep_newest: keep.box.checked });
+          toast(next.keep_newest ? "Sentinels are kept on the newest version" : "Sentinels are no longer asked to update");
+        }),
+      ),
+    );
+  },
   async reports(m) {
     const s = await api("GET", "reports");
     const inputs = {
@@ -1322,32 +1516,37 @@ const sections = {
 // Thirteen tabs never fit on one line, so they are grouped: a column beside the panel on a wide screen, wrapped rows on a narrow one.
 const view = root.querySelector("#view");
 view.classList.add("set-layout");
+// A navigation list, not a tablist: the groups hold a collapsible heading button and a link next to the section buttons, which a tablist may not own.
+// The open section is marked with aria-current.
 const tabs = el("nav", "set-nav", null, {
-  role: "tablist",
   "aria-label": "Settings",
 });
 const panel = el("div", "set-panel");
 view.append(tabs, panel);
-const groups = [
-  ["AI and access", ["ai", "keys", "tailscale"]],
-  ["Scanning", ["scan_policy", "openvas", "ip_allowlist", "proxy", "resources"]],
-  ["Alerts and reports", ["notifications", "email", "reports"]],
-  ["System", ["updates", "reset"]],
-];
+// Essentials are the four things most installs ever touch; everything else is under Advanced, collapsed. OpenVAS is not in Settings: its one
+// place is Administration > OpenVAS, which an organization admin can open too (the panel is the same).
+const essentials = ["ai", "alerts", "reports", "updates", "sentinels"];
+const advanced = ["keys", "tailscale", "scan_policy", "ip_allowlist", "proxy", "resources", "reset"];
 const labels = {
   ai: "AI model",
+  alerts: "Alerts",
+  reports: "Reports",
+  updates: "Updates",
+  sentinels: "Sentinels",
   keys: "API keys",
   tailscale: "Tailscale",
-  openvas: "OpenVAS",
-  notifications: "Notifications",
-  email: "Email",
   scan_policy: "Scan policy",
   ip_allowlist: "IP allowlist",
   proxy: "Proxy",
-  reports: "Reports",
   resources: "Resources",
-  updates: "Updates",
   reset: "Factory reset",
+};
+// Alerts: where this server sends notices (chat webhooks) and how it sends mail, one pane instead of two
+sections.alerts = async (m) => {
+  const mail = el("div");
+  await sections.notifications(m);
+  m.append(mail);
+  await sections.email(mail);
 };
 
 // configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
@@ -1356,6 +1555,12 @@ try {
   storage = window.localStorage;
 } catch (_) {
   /* blocked: the group stays collapsed by default and nothing is remembered */
+}
+const advItems = el("div", "set-group-items", null, { id: "set-adv-items" });
+const advToggle = el("button", "set-group-title set-toggle", "Advanced", { type: "button", "aria-controls": "set-adv-items" });
+function setAdvOpen(isOpen) {
+  advItems.hidden = !isOpen;
+  advToggle.setAttribute("aria-expanded", String(isOpen));
 }
 const cmItems = el("div", "set-group-items", null, { id: "set-cm-items" });
 const cmToggle = el("button", "set-group-title set-toggle", SECTION_LABEL, {
@@ -1374,11 +1579,12 @@ async function open(name, card = "") {
     .querySelectorAll("button[data-tab]")
     .forEach((b) =>
       b.setAttribute(
-        "aria-selected",
+        "aria-current",
         String(b.dataset.tab === name && (!b.dataset.card || b.dataset.card === (card || b.dataset.card))),
       ),
     );
   if (name === SECTION_ID) setCmOpen(true);
+  if (name === SECTION_ID || advanced.includes(name)) setAdvOpen(true); // a link into an advanced pane opens the fold around it
   panel.textContent = "";
   history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
   try {
@@ -1387,44 +1593,48 @@ async function open(name, card = "") {
     panel.append(el("p", "msg err", err.message));
   }
 }
-groups.forEach(([title, names]) => {
-  const group = el("div", "set-group", null, { role: "presentation" });
-  group.append(el("span", "set-group-title", title, { "aria-hidden": "true" }));
-  names.forEach((name) => {
-    const b = el("button", "btn ghost sm", labels[name], {
-      role: "tab",
-      "data-tab": name,
-      "aria-selected": "false",
-    });
-    b.type = "button";
-    b.onclick = () => open(name);
-    group.append(b);
-  });
-  tabs.append(group);
-});
+const tabButton = (name) => {
+  const b = el("button", "btn ghost sm", labels[name], { "data-tab": name, "aria-current": "false" });
+  b.type = "button";
+  b.onclick = () => open(name);
+  return b;
+};
+const essentialsGroup = el("div", "set-group", null, { role: "presentation" });
+essentialsGroup.append(el("span", "set-group-title", "Essentials", { "aria-hidden": "true" }), ...essentials.map(tabButton));
+tabs.append(essentialsGroup);
+advToggle.onclick = () => setAdvOpen(advItems.hidden);
+advanced.forEach((name) => advItems.append(tabButton(name)));
 const cmGroup = el("div", "set-group", null, { role: "presentation" });
 cmToggle.onclick = () => setCmOpen(cmItems.hidden);
 cards().forEach((entry) => {
   const b = el("button", "btn ghost sm", entry.title, {
-    role: "tab",
     "data-tab": SECTION_ID,
     "data-card": entry.id,
-    "aria-selected": "false",
+    "aria-current": "false",
   });
   b.type = "button";
   b.onclick = () => open(SECTION_ID, entry.id);
   cmItems.append(b);
 });
 cmGroup.append(cmToggle, cmItems);
-tabs.append(cmGroup);
+// Timings (feed interval, discovery and nuclei limits) live in Administration; a link here so Advanced is where one looks for them
+advItems.append(Object.assign(el("a", "btn ghost sm", "Timings", { href: "/cve/admin/#timings" })));
+advItems.append(cmGroup);
+const advGroup = el("div", "set-group", null, { role: "presentation" });
+advGroup.append(advToggle, advItems);
+tabs.append(advGroup);
 setCmOpen(readOpen(storage), false);
+setAdvOpen(false);
 
 // an old link to #engines (the tab this replaced) opens the scan policy
-const legacyTabs = { engines: "scan_policy" };
+const legacyTabs = { engines: "scan_policy", notifications: "alerts", email: "alerts" };
 const hash = location.hash.slice(1);
+if (hash === "openvas") window.location.replace("/cve/admin/#openvas"); // its one place now
 const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
 open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#openvas") window.location.replace("/cve/admin/#openvas");
   if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  else if (legacyTabs[location.hash.slice(1)]) open(legacyTabs[location.hash.slice(1)]);
   else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
 });

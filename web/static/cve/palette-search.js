@@ -2,6 +2,7 @@
 // it): filter:value, "quoted phrases", -negation, and a space means AND. This module adds filter suggestions as you type, a live
 // preview of the matching hosts, and a help sheet. Nothing here parses the query itself; the server is the single authority.
 import { dialog, el } from "/staticfiles/cve/ui.js";
+import { cvePaletteRow, looksLikeId } from "/staticfiles/cve/explorer-logic.js";
 
 export const FILTERS = [
   { name: "port", hint: "an open port", example: "port:443" },
@@ -46,6 +47,12 @@ export const FILTERS = [
     hint: "sensitive data seen",
     example: "sensitive:credentials",
     values: ["any", "credentials", "pii", "internal"],
+  },
+  {
+    name: "secret",
+    hint: "serves an exposed secret",
+    example: "secret:s",
+    values: ["any", "s", "p", "i", "live"],
   },
   {
     name: "zombie",
@@ -105,7 +112,15 @@ export function suggestions(text) {
         );
     }
   }
-  return out.slice(0, 6);
+  const rows = out.slice(0, 6);
+  // "Search CVEs for ...": opens the CVE explorer (/cve/cves/?q=) with a bare word or id; a CVE id goes first, anything else after the
+  // filter completions
+  const cve = cvePaletteRow(text);
+  if (cve) {
+    if (looksLikeId(text)) rows.unshift(cve);
+    else rows.push(cve);
+  }
+  return rows;
 }
 
 export async function previewHosts(slug, q, signal) {

@@ -8,7 +8,7 @@ never a project whose bug bounty engagement has not confirmed automated testing,
 organization excluded, or anything while scanning is paused (including the pause an update holds).
 
 Everything else that keeps the instance busy (validation of fire and smoke matches, re-tests of changed hosts, the paced full port scan
-and deep nuclei, triage, the AI review every three hours) has its own schedule; this is the part that guarantees the discovery queue
+and deep nuclei, triage, the coverage top-up) has its own schedule; this is the part that guarantees the discovery queue
 never runs dry. Each dispatch is logged in the target's project activity, and the last round is kept for ``status()``.
 """
 import logging
@@ -70,6 +70,18 @@ def bounty_blocked_projects():
     return set(BountyEngagement.objects.exclude(confirmed).values_list('project_id', flat=True))
 
 
+# The conductor starts one thing: a discovery scan per target, whose first stage (discovery) runs on a Sentinel. It has no per-kind work to hold back while a
+# scanner is offline, so ``scanner_state`` only annotates its rounds; the sweeps that dispatch one kind on their own schedule are the ones that stop
+# (the TLS audit, UDP, the WordPress scan), and they do it themselves. Stopping discovery here would stop local work for a reason that is not local.
+def scanner_waiting():
+    """The kinds waiting for a scanner (``agentapi.scanner_state``), for the round's record; never raises, and never changes what the round does."""
+    try:
+        from agentapi import scanner_state
+        return scanner_state.waiting_kinds()
+    except Exception:  # noqa: BLE001 - a note about the scanners must not stop the conductor
+        return []
+
+
 def next_targets(limit, now=None):
     """The targets to scan next, most overdue first: never scanned, then longest since the last scan. At most one per project, none
     with a scan going, none scanned inside the minimum gap, none excluded, none set to manual only (added with "just add them, do not
@@ -120,6 +132,9 @@ def keep_work_queued():
     from cveFeed.scan_control import pause_requested
     depth = wanted_depth()
     result = {'at': timezone.now().isoformat(), 'depth': depth, 'started': 0}
+    waiting = scanner_waiting()
+    if waiting:
+        result['scanner_waiting'] = waiting  # shown with the round: scans still start (discovery runs here), their dispatched stages wait for a scanner
     if not depth:
         result['skipped'] = 'off'
     elif pause_requested():
@@ -174,6 +189,24 @@ def last_round():
 
 
 def status():
-    """What the conductor sees, for the system status: the wanted depth, scans running and queued, and its last round."""
+    """What the conductor sees, for the system status: the wanted depth, scans running and queued, its last round (and how old it is, in seconds), and
+    ``due``: whether any target is due to start right now, by the same rules the round uses (``next_targets``), so "nothing started" can be told from
+    "nothing was due"."""
+    from datetime import datetime
+
+    from django.utils import timezone
+
     from cveFeed.counts import queued_scans, running_scans
-    return {'wanted_depth': wanted_depth(), 'running': running_scans().count(), 'queued': queued_scans().count(), 'last_round': last_round()}
+    last = last_round()
+    age = None
+    try:
+        age = max(0, int((timezone.now() - datetime.fromisoformat(last['at'])).total_seconds())) if last and last.get('at') else None
+    except (TypeError, ValueError):
+        age = None
+    try:
+        due = bool(next_targets(1))
+    except Exception:  # noqa: BLE001 - a status read never fails on this
+        logger.warning('work conductor: could not read which targets are due', exc_info=True)
+        due = None
+    return {'wanted_depth': wanted_depth(), 'running': running_scans().count(), 'queued': queued_scans().count(), 'last_round': last,
+            'last_round_age_seconds': age, 'due': due}

@@ -28,9 +28,10 @@ BACKFILLS = (
     'reopen_openvas_identity_closures',   # 1.3.5 (#414): OpenVAS matches closed as "different product" by mistake
     'dedupe_findings',                    # 1.3.5: scanner and hygiene findings filed more than once
     'fold_alias_findings',                # 1.3.5: what redirect aliases share with their target host
-    'close_fixed_findings',               # 1.3.5: WPScan findings past their fix
+    'close_fixed_findings',               # 1.3.5: WordPress scan findings past their fix
     'rerate_hygiene',                     # 1.3.5: hygiene findings rated by the endpoint rules
     'rerate_dangling_dns',                # 1.3.5: dangling-DNS findings rated by what an outsider can claim (read-only DNS and HTTP checks)
+    'backfill_secrets_inventory',         # 1.4: the secrets stored token and bbot findings carry, filed in the inventory and masked in place
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

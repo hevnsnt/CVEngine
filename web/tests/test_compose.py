@@ -49,17 +49,11 @@ class ComposeEnvTests(unittest.TestCase):
             self.assertIs(celery.get('init'), True, name)
             self.assertEqual(celery.get('stop_grace_period'), '60s', name)
 
-    def test_the_celery_container_can_give_chromium_its_sandbox(self):
-        # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1
-        import hashlib
-        import json
-        path = 'config/seccomp/playwright-chromium.json'
+    def test_the_celery_container_carries_no_browser_profile(self):
+        # the screenshot browser runs on a Sentinel (kind web_screenshot): the server's own containers keep Docker's default seccomp profile
         for name in FILES:
-            self.assertIn(f'seccomp=./{path}', load(name)['celery'].get('security_opt', []), name)
-        data = (ROOT / path).read_bytes()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849')
-        rule = json.loads(data)['syscalls'][0]
-        self.assertEqual((sorted(rule['names']), rule['action']), (['clone', 'setns', 'unshare'], 'SCMP_ACT_ALLOW'))
+            for svc in APP_SERVICES:
+                self.assertEqual([o for o in load(name)[svc].get('security_opt', []) if 'seccomp' in o], [], f'{name} {svc}')
 
     def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
         services = load('docker-compose.yml')
@@ -72,6 +66,68 @@ class ComposeEnvTests(unittest.TestCase):
             self.assertNotIn('MAX_CONCURRENCY', text, name)
             self.assertNotIn('MIN_CONCURRENCY', text, name)
 
+
+@unittest.skipUnless(yaml and (ROOT / 'docker-compose.yml').is_file(), 'needs PyYAML and the compose file')
+class BuiltinScannerComposeTests(unittest.TestCase):
+    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the moving tag scanner.lock.json names, celery's network namespace, a health check
+    on its heartbeats, and the enrollment read from the shared volume by the client itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.compose = load('docker-compose.yml')
+        cls.scanner = cls.compose['scanner']
+
+    def test_it_is_a_default_service_not_behind_a_profile(self):
+        self.assertNotIn('profiles', self.scanner)
+
+    def test_it_follows_the_moving_tag_and_never_builds_an_image(self):
+        self.assertTrue(self.scanner['image'].startswith('${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-'))
+        self.assertTrue(self.scanner['image'].endswith('cvengine-sentinel:main}}'))
+        self.assertNotIn('build', self.scanner)
+        self.assertEqual(self.scanner['pull_policy'], '${CVENGINE_SCANNER_PULL_POLICY:-missing}')
+
+    def test_it_shares_celerys_network_namespace(self):
+        self.assertEqual(self.scanner['network_mode'], 'service:celery')
+        self.assertNotIn('networks', self.scanner)
+        self.assertIn('celery', self.scanner['depends_on'])
+
+    def test_it_has_its_raw_socket_capabilities_and_nothing_that_would_block_them(self):
+        self.assertEqual(sorted(self.scanner['cap_add']), ['NET_ADMIN', 'NET_RAW'])
+        self.assertFalse([o for o in self.scanner.get('security_opt', []) if 'no-new-privileges' in o])
+
+    def test_the_built_in_scanner_can_give_chromium_its_sandbox(self):
+        # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1: the web_screenshot
+        # kind runs Chromium in this container, and it proves the sandbox engaged before it opens a page
+        import hashlib
+        import json
+        path = 'config/seccomp/playwright-chromium.json'
+        self.assertIn(f'seccomp=./{path}', self.scanner.get('security_opt', []))
+        data = (ROOT / path).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849')
+        rule = json.loads(data)['syscalls'][0]
+        self.assertEqual((sorted(rule['names']), rule['action']), (['clone', 'setns', 'unshare'], 'SCMP_ACT_ALLOW'))
+
+    def test_it_is_built_in_mode_reading_its_enrollment_from_the_shared_volume(self):
+        env = self.scanner['environment']
+        self.assertEqual(env['CVENGINE_SENTINEL_BUILTIN'], '1')
+        self.assertEqual(env['CVENGINE_SENTINEL_BLOB_FILE'], '/bootstrap/blob')
+        self.assertNotIn('CVENGINE_SENTINEL_UPDATE', env)  # built-in mode forces it off
+        self.assertIn('web', env['NO_PROXY'])
+        self.assertIn('scanner_bootstrap:/bootstrap:ro', self.scanner['volumes'])
+        self.assertNotIn('entrypoint', self.scanner)
+
+    def test_the_health_check_and_restart_policy_restart_a_wedged_scanner(self):
+        self.assertEqual(self.scanner['healthcheck']['test'], ['CMD', 'python3', '-m', 'client.control', 'health'])
+        self.assertEqual(self.scanner['healthcheck']['start_period'], '10m')
+        self.assertEqual(self.scanner['restart'], 'unless-stopped')
+
+    def test_it_has_a_memory_limit(self):
+        self.assertEqual(self.scanner['mem_limit'], '${SCANNER_MEM_LIMIT:-3g}')
+
+    def test_the_host_network_overlay_points_it_at_a_published_web(self):
+        overlay = (ROOT / 'docker-compose.hostnet.yml').read_text()  # read as text: it uses Compose's own !reset tag
+        self.assertIn('      - CVENGINE_SCANNER_SERVER_URL=http://127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}\n', overlay)
+        self.assertIn('  web:\n    ports:\n      - "127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000"\n', overlay)
 
 if __name__ == '__main__':
     unittest.main()

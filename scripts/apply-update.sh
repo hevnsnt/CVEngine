@@ -174,6 +174,7 @@ resolve_layout() {
 
 # How far the last deploy got; "migrated" means the database already has the new schema.
 DEPLOY_STAGE=
+DEPLOY_WHY=  # a sentence for the Update screen when the deploy stops for a reason an administrator can act on (set by scripts/update-deploy.sh)
 deploy_builtin() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
@@ -186,6 +187,8 @@ deploy_builtin() {
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
+  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
+  export SENTINEL_SHA
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
@@ -207,7 +210,14 @@ deploy_builtin() {
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
-  verify_running "${services[@]}"
+  verify_running "${services[@]}" || return 1
+  # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated after celery, put back on the previous image when
+  # it sends no heartbeat. Never a failed update. A checkout with scripts/update-deploy.sh does the same there.
+  if [ -f scripts/scanner.sh ]; then
+    . scripts/scanner.sh
+    cvengine_scanner_fetch "${compose[@]}"
+    cvengine_scanner_start "${compose[@]}"
+  fi
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.
@@ -238,8 +248,22 @@ deploy() {
 
 RUNNING_QUERY="from django.apps import apps; from startScan.models import ScanHistory; n=ScanHistory.objects.filter(scan_status=1).count(); n+=sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"
 
+# A scan stuck "running" whose worker is gone never finishes, and used to cost the whole drain wait (five minutes). Close those first (cveFeed.ghost_scans:
+# no Celery task anywhere, no activity for CVENGINE_UPDATE_GHOST_MINUTES, default 5); a scan that shows progress, or that a worker holds, is not touched and
+# is waited for as before. A web service that does not have the command (an older build) or cannot answer closes nothing.
+close_ghost_scans() {
+  local compose=("${COMPOSE[@]}") out minutes
+  minutes=$(setting CVENGINE_UPDATE_GHOST_MINUTES)
+  [[ $minutes =~ ^[0-9]{1,4}$ ]] && minutes=$((10#$minutes)) || minutes=5
+  (( minutes >= 1 )) || minutes=5
+  out=$("${compose[@]}" exec -T web python3 manage.py update_ghost_scans --idle-minutes "$minutes" 2>/dev/null) || return 0
+  { grep '^closed scan ' <<<"$out" || true; } | while IFS= read -r line; do log "$line (no worker holds it and it showed no activity for ${minutes} minutes; not waited for)"; done
+  return 0
+}
+
 running_scans() {
   local compose=("${COMPOSE[@]}") out
+  close_ghost_scans
   out=$("${compose[@]}" exec -T web python3 manage.py shell -c "$RUNNING_QUERY" 2>/dev/null | tail -n1) || true
   if ! [[ $out =~ ^[0-9]+$ ]]; then
     # web is down, which is when an update may be needed most: ask the database from a one-off container
@@ -390,6 +414,18 @@ if (( TRIES >= MAX_ATTEMPTS )); then
   clear_approval
   exit 1
 fi
+# Room for the update, before anything is paused or stopped (scripts/update-disk.sh; the same sentence the Update screen shows). Only for an update that moves the
+# files: a rebuild of what is already here is checked by the deploy itself. A host that does not have the script yet (the first update to this version)
+# is checked by scripts/update-deploy.sh once the new files are in.
+if [ -f scripts/update-disk.sh ] && ! git merge-base --is-ancestor "$SHA" HEAD; then
+  . scripts/update-disk.sh
+  if ! cvengine_disk_check "$(python3 "$STATE_HELPER" sentinels-choice 2>/dev/null || true)"; then
+    log "refusing: $cv_disk_sentence (nothing was paused, stopped or changed)"
+    phase failed "$cv_disk_sentence"
+    clear_approval
+    exit 1
+  fi
+fi
 pause_scanning
 RUNNING=$(running_scans)
 if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
@@ -523,7 +559,8 @@ else
   if CVENGINE_UPDATE_MIN_FREE_MB=0 deploy >>"$LOG" 2>&1; then
     mark_deployed "$PREV"
     resume_scanning
-    phase done
+    # what stopped it (too little disk, a build that failed) is what the Update screen says, not a "done" that looks like an update that never happened
+    if [ -n "${DEPLOY_WHY:-}" ]; then phase failed "$DEPLOY_WHY"; else phase done; fi
   else
     log "could not restart the previous version; redeploy by hand"
     phase failed "could not restart $PREV after rolling back a failed update; scanning stays paused"

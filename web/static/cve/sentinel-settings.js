@@ -1,5 +1,7 @@
-// A Sentinel's settings, version and updates on the Sentinels page. GET /api/v1/agents/{id} reports `settings` with value, source,
-// at and by. Network also reports its server grant and machine setting, with value showing the usable location. PATCH the same
+// A Sentinel's settings, version, updates and capability policy on the Sentinels page. GET /api/v1/agents/{id} reports `settings` with value, source,
+// at and by, and `kinds`: per task kind whether the Sentinel declares it, whether cvENGINE offers it work of that kind, its policy (allow, deny, prefer),
+// who decided that, and its per-kind cap. The settings panel edits that policy (PATCH {settings: {kinds: {kind: {mode, max_concurrent}|null}}}); the chips
+// of a card show it (allowed, denied with who or what decided, withheld after repeated failures with the retry time). Network also reports its server grant and machine setting, with value showing the usable location. PATCH the same
 // address with {settings: {...}} (network null restores its provisioned grant; other null values clear the dashboard setting)
 // or {update: "now"}. A server or Sentinel too old to
 // report them simply leaves the keys out, and then nothing here is drawn. Everything the machine reports is set with textContent.
@@ -26,6 +28,31 @@ export const SENTINEL_KINDS = [
   "wpscan",
   "openvas",
   "discover",
+  "bbot_discovery",
+  "waf",
+  "http_probe",
+  "dns_resolve",
+  "nmap_full",
+  "nmap_verify",
+  "node2shell",
+  "rdp_shot",
+  "db_probe",
+  "path_probe",
+  "nuclei_validate",
+  "alive_check",
+  "bucket_check",
+  "vhost_probe",
+  "subdir_probe",
+  "supplier_check",
+  "hygiene_check",
+  "dangling_dns_check",
+  "route_probe",
+  "route_probe_signed",
+  "page_read",
+  "identity_check",
+  "web_screenshot",
+  "ssh_probe",
+  "wpscan_thorough",
 ];
 const KIND_WORDS = {
   nmap: "nmap",
@@ -38,6 +65,31 @@ const KIND_WORDS = {
   wpscan: "WPScan",
   openvas: "OpenVAS",
   discover: "internal discovery",
+  waf: "WAF fingerprint",
+  bbot_discovery: "bbot discovery",
+  http_probe: "version probes",
+  dns_resolve: "name resolution",
+  nmap_full: "full port sweep",
+  nmap_verify: "service version probe",
+  node2shell: "node2shell check",
+  rdp_shot: "RDP screenshot",
+  db_probe: "database exposure probe",
+  path_probe: "scan path check",
+  nuclei_validate: "template check",
+  alive_check: "retired host checks",
+  bucket_check: "cloud storage checks",
+  vhost_probe: "virtual host checks",
+  subdir_probe: "subdirectory application checks",
+  supplier_check: "supplier posture checks",
+  hygiene_check: "TLS and email checks",
+  dangling_dns_check: "dangling DNS checks",
+  route_probe: "web route checks",
+  route_probe_signed: "signed-in web route checks",
+  page_read: "validation page reads",
+  identity_check: "name and certificate reads",
+  web_screenshot: "web screenshots",
+  ssh_probe: "SSH inspection",
+  wpscan_thorough: "thorough WordPress scan",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
 const UPDATE_WORDS = {
@@ -95,10 +147,7 @@ export function sourceLine(setting) {
 }
 
 const shown = (key, value) => {
-  if (value == null || (Array.isArray(value) && !value.length))
-    return key === "disabled_kinds" ? "none" : "not set";
-  if (key === "disabled_kinds")
-    return value.map((k) => KIND_WORDS[k] || k).join(", ");
+  if (value == null) return "not set";
   if (key === "network")
     return value === "internal" ? "Internal network" : "External";
   if (key === "profile")
@@ -106,9 +155,255 @@ const shown = (key, value) => {
   return String(value);
 };
 
+// --- the capability policy: what a Sentinel declares, and what an administrator lets it take ------------------------------------------------
+const MODE_WORDS = { allow: "Allow", deny: "Deny", prefer: "Prefer" };
+export const UNAVAILABLE_NOTE =
+  "Not available on this Sentinel (tool missing or off on the machine).";
+export const MACHINE_NOTE =
+  "Turned off on the machine. Only a change there lifts it.";
+export const kindWord = (k) => KIND_WORDS[k] || k;
+
+// The one word for what a kind is on this Sentinel: `on`, `denied`, `machine_off`, `unavailable` (not declared), `cool_off` or `outdated`.
+// The server says it (`state`); an older server that does not is read from the other fields.
+export function kindState(info) {
+  if (!info) return "unavailable";
+  if (info.state) return info.state;
+  if (info.source === "machine") return "machine_off";
+  if (info.mode === "deny") return "denied";
+  if (!info.declared) return "unavailable";
+  if (info.source === "cool-off") return "cool_off";
+  if (info.source === "contract") return "outdated";
+  return "on";
+}
+
+const clock = (iso) =>
+  iso
+    ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+
+// The sentence behind a chip or a row: who decided, and what to do about it.
+export function kindNote(info) {
+  const state = kindState(info);
+  if (state === "machine_off") return MACHINE_NOTE;
+  if (state === "unavailable") return UNAVAILABLE_NOTE;
+  if (state === "outdated") return "Its client is too old to run this; update it.";
+  if (state === "cool_off")
+    return `Withheld after repeated failures until ${clock(info.retry_at) || "the retry time"}; then tried again.`;
+  const when = info.at ? `, ${ago(info.at)}` : "";
+  if (state === "denied") {
+    if (info.source === "instance default")
+      return `Denied by the instance default${info.by ? ` (set by ${info.by})` : ""}${when}.`;
+    return `Denied${info.by ? ` by ${info.by}` : ""}${when}.`;
+  }
+  const cap = info.cap ? `at most ${info.cap} at once` : "";
+  const mode = info.mode === "prefer" ? "Preferred: other Sentinels wait a moment so this one gets the work first" : "Allowed";
+  return [mode, cap].filter(Boolean).join(", ") + ".";
+}
+
+// The modes an administrator may pick for a kind: none for a kind the Sentinel does not declare (it cannot be enabled) or one its machine turned off.
+export const modesOffered = (info) =>
+  info && info.declared && kindState(info) !== "machine_off" ? ["allow", "deny", "prefer"] : [];
+export const canReset = (info) => Boolean(info && info.source === "agent");
+const validCap = (cap) =>
+  cap == null || (Number.isInteger(cap) && cap >= 1 && cap <= MAX_CONCURRENT);
+// The sentence under a cap field that cannot be saved ("" when it can: empty means no cap).
+export const capProblem = (raw) => {
+  const t = String(raw ?? "").trim();
+  if (t === "") return "";
+  return validCap(/^\d+$/.test(t) ? Number(t) : NaN)
+    ? ""
+    : `At once must be a whole number from 1 to ${MAX_CONCURRENT}, or empty for no limit.`;
+};
+// One line for the panel when an instance default denies kinds here: an own Allow overrides it for this Sentinel only.
+export function defaultHint(kinds) {
+  const names = Object.entries(kinds || {})
+    .filter(([, i]) => i && i.source === "instance default" && i.mode === "deny" && i.declared)
+    .map(([k]) => kindWord(k));
+  return names.length
+    ? `${names.join(", ")} ${names.length === 1 ? "is" : "are"} denied here by the instance default. Choosing Allow overrides that default for this Sentinel only.`
+    : "";
+}
+
+// What to PATCH: ``picks`` is {kind: {mode, cap, reset}} read from the panel; only a kind whose mode or cap differs from what the server shows is sent
+// (null removes the Sentinel's own policy for it, which hands the kind back to the instance default).
+export function kindsChange(kinds, picks) {
+  const out = {};
+  Object.entries(picks).forEach(([k, p]) => {
+    const info = (kinds || {})[k] || {};
+    if (p.reset) {
+      if (canReset(info)) out[k] = null;
+      return;
+    }
+    if (!p.mode || !modesOffered(info).length) return;
+    const cap = p.cap == null || p.cap === "" ? null : Number(p.cap);
+    if (!validCap(cap))
+      throw new Error(`${kindWord(k)}: at once must be a whole number from 1 to ${MAX_CONCURRENT}, or empty.`);
+    if (p.mode === info.mode && cap === (info.cap ?? null)) return;
+    out[k] = { mode: p.mode, max_concurrent: cap };
+  });
+  return out;
+}
+
+// The capability chips of a card, in three styles: allowed (`kind-on`), denied (`kind-denied`, the title says by whom or what) and withheld after
+// failing or too old (`kind-held`, the title says until when). A kind the Sentinel does not declare has no chip. Returns null when there is nothing to show.
+export function kindChips(kinds) {
+  const box = el("div", "chips sl-kinds", null, { role: "list", "aria-label": "Capabilities" });
+  let n = 0;
+  Object.entries(kinds || {}).forEach(([k, info]) => {
+    const state = kindState(info);
+    if (state === "unavailable") return;
+    // each style also says its state in words, so it never depends on colour: a denied kind is struck through and marked, one turned off on the machine
+    // is hatched, dashed and marked "off on machine" (the server cannot lift it), a withheld one is marked too
+    const tone = { on: "kind-on", denied: "kind-denied", machine_off: "kind-locked", cool_off: "kind-held", outdated: "kind-held" }[state] || "kind-denied";
+    const cue = { denied: " (denied)", machine_off: " (off on machine)", cool_off: " (withheld)", outdated: " (outdated)" }[state] || "";
+    const word = `${kindWord(k)}${cue}${state === "on" && info.mode === "prefer" ? " (preferred)" : ""}${info.cap && state === "on" ? ` x${info.cap}` : ""}`;
+    const note = kindNote(info);
+    box.append(
+      el("span", `chip ${tone}`, word, { role: "listitem", title: note, "aria-label": `${kindWord(k)}: ${note}` }),
+    );
+    n += 1;
+  });
+  return n ? box : null;
+}
+
+// The per-kind rows of the settings panel: Allow / Deny / Prefer and a cap each, the note of who decided, and "Use default" where the Sentinel has a policy of
+// its own. A kind the Sentinel does not declare, or its machine turned off, shows why and offers nothing.
+// What a cap field holds; a number field with letters typed into it reports an empty value and ``validity.badInput``, which is not "no limit".
+const capText = (input) => (input.validity && input.validity.badInput ? "x" : input.value);
+
+export function kindsPanel(kinds, onReset, onValidity = () => {}) {
+  const box = el("div", "ss-pol", null, { role: "group", "aria-label": "What this Sentinel may take" });
+  const hint = el("p", "note ss-pol-hint");
+  hint.hidden = true;
+  box.append(hint);
+  const rows = new Map();
+  const check = () => {
+    rows.forEach((r) => {
+      const problem = r.cap.hidden ? "" : capProblem(capText(r.cap));
+      r.err.textContent = problem;
+      r.err.hidden = !problem;
+      if (problem) r.cap.setAttribute("aria-invalid", "true");
+      else r.cap.removeAttribute("aria-invalid");
+      r.cap.classList.toggle("invalid", Boolean(problem));
+    });
+    onValidity(!invalid());
+  };
+  const invalid = () => [...rows.values()].some((r) => !r.cap.hidden && capProblem(capText(r.cap)));
+  SENTINEL_KINDS.forEach((k) => {
+    const row = el("div", "ss-pol-row");
+    const note = el("span", "note ss-pol-note");
+    const mode = el("select", "ss-pol-mode", null, { "aria-label": `${kindWord(k)} policy` });
+    Object.entries(MODE_WORDS).forEach(([v, t]) => mode.append(el("option", "", t, { value: v })));
+    const cap = text("", {
+      type: "number", min: "1", max: String(MAX_CONCURRENT), step: "1", inputmode: "numeric",
+      placeholder: "no limit", "aria-label": `${kindWord(k)} at once`,
+    });
+    const err = el("p", "msg err ss-pol-err", "", { role: "alert", "aria-live": "assertive" });
+    err.hidden = true;
+    cap.addEventListener("input", check);
+    const reset = button("Use default", async () => onReset(k), "btn sm ghost");
+    // a stable grid: kind | mode | cap | use default, then the note and any error on their own full-width lines
+    row.append(el("b", "ss-pol-name", kindWord(k)), mode, cap, reset, note, err);
+    box.append(row);
+    rows.set(k, { row, note, mode, cap, reset, err });
+  });
+  // refill: the inputs take the server's values (after a save or a reset), never while someone is typing
+  function paint(next, refill) {
+    rows.forEach((r, k) => {
+      const info = (next || {})[k];
+      const offered = modesOffered(info).length > 0;
+      r.row.setAttribute("data-state", kindState(info));
+      r.note.textContent = kindNote(info);
+      r.mode.hidden = r.cap.hidden = !offered; // hidden controls keep their column (visibility), so the rows line up
+      r.reset.hidden = !canReset(info);
+      if (refill && info) {
+        r.mode.value = info.mode || "allow";
+        r.cap.value = info.cap == null ? "" : String(info.cap);
+      }
+    });
+    const line = defaultHint(next);
+    hint.textContent = line;
+    hint.hidden = !line;
+    check();
+  }
+  function read() {
+    const picks = {};
+    rows.forEach((r, k) => {
+      if (!r.mode.hidden) picks[k] = { mode: r.mode.value, cap: r.cap.value.trim() };
+    });
+    return picks;
+  }
+  paint(kinds, true);
+  return { node: box, paint, read, invalid };
+}
+
+// Whether the running build is the newest the server saw (its cached look at the Sentinel repository's main branch, never made while a page is built),
+// and since when it has been running: "last updated". Nothing is drawn for what the server did not report.
+function checkedAgo(when, now = Date.now()) {
+  const minutes = Math.max(0, Math.round((now - when.getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} days ago`;
+}
+
+export function newestLine(d) {
+  const v = d.version_state;
+  const parts = [];
+  if (v && v.status === "current") parts.push("The newest build the server saw");
+  else if (v && v.status === "behind")
+    parts.push(
+      `${typeof v.behind_by === "number" ? `${v.behind_by} commit${v.behind_by === 1 ? "" : "s"} behind` : "Behind"} the newest build (${v.latest || "unknown"})`,
+    );
+  if (v && v.checked_at && parts.length) {
+    const checked = new Date(v.checked_at);
+    if (!Number.isNaN(checked.getTime())) parts.push(`checked ${checkedAgo(checked)}`);
+  }
+  if (d.version_since) {
+    const when = new Date(d.version_since);
+    if (!Number.isNaN(when.getTime())) parts.push(`running since ${when.toLocaleString()}`);
+  }
+  return parts.length ? el("p", "note ss-detail", parts.join(", ")) : null;
+}
+
+// "running abc1234, newest def5678, update requested 10:42": what cvENGINE knows about keeping this Sentinel on the newest version, in plain words
+// (``d.auto_update`` from agentapi/sentinel_autoupdate.py). Nothing is drawn for a server that does not report it.
+const short = (v) => (v ? String(v).slice(0, 7) : "");
+export function updateLine(d) {
+  const a = d.auto_update;
+  if (!a) return null;
+  const u = d.update || {};
+  const parts = [`running ${short(a.running || d.version) || "unknown"}`];
+  if (a.newest) parts.push(`newest ${short(a.newest)}`);
+  let tail;
+  if (a.code === "requested") {
+    const when = a.requested_at ? new Date(a.requested_at) : null;
+    const hhmm = when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    tail = ["draining", "updating"].includes(u.status) ? "updating" : `update requested${hhmm ? ` ${hhmm}` : ""}`;
+  } else if (a.code === "current") tail = "current";
+  else tail = a.text || "";
+  if (tail) parts.push(tail);
+  return el("p", a.flagged ? "msg err ss-detail" : "note ss-detail", parts.join(", "));
+}
+
+// Why a kind is not being taken, as the Sentinel itself reports it: a heavy kind waiting for memory (what it needs, what is free, which tasks hold the rest), and
+// a task the server took back that is still stopping. Nothing is drawn when nothing waits.
+const minutesOrSeconds = (s) => (s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`);
+export function waitingLines(d) {
+  const rows = Array.isArray(d.waiting) ? d.waiting : [];
+  return rows.map((w) => {
+    if (w.stopping) return el("p", "note ss-detail", `Task ${w.task} (${w.kind}) was taken back by the server and is still stopping, ${minutesOrSeconds(w.seconds)} later. It is killed and its slot freed shortly.`);
+    const holders = (w.held_by || []).map((h) => `task ${h.task} ${h.kind} (${h.mb} MB, ${minutesOrSeconds(h.seconds)})`).join(", ");
+    return el("p", "msg err ss-detail", `${w.kind} waiting ${minutesOrSeconds(w.seconds)}: needs ${w.need_mb} MB, ${w.free_mb} MB free of ${w.budget_mb} MB${holders ? `, held by ${holders}` : ""}.`);
+  });
+}
+
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
 // when it does not report these keys.
-export function versionBlock(d, { onChange }) {
+// ``builtin`` (the install's own scanner) has no "Update now": it never updates itself, so the button would promise what cannot happen.
+export function versionBlock(d, { onChange, builtin = false }) {
   if (!reported(d)) return null;
   const box = el("div", "ss-version");
   const line = el("p", "ss-vline");
@@ -131,6 +426,13 @@ export function versionBlock(d, { onChange }) {
     line.append(badge("Update requested", "queued"));
   }
   box.append(line);
+  const newest = newestLine(d);
+  if (newest) box.append(newest);
+  const keeping = updateLine(d);
+  if (keeping) box.append(keeping);
+  if (d.contract && d.contract.note)
+    box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
+  box.append(...waitingLines(d));
   const sub =
     u.status === "failed"
       ? u.detail
@@ -147,6 +449,14 @@ export function versionBlock(d, { onChange }) {
         sub,
       ),
     );
+  if (builtin)
+    box.append(
+      el(
+        "p",
+        "note ss-detail",
+        "The built-in scanner follows the newest published Sentinel image. The server's updates and a daily Scanner update pull it and keep it only once it has checked in, so there is no Update now. To hold it at one version, set CVENGINE_SCANNER_IMAGE in .env.",
+      ),
+    );
   const actions = el("div", "ss-actions");
   const now = button(
     pending ? "Update requested" : "Update now",
@@ -160,7 +470,7 @@ export function versionBlock(d, { onChange }) {
   now.title = MANUAL_NOTE;
   now.disabled =
     pending || ["waiting", "draining", "updating"].includes(u.status);
-  actions.append(now);
+  if (!builtin) actions.append(now);
   if (d.settings)
     actions.append(
       button("Settings", async () => openSettings(d, onChange), "btn sm ghost"),
@@ -203,24 +513,10 @@ function control(key, value) {
       step: "1",
       inputmode: "numeric",
     });
-  // disabled_kinds: one box per kind; a ticked box is a kind this Sentinel never takes
-  const box = el("div", "ss-kinds", null, {
-    role: "group",
-    "aria-label": "Task kinds this Sentinel never takes",
-  });
-  SENTINEL_KINDS.forEach((k) => {
-    const label = el("label", "ss-kind");
-    const c = el("input", "", null, { type: "checkbox", value: k });
-    c.checked = (value || []).includes(k);
-    label.append(c, document.createTextNode(` ${KIND_WORDS[k]}`));
-    box.append(label);
-  });
-  return box;
+  return text(value || "");
 }
 
 function readControl(key, node) {
-  if (key === "disabled_kinds")
-    return [...node.querySelectorAll("input:checked")].map((c) => c.value);
   if (key === "max_concurrent")
     return node.value.trim() === "" ? undefined : Number(node.value);
   const v = node.value.trim();
@@ -239,11 +535,6 @@ const ROWS = [
     "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
-  [
-    "disabled_kinds",
-    "Never takes",
-    "Task kinds this Sentinel refuses, whatever its capabilities.",
-  ],
   [
     "max_concurrent",
     "Tasks at once",
@@ -297,21 +588,42 @@ export function openSettings(first, onChange) {
       rows.set(key, { now, src, input, reset, label });
     });
     body.append(form);
+    let panel = null;
+    let save = null; // the Save button, made below; the panel tells it when a cap cannot be saved
+    if (d.kinds) {
+      body.append(
+        el("h4", "ss-pol-title", "What it may take"),
+        el(
+          "p",
+          "note",
+          "Allow offers the kind, Deny never does, Prefer also holds the work back from the others for a moment while this Sentinel has room. The number caps how many of that kind it runs at once. Only what the Sentinel declares can be enabled.",
+        ),
+      );
+      panel = kindsPanel(
+        d.kinds,
+        async (kind) => {
+          d = await api("PATCH", detailUrl(d.id), { settings: { kinds: { [kind]: null } } });
+          toast(`${kindWord(kind)} handed back to the default`);
+          paint(true);
+          onChange();
+        },
+        (ok) => {
+          if (save) save.disabled = !ok; // an invalid cap cannot be saved: the field says why
+        },
+      );
+      body.append(panel.node);
+    }
     const msg = el("p", "note ss-msg");
     const actions = el("div", "actions");
-    actions.append(
-      msg,
-      el("span", "grow"),
-      button("Close", async () => close(), "btn ghost"),
-      button("Save changes", async () => {
+    save = button("Save changes", async () => {
         const change = {};
         rows.forEach((r, key) => {
           const next = readControl(key, r.input);
           const cur = controlValue(key, d.settings[key]);
           if (next !== undefined && !same(next, cur)) change[key] = next;
-          if (key === "disabled_kinds" && same(next, []) && cur && cur.length)
-            change[key] = [];
         });
+        const kindChange = panel ? kindsChange(d.kinds, panel.read()) : {};
+        if (Object.keys(kindChange).length) change.kinds = kindChange;
         if (!Object.keys(change).length) {
           msg.textContent = "Nothing changed.";
           return;
@@ -331,12 +643,14 @@ export function openSettings(first, onChange) {
         toast("Saved. The Sentinel picks it up at its next heartbeat.");
         paint(true);
         onChange();
-      }),
-    );
+      });
+    actions.append(msg, el("span", "grow"), button("Close", async () => close(), "btn ghost"), save);
     body.append(actions);
+    if (panel && panel.invalid()) save.disabled = true;
 
     // the effective value and why it has it; the inputs are only refilled after a save or a reset, never while someone is typing
     function paint(refill) {
+      if (panel) panel.paint(d.kinds, refill);
       rows.forEach((r, key) => {
         const s = d.settings[key];
         r.now.textContent = shown(key, s && s.value);

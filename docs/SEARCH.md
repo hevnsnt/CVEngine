@@ -20,6 +20,17 @@ ip:203.0.113.0/24 product:nginx     nginx anywhere in a network range
 
 Use the slug `_all` to search every project you can see.
 
+### Your inventory or the CVE catalog
+
+Host search (everything above) answers "which of my hosts...". To look up a CVE itself, or every CVE for a technology, use the **CVE explorer** at `/cve/cves/`: type an id (`CVE-2024-6387`, `2024-6387`) or a product (`ssh`, `php`, `tomcat`). Each row says how many of your hosts that CVE matches, and the detail drawer lists them. In `Ctrl+K`, a bare word or id also offers **Search CVEs for "..."**. The API is `GET /cve/api/cves?q=...` ([FRONTEND.md](FRONTEND.md#cve-explorer)).
+
+| You want | Use |
+| --- | --- |
+| Hosts running OpenSSH | Hosts page: `product:openssh` |
+| Hosts matched by one CVE | Hosts page: `cve:CVE-2024-6387` |
+| Every OpenSSH CVE, and how many of your hosts each one hits | CVE explorer: `ssh` |
+| One CVE's summary, ranges and references | CVE explorer: `CVE-2024-6387` |
+
 ## The syntax
 
 - A **bare word** matches almost anything: host name, the alias and note a person gave the host (or, for an address added as a target, the target), IP, technology, web server, port product, service, version, CPE, banner, page title, OS, finding name, and CVE id. `nginx`, `jenkins`, `CVE-2026-111497`.
@@ -49,6 +60,7 @@ Use the slug `_all` to search every project you can see.
 | `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
 | `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `catch_all`, `error` | `auth:open` |
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
+| `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 

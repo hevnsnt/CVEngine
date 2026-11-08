@@ -1,45 +1,26 @@
-"""Nuclei over everything discovery found, info severity included, streamed into the findings table.
+"""The template passes over everything discovery found, info severity included, streamed into the findings table.
 
-Targets are every discovered host plus its IPs, and host:port for each open port bbot reported on a
-non-default port, so nuclei probes every service rather than just the front door.
+Targets are every discovered host plus its IPs, and host:port for each open port discovery reported on a
+non-default port, so every service is probed rather than just the front door. Nothing here runs a scan tool: every pass takes a ``stream``
+(``agentapi.sentinel_dispatch.wrap_nuclei_stream``) that hands the targets to a Sentinel, and with no scanner able to take the work the stream
+raises ``ScannerUnavailable`` and the targets stay due. This module builds the target list, keeps the approved template snapshot a Sentinel is
+sent (``template_bundle``), and turns the lines a Sentinel reported into findings.
 """
-import json
 import hashlib
 import logging
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
-from urllib.parse import urlparse
+
+from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of
 
 logger = logging.getLogger(__name__)
 
-NUCLEI_BIN = 'nuclei'
-SEVERITIES = 'info,low,medium,high,critical'
-DEFAULT_NUCLEI_TIMEOUT = 4 * 3600
-
-
-def nuclei_timeout():
-    """Seconds nuclei may run, from the App Admin timings."""
-    try:
-        from dashboard.models import SystemTimings
-        return SystemTimings.current().nuclei_timeout_hours * 3600
-    except Exception:  # noqa: BLE001
-        return DEFAULT_NUCLEI_TIMEOUT
-DEFAULT_PORTS = (80, 443)
-NUCLEI_CHUNK = 100  # targets per nuclei process: a memory kill then only repeats one chunk
-BASE_FLAGS = ['-severity', SEVERITIES, '-jsonl', '-silent', '-duc', '-ni', '-nc', '-rl', '150', '-c', '40',
-              '-timeout', '10', '-retries', '1', '-etags', 'dos']
-
-
-# A lighter run for when the normal one was stopped for lack of memory: fewer hosts in parallel, a gentler rate.
-LIGHT_FLAGS = {'-rl': '50', '-c': '10'}
-
-
-TECH_FLAGS = ['-tags', 'tech']
+NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written after each call, so a failure part way marks only the later ones
+# A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
 TEMPLATE_POLICY_REV = 'readonly-2'
 ALL_TEMPLATES_REV = 'all-1'
 _APPROVED = {'root': None, 'at': 0, 'value': None}
@@ -48,8 +29,6 @@ _APPROVED_LOCK = threading.Lock()
 
 # Templates whose absence quietly removes a whole capability: their exclusion is an error, not a policy statistic.
 ESSENTIAL_TEMPLATES = ('http/technologies/tech-detect.yaml',)
-NO_TEMPLATES = re.compile(r'no (valid )?templates (were )?(provided|found|loaded)', re.I)
-ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
 
 def _policy_reason(problem):
@@ -80,19 +59,6 @@ def _report_policy(revision, count, skipped, essential_skipped):
     from cveFeed import activity
     activity.log('run_check', message, status='failed' if failed else 'done', approved=count, installed=total,
                  skipped=dict(sorted(skipped.items(), key=lambda kv: -kv[1])[:10]), essential_excluded=essential_skipped)
-
-
-def _stderr_reason(stream):
-    """The line of nuclei's stderr that says why it stopped (its last fatal or error line, else its last line), cleaned."""
-    try:
-        stream.seek(0, os.SEEK_END)
-        stream.seek(max(0, stream.tell() - 8192))
-        lines = [ANSI.sub('', line).strip() for line in stream.read().splitlines()]
-    except (OSError, ValueError):
-        return ''
-    lines = [line for line in lines if line]
-    pick = next((line for line in reversed(lines) if re.search(r'\[(FTL|ERR)\]|could not|error', line, re.I)), lines[-1] if lines else '')
-    return ''.join(c for c in pick if c.isprintable())[:200]
 
 
 def policy_rev():
@@ -135,7 +101,7 @@ def _approved_templates_locked():
         return _APPROVED['value']
     if not os.path.isdir(root):
         raise RuntimeError('Nuclei template library is unavailable')
-    dest = tempfile.mkdtemp(prefix='cvengine-approved-nuclei-')
+    dest = tempfile.mkdtemp(prefix='cvengine-approved-templates-')
     digest = hashlib.sha256(rev.encode())
     count, skipped, essential_skipped = 0, {}, {}
     try:
@@ -184,7 +150,7 @@ def _approved_templates_locked():
     retained = _APPROVED.setdefault('retained', [])
     if old:
         retained.append((old[0], time.monotonic()))
-    # A running Nuclei process can use its immutable snapshot for up to four hours.
+    # A Sentinel's template bundle can be packed from an immutable snapshot for hours after the next one is built.
     for path, created in list(retained):
         if time.monotonic() - created > 6 * 3600:
             shutil.rmtree(path, ignore_errors=True)
@@ -205,34 +171,8 @@ def cve_service(cve_id):
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
-def build_flags(tags=None, profile='normal', severities=None, tech=False, templates_dir=None, secret_file=None, proxy_args=()):
-    """Pure: the nuclei CLI flags for a run, optionally narrowed to ``tags`` (an iterable of tag names
-    already validated against a known-safe allowlist by the caller - see cveFeed.nuclei_templates).
-    ``profile='light'`` lowers concurrency and rate for a memory-constrained retry. ``severities`` narrows the severity
-    list, and ``tech`` is the light technology-fingerprint pass (the http/technologies templates, info severity). ``secret_file`` (the
-    path of a nuclei secrets file, see cveFeed.auth_checks) makes it an authenticated run: nuclei reads the headers from that file, so no
-    value is ever on the command line, and ``-dr`` stops it following redirects, which could carry a header to another host. ``proxy_args`` is the
-    egress proxy's argument list (``cveFeed.egress_proxy.for_tool('nuclei')``, empty for a direct run)."""
-    flags = list(BASE_FLAGS)
-    if templates_dir:
-        flags += ['-t', templates_dir]
-    if severities or tech:
-        flags[flags.index('-severity') + 1] = ','.join(severities) if severities else 'info'
-    if profile == 'light':
-        for flag, value in LIGHT_FLAGS.items():
-            flags[flags.index(flag) + 1] = value
-        flags += ['-bs', '10']
-    if tech:
-        flags += TECH_FLAGS
-    elif tags:
-        flags += ['-tags', ','.join(sorted(tags))]
-    if secret_file:
-        flags += ['-sf', secret_file, '-dr']
-    return flags + list(proxy_args)
-
-
 def build_targets(hostnames, ips, ports):
-    """Pure: the target list for nuclei. ``ports`` is an iterable of (host, port)."""
+    """Pure: the target list of a template pass. ``ports`` is an iterable of (host, port)."""
     targets = []
     seen = set()
 
@@ -245,193 +185,9 @@ def build_targets(hostnames, ips, ports):
     for ip in sorted(ips):
         add(ip)
     for host, port in sorted(ports):
-        if port not in DEFAULT_PORTS:
+        if port not in NUCLEI_DEFAULT_PORTS:
             add(f'{host}:{port}')
     return targets
-
-
-def host_of(line):
-    """Hostname or IP of a nuclei result line (``host`` may be a URL or host:port)."""
-    raw = (line.get('host') or line.get('ip') or '').strip()
-    if '://' in raw:
-        return (urlparse(raw).hostname or '').lower()
-    return raw.rsplit(':', 1)[0].strip('[]').lower() if raw.count(':') == 1 else raw.strip('[]').lower()
-
-
-def _target_host(target):
-    raw = str(target).strip()
-    if '://' in raw:
-        return urlparse(raw).hostname or raw
-    if raw.startswith('['):
-        return raw[1:].split(']', 1)[0]
-    return raw.rsplit(':', 1)[0] if raw.count(':') == 1 else raw
-
-
-def _has_port(target):
-    """Whether a nuclei target names its port (``host:25``, a URL with a port) rather than being a bare host or address."""
-    raw = str(target).strip()
-    if '://' in raw:
-        try:
-            return urlparse(raw).port is not None
-        except ValueError:
-            return False
-    if raw.startswith('['):
-        return ']:' in raw
-    return raw.count(':') == 1 and raw.rsplit(':', 1)[1].isdigit()
-
-
-def _target_ports(target):
-    """The ports a nuclei target names: its own port, or 80 and 443 for a bare host or address (the web templates' defaults)."""
-    raw = str(target).strip()
-    if '://' in raw:
-        parsed = urlparse(raw)
-        try:
-            return [parsed.port or (443 if parsed.scheme == 'https' else 80)]
-        except ValueError:
-            return []
-    if raw.count(':') == 1 or raw.startswith('['):
-        tail = raw.rsplit(':', 1)[1] if not raw.endswith(']') else ''
-        if tail.isdigit():
-            return [int(tail)]
-    return list(DEFAULT_PORTS)
-
-
-def stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None):
-    """Run nuclei and yield decoded JSON result lines as they arrive. Waits its turn for memory; raises
-    reNgine.resources.MemoryKill if it had to be stopped to protect the container (the caller retries lighter).
-
-    A target on a port of the opt-in skip list (``CVENGINE_LOCAL_SKIP_PORTS``, ``host:25``) is left out of this server's run. A target on a
-    budgeted port (``host:25``: the egress governor, ``cveFeed.local_egress``) is asked of the governor as NUCLEI_TARGET_CONNECTIONS
-    connections, all or nothing; one not granted is left out of this run (logged as paced) and comes back with the host's next nuclei run,
-    and the rest of the run goes ahead. The run is counted in the egress ledger from its target list (an estimate: a network template may
-    connect to a port of its own, which is not governed)."""
-    from cveFeed import local_egress
-    try:
-        with open(targets_file) as f:
-            listed = [ln.strip() for ln in f if ln.strip()]
-    except OSError:
-        listed = None
-    path, scratch, kept = targets_file, [], None
-    if listed is not None:
-        skip = local_egress.skipped_ports()
-        kept = [t for t in listed if not set(_target_ports(t)) & skip] if skip else listed
-        if len(kept) != len(listed):
-            local_egress.note_skipped('nuclei', skip, [_target_host(t) for t in listed if t not in kept])
-        if not kept:
-            return
-
-    def _write(targets):
-        handle = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        handle.write('\n'.join(targets) + '\n')
-        handle.close()
-        scratch.append(handle.name)
-        return handle.name
-
-    def started():
-        """Once nuclei is let start (after its memory wait): each host:25 target is charged now, whole; one with no room is left out of this
-        run (logged paced; it comes back with the host's next nuclei run). Then the run is counted and logged. Returns the targets file to
-        run, or None when nothing is left."""
-        if kept is None:
-            return path
-        run = kept
-        rules = set(local_egress.budgets())
-        if rules:
-            explicit = lambda t: _target_ports(t) if _has_port(t) else []  # noqa: E731 - a bare host is a web target (80, 443)
-            governed = [t for t in kept if set(explicit(t)) & rules]
-            # oldest-admitted first, so every host:25 target gets its turn within a bounded number of runs (cveFeed.local_egress.rotation)
-            last = local_egress.last_admitted('nuclei', governed)
-            admitted = set()
-            for target in sorted(governed, key=lambda t: (last.get(t, 0), kept.index(t))):
-                if not any(local_egress.admit_one(p, 'nuclei', _target_host(target), weight=local_egress.NUCLEI_TARGET_CONNECTIONS,
-                                                  now=local_egress.launch_now()) for p in set(explicit(target)) & rules):
-                    admitted.add(target)
-            local_egress.note_admitted('nuclei', admitted)
-            run = [t for t in kept if t not in governed or t in admitted]
-        if not run:
-            return None
-        per_port = {}
-        for target in run:
-            for port in _target_ports(target):
-                per_port[port] = per_port.get(port, 0) + (local_egress.NUCLEI_TARGET_CONNECTIONS if _has_port(target) else 1)
-        local_egress.record('nuclei', sum(per_port.values()), per_port)
-        for port in local_egress.log_ports() & set(per_port):
-            local_egress.log_connections([_target_host(t) for t in run if port in _target_ports(t)], [port], 'nuclei', mode=local_egress.ESTIMATED)
-        return path if len(run) == len(listed) else _write(run)
-    try:
-        yield from _stream_nuclei(path, timeout, tags, profile, severities, tech, secret_file, on_start=started)
-    finally:
-        for name in scratch:
-            try:
-                os.remove(name)
-            except OSError:
-                pass
-
-
-def _stream_nuclei(targets_file, timeout=None, tags=None, profile='normal', severities=None, tech=False, secret_file=None, on_start=None):
-    from targetApp.target_types import refuse_local
-    refuse_local('nuclei')
-    from reNgine import resources
-    from cveFeed import egress_proxy
-    try:
-        with open(targets_file) as f:
-            hosts = [ln.strip() for ln in f if ln.strip()]
-        label = f'{len(hosts)} targets'
-    except OSError:
-        hosts, label = None, 'targets'
-    proxy_args = egress_proxy.for_tool('nuclei', hosts)  # Settings > Proxy: raises when it is on and no proxy suits nuclei, never a direct run
-    kind = 'nuclei-light' if profile == 'light' or tech else 'nuclei'
-    approved_dir, _, _ = approved_templates()
-    with resources.heavy_job(kind, label=label) as job, tempfile.TemporaryFile('w+', errors='replace') as stderr:
-        if on_start is not None:
-            targets_file = on_start()  # the egress governor's say at the start (cveFeed.local_egress): the targets to run, or None
-            if targets_file is None:
-                return
-        proc = subprocess.Popen([NUCLEI_BIN, '-l', targets_file, *build_flags(tags, profile, severities, tech, approved_dir, secret_file, proxy_args)], stdout=subprocess.PIPE,
-                                stderr=stderr, text=True, bufsize=1, start_new_session=True)
-        job.attach(proc)
-        timed_out = threading.Event()
-        def expire():
-            timed_out.set()
-            resources.terminate_group(proc, grace=5)
-        timer = threading.Timer(timeout or nuclei_timeout(), expire)
-        timer.start()
-        completed = False
-        malformed = False
-        yielded = 0
-        try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    malformed = True
-                    continue
-                if isinstance(row, dict):
-                    yielded += 1
-                    yield row
-                else:
-                    malformed = True
-            completed = True
-        finally:
-            timer.cancel()
-            if proc.poll() is None:
-                resources.terminate_group(proc, grace=5)
-            proc.wait()
-            job.raise_if_killed()
-        if completed and timed_out.is_set():
-            raise RuntimeError('Nuclei timed out')
-        if completed and proc.returncode:
-            reason = _stderr_reason(stderr)
-            if not yielded and NO_TEMPLATES.search(reason):
-                # nuclei exits 1 when the approved library holds no template for these tags: nothing ran, nothing failed
-                logger.info('nuclei: no approved template matched %s; nothing to run', ','.join(sorted(tags or [])) or 'this selection')
-                return
-            logger.error('nuclei exited with status %s: %s', proc.returncode, reason or 'no error output')
-            raise RuntimeError(f'Nuclei exited with status {proc.returncode}' + (f': {reason}' if reason else ''))
-        if completed and malformed:
-            raise RuntimeError('Nuclei returned malformed JSON output')
 
 
 def scan_targets(scan):
@@ -458,7 +214,7 @@ def scan_targets(scan):
         for ip in sub.ip_addresses.all():
             if gate.refusal(project, ip.address, unattended=False, derived=True):
                 continue
-            if ip.is_cdn:  # a shared edge address belongs to the platform and its other customers: the sweeps and nmap never aim at it either
+            if ip.is_cdn:  # a shared edge address belongs to the platform and its other customers: the sweeps never aim at it either
                 continue
             if not is_scannable_ip(ip.address, project=scan.domain.project_id) and not (
                     internal and sentinel_only_target(ip.address, scan.domain.project_id)):
@@ -504,8 +260,13 @@ def reuse_findings(scan, project, targets):
     return copied, len(copied_hosts)
 
 
+def _waiting_message(exc, left):
+    """What a template stage says when no scanner could take its work: it names the scanner kind, never memory, and that the targets stay due."""
+    return f'no scanner could take this work ({exc.kind}); the {left} target{"s" if left != 1 else ""} stay{"" if left != 1 else "s"} due until one can'
+
+
 def _echo_ports(subs):
-    """``{(name or address, port)}`` of the ports nmap named ``echo`` on ``subs``' addresses: a protocol template that matched one of them
+    """``{(name or address, port)}`` of the ports the port scan named ``echo`` on ``subs``' addresses: a protocol template that matched one of them
     matched its own payload (cveFeed.nuclei_fp)."""
     from startScan.models import IpAddress
     ids = {ip.pk for sub in subs for ip in sub.ip_addresses.all()}
@@ -519,28 +280,32 @@ def _echo_ports(subs):
 
 
 def _chunk_size(stream, total):
-    """Targets handed to ``stream`` per call. A local stream gets ``NUCLEI_CHUNK`` at a time (a memory kill then only repeats one chunk). The Sentinel
-    wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) splits each call into 64-target chunk tasks and runs them side by side, so it is
-    handed enough to fill its window (``MAX_ADDRESSES`` times ``CVENGINE_STAGE_PARALLEL``, 256 by default) and no more: the ledger is written
-    after each call, so a failure part way marks only the targets of the calls that did not finish. ``CVENGINE_STAGE_PARALLEL=1`` keeps the serial,
-    100 at a time, behaviour exactly."""
+    """Targets handed to ``stream`` per call: ``NUCLEI_CHUNK`` at a time. The Sentinel wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``)
+    splits each call into 64-target chunk tasks and runs them side by side, so it is handed enough to fill its window (``MAX_ADDRESSES`` times
+    ``CVENGINE_STAGE_PARALLEL``, 256 by default) and no more: the ledger is written after each call, so a failure part way marks only the targets
+    of the calls that did not finish. ``CVENGINE_STAGE_PARALLEL=1`` keeps the serial, 100 at a time, behaviour exactly."""
     if getattr(stream, 'chunks_itself', False):
+        from agentapi import stage_runs
+        if stage_runs.current() is not None:
+            # the stage waits on Sentinels without its worker (agentapi.stage_runs): one call takes every target, the wrapper sends them in
+            # windows across its passes and the findings are saved once, when every chunk is in
+            return max(1, total)
         from agentapi.sentinel_dispatch import MAX_ADDRESSES, stage_parallel
         if stage_parallel() > 1:
             return max(NUCLEI_CHUNK, MAX_ADDRESSES * stage_parallel())
     return NUCLEI_CHUNK
 
 
-def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
-    """Run nuclei over the scan's discovered assets and persist every result. Returns a summary dict.
+def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, service_override=None, force=False):
+    """Run the template pass over the scan's discovered assets (through ``stream``, a Sentinel) and persist every result. Returns a summary dict.
     ``tags`` narrows the template set to a focused pass (see cveFeed.nuclei_templates); omitted, this
-    is the blanket info-severity-and-up pass over every default template. Targets this project's nuclei already covered
+    is the blanket info-severity-and-up pass over every default template. Targets this project's pass already covered
     inside the TTL are not scanned again (see cveFeed.ledger): their existing findings are copied into this scan instead.
     ``targets`` replaces the scan's whole target list (the targeted pass runs one group of hosts at a time) and
     ``severities`` narrows what is reported."""
     from cveFeed import activity, ledger, nuclei_fp, template_gates
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import MemoryKill
+    from reNgine.resources import ScannerUnavailable
     from reNgine.definitions import NUCLEI_SEVERITY_MAP
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import ScanHistory, Subdomain
@@ -552,8 +317,6 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
         activity.log('run_check', f'Nuclei skipped for {domain.name}: discovery found nothing to scan', project=project)
         return {'targets': 0, 'findings': 0}
     service = service_override or (ledger.nuclei_tag_service(tags) if tags else 'nuclei')
-    if stream is stream_nuclei and not service_override:
-        service = f'{service}:{approved_templates()[1]}'[:64]
     covered = set() if force else ledger.fresh(service, targets, project)
     todo = [t for t in targets if t not in covered]
     counts = {name: 0 for name in ('info', 'low', 'medium', 'high', 'critical', 'unknown')}
@@ -576,7 +339,7 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
         by_name.setdefault(sub.name, sub)
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
-    screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project)
+    screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project, scan=scan)
 
     def save(line):
         nonlocal new
@@ -584,6 +347,8 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
             data = parse_nuclei_result(line)
         except (KeyError, TypeError):
             return
+        if screen.is_unscreened(line):  # its control read could not be made: kept, and not claimed to be a real answer rather than a catch-all page
+            data['tags'] = [*(data.get('tags') or []), nuclei_fp.UNSCREENED_TAG]
         host = host_of(line)
         sub = by_name.get(host) or by_ip.get(host)
         if template_gates.held_back(line, sub):
@@ -601,7 +366,6 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
                 activity.log('validate', f"Nuclei confirmed {data['name']} ({sev}) on {host}",
                              project=project, severity=sev)
 
-    profiles = ['normal', 'light'] if stream is stream_nuclei else ['normal']  # injected test streams cannot be lightened
     scanned = []
     # a target another pipeline of this project is scanning right now is left to it
     with ledger.claim_many(f'{service}@{project}', todo) as won:
@@ -623,32 +387,26 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
                     f.write('\n'.join(chunk) + '\n')
                     path = f.name
                 try:
-                    for profile in profiles:
-                        kwargs = ({'tags': tags} if tags else {})
-                        if severities:
-                            kwargs['severities'] = severities
-                        if profile != 'normal':
-                            kwargs['profile'] = profile
-                        try:
-                            screen.reset()  # a retried chunk sends its protocol matches again
-                            for line in stream(path, **kwargs):
-                                if not isinstance(line, dict):
-                                    continue
-                                if screen.offer(line) == 'keep':  # an echo or a catch-all answer is set aside (cveFeed.nuclei_fp)
-                                    save(line)
-                            for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
-                                save(line)
-                            break
-                        except MemoryKill:
-                            if profile == profiles[-1]:
-                                raise
-                            logger.warning('nuclei was stopped for memory on scan %s; retrying with fewer parallel hosts', scan_id)
-                            activity.log('run_check', f'Nuclei ran out of memory on {domain.name}; retrying with fewer parallel hosts',
-                                         project=project, scan_id=scan.id)
+                    kwargs = ({'tags': tags} if tags else {})
+                    if severities:
+                        kwargs['severities'] = severities
+                    screen.reset()  # a retried chunk sends its protocol matches again
+                    lines = [line for line in stream(path, **kwargs) if isinstance(line, dict)]
+                    screen.prefetch(lines)  # the control reads the chunk's error pages need, by a Sentinel (ScannerUnavailable: the chunk stays due)
+                    for line in lines:
+                        if screen.offer(line) == 'keep':  # an echo or a catch-all answer is set aside (cveFeed.nuclei_fp)
+                            save(line)
+                    for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
+                        save(line)
                 finally:
                     os.unlink(path)
                 ledger.record(service, chunk, project, scan)
                 scanned += chunk
+        except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
+            logger.warning('nuclei for scan %s is waiting for a scanner: %s', scan_id, exc)
+            message = _waiting_message(exc, len([t for t in won_targets if t not in set(scanned)]))
+            activity.settle(running, 'done', message=f'Nuclei for {domain.name} is waiting: {message}')
+            return {'targets': len(targets), 'findings': new, 'reused': reused, 'skipped': message, **counts}
         except Exception as exc:  # noqa: BLE001
             logger.exception('nuclei failed for scan %s', scan_id)
             ledger.record(service, [t for t in won_targets if t not in set(scanned)], project, scan, 'failed')
@@ -658,16 +416,19 @@ def _run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severiti
     activity.settle(running, 'done', message=(
         f"Nuclei finished {domain.name}: {new} finding{'s' if new != 1 else ''} "
         f"({counts['critical']} critical, {counts['high']} high, {counts['medium']} medium, "
-        f"{counts['low']} low, {counts['info']} info)" + (f'; set aside as scanner artefacts: {set_aside}' if set_aside else '')), **counts)
+        f"{counts['low']} low, {counts['info']} info)" + (f'; set aside as scanner artefacts: {set_aside}' if set_aside else '')
+        + (f'; {screen.unscreened} kept unscreened (the control read for a catch-all page could not be made)' if screen.unscreened else '')), **counts)
     out = {'targets': len(targets), 'findings': new, 'reused': reused, **counts}
     if screen.dropped:
         out['set_aside'] = dict(screen.dropped)
+    if screen.unscreened:
+        out['unscreened'] = screen.unscreened
     return out
 
 
-def run_nuclei(scan_id, stream=stream_nuclei, tags=None, targets=None, severities=None, service_override=None, force=False):
+def run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, service_override=None, force=False):
     """``_run_nuclei``, then, when the scan's target has a stored sign-in (cveFeed.auth_checks), the same selection again for the hosts that
-    sign-in covers, with the headers read from a private secrets file (cveFeed.auth_nuclei). A target with none runs exactly as before."""
+    sign-in covers, on the built-in scanner only (cveFeed.auth_nuclei). A target with none runs exactly as before."""
     from cveFeed import auth_nuclei, ledger
     scope = auth_nuclei.scope_for_scan(scan_id)
     if scope is None:
@@ -739,13 +500,13 @@ def reuse_technologies(scan, project, hosts):
     return len(source)
 
 
-def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
-    """The light pass: nuclei's HTTP and technology templates over every discovered host, quick and low on memory. Each
-    technology it detects is stored on the host, with the same Technology rows bbot fills, so search, the CVE correlation
+def run_light_nuclei(scan_id, stream, force=False):
+    """The light pass: the HTTP and technology templates over every discovered host, quick and low on memory. Each
+    technology it detects is stored on the host, with the same Technology rows discovery fills, so search, the CVE correlation
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
-    from reNgine.resources import MemoryKill
+    from reNgine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain, Technology
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
@@ -754,7 +515,7 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
         activity.log('run_check', f'Nuclei technology pass skipped for {domain.name}: discovery found nothing to scan',
                      project=project, scan_id=scan.id)
         return {'targets': 0, 'technologies': 0, 'hosts': 0, 'techs': {}}
-    service = f'{LIGHT_SERVICE}:{approved_templates()[1]}' if stream is stream_nuclei else LIGHT_SERVICE
+    service = LIGHT_SERVICE
     covered = set() if force else ledger.fresh(service, targets, project)
     todo = [t for t in targets if t not in covered]
     reused = reuse_technologies(scan, project, {host_of({'host': t}) for t in covered}) if covered else 0
@@ -791,7 +552,7 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
                     f.write('\n'.join(chunk) + '\n')
                     path = f.name
                 try:
-                    for line in stream(path, **({'tech': True} if stream is stream_nuclei else {})):
+                    for line in stream(path):
                         name = tech_name_from(line)
                         sub = by_name.get(host_of(line)) or by_ip.get(host_of(line))
                         if not (name and sub):
@@ -806,7 +567,13 @@ def run_light_nuclei(scan_id, stream=stream_nuclei, force=False):
                     flush_links()  # what a killed chunk already saw is kept
                 ledger.record(service, chunk, project, scan)
                 scanned += chunk
-        except Exception as exc:  # noqa: BLE001 - includes MemoryKill: the pass is best effort, the pipeline carries on
+        except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
+            logger.warning('nuclei technology pass for scan %s is waiting for a scanner: %s', scan_id, exc)
+            message = _waiting_message(exc, len([t for t in won_targets if t not in set(scanned)]))
+            activity.settle(running, 'done', message=f'Nuclei technology pass for {domain.name} is waiting: {message}')
+            return {'targets': len(targets), 'technologies': sum(len(v) for v in found.values()), 'hosts': len(found),
+                    'techs': {h: sorted(v) for h, v in found.items()}, 'reused': reused, 'skipped': message}
+        except Exception as exc:  # noqa: BLE001 - the pass is best effort, the pipeline carries on
             logger.exception('nuclei technology pass failed for scan %s', scan_id)
             ledger.record(service, [t for t in won_targets if t not in set(scanned)], project, scan, 'failed')
             activity.settle(running, 'failed', message=f'Nuclei technology pass failed for {domain.name}: {exc}')
@@ -825,14 +592,15 @@ def _target_strings(sub):
     from startScan.models import open_ports
     out = [sub.name]
     for ip in sub.ip_addresses.all():
-        out += [f'{sub.name}:{p.number}' for p in open_ports(ip) if p.number not in DEFAULT_PORTS]
+        out += [f'{sub.name}:{p.number}' for p in open_ports(ip) if p.number not in NUCLEI_DEFAULT_PORTS]
     return list(dict.fromkeys(out))
 
 
-def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
+def run_cve_checks(scan, subs, ai=False, cve_runner=None, force=False):
     """For each host of the scan with CVE matches, run the CVE's template (installed, or AI-written and validated) against it.
     Only fire and smoke CVEs, at most MAX_CVES_PER_HOST per host, and a host this project already checked for that CVE inside
-    the TTL is left out (unless ``force``: a re-test after a change). Every CVE is its own non-fatal step. Returns ``{'cves': n, 'hosts': n, 'vulnerable': [...]}``."""
+    the TTL is left out (unless ``force``: a re-test after a change). ``ai`` is what ``templategen.run_cve_tests`` takes: whether an AI reviewer job may be
+    queued for a CVE with no safe installed template (the reviewer container writes the draft; nothing here holds a provider). Every CVE is its own non-fatal step. Returns ``{'cves': n, 'hosts': n, 'vulnerable': [...]}``."""
     from cveFeed import ledger
     from cveFeed.autofire import HOT_TIERS
     from cveFeed.nuclei_templates import MAX_CVES_PER_HOST
@@ -861,7 +629,7 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
         if not todo:
             continue
         try:
-            outcome = cve_runner(cve, todo, provider=provider, project=project)
+            outcome = cve_runner(cve, todo, ai=ai, project=project)
         except Exception:  # noqa: BLE001 - one CVE failing must not stop the rest
             logger.exception('CVE check %s failed for scan %s', cve.cve_id, scan.id)
             ledger.record(service, todo, project, scan, 'failed')
@@ -882,9 +650,9 @@ def run_cve_checks(scan, subs, provider, cve_runner=None, force=False):
     return {'cves': len(wanted), 'hosts': len(tested), 'not_tested': len(not_tested), 'vulnerable': vulnerable}
 
 
-def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_techs=None, cve_runner=None,
+def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_runner=None,
                         force_cve_checks=False, force=False):
-    """The AI-targeted pass. A profile is built for each host from everything gathered (bbot technologies, nmap services,
+    """The AI-targeted pass. A profile is built for each host from everything gathered (discovered technologies, port-scan services,
     the database exposure check, the light pass, CVE matches). The AI picks nuclei tags and severities from the tags the
     installed templates use (the static table is the fallback), hosts that share a choice are scanned together so nuclei
     runs once per group, and each CVE matched to a host gets its own template test. Whatever the ledger says was covered
@@ -912,14 +680,20 @@ def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_tec
     by_host = {sub.name: sub for sub in subs}
     light = light_techs or {}
     profiles = {sub.name: host_profile(sub, light.get(sub.name, ())) for sub in subs}
-    groups, skipped = plan_targeting(profiles, provider)
+    from agentapi import stage_runs
+    # asked once: when the pass waits on Sentinels and a later pass continues it (agentapi.stage_runs), the plan is the one the AI gave first
+    ai_notes = []
+    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider, notes=ai_notes))
+    for note in ai_notes[:1]:  # asked once, so said once: a later pass of the run has no notes
+        activity.log('run_check', f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates',
+                     project=project, scan_id=scan.id)
     result = {'targets': 0, 'findings': 0, 'groups': len(groups), 'hosts': len(profiles) - len(skipped), 'skipped': len(skipped),
               'reused': 0}
     errors = []
     if skipped:
         activity.log('run_check', f'Targeted nuclei on {domain.name}: {len(skipped)} host(s) with nothing identified to aim at, '
                      f'left to the CVE checks', project=project, scan_id=scan.id)
-    for group in groups:
+    for number, group in enumerate(groups):
         for host in group['hosts'][:5]:
             sources = ', '.join(profile_sources(profiles[host]))
             activity.log('run_check', f'nuclei targeted scan of {host}: {", ".join(group["tags"][:8])}' +
@@ -929,19 +703,25 @@ def run_targeted_nuclei(scan_id, stream=stream_nuclei, provider=False, light_tec
                          project=project, scan_id=scan.id)
         targets = [t for host in group['hosts'] for t in _target_strings(by_host[host])]
         try:
-            out = run_nuclei(scan_id, stream=stream, tags=group['tags'], targets=targets,
-                             severities=list(group['severities']) or None, **({'force': True} if force else {}))
+            out = stage_runs.once(f'targeted_group:{number}', lambda: run_nuclei(  # a group a later pass finds done keeps its own counts
+                scan_id, stream=stream, tags=group['tags'], targets=targets, severities=list(group['severities']) or None,
+                **({'force': True} if force else {})))
         except Exception as exc:  # noqa: BLE001 - one group failing must not stop the others
             logger.exception('targeted nuclei group failed for scan %s', scan_id)
             errors.append(str(exc))
             continue
-        result['targets'] += out.get('targets', 0)
         result['findings'] += out.get('findings', 0)
         result['reused'] += out.get('reused', 0)
+        if out.get('skipped'):  # no scanner could take this group: it was not scanned and stays due
+            result['skipped'] = out['skipped']
+            continue
+        result['targets'] += out.get('targets', 0)
         if out.get('error'):
             errors.append(out['error'])
     try:
-        checks = run_cve_checks(scan, subs, provider, cve_runner, force=force_cve_checks)
+        from cveFeed import ai_jobs
+        ai = provider is not None and ai_jobs.ai_on()  # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
+        checks = run_cve_checks(scan, subs, ai, cve_runner, force=force_cve_checks)
     except Exception as exc:  # noqa: BLE001
         logger.exception('CVE checks failed for scan %s', scan_id)
         checks = {'cves': 0, 'hosts': 0, 'vulnerable': []}

@@ -8,7 +8,6 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import activity, changes, discovery
-from cveFeed import hygiene as hy
 from cveFeed.models import AgentActivity, AssetChange, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -17,6 +16,7 @@ from targetApp.models import Domain
 from tests.test_agentapi import call, rpc
 from tests.test_hygiene import cert
 from tests.test_perf_hostpipeline import _stages
+from tests import hygiene_harness
 
 
 def state(ports=None, techs=(), ip='203.0.113.5'):
@@ -98,6 +98,11 @@ class ChangeFixture:
 			'b.ct.test': {'ip': '203.0.113.6', 'ports': [(22, 'ssh', 'OpenSSH', '8.0')]}})
 
 
+def NOTHING_ANSWERS(*address):
+	"""The zombie checks of a retiring host (HTTP, then a bare connect) find nobody, without asking the network."""
+	return False
+
+
 class RecordTests(ChangeFixture, TestCase):
 	def test_the_first_scan_is_a_baseline_with_no_changes(self):
 		scan = self.baseline()
@@ -138,7 +143,7 @@ class RecordTests(ChangeFixture, TestCase):
 		def resolver(names):
 			asked.append(list(names))
 			return set()
-		out = changes.record_scan_changes(second.id, resolver=resolver)
+		out = changes.record_scan_changes(second.id, resolver=resolver, checker=NOTHING_ANSWERS, tcp_checker=NOTHING_ANSWERS)
 		self.assertEqual(asked, [['b.ct.test']])
 		self.assertEqual(out['retired'], 1)
 		self.assertEqual(AssetChange.objects.get(kind='host_retired').host, 'b.ct.test')
@@ -165,7 +170,7 @@ class RecordTests(ChangeFixture, TestCase):
 	def test_a_retired_host_seen_again_returns(self):
 		changes.record_scan_changes(self.baseline().id)
 		second = self.scan({'a.ct.test': {'ip': '203.0.113.5', 'ports': [(443, 'https', 'nginx', '1.18.0')], 'techs': ['nginx']}})
-		changes.record_scan_changes(second.id, resolver=lambda names: set())
+		changes.record_scan_changes(second.id, resolver=lambda names: set(), checker=NOTHING_ANSWERS, tcp_checker=NOTHING_ANSWERS)
 		third = self.scan({'b.ct.test': {'ip': '203.0.113.6', 'ports': [(22, 'ssh', 'OpenSSH', '8.0')]},
 			'a.ct.test': {'ip': '203.0.113.5', 'ports': [(443, 'https', 'nginx', '1.18.0')], 'techs': ['nginx']}})
 		changes.record_scan_changes(third.id, resolver=lambda names: {(n, 'x') for n in names})
@@ -276,7 +281,7 @@ class CertChangeTests(TestCase):
 			if host != 'www.example.test':
 				return None
 			return {**cert(host=host, port=port, sans=[host], subject=host), 'issuer': issuer}
-		return hy.run_hygiene(self.domain.id, probe=probe, emailer=lambda n: ([], False), mx=lambda n, t: False)
+		return hygiene_harness.run_hygiene(self.domain.id, probe=probe, emailer=lambda n: ([], False), mx=lambda n, t: False)
 
 	def test_a_changed_certificate_is_one_change_and_the_first_sight_is_none(self):
 		self.assertEqual(self.run_with('CN=Old CA')['cert_changes'], 0)

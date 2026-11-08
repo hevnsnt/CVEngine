@@ -57,6 +57,10 @@ except ValueError:
 ALLOWED_HOSTS = list(dict.fromkeys(host for host in (
     _site_host, 'localhost', '127.0.0.1', '[::1]',
     *(item.strip() for item in env('CVENGINE_ALLOWED_HOSTS', default='').split(',')),
+    # the built-in scanner and the AI reviewer containers reach this server by its compose service name; both are on by default, and the name is
+    # left out only when both are switched off (agentapi.builtin_scanner, cveFeed.reviewer)
+    *(['web'] if any(env(name, default='1').strip().lower() not in ('0', 'false', 'no', 'off')
+                     for name in ('CVENGINE_BUILTIN_SCANNER', 'CVENGINE_REVIEWER')) else []),
 ) if host))
 # Behind a TLS-terminating proxy Django sees plain http, while browsers send "Origin: https://<site>"; since Django 4
 # that mismatch fails every POST with "CSRF verification failed". The shipped nginx overwrites X-Forwarded-Proto itself, so
@@ -106,6 +110,11 @@ DATABASES = {
         # overestimates their cost, so it compiled each one with LLVM before running it: a 0.1 s query took 2 s here and up to a minute
         # on a busy 3-core server, which is what made a 2,000-host project's dashboard slow to open. The queries themselves are cheap.
         'OPTIONS': {'options': '-c jit=off'},
+        # A new connection costs 3.8 ms and a backend process on the database (a dozen Sentinels and a few browsers polling every few seconds opened and
+        # closed one per request). The web container sets this to 60 (docker-compose.yml): its 2 x 8 threads then hold at most 16 connections. Left at 0 for the
+        # Celery workers, whose gevent greenlets would each keep one.
+        'CONN_MAX_AGE': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0),
+        'CONN_HEALTH_CHECKS': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0) > 0,  # a ping before reuse; with 0 (workers, tests) it would only add a statement
         # 'OPTIONS':{
         #     'sslmode':'verify-full',
         #     'sslrootcert': os.path.join(BASE_DIR, 'ca-certificate.crt')
@@ -261,7 +270,12 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': env.int('CELERY_VISIBIL
 # every start, so its cadence follows CVENGINE_LIVE_REFRESH_SECONDS and its row is switched off by CVENGINE_LIVE_REFRESH=0 (reNgine/livecache_config.py).
 from reNgine import livecache_config as _livecache  # noqa: E402
 
-CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry()}
+# the stage runs' safety net (agentapi.stage_runs.tick): a stage that waits on Sentinels without its worker is driven by its own countdown; this
+# re-drives what a restart or a lost message left behind. The message expires after two minutes, so a stopped worker gets no backlog of ticks.
+from celery.schedules import schedule as _every  # noqa: E402
+CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry(),
+                        'cvengine-stage-runs': {'task': 'stage_runs_tick', 'schedule': _every(run_every=60),
+                                                'options': {'queue': 'cve_feed_queue', 'expire_seconds': 120}}}
 
 '''
 ROLES and PERMISSIONS
@@ -392,7 +406,7 @@ File upload settings
 # A finite cap on form fields (Django's own default is 1000): a body of `a=&a=&...` costs CPU linear in the field count, and /login/ takes
 # one without authentication. Set above the default so the larger bulk forms still post.
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 5000
-# nginx caps every request at 4 MB except a Sentinel's task result (24 MB, config/nginx/rengine.conf); the application accepts what nginx lets through
+# nginx caps every request at 4 MB except a Sentinel's task result and partial batches (24 MB, config/nginx/rengine.conf); the application accepts what nginx lets through
 DATA_UPLOAD_MAX_MEMORY_SIZE = 24 * 1024 * 1024
 
 '''

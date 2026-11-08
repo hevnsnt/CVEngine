@@ -26,6 +26,7 @@ DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 2
                      'testssl': 14 * 24, 'testssl-failed': 3 * 24, 'buckets': 7 * 24, 'buckets-failed': 24, 'vhost': 7 * 24, 'vhost-ip': 3 * 24, 'subapp': 7 * 24,
                      'nuclei-auth': 24, 'nuclei-auth-refused': 24, 'route-auth-signed': 24, 'udp-scan': 7 * 24, 'udp-scan-failed': 24,
                      'openvas': 7 * 24, 'openvas-failed': 3 * 24, 'supplier': 7 * 24, 'supplier-failed': 24,
+                     'secrets-scan': 7 * 24, 'secrets-validate': 7 * 24, 'ssh-probe': 7 * 24, 'ssh-probe-failed': 24,
                      # kinds that always ran on the 24 hour default; listed so the check coverage registry (cveFeed.check_coverage) can see them
                      'nuclei-light': 24, 'nuclei-cve': 24, 'rdp-shot': 24, 'node2shell': 24}
 CLAIM_TTL = 180  # seconds; refreshed while held, so a crashed worker frees its assets within minutes
@@ -183,7 +184,10 @@ def claim(service, asset):
     """Hold the right to run ``service`` on ``asset``. Yields True when this caller won it (or Redis is unavailable), False
     when another pipeline is running it right now."""
     from reNgine import resources
-    with resources.redis_claim(_key(service, asset), _owner(), CLAIM_TTL) as holder:
+    from agentapi import stage_runs
+    run = stage_runs.current()  # inside a StageRun the claim belongs to the run: held while it waits, taken back by its next pass
+    owner = run.claim_owner(service) if run is not None else _owner()
+    with resources.redis_claim(_key(service, asset), owner, CLAIM_TTL, adopt=run is not None, hold=run is not None) as holder:
         yield holder is True
 
 
@@ -196,11 +200,15 @@ def claim_many(service, assets):
     if client is None:
         yield assets
         return
-    owner = _owner()
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    # Inside a StageRun (agentapi.stage_runs) the claims belong to the run, not to this worker: they are held while the run waits for its
+    # Sentinels and taken back by the pass that continues it, so another scan cannot start the same work in between.
+    owner = run.claim_owner(service) if run is not None else _owner()
     won = []
     try:
         for a in assets:
-            if client.set(_key(service, a), owner, nx=True, ex=CLAIM_TTL):
+            if client.set(_key(service, a), owner, nx=True, ex=CLAIM_TTL) or (run is not None and client.get(_key(service, a)) == owner):
                 won.append(a)
     except Exception:  # noqa: BLE001 - never block scanning because the claim is unavailable
         logger.exception('ledger: Redis claim failed for %s', service)
@@ -219,12 +227,20 @@ def claim_many(service, assets):
                 pass
     if won:
         threading.Thread(target=keep_alive, name='ledger-claim', daemon=True).start()
+    suspending = False
     try:
         yield won
+    except stage_runs.Suspend:
+        suspending = True
+        raise
     finally:
         stop.set()
         try:
             for a in list(won):
-                resources.claim_release(client, _key(service, a), owner)
+                if suspending:  # the run waits: the claim outlives this pass, kept alive by the run's drive
+                    resources.claim_refresh(client, _key(service, a), owner, stage_runs.HOLD_SECONDS)
+                    run.hold_claim(_key(service, a), owner)
+                else:
+                    resources.claim_release(client, _key(service, a), owner)
         except Exception:  # noqa: BLE001
             pass

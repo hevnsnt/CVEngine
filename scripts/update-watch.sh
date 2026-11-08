@@ -4,7 +4,8 @@
 # Cron starts it every minute (scripts/install-updater.sh). Each start watches web/.update-approved for SECONDS (a little less than a
 # minute), so an approval is acted on within about two seconds: scans are paused, running ones drain, the files are updated and the
 # containers restart (all of that is scripts/apply-update.sh). It also tells the app it is alive every 15 seconds (web/.updater-heartbeat),
-# so Settings > Updates can say when nothing on the host is listening; the heartbeat goes on while an update runs, which takes minutes.
+# so Settings > Updates can say when nothing on the host is listening; the heartbeat goes on while an update runs, which takes minutes. It also acts on
+# web/.scanner-update-requested (the server asking for the built-in scanner's newest image) by running scripts/scanner-update.sh.
 # The web container has no Docker or git access on purpose; this script is the only thing that acts on the approval.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -45,6 +46,15 @@ refresh_upstream() {
 
 end=$((SECONDS + span))
 next_beat=0
+next_disk=0
+# How much disk Docker's directory has against what an update needs, for the Update screen (it cannot ask Docker itself): once a minute, never longer than 30 seconds
+disk_report() {
+  if (( SECONDS >= next_disk )) && [ -f scripts/update-disk.sh ]; then
+    next_disk=$((SECONDS + 60))
+    ( . scripts/update-disk.sh; cvengine_disk_report ) >/dev/null 2>&1 8>&- </dev/null &  # not holding the watcher's lock, not delaying its heartbeat
+  fi
+}
+next_plan=0
 heartbeat() {
   if (( SECONDS >= next_beat )); then
     python3 scripts/update-state.py heartbeat >/dev/null 2>&1 || true
@@ -53,6 +63,7 @@ heartbeat() {
 }
 while :; do
   heartbeat
+  disk_report
   refresh_upstream
   # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
   # several GB neither delays an update nor stops the heartbeat. The script takes its own lock. Its output goes to a host-private log (it
@@ -63,6 +74,19 @@ while :; do
   # gvmd's NVT cache found out of date by an import (web/.openvas-restart newer than its answer): restart gvmd, nothing else
   if [ -f web/.openvas-restart ] && [ ! -L web/.openvas-restart ] && [ web/.openvas-restart -nt web/.openvas-restarted ]; then
     setsid nohup scripts/openvas-sync.sh restart-gvmd >>"$STATE/openvas.log" 2>&1 </dev/null &
+  fi
+  # "Which scanners run" changed in Settings > Sentinels (web/.scanner-plan-wanted): carried out in the background, with a log of its own. It exits 3 while a
+  # scan is running (the server's processes are recreated to read the new setting) and is asked again at the next round.
+  if { [ -f web/.scanner-plan-wanted ] || [ -L web/.scanner-plan-wanted ]; } && (( SECONDS >= next_plan )); then
+    next_plan=$((SECONDS + 20))
+    setsid nohup scripts/apply-scanner-plan.sh >>"$STATE/scanner-plan.log" 2>&1 8>&- </dev/null &
+  fi
+  # the server asked for the built-in scanner's newest image (web/.scanner-update-requested, written by agentapi/sentinel_autoupdate.py when the scanner runs a
+  # build behind the newest published one): run the scanner update in the background. scripts/scanner-update.sh waits for the scanner to finish its tasks, keeps
+  # the new image only once it has checked in, puts the old one back otherwise, and takes its own lock. The answer marker is touched first, so one request runs once.
+  if [ -f web/.scanner-update-requested ] && [ ! -L web/.scanner-update-requested ] && [ web/.scanner-update-requested -nt web/.scanner-update-done ] && [ -f scripts/scanner-update.sh ]; then
+    python3 scripts/update-state.py scanner-update-done >/dev/null 2>&1 || true  # published like every other state file: no redirection into the shared mount
+    setsid nohup scripts/scanner-update.sh >>"$STATE/scanner-update.log" 2>&1 </dev/null &
   fi
   pause=2
   if [ -e web/.update-approved ] || [ -L web/.update-approved ]; then

@@ -7,47 +7,56 @@
 <p class="sub">A Sentinel is a scanner you run on any machine: deploy one or a hundred to spread this project's scanning. It registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back. A scan with no live Sentinel runs the external stages locally exactly as before; work on an internal network only ever runs on a Sentinel inside it.</p>
 </div></div>
 
-<div class="grid main" style="margin-top:0">
+<div class="grid main sentinels-grid">
   <div>
     <div class="card">
-      <h2 style="margin-bottom:8px">Registered Sentinels</h2>
+      <h2 class="card-h">Registered Sentinels</h2>
+      <p class="note" id="sentinel-contract-source" style="margin-bottom:8px">{{ sentinel_contract_line }}.</p>
       <div id="live" aria-live="polite"></div>
     </div>
+    <div class="card" id="plan-card" hidden></div>
   </div>
   <div class="card">
-    <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
-    <p class="note" style="margin-bottom:6px">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision gives you one command to paste on the machine that will scan, and a ready-made prompt to hand an AI agent instead. Both carry a single-use secret that expires in 30 minutes. The machine needs Docker with Compose, git and outbound HTTPS to this server. The client is <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>.</p>
+    <h2 class="card-h">Provision a Sentinel</h2>
+    <p class="note enroll-intro">A Sentinel can be scoped to one project, one organization (every project of it, present and future) or, for an App Admin, the whole instance (every organization and project). Whichever scope, Provision gives you one command to paste on the machine that will scan, and a ready-made prompt to hand an AI agent instead. Both carry a single-use secret that expires in 30 minutes. The machine needs Docker with Compose, git and outbound HTTPS to this server. The client is <a href="https://github.com/hevnsnt/cvengine-sentinel" target="_blank" rel="noopener">hevnsnt/cvengine-sentinel</a>.</p>
     <div class="field"><label for="enroll-scope">Scope</label>
-      <select id="enroll-scope">
+      <select id="enroll-scope" required>
+        <option value="" selected disabled>Choose a scope</option>
         <option value="project">Project</option>
         {% if enroll_orgs %}<option value="org">Organization</option>{% endif %}
         {% if user.is_superuser %}<option value="instance">Instance (everything)</option>{% endif %}
       </select>
     </div>
-    <div class="field" id="enroll-project-field"><label for="enroll-project">Project</label><select id="enroll-project"></select></div>
-    <div class="field" id="enroll-org-field" style="display:none"><label for="enroll-org">Organization</label><select id="enroll-org">{% for o in enroll_orgs %}<option value="{{ o.slug }}">{{ o.name }}</option>{% endfor %}</select></div>
+    <div class="field" id="enroll-project-field" hidden><label for="enroll-project">Project</label><select id="enroll-project" required><option value="" selected disabled>Choose a project</option></select></div>
+    <div class="field" id="enroll-org-field" hidden><label for="enroll-org">Organization</label><select id="enroll-org" required><option value="" selected disabled>Choose an organization</option>{% for o in enroll_orgs %}<option value="{{ o.slug }}">{{ o.name }}</option>{% endfor %}</select></div>
     <div class="field"><label for="enroll-network">Where it runs</label>
-      <select id="enroll-network">
+      <select id="enroll-network" required>
+        <option value="" selected disabled>Choose where it runs</option>
         <option value="external">External: reaches the internet-facing targets</option>
         <option value="internal">Internal: inside a private network (office LAN, VPC, VPN)</option>
       </select>
     </div>
     <div class="field"><label for="enroll-profile">Size</label>
-      <select id="enroll-profile">
+      <select id="enroll-profile" required>
+        <option value="" selected disabled>Choose a size</option>
         <option value="full">Full: also runs OpenVAS (several GB, hours of feed sync on first start)</option>
         <option value="light">Light: nmap, naabu, nuclei, testssl and WPScan only</option>
       </select>
     </div>
-    <button class="btn" type="button" id="enroll-go">Provision</button>
-    <div id="enroll-out" class="msg ok" style="display:none" role="status"></div>
-    <h2 style="margin:18px 0 8px">What a Sentinel needs</h2>
+    <button class="btn" type="button" id="enroll-go" disabled aria-disabled="true" aria-describedby="enroll-missing">Provision</button>
+    <p class="note enroll-missing" id="enroll-missing" role="status" aria-live="polite">Choose a scope to continue.</p>
+    <div id="enroll-out" class="msg ok" role="status" hidden></div>
+    <h2 class="card-h enroll-needs">What a Sentinel needs</h2>
     <p class="note">The blob is nothing new: standard base64 of the same JSON <code>projects/{slug}/sentinels/enroll</code>, <code>orgs/{slug}/sentinels/enroll</code> or <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, scope}</code>, plus <code>project</code> or <code>org</code> where scope is not instance-wide), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
   </div>
 </div>
 {% endblock %}
 {% block scripts %}
 <script type="module" src="{% asset 'cve/sentinel-live.js' %}"></script>
-<script>
+<script type="module">
+import { mountScannerPlan } from '{% asset 'cve/scanner-plan.js' %}';
+import {missingChoice} from '/staticfiles/cve/provision-form.js';
+mountScannerPlan(document.getElementById('plan-card'));
 (function () {
   var csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
   function api(method, url, body) {
@@ -70,27 +79,40 @@
   var enrollScope = document.getElementById('enroll-scope'), enrollProject = document.getElementById('enroll-project'),
     enrollProjectField = document.getElementById('enroll-project-field'), enrollOrg = document.getElementById('enroll-org'),
     enrollOrgField = document.getElementById('enroll-org-field'), enrollOut = document.getElementById('enroll-out');
+  var enrollNetwork = document.getElementById('enroll-network'), enrollProfile = document.getElementById('enroll-profile'),
+    enrollGo = document.getElementById('enroll-go'), enrollMissing = document.getElementById('enroll-missing');
+  // Nothing is pre-selected, the project included: a Sentinel provisioned to the wrong customer is a data-isolation error,
+  // so the project is never defaulted to the first in the list or to the one being worked in.
   api('GET', '/api/v1/projects').then(function (x) {
     (x.d.results || x.d.projects || []).forEach(function (p) { var o = el('option', '', p.name || p.slug); o.value = p.slug; enrollProject.appendChild(o); });
+    enrollProject.value = ''; refreshEnroll();
   });
-  enrollScope.addEventListener('change', function () {
-    enrollProjectField.style.display = enrollScope.value === 'project' ? '' : 'none';
-    enrollOrgField.style.display = enrollScope.value === 'org' ? '' : 'none';
-  });
+  function missing() {
+    return missingChoice({scope: enrollScope.value, project: enrollProject.value, org: enrollOrg.value, network: enrollNetwork.value, profile: enrollProfile.value});
+  }
+  function refreshEnroll() {
+    enrollProjectField.hidden = enrollScope.value !== 'project';
+    enrollOrgField.hidden = enrollScope.value !== 'org';
+    var why = missing();
+    enrollGo.disabled = !!why; enrollGo.setAttribute('aria-disabled', String(!!why));
+    enrollMissing.textContent = why; enrollMissing.hidden = !why;
+  }
+  enrollScope.addEventListener('change', function () { enrollProject.value = ''; enrollOrg.value = ''; refreshEnroll(); });
+  [enrollProject, enrollOrg, enrollNetwork, enrollProfile].forEach(function (n) { n.addEventListener('change', refreshEnroll); });
+  refreshEnroll();
   document.getElementById('enroll-go').addEventListener('click', function () {
+    if (missing()) { refreshEnroll(); return; }
     var scope = enrollScope.value, url;
     if (scope === 'project') {
-      if (!enrollProject.value) return;
       url = '/api/v1/projects/' + enrollProject.value + '/sentinels/enroll?format=blob';
     } else if (scope === 'org') {
-      if (!enrollOrg.value) return;
       url = '/api/v1/orgs/' + encodeURIComponent(enrollOrg.value) + '/sentinels/enroll?format=blob';
     } else {
       url = '/api/v1/sentinels/enroll?format=blob';
     }
     url += '&network=' + document.getElementById('enroll-network').value + '&profile=' + document.getElementById('enroll-profile').value;
     api('POST', url).then(function (x) {
-      enrollOut.style.display = 'block';
+      enrollOut.hidden = false;
       if (x.ok) {
         enrollOut.className = 'msg ok secret-box enroll-ready'; enrollOut.textContent = '';
         var label = x.d.scope === 'project' ? x.d.project : x.d.scope === 'org' ? ('organization ' + x.d.org) : 'the whole instance';

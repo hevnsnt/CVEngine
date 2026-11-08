@@ -1,4 +1,6 @@
 import json
+import socket
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -70,7 +72,8 @@ class SettingsApiTests(TestCase):
 		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='off').exists())
 		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
 
-	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self):
+	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)  # the saved addresses are names, and a name that does not resolve is not blocked
+	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self, _lookup):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
 		send(self.c, 'PUT', 'ai', {'model': 'm2'})  # nothing about the connection changed: the key stays
 		self.assertEqual(AIProviderSettings.objects.get().api_key, 'sk-keep-me')
@@ -80,7 +83,8 @@ class SettingsApiTests(TestCase):
 		send(self.c, 'PUT', 'ai', {'provider': 'anthropic'})  # another provider without a new key
 		self.assertEqual(AIProviderSettings.objects.get().api_key, '')
 
-	def test_a_stored_key_follows_the_host_for_every_provider_the_vendor_address_included(self):
+	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)  # the Base URL check resolves the host: no test touches the network
+	def test_a_stored_key_follows_the_host_for_every_provider_the_vendor_address_included(self, _lookup):
 		def key():
 			return AIProviderSettings.objects.get().api_key
 
@@ -112,15 +116,16 @@ class SettingsApiTests(TestCase):
 		send(self.c, 'PUT', 'ai', {'base_url': 'https://other.example.net/v1', 'api_key': 'sk-typed-for-it'})  # a key typed with the new host is kept
 		self.assertEqual(key(), 'sk-typed-for-it')
 
-	def test_every_provider_takes_a_base_url_and_refuses_a_metadata_address(self):
+	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)  # the Base URL check resolves the host: no test touches the network
+	def test_every_provider_takes_a_base_url_and_refuses_a_metadata_address(self, _lookup):
 		for provider in ('anthropic', 'openai', 'openrouter', 'ollama', 'vllm', 'lmstudio'):
 			status, data = send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'https://gateway.example.net'})
 			self.assertEqual((status, data['base_url']), (200, 'https://gateway.example.net'), provider)
 			self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'http://169.254.169.254/v1'})[0], 400, provider)
 			self.assertEqual(send(self.c, 'PUT', 'ai', {'provider': provider, 'base_url': 'ftp://gateway.example.net'})[0], 400, provider)
 
-	def test_model_listing_does_not_send_the_stored_key_to_another_address(self):
-		from unittest import mock
+	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)
+	def test_model_listing_does_not_send_the_stored_key_to_another_address(self, _lookup):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
 		with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
 			get_provider.return_value.list_models.return_value = []

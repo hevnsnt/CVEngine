@@ -1,23 +1,33 @@
 # CVEngine application image (web, celery, celery-beat).
-# Based on the Ubuntu LTS; Python from the distribution, Go and nmap taken from pinned, checksummed releases.
-FROM ubuntu:26.04
+# Based on the Ubuntu LTS; Python from the distribution. The server runs no scan tool: every probe runs on a Sentinel (the built-in scanner
+# container or an external one). What stays is nuclei, whose template set the server keeps current (the update_nuclei_templates task) and
+# reads to write and check templates. It is built in a throwaway stage, so the Go toolchain is not part of the image.
 
-# Versions are pinned so builds are reproducible; the security tools below track their latest release at build time.
+# Versions are pinned so builds are reproducible. nuclei is pinned to the version the CI smoke test uses and bumped on purpose, after
+# scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Its TEMPLATES are not pinned: they refresh at runtime.
 ARG GOVERSION=1.27.3
 ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
-ARG NMAPVERSION=7.993
-# Scanner tools, pinned to versions that were built and tested together (the CI smoke test uses the same nuclei). A tool is bumped on
-# purpose, after scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Nuclei's TEMPLATES are not
-# pinned: they refresh at runtime.
 ARG NUCLEI_VERSION=3.11.1
-ARG NAABU_VERSION=2.7.0
-ARG BBOT_VERSION=3.0.2
-ARG TZDATA_VERSION=2026.6
-# nmap: amd64 installs the project's own x86_64 release RPM (its libraries are linked in statically), arm64 builds the source
-# tarball, because nmap.org publishes no arm64 binary. Both checksums are published beside the files at nmap.org/dist/sigs/.
-ARG NMAP_SHA256=270e55f04915bfcecb5db8feb959d4c5ba86a48c094520a4f1c07571e1c79c59
-ARG NMAP_RPM_SHA256_AMD64=997cb830c84a429aaa1d41708a1ebb9b1cc36e75d21801c9d359fe930a8c1f93
+
+# Build stage: the Go toolchain (checksum verified) compiles nuclei; only the binary is copied on.
+FROM ubuntu:26.04 AS nuclei-build
+ARG GOVERSION
+ARG GO_SHA256_AMD64
+ARG GO_SHA256_ARM64
+ARG NUCLEI_VERSION
+ENV DEBIAN_FRONTEND="noninteractive" GOROOT="/usr/local/go" GOPATH="/root/go" GO111MODULE=on
+ENV PATH="${PATH}:/usr/local/go/bin"
+RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl git gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+RUN ARCH=$(dpkg --print-architecture) \
+    && if [ "${ARCH}" = "arm64" ]; then GO_SHA="${GO_SHA256_ARM64}"; else GO_SHA="${GO_SHA256_AMD64}"; fi \
+    && curl -fsSLo /tmp/go.tgz https://go.dev/dl/go${GOVERSION}.linux-${ARCH}.tar.gz \
+    && echo "${GO_SHA}  /tmp/go.tgz" | sha256sum -c - \
+    && tar -xzC /usr/local -f /tmp/go.tgz \
+    && rm /tmp/go.tgz
+RUN GOBIN=/out go install -ldflags="-s -w" -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v${NUCLEI_VERSION}
+
+FROM ubuntu:26.04
 
 RUN ARCH=$(dpkg --print-architecture) \
     && if [ "${ARCH}" != "arm64" ] && [ "${ARCH}" != "amd64" ]; then \
@@ -38,88 +48,38 @@ ENV DEBIAN_FRONTEND="noninteractive" \
     TZ="UTC"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV GOROOT="/usr/local/go"
-ENV GOPATH="/root/go"
-ENV PATH="/opt/venv/bin:${PATH}:${GOROOT}/bin:${GOPATH}/bin"
+ENV PATH="/opt/venv/bin:${PATH}"
 
-# System packages. tzdata matters: without zone data Python's zoneinfo (used by bbot) cannot find "UTC".
+# System packages. tzdata matters: without zone data Python's zoneinfo (Django's time zones) cannot find "UTC".
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     build-essential \
-    bzip2 \
     ca-certificates \
-    cargo \
-    cmake \
     curl \
     fonts-dejavu-core \
     gcc \
     git \
-    jq \
     libharfbuzz-subset0 \
     libpango-1.0-0 \
     libpangoft2-1.0-0 \
-    libpcap-dev \
     libpq-dev \
     libssl-dev \
-    netcat-openbsd \
     python3 \
     python3-dev \
     python3-pip \
     python3-venv \
-    rustc \
-    tzdata \
-    wget && \
+    tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Legacy GeoIP lookups (geoiplookup); the package is not in every release, so its absence is not fatal.
 RUN apt-get update -y && (apt-get install -y --no-install-recommends geoip-bin geoip-database || echo "geoip packages not available: IP geolocation is skipped") && \
     rm -rf /var/lib/apt/lists/*
 
-# Go toolchain, checksum verified
-RUN ARCH=$(dpkg --print-architecture) \
-    && if [ "${ARCH}" = "arm64" ]; then GO_SHA="${GO_SHA256_ARM64}"; else GO_SHA="${GO_SHA256_AMD64}"; fi \
-    && curl -fsSLo /tmp/go.tgz https://go.dev/dl/go${GOVERSION}.linux-${ARCH}.tar.gz \
-    && echo "${GO_SHA}  /tmp/go.tgz" | sha256sum -c - \
-    && tar -xzC /usr/local -f /tmp/go.tgz \
-    && rm /tmp/go.tgz
-
-# nmap, the current release (the distribution package lags by years), checksum verified. On amd64 the official release RPM is
-# unpacked (no compile: minutes saved on every uncached build and the binary is the one the nmap project ships); on arm64 there is no
-# official binary, so the release tarball is compiled. Either way it lives under /usr/local, where nmap_scan.py looks for its data.
-RUN set -e; cd /tmp \
-    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-        curl -fsSLO https://nmap.org/dist/nmap-${NMAPVERSION}-1.x86_64.rpm \
-        && echo "${NMAP_RPM_SHA256_AMD64}  nmap-${NMAPVERSION}-1.x86_64.rpm" | sha256sum -c - \
-        && apt-get update -y && apt-get install -y --no-install-recommends libarchive-tools \
-        && mkdir nmap-rpm && bsdtar -xf nmap-${NMAPVERSION}-1.x86_64.rpm -C nmap-rpm \
-        && install -D -m 0755 nmap-rpm/usr/bin/nmap /usr/local/bin/nmap \
-        && mkdir -p /usr/local/share && cp -r nmap-rpm/usr/share/nmap /usr/local/share/nmap \
-        && apt-get purge -y libarchive-tools && rm -rf /var/lib/apt/lists/* nmap-rpm nmap-${NMAPVERSION}-1.x86_64.rpm; \
-    else \
-        curl -fsSLO https://nmap.org/dist/nmap-${NMAPVERSION}.tar.bz2 \
-        && echo "${NMAP_SHA256}  nmap-${NMAPVERSION}.tar.bz2" | sha256sum -c - \
-        && tar xjf nmap-${NMAPVERSION}.tar.bz2 \
-        && cd nmap-${NMAPVERSION} \
-        && ./configure --prefix=/usr/local --without-zenmap --without-ndiff --without-nmap-update \
-        && make -j"$(nproc)" \
-        && make install \
-        && cd / && rm -rf /tmp/nmap-${NMAPVERSION}*; \
-    fi \
-    && nmap --version | head -2
-# The packaged binary looks for its data under /usr/share/nmap; the compiled one under /usr/local/share/nmap. One variable fixes both.
-ENV NMAPDIR=/usr/local/share/nmap
-# the scripts and data are found on both architectures, not only the version string
-RUN nmap --script-help ssl-cert | grep -q '^ssl-cert' && test -s "$NMAPDIR/nmap-service-probes"
+# nuclei, from the build stage
+COPY --from=nuclei-build /out/nuclei /usr/local/bin/nuclei
 
 # Make directory for app
 WORKDIR /usr/src/app
-
-ENV GO111MODULE=on
-RUN printf "\
-    github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v${NUCLEI_VERSION}\n\
-    github.com/projectdiscovery/naabu/v2/cmd/naabu@v${NAABU_VERSION}\n" | \
-    xargs -L1 go install -ldflags="-s -w" -v && \
-    rm -rf /go/pkg/* && rm -rf /root/.cache/go-build
 
 # Update Nuclei and Nuclei-Templates (refreshed daily at runtime by the update_nuclei_templates task)
 RUN nuclei -update-templates
@@ -130,62 +90,21 @@ COPY ./requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Web screenshots (web/cveFeed/web_shot.py): Playwright's own headless Chromium, installed with the operating system libraries it needs on this release.
-# Playwright 1.64 knows Ubuntu 26.04 on amd64 and arm64 (the library names changed with the release, which is what bbot's own Chromium installer gets wrong
-# here, and why screenshots never worked through it). The browser is fixed by the Playwright pin in requirements.txt: PLAYWRIGHT_CHROMIUM_VERSION is the
-# build that release drives, and the build fails if it launches anything else, so a Playwright bump that moves the browser is read before it ships. Only the
-# headless shell is installed (it is what a screenshot needs, and about 100 MB smaller than the full browser). It is launched as root and as the unprivileged
-# account the screenshot worker runs it as (nobody), against about:blank (there is no checksum of the download to pin: Playwright fetches its own pinned revision, and this launch check is what verifies it), so a missing library or an unreadable install stops the build instead of the first scan.
-# Chromium's sandbox cannot be checked here: build steps run under the builder's default seccomp profile, which refuses the user namespaces the sandbox
-# needs (so this check launches without it). The running celery container has Playwright's seccomp profile (docker-compose.yml) and proves the sandbox
-# engages at every start (manage.py check_screenshot_sandbox) and before every batch of pages (cveFeed/shot_worker.py); CI runs the built image with and
-# without the profile (.github/workflows/build-pr.yml). A Playwright bump that moves the browser means rebuilding the image: nothing updates Chromium in place.
-ARG PLAYWRIGHT_CHROMIUM_VERSION=156.0.8078.4
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN set -e; playwright install --with-deps --only-shell chromium \
-    && rm -rf /var/lib/apt/lists/* \
-    && chmod -R a+rX /opt/pw-browsers \
-    && CHECK="import sys; from playwright.sync_api import sync_playwright as sp; p = sp().start(); b = p.chromium.launch(args=['--disable-dev-shm-usage']); pg = b.new_page(); pg.goto('about:blank'); v = b.version; b.close(); p.stop(); print('chromium', v); sys.exit(0 if v == '${PLAYWRIGHT_CHROMIUM_VERSION}' else 1)" \
-    && python3 -c "$CHECK" \
-    && runuser -u nobody -- env HOME=/tmp python3 -c "$CHECK"
-
-# bbot (isolated venv so its dependency pins cannot clash with the application's)
-RUN python3 -m venv /opt/bbot-venv && \
-    /opt/bbot-venv/bin/pip install --no-cache-dir bbot==${BBOT_VERSION} tzdata==${TZDATA_VERSION} && \
-    ln -s /opt/bbot-venv/bin/bbot /usr/local/bin/bbot
-# Fail the build when this bbot no longer reads the way cvENGINE passes it API keys (a preset file listed after the named presets,
-# which must still load every module of the default scan). bbot 3.x rejects a config file after -c and ignores all but the last -p,
-# and both used to make scans quietly find nothing. It runs no scan, but bbot installs the dependencies of the modules it loads before the dry run
-# stops, so this is also what bakes gowitness and its Chromium into the image (screenshots need them) instead of fetching them in a running worker.
-RUN printf 'config:\n  modules:\n    shodan_dns:\n      api_key: build-check\n' > /tmp/keys.yml && \
-    bbot -t example.com -p subdomain-enum web web-screenshots /tmp/keys.yml -rf safe --force --dry-run -v 2>&1 | tee /tmp/bbot-check.txt | \
-        grep -q 'Loading [0-9]* scan modules:.*shodan_dns' && \
-    grep -q 'gowitness' /tmp/bbot-check.txt && \
-    bbot -t example.com -p subdomain-enum /tmp/keys.yml --current-preset 2>&1 | grep -q 'api_key: build-check' && \
-    ! grep -q 'Error parsing' /tmp/bbot-check.txt && rm -f /tmp/keys.yml /tmp/bbot-check.txt
-
-# WPScan, run against every host that shows any sign of WordPress, quick pass in the scan and a thorough pass in the background (see docs/CONFIGURATION.md for its licence).
-# Pinned; its vulnerability metadata is fetched now and refreshed by WPScan itself while it runs.
-ARG WPSCAN_VERSION=4.2.0
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends ruby ruby-dev libcurl4-openssl-dev libxml2-dev libxslt1-dev libffi-dev zlib1g-dev && \
-    gem install wpscan -v ${WPSCAN_VERSION} --no-document && \
-    (wpscan --update --no-banner || echo "WPScan database not fetched at build time; it updates on first use") && \
-    rm -rf /var/lib/apt/lists/* /root/.gem/cache
-
-# testssl.sh (GPLv2, run as a separate program) audits the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named
-# TLS vulnerabilities (see cveFeed/testssl_scan.py). Pinned tarball with its checksum, never a branch. It needs dig (--nodns none still checks
-# for it), hexdump and ps; the x86_64 tarball bundles an openssl that still speaks SSLv2/SSLv3 and export ciphers (arm64 uses the system openssl).
-ARG TESTSSL_VERSION=3.2.4
-ARG TESTSSL_SHA256=98528f8a0ac07f1e226efaa8ead438247df8efcb8fee4e056a937ab82a305490
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends bind9-dnsutils bsdextrautils procps && \
-    curl -fsSL -o /tmp/testssl.tar.gz "https://testssl.sh/testssl.sh-${TESTSSL_VERSION}.tar.gz" && \
-    echo "${TESTSSL_SHA256}  /tmp/testssl.tar.gz" | sha256sum -c - && \
-    mkdir -p /opt/testssl && tar -xzf /tmp/testssl.tar.gz -C /opt/testssl --strip-components=1 && \
-    ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh && \
-    rm -f /tmp/testssl.tar.gz && rm -rf /var/lib/apt/lists/* && \
-    testssl.sh --version 2>&1 | grep -q "${TESTSSL_VERSION}"
+# The Sentinel library (scan policy, parsers, the result contract the server reads) at the NEWEST build of SENTINEL_REF (default main), resolved to a commit when the
+# image is built. web/requirements.txt pins a known-good floor commit, which CI and a plain pip install use; this installs the newest over it, so a server built today reads
+# the contract of today's Sentinel. SENTINEL_SHA (docker-compose.yml, from scripts/sentinel-ref.sh) is that commit, passed in so Docker rebuilds the layer when main
+# moved; empty, it is resolved here. pip records the installed commit (direct_url.json), which the About page and the Sentinels page read (agentapi/sentinel_source.py).
+ARG SENTINEL_REPO=https://github.com/hevnsnt/cvENGINE-sentinel
+ARG SENTINEL_REF=main
+ARG SENTINEL_SHA=
+RUN set -eu; sha="$SENTINEL_SHA"; \
+    if [ -z "$sha" ]; then sha=$(printf '%s' "$SENTINEL_REF" | grep -E '^[0-9a-f]{40}$' || git ls-remote "$SENTINEL_REPO" "refs/heads/$SENTINEL_REF" "refs/tags/$SENTINEL_REF^{}" "refs/tags/$SENTINEL_REF" | awk '{print $1}' | head -n 1); fi; \
+    printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$' || { echo "could not resolve SENTINEL_REF=$SENTINEL_REF to a commit of $SENTINEL_REPO" >&2; exit 1; }; \
+    pip install --no-cache-dir "cvengine-scanner @ git+${SENTINEL_REPO}@${sha}" \
+    && python -c "import json,importlib.metadata as m; print('Sentinel library', json.loads(m.distribution('cvengine-scanner').read_text('direct_url.json'))['vcs_info']['commit_id'])"
+# what the image was asked for (the commit it holds is in the package's direct_url.json: `docker run --rm cvengine/web:latest python -c ...`, and on the About page)
+LABEL com.cvengine.sentinel.ref="${SENTINEL_REF}" \
+      com.cvengine.sentinel.sha="${SENTINEL_SHA}"
 
 # Copy source code
 COPY . /usr/src/app/

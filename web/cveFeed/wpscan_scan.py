@@ -1,30 +1,25 @@
-"""WPScan as the primary WordPress assessment.
+"""The WordPress assessment: what the server does around a Sentinel's WordPress scan.
 
 Every host that shows any sign of WordPress is checked: a technology tag, a header or page signature, the login page, the REST API,
 the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A cheap read-only probe
 (``cveFeed.probes``, probe ``wordpress-detect``) confirms the signature with browser-like requests, follows apex and www redirects, and
-records an edge that challenged the scanner instead of concluding "not WordPress". Then WPScan runs on every candidate and on every name of
-a grouped host that probes positive. Nothing is skipped silently: each candidate ends in a recorded state on the host (``state_of``).
+records an edge that challenged the scanner instead of concluding "not WordPress". Then a Sentinel scans every candidate and every name of
+a grouped host that probes positive (task kind ``wpscan``, ``agentapi.sentinel_dispatch.wrap_wpscan_runner``): this server never runs the scan
+itself, and with no scanner able to take it the sites stay due. Nothing is skipped silently: each candidate ends in a recorded state on the
+host (``state_of``).
 
-WPScan runs read-only (version, plugins, themes, config backups, database exports, timthumbs and the first author ids; no password
-guessing). Its vulnerability data comes from the wpscan.com API, so the token is a project or organization API key (Settings, API keys,
-WPScan), given to WPScan in its environment and never on the command line or in a log. The free plan allows 25 requests a day: when the
-budget is spent WPScan still runs without the token (versions, plugins, themes, exposures and users come from the scan itself) and the
-host says its vulnerability data was not checked.
+The Sentinel reports a raw JSON report, an exit code and the tail of stderr; ``_classify`` turns that into a report or a classified failure.
+Nothing in a report is trusted or executed: it is clipped and stored. The report's vulnerability data comes from a vulnerability API, so the
+token is a project or organization API key (Settings, API keys), sent with the one task and scrubbed from it afterwards. The free plan allows
+25 requests a day: when the budget is spent the scan still runs without the token (versions, plugins, themes, exposures and users come from the
+scan itself) and the host says its vulnerability data was not checked.
 
-Results become findings (source ``wpscan``, with CVE ids where WPScan names them and what to do about them), technology rows and, for the
+Results become findings (source ``wpscan``, with CVE ids where the report names them and what to do about them), technology rows and, for the
 core, every plugin and every theme, versioned sightings (``ProbeObservation`` rows) that ``cveFeed.wp_correlation`` correlates with CVEs by
-exact plugin identity.
-
-WPScan's own licence allows testing your own systems and penetration testing, and requires a commercial licence for managed or hosted
-services (see docs/CONFIGURATION.md)."""
-import json
+exact plugin identity."""
 import logging
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import time
 from datetime import timedelta
 
@@ -32,34 +27,37 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-WPSCAN_BIN = 'wpscan'
 SERVICE = 'wpscan'
 PARTIAL_SERVICE = 'wpscan-partial'  # a run that finished but could not check vulnerability data: asked again soon
 PROBE_SERVICE = 'wp-probe'
-DEFAULT_TIMEOUT = 15 * 60
 DEFAULT_MAX_SITES = 20
-# WPScan 4: plugins are no longer enumerated by default, so the tokens are explicit. ap and at list the plugins and themes the site's own pages
-# reference (with versions, no API token needed); cb config backups; dbe database exports; u1-10 the first author ids. vp and vt only report
-# vulnerable ones and need the API, so they cannot give versions without a token. tt (timthumbs, 2,568 requests alone) is opt-in
-# (CVENGINE_WPSCAN_TIMTHUMBS=1). Plugin and theme detection are set to passive explicitly: in WPScan 4 they fall back to the global
-# --detection-mode, and mixed with "ap" asks for every plugin and theme slug WPScan knows (about 170,000 requests), which no run survives.
-ENUMERATE = 'ap,at,cb,dbe,u1-10'
-MAX_OUTPUT = 8 * 1024 * 1024
-THROTTLE_MS = 100  # --throttle waits between requests (and runs WPScan on one thread): gentle on the site and on its WAF
 DEFAULT_STAGE_SECONDS = 60 * 60
-# The thorough pass: plugin and theme detection in mixed mode asks the site for every plugin and theme slug WPScan knows (about 170,000
+QUEUE = 'wpscan_queue'
+# The thorough pass: plugin and theme detection in mixed mode asks the site for every plugin and theme slug the scanner knows (about 170,000
 # requests), which finds the ones a page never links. It takes hours, so it is never part of the scan: a one-site-at-a-time background task
-# (``run_thorough``) with its own long timeout, started after the quick pass, resumable and never blocking correlation or triage.
+# (``run_thorough``) that hands each site to a Sentinel as the task kind ``wpscan_thorough`` (its own long budget, one per project at a time),
+# started after the quick pass, resumable and never blocking correlation or triage. This server never runs it.
 THOROUGH_PROBE = 'wpscan-thorough'
 THOROUGH_SERVICE = 'wpscan-thorough'
-THOROUGH_QUEUE = 'wpscan_queue'
+THOROUGH_QUEUE = QUEUE
+THOROUGH_KIND = 'wpscan_thorough'
 DEFAULT_THOROUGH_TIMEOUT = 12 * 60 * 60
-THOROUGH_ENUMERATE = 'ap,at,tt'
+MIN_THOROUGH_TIMEOUT = 600
+MAX_THOROUGH_TIMEOUT = 24 * 60 * 60  # what the contract and the Sentinel accept: a longer budget is held to this
+THOROUGH_RETRIES = 6  # times the pass is asked again when no scanner could take it (``cveFeed.tasks.wpscan_thorough``)
+THOROUGH_RETRY_DELAY = 30 * 60  # seconds; the n-th retry waits n times this
 THOROUGH_STATES = ('pending', 'running', 'done', 'partial', 'blocked', 'failed')
 
 
-def timthumbs():
-    return os.environ.get('CVENGINE_WPSCAN_TIMTHUMBS', '').strip().lower() in ('1', 'true', 'yes', 'on')
+def thorough_timeout():
+    """Seconds one site's thorough pass may take on a Sentinel (``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default, between ten minutes
+    and a day): it travels with the task, the Sentinel ends the scan 30 seconds before it and reports what it read, and the broker keeps the task's
+    lease alive for that long (plus a grace to report) and no longer."""
+    try:
+        value = int(os.environ.get('CVENGINE_WPSCAN_THOROUGH_TIMEOUT', DEFAULT_THOROUGH_TIMEOUT))
+    except ValueError:
+        return DEFAULT_THOROUGH_TIMEOUT
+    return min(MAX_THOROUGH_TIMEOUT, max(MIN_THOROUGH_TIMEOUT, value))
 
 
 def stage_seconds():
@@ -69,34 +67,15 @@ def stage_seconds():
         return DEFAULT_STAGE_SECONDS
 
 
-def thorough_timeout():
-    try:
-        return max(600, int(os.environ.get('CVENGINE_WPSCAN_THOROUGH_TIMEOUT', DEFAULT_THOROUGH_TIMEOUT)))
-    except ValueError:
-        return DEFAULT_THOROUGH_TIMEOUT
-
-
-def wpscan_args(timeout, thorough=False, proxy_args=()):
-    """The WPScan options for one site. ``--max-scan-duration`` ends the scan 30 seconds before the process would be killed, so a slow site
-    still gives a partial report instead of nothing. The quick pass reads plugins and themes passively; the thorough pass asks for every one
-    WPScan knows (mixed detection) and the timthumbs. ``proxy_args`` is the egress proxy's argument list (``cveFeed.egress_proxy.for_tool('wpscan')``,
-    empty for a direct run)."""
-    mode = 'mixed' if thorough else 'passive'
-    enumerate_ = THOROUGH_ENUMERATE if thorough else ENUMERATE + (',tt' if timthumbs() else '')
-    return ['--format', 'json', '--no-banner', '--random-user-agent', '--throttle', str(THROTTLE_MS), '--request-timeout', '30',
-            '--connect-timeout', '15', '--detection-mode', 'mixed', '--plugins-detection', mode, '--themes-detection', mode,
-            '--disable-tls-checks', '--enumerate', enumerate_, '--max-scan-duration', str(max(30, timeout - 30)), *proxy_args]
-
-
 OK_EXIT_CODES = (0, 5)  # 5 means "vulnerabilities found"; 1 bad option, 2 interrupted, 3 unexpected exception, 4 the scan did not finish
-# severity of WPScan's "interesting findings" by their type; unlisted types are informational
+# severity of the scan's "interesting findings" by their type; unlisted types are informational
 INTERESTING_SEVERITY = {'config_backup': 3, 'db_export': 3, 'debug_log': 2, 'upload_directory_listing': 1, 'multisite': 0, 'xmlrpc': 1,
                         'registration': 1, 'search_replace_db2': 3, 'full_path_disclosure': 1}
 CVE_PART = re.compile(r'^(?:CVE-)?(\d{4}-\d{4,})$', re.I)
 NOT_WORDPRESS = re.compile(r'not seem to be running wordpress', re.I)
 BLOCKED = re.compile(r'\b(?:403|429|503|forbidden|blocked|waf|firewall|captcha|challenge|access denied|too many requests)\b', re.I)
 VULN_DATA = {'checked': 'checked', 'no_token': 'not checked: no API token', 'exhausted': 'not checked: API token budget exhausted',
-             'error': 'not checked: the WPScan API returned an error'}
+             'error': 'not checked: the vulnerability API returned an error'}
 BUDGET_ERROR = re.compile(r'limit|quota|exhaust|too many|requests', re.I)
 # any of these in a technology name says the host runs (or is hosted for) WordPress
 WP_TECH = re.compile(r'^(wordpress|woocommerce|wp ?engine|elementor|wpml|yoast|wp-)', re.I)
@@ -107,18 +86,11 @@ QUICK_DELAY = 120    # seconds; the n-th retry waits n times this
 
 
 class NotWordPress(ValueError):
-    """WPScan could reach the site and it is not WordPress."""
+    """The scan could reach the site and it is not WordPress."""
 
 
 class Blocked(RuntimeError):
-    """WPScan was refused or challenged by an edge (a 403, 429 or 503, a captcha or a challenge page)."""
-
-
-def wpscan_timeout():
-    try:
-        return max(60, int(os.environ.get('CVENGINE_WPSCAN_TIMEOUT', DEFAULT_TIMEOUT)))
-    except ValueError:
-        return DEFAULT_TIMEOUT
+    """The scan was refused or challenged by an edge (a 403, 429 or 503, a captcha or a challenge page)."""
 
 
 def max_sites():
@@ -135,12 +107,8 @@ def max_probe_hosts():
         return 100
 
 
-def installed():
-    return shutil.which(WPSCAN_BIN) is not None
-
-
 def api_token(project):
-    """The project's (or its organization's) WPScan token, or ''."""
+    """The project's (or its organization's) WordPress vulnerability API token, or ''."""
     from cveFeed.api_credentials import resolve_for_project
     return (resolve_for_project(project).get('wpscan') or {}).get('api_key') or ''
 
@@ -149,7 +117,7 @@ def severity_from_score(score):
     try:
         score = float(score)
     except (TypeError, ValueError):
-        return 2  # WPScan did not rate it: medium
+        return 2  # the scan did not rate it: medium
     return 4 if score >= 9 else 3 if score >= 7 else 2 if score >= 4 else 1
 
 
@@ -228,91 +196,41 @@ def _base_of(sub):
     return base if base.startswith(('http://', 'https://')) else f'https://{sub.name}'
 
 
-# ----------------------------------------------------------------------------- running WPScan
-
-def _read_report(path):
-    if not os.path.exists(path) or os.path.getsize(path) > MAX_OUTPUT:
-        return None
-    with open(path, encoding='utf-8', errors='replace') as f:
-        try:
-            return json.load(f)
-        except ValueError:
-            return None
-
-
-# what WPScan (a Ruby program that talks to an untrusted site) needs from the worker's environment; the database password, the field-encryption
-# key and every other secret stay out of it
-CHILD_ENV_KEYS = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'GEM_HOME', 'GEM_PATH', 'BUNDLE_PATH', 'RUBYLIB', 'RUBYOPT', 'SSL_CERT_FILE',
-                  'SSL_CERT_DIR', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy',
-                  'https_proxy', 'no_proxy')
-
-
-def child_env(token):
-    env = {k: os.environ[k] for k in CHILD_ENV_KEYS if k in os.environ}
-    if token:
-        env['WPSCAN_API_TOKEN'] = token  # the environment is where WPScan reads its token: never the command line
-    return env
-
-
-def url_host(url):
-    from urllib.parse import urlsplit
-    return (urlsplit(url).hostname or '')[:80]
-
-
-def run_wpscan_process(url, token, timeout=None, thorough=False):
-    """Run WPScan on one site and return its parsed JSON report (local execution only - see ``_classify`` for what a
-    Sentinel-dispatched run shares with this). The token travels in the environment."""
-    from cveFeed import egress_proxy, heavy_process
-    from targetApp.target_types import refuse_local
-    refuse_local('WPScan')
-    env = child_env(token)
-    proxy_args = egress_proxy.for_tool('wpscan', [url_host(url)])  # Settings > Proxy: raises when it is on and no proxy suits WPScan
-    with tempfile.TemporaryDirectory(prefix='wpscan-') as tmp:
-        out = os.path.join(tmp, 'report.json')
-        limit = timeout or (thorough_timeout() if thorough else wpscan_timeout())
-        # under the resource gate: a pause or a stopped scan kills WPScan and its ruby children, and it waits for memory like nmap does
-        # stdout too: WPScan prints "Scan Aborted: --url ..." for a refused option or address there, and without it the reason was only "exit 1"
-        proc = heavy_process.run('wpscan', [WPSCAN_BIN, '--url', url, *wpscan_args(limit, thorough, proxy_args), '-o', out], limit, label=url_host(url), env=env,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return _classify(_read_report(out), proc.returncode, last_line(proc.stderr) or last_line(proc.stdout), token)
-
-
 def last_line(text):
-    """The last non-empty line of a process's output, clipped: what WPScan said last, for a failure that wrote no report."""
+    """The last non-empty line of a process's output, clipped: what the scanner said last, for a failure that wrote no report."""
     lines = [line.strip() for line in str(text or '').splitlines() if line.strip()]
     return lines[-1][:300] if lines else ''
 
 
-# what WPScan's own exit codes mean (wpscan/exit_code.rb) when nothing else says why it stopped
-EXIT_MEANING = {1: 'WPScan refused its options or the address it was given', 2: 'WPScan was interrupted', 3: 'WPScan hit an unexpected error'}
+# what the scanner's own exit codes mean when nothing else says why it stopped
+EXIT_MEANING = {1: 'the scan refused its options or the address it was given', 2: 'the scan was interrupted', 3: 'the scan hit an unexpected error'}
 
 
 def _classify(report, returncode, stderr='', token=''):
-    """A wpscan process's outcome - its own exit code, its JSON report if it wrote one, and stderr if it did not - turned
-    into a report dict, or raised as ``NotWordPress``/``Blocked``/``RuntimeError``. The one function either a local run
-    (``run_wpscan_process``) or a Sentinel's reported ``{report, returncode, stderr_tail}`` (``agentapi.sentinel_dispatch.
-    wrap_wpscan_runner``) goes through, so a dispatched site is classified exactly as a local one would be - no
-    detection logic (what counts as "not WordPress" or "blocked") is duplicated on the Sentinel side.
+    """A Sentinel's reported outcome of one WordPress scan - the scanner's exit code, its JSON report if it wrote one, and the tail of stderr if it
+    did not - turned into a report dict, or raised as ``NotWordPress``/``Blocked``/``RuntimeError``. The one function every dispatched site goes
+    through (``agentapi.sentinel_dispatch.wrap_wpscan_runner``), so what counts as "not WordPress" or "blocked" is decided here and nowhere
+    else. Nothing in the report or the text is trusted: the text is clipped and the token redacted.
 
-    Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (WPScan says
-    the site is up and is not WordPress), ``Blocked`` (an edge refused or challenged WPScan) or a ``RuntimeError``
-    (including no report at all). A report that has results despite the abort is returned, marked ``cvengine_partial``."""
+    Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (the scan says the site is up and
+    is not WordPress), ``Blocked`` (an edge refused or challenged the scan) or a ``RuntimeError`` (including no report at all). A report that has
+    results despite the abort is returned, marked ``cvengine_partial``."""
     if returncode == 4:
         if report is None:
-            raise RuntimeError('WPScan did not finish and wrote no report')  # not "not WordPress": nothing was read
+            raise RuntimeError('the scan did not finish and wrote no report')  # not "not WordPress": nothing was read
         reason = str(report.get('scan_aborted') or '')
         if any(report.get(k) for k in ('version', 'plugins', 'themes', 'interesting_findings')):
             return {**report, 'cvengine_partial': reason[:120] or 'the scan did not finish'}  # what it read before it stopped
         if NOT_WORDPRESS.search(reason):
-            raise NotWordPress('WPScan says the site is up and is not running WordPress')
+            raise NotWordPress('the scan says the site is up and is not running WordPress')
         if BLOCKED.search(reason):
             raise Blocked(_redact(reason, token))
         raise RuntimeError(_redact(reason or 'the scan did not finish', token))
     if returncode not in OK_EXIT_CODES:
         said = last_line(stderr)
-        raise RuntimeError(_redact(said or f'{EXIT_MEANING.get(returncode, "WPScan stopped")} (exit {returncode})', token))
+        raise RuntimeError(_redact(said or f'{EXIT_MEANING.get(returncode, "the scan stopped")} (exit {returncode})', token))
     if report is None:
-        raise RuntimeError('WPScan wrote no usable report')
+        raise RuntimeError('the scan wrote no usable report')
     return report
 
 
@@ -334,8 +252,8 @@ def _urls(references):
 
 
 def _vuln_rows(report, base):
-    """``[(name, severity, description, cves, references, component)]`` from one WPScan report: the vulnerabilities of the core, the main
-    theme, every plugin and theme, what WPScan found exposed, users, and components it calls outdated. Each says what to do."""
+    """``[(name, severity, description, cves, references, component)]`` from one WordPress scan report: the vulnerabilities of the core, the main
+    theme, every plugin and theme, what the scan found exposed, users, and components it calls outdated. Each says what to do."""
     rows = []
 
     def add(component, version, items):
@@ -346,20 +264,20 @@ def _vuln_rows(report, base):
             note = f'Fixed in {fixed}. Remediation: update {component} to {fixed} or later.' if fixed else (
                 'No fixed version is listed. Remediation: remove or replace the component, or restrict access to it.')
             rows.append((f'{label}: {v.get("title", "known vulnerability")}'[:500], severity_from_score(cvss.get('score')),
-                         f'{note} Reported by WPScan for {label}.', _cves(v.get('references')), _urls(v.get('references')), component))
+                         f'{note} Reported by the WordPress scan for {label}.', _cves(v.get('references')), _urls(v.get('references')), component))
 
     def outdated(component, info):
         latest = info.get('latest_version')
         version = (info.get('version') or {}).get('number')
         if info.get('outdated') and latest and version:
             rows.append((f'{component} {version} is outdated (latest {latest})'[:500], 1,
-                         f'WPScan reports {component} {version}; the latest release is {latest}. Remediation: update {component}.',
+                         f'The WordPress scan reports {component} {version}; the latest release is {latest}. Remediation: update {component}.',
                          [], [], f'{component} outdated'))
     version = report.get('version') or {}
     add('WordPress', version.get('number') or '', version.get('vulnerabilities'))
     if version.get('status') == 'outdated' and version.get('number'):
         rows.append((f'WordPress {version["number"]} is outdated'[:500], 1,
-                     f'WPScan reports WordPress {version["number"]} as outdated. Remediation: update WordPress.', [], [], 'WordPress outdated'))
+                     f'The WordPress scan reports WordPress {version["number"]} as outdated. Remediation: update WordPress.', [], [], 'WordPress outdated'))
     theme = report.get('main_theme') or {}
     add(f'WordPress theme {theme.get("slug", "")}', (theme.get('version') or {}).get('number') or '', theme.get('vulnerabilities'))
     if theme.get('slug'):
@@ -373,7 +291,7 @@ def _vuln_rows(report, base):
         severity = INTERESTING_SEVERITY.get(kind)
         if severity is None:
             continue  # headers, robots, readme and the like are not findings
-        rows.append((f'WordPress: {item.get("to_s", kind)}'[:500], severity, f'WPScan found {kind.replace("_", " ")} at {item.get("url", base)}. '
+        rows.append((f'WordPress: {item.get("to_s", kind)}'[:500], severity, f'The WordPress scan found {kind.replace("_", " ")} at {item.get("url", base)}. '
                      'Remediation: remove or restrict access to it.', [], _urls(item.get('references')), kind))
     users = sorted((report.get('users') or {}))[:10]
     if users:
@@ -404,7 +322,7 @@ def _technologies(report):
 
 def components(report):
     """``[(kind, slug, version, extra)]`` for the core, every plugin and every theme in a report (kind ``core``, ``wp-plugin``, ``wp-theme``);
-    a component whose version WPScan could not read has an empty version. Slugs are cut to a safe alphabet."""
+    a component whose version the scan could not read has an empty version. Slugs are cut to a safe alphabet."""
     out = [('core', 'WordPress', str((report.get('version') or {}).get('number') or ''), {'status': (report.get('version') or {}).get('status') or ''})]
     for kind, items in (('wp-plugin', report.get('plugins')), ('wp-theme', report.get('themes'))):
         for slug, info in list((items or {}).items())[:200]:
@@ -417,7 +335,7 @@ def components(report):
 
 
 def vulnerability_data(report, token):
-    """Whether WPScan could check vulnerability data: ``checked``, ``no_token``, ``exhausted`` (the API says its limit is reached) or ``error``
+    """Whether the scan could check vulnerability data: ``checked``, ``no_token``, ``exhausted`` (the API says its limit is reached) or ``error``
     (any other API error: the token may be fine, so it is not given up)."""
     api = report.get('vuln_api') or {}
     if not token:
@@ -448,7 +366,7 @@ def persist_report(scan, sub, url, report):
     try:
         finding_lifecycle.close_fixed_wpscan_rows(scan, sub, report, seen)
     except Exception:  # noqa: BLE001 - closing what a newer version fixed never fails the stage; the next scan tries again
-        logger.exception('could not close the fixed WPScan findings of %s', getattr(sub, 'name', ''))
+        logger.exception('could not close the fixed WordPress scan findings of %s', getattr(sub, 'name', ''))
     added = 0
     for tech_name in _technologies(report):
         tech, _ = get_or_create_first(Technology, name=tech_name)
@@ -458,42 +376,43 @@ def persist_report(scan, sub, url, report):
     return new, added
 
 
-README_TITLE = re.compile(r'^===\s*(.{1,120}?)\s*===', re.M)
 MAX_TITLE_LOOKUPS = 8
 
 
-def plugin_titles(base, report, allowed, get=None, sleep=None, project=None):
-    """``{slug: title}`` read from each plugin's own readme.txt (``=== Plugin Name ===``, one small GET, at most MAX_TITLE_LOOKUPS per host): an
-    advisory names a plugin by its title, and a slug alone often differs from it. A plugin whose readme cannot be read has no title."""
-    import time
-
-    from cveFeed import probes
-    get = get or (lambda url: probes.fetch(url, allowed=allowed, project=project))
-    out = {}
-    for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]:
-        slug = re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80]
-        if not slug:
-            continue
-        (sleep or time.sleep)(probes.REQUEST_GAP)
-        try:
-            found = README_TITLE.search((get(f'{base.rstrip("/")}/wp-content/plugins/{slug}/readme.txt') or {}).get('body') or '')
-        except (OSError, ValueError):
-            continue
-        if found:
-            out[slug] = re.sub(r'[^A-Za-z0-9 ._+&()-]', '', found.group(1))[:120]
-    return out
+def plugin_titles(scan, sub, base, report):
+    """``{slug: title}`` read from each plugin's own readme.txt (``=== Plugin Name ===``, one small GET each, at most MAX_TITLE_LOOKUPS per host, made by
+    a Sentinel: ``page_read``, op ``readme``; this server sends nothing to the site): an advisory names a plugin by its title, and a slug alone often
+    differs from it. A plugin whose readme cannot be read has no title. Returns None when the titles are unknown (the read could not be made, or no
+    Sentinel could take it): ``record_components`` keeps the titles it already holds. A title is an enrichment, not a verdict, so an unanswered read
+    never discards the scan that was just made, and never turns into \"this plugin has no title\"."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    slugs = [re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80] for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]]
+    slugs = [slug for slug in dict.fromkeys(slugs) if slug and slug[0].isalnum() and '..' not in slug]
+    if not slugs:
+        return {}
+    try:
+        return probe_dispatch.readme_titles(scan.domain.project, scan, sub, base, slugs)
+    except (RuntimeError, ScannerUnavailable) as exc:  # the scanner could not make the read, or none could take it: unknown, never "no titles"
+        logger.info('plugin titles of %s were not read: %s', sub.name, exc)
+        return None
 
 
 def record_components(project_id, domain_id, host, report, titles=None):
-    """Store the core, plugin and theme versions WPScan read as sightings the CVE correlation uses (with the plugin title when a readme gave
+    """Store the core, plugin and theme versions the scan read as sightings the CVE correlation uses (with the plugin title when a readme gave
     one); a plugin that is no longer reported is removed. Returns the number of plugins and themes with a version."""
     from cveFeed.models import ProbeObservation
+    keep_known = titles is None  # the titles could not be read this time: the title each plugin row already holds stays
     titles = titles or {}
     now = timezone.now()
     keep = {'wpscan-plugin': set(), 'wpscan-theme': set()}
     versioned = 0
     for kind, slug, version, extra in components(report):
         probe = {'core': 'wpscan-core', 'wp-plugin': 'wpscan-plugin', 'wp-theme': 'wpscan-theme'}[kind]
+        if keep_known and kind == 'wp-plugin':
+            known = ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe=probe, product=slug).first()
+            if known and (known.evidence or {}).get('title'):
+                titles = {**titles, slug: known.evidence['title']}
         ProbeObservation.objects.update_or_create(
             project_id=project_id, host=host.lower(), probe=probe, port=0, kind='version' if kind == 'core' else kind, product=slug,
             defaults={'domain_id': domain_id, 'version': version[:100],
@@ -508,7 +427,7 @@ def record_components(project_id, domain_id, host, report, titles=None):
 
 
 def remaining_requests(report):
-    """WPScan API requests the token has left, from the report, or None when it does not say."""
+    """Vulnerability API requests the token has left, from the report, or None when it does not say."""
     value = (report.get('vuln_api') or {}).get('requests_remaining')
     return value if isinstance(value, int) else None
 
@@ -516,7 +435,7 @@ def remaining_requests(report):
 # ----------------------------------------------------------------------------- states: what happened to each candidate, on the host
 
 def record_state(project_id, domain_id, host, state, reason='', **extra):
-    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no WPScan result.
+    """Record where a WordPress candidate stands (one of STATES) with the reason, so a host never silently has no scan result.
 
     The core version the last successful scan read stays on the row through a run that could not read one (blocked by the edge, failed, waiting,
     queued): the host page shows the state with the version it last knew, and only a scan that read the site (``scanned``) or found it is not
@@ -565,7 +484,7 @@ def state_of(rows):
             'probe': detect_row.outcome if detect_row else '', 'hint': ((detect_row.evidence or {}).get('hint') if detect_row else '') or '',
             'thorough': thorough_of(rows)}
     if scan is not None and (scan.evidence or {}).get('state') == 'not_wordpress' and base['detected_how']:
-        return {**base, 'state': 'failed', 'reason': 'WPScan could not see WordPress, the probe did', 'scanned_at': scan.observed_at.isoformat()}
+        return {**base, 'state': 'failed', 'reason': 'the scan could not see WordPress, the probe did', 'scanned_at': scan.observed_at.isoformat()}
     if scan is not None:
         evidence = scan.evidence or {}
         return {**base, 'state': evidence.get('state') or 'failed', 'reason': evidence.get('reason', ''), 'scanned_at': scan.observed_at.isoformat(),
@@ -573,7 +492,7 @@ def state_of(rows):
                 'next_scan': evidence.get('next_scan', ''), 'core': scan.version}
     if detect_row is not None:
         if detect_row.outcome == 'found':
-            return {**base, 'state': 'detected', 'reason': 'WordPress was detected; WPScan has not run on it yet', 'core': detect_row.version}
+            return {**base, 'state': 'detected', 'reason': 'WordPress was detected; the scan has not run on it yet', 'core': detect_row.version}
         if detect_row.outcome == 'challenged':
             return {**base, 'state': 'blocked', 'reason': 'the edge challenged the scanner, so WordPress could not be confirmed'}
         if detect_row.outcome == 'absent':
@@ -618,11 +537,44 @@ def status_counts(project_ids=None):
 
 # ----------------------------------------------------------------------------- the stage
 
-def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only=None):
-    """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
-    Returns ``{host: first observation}`` for the hosts probed now."""
-    from cveFeed import ledger, probes, route_auth
+def _ask_wordpress(scan, chosen):
+    """``{host: observations}`` of the ``wordpress-detect`` probe a Sentinel ran for each ``(sub, bases)`` of ``chosen`` (``agentapi.probe_dispatch.try_http_probes``:
+    one ``http_probe`` task per chunk, this server asks the site for nothing). A host's bases are asked in order and the first that is WordPress ends
+    its list; an answer that is an error is no answer (``[]``: the host stays due, never read as \"not WordPress\"). Raises ``ScannerUnavailable``
+    when no Sentinel can take the work or a task ended with no result: nothing was asked, nothing is recorded."""
+    from agentapi import probe_dispatch
+    from cveFeed import probes
     from reNgine import resources
+    pending = {sub.name.lower(): (sub, list(bases)) for sub, bases in chosen}
+    results = {}
+    while pending:
+        planned, asked = [], {}
+        for host, (sub, bases) in pending.items():
+            entry = {'probe': 'wordpress-detect', 'label': probes.BY_ID['wordpress-detect']['label'], 'family': 'http', 'target': {'base': bases.pop(0)}, 'for': []}
+            asset = probes.asset_key(host, entry)
+            planned.append((sub, asset, entry))
+            asked[host] = asset
+        for start in range(0, len(planned), probe_dispatch.MAX_PROBES_PER_TASK):
+            if resources.abort_requested(scan.id) or resources.global_pause_requested(fail_closed=True):
+                return results
+            answered = probe_dispatch.try_http_probes(scan.domain.project, scan, planned[start:start + probe_dispatch.MAX_PROBES_PER_TASK])
+            for sub, asset, _entry in planned[start:start + probe_dispatch.MAX_PROBES_PER_TASK]:
+                got = answered.get(asset)
+                host = sub.name.lower()
+                if got is None or isinstance(got, Exception):
+                    logger.info('WordPress probe failed for %s: %s', host, type(got).__name__ if got is not None else 'no answer')
+                    got = []
+                results[host] = got
+        pending = {host: (sub, bases) for host, (sub, bases) in pending.items()
+                   if bases and not (results.get(host) and results[host][0]['outcome'] == 'found')}
+    return results
+
+
+def detect(scan, subs, candidates, force=False, only=None):
+    """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
+    The probe is a Sentinel's (``http_probe``, probe ``wordpress-detect``): this server sends nothing to a site. Returns ``{host: first observation}``
+    for the hosts probed now. ``ScannerUnavailable`` (no Sentinel can take it) propagates: nothing is recorded and every site stays due."""
+    from cveFeed import ledger, probes, route_auth
     project, domain = scan.domain.project_id, scan.domain
     by_name = {s.name.lower(): s for s in subs}
     siblings = siblings_of(subs, set(candidates))
@@ -631,27 +583,13 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only
     if only is not None:
         order = [h for h in order if h in only]
     covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
-    group = set(candidates) | siblings
     results = {}
-    kwargs = {'get': probe_get, 'project': project} if probe_get else {'project': project}
-    if sleep:
-        kwargs['sleep'] = sleep
+    chosen = [(by_name[host], route_auth.web_bases(by_name[host])) for host in order if host not in covered]
+    answers = _ask_wordpress(scan, chosen) if chosen else {}
     for host in order:
-        if host in covered:
+        if host in covered or host not in answers:
             continue
-        if resources.abort_requested(scan.id) or resources.global_pause_requested(fail_closed=True):
-            break
-        sub = by_name[host]
-        allowed = (group & set(by_name)) | probes.allowed_names(sub)
-        found = []
-        for base in route_auth.web_bases(sub):
-            try:
-                found = probes.run_http_probe('wordpress-detect', base, allowed, **kwargs)
-            except Exception as exc:  # noqa: BLE001 - one host failing never stops the rest
-                logger.info('WordPress probe failed for %s: %s', host, type(exc).__name__)
-                found = []
-            if found and found[0]['outcome'] == 'found':
-                break
+        sub, found = by_name[host], answers[host]
         if not found:
             ledger.record(PROBE_SERVICE, [host], project, scan, 'failed')
             continue
@@ -667,27 +605,31 @@ def detect(scan, subs, candidates, probe_get=None, sleep=None, force=False, only
     return results
 
 
-def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, internal=False, only=None, attempt=0):
-    """The pipeline stage: probe for WordPress, then WPScan every host that shows any sign of it (and every grouped name that probes
+def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, attempt=0):
+    """The pipeline stage: probe for WordPress, then scan every host that shows any sign of it (and every grouped name that probes
     positive), positive probes first. Never silent: every candidate gets a recorded state. Returns a summary dict; ``error`` is set only when
     every attempted site failed.
 
-    ``internal`` is the run for a host inside a declared internal network (``cveFeed.internal_scan``): WPScan runs only through a Sentinel inside
-    it with no local fallback, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
-    its own, to the site or to its plugin pages), and no thorough pass is queued (it would run from here).
+    ``internal`` is the run for a host inside a declared internal network (``cveFeed.internal_scan``): the scan runs only through a Sentinel inside
+    it, the sites are the ones the Sentinel-run technology pass already tagged as WordPress (this server sends no probe of
+    its own, to the site or to its plugin pages), and no thorough pass is queued (its Sentinel would not be inside the network).
 
     A site the stage cannot reach in time (over the per-scan limit, out of the stage's time budget, no memory for it) is not left for the next
     scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
     limits the run to those hosts (that job's call); ``attempt`` counts its retries. The summary's ``deferred`` lists the hosts queued."""
-    from cveFeed import activity, ledger, probes, wp_correlation
+    from cveFeed import activity, ledger, wp_correlation
     from reNgine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
     real_runner = runner is None
+    unavailable = None
     if real_runner:
         from agentapi import sentinel_dispatch
-        runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan, internal=internal)
+        try:
+            runner = sentinel_dispatch.wrap_wpscan_runner(domain.project, scan=scan, internal=internal)
+        except resources.ScannerUnavailable as exc:  # no scanner can take it and the scan may not run here: said below, once there is a site to scan
+            unavailable = exc
     allowed, _ips, _ports = _scan_targets(scan)
     subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports'))
     by_name = {s.name.lower(): s for s in subs}
@@ -696,20 +638,26 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
         signals = {h: v for h, v in signals.items() if h in only}
     for host, found in signals.items():
         record_signals(project, domain.id, host, found)
-    probed = {} if internal else detect(scan, subs, signals, probe_get=probe_get, sleep=sleep, force=force, only=only)
+    probed, probe_waiting = {}, None
+    if not internal:
+        try:
+            probed = detect(scan, subs, signals, force=force, only=only)
+        except resources.ScannerUnavailable as exc:  # no Sentinel can ask the sites: nothing is recorded, they stay due, and none is read as not WordPress
+            probe_waiting = exc
+            logger.warning('WordPress detection of scan %s is waiting for a scanner: %s', scan_id, exc)
     positive = {h for h, o in probed.items() if o['outcome'] == 'found'}
     for host in sorted(h for h, o in probed.items() if o['outcome'] == 'absent' and h not in signals):
         record_state(project, domain.id, host, 'not_wordpress', 'the probe found no WordPress signature')
     wanted = sorted(set(signals) | positive, key=lambda h: (h not in positive, h))
     deferred = []
     summary = {'candidates': len(signals), 'probed': len(probed), 'sites': len(wanted), 'scanned': 0, 'findings': 0, 'technologies': 0, 'reused': 0}
+    if probe_waiting is not None:  # the sites with a sign of WordPress are still scanned below; the ones only the probe could name wait for it
+        summary['probe_waiting'] = probe_waiting.kind
     wp_correlation.carry_forward(scan)
     if not wanted:
+        if probe_waiting is not None:  # nothing could be asked: not 'no WordPress here', and every site stays due
+            return {**summary, 'skipped': f'no scanner could take this work ({probe_waiting.kind}); the sites stay due until one can'}
         return summary
-    if runner is run_wpscan_process and not installed():
-        for host in wanted:
-            record_state(project, domain.id, host, 'unavailable', 'WPScan is not installed in this worker image')
-        return {**summary, 'skipped': 'wpscan is not installed'}
     fresh = set() if force else ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
     summary['reused'] = len([h for h in wanted if h in fresh])
     history = ledger.last_run(SERVICE, wanted, project)
@@ -723,30 +671,43 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     if not todo:
         summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
         return summary
+    if unavailable is not None:  # nothing is recorded in the ledger (the sites stay due) and it is not a failure: the next scan asks again
+        message = f'no scanner could take this work ({unavailable.kind}); the sites stay due until one can'
+        logger.warning('WordPress scan of scan %s is waiting for a scanner: %s', scan_id, unavailable)
+        for host in todo:
+            record_state(project, domain.id, host, 'waiting', f'no scanner could take this work ({unavailable.kind}); it goes first next time')
+        activity.log('run_check', f'WordPress scan for {domain.name} is waiting: {message}', project=project, scan_id=scan.id)
+        return {**summary, 'skipped': message}
     token = api_token(domain.project)
-    running = activity.log('run_check', f'WPScan is checking {len(todo)} WordPress site(s) of {domain.name}'
+    running = activity.log('run_check', f'The WordPress scan is checking {len(todo)} WordPress site(s) of {domain.name}'
                            + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
     errors, scanned, token_ok = [], [], bool(token)
+    no_scanner = None
+    if real_runner:
+        # waiting on Sentinels without the worker (agentapi.stage_runs): every site's task is sent first, and the loop below runs once they are all
+        # in, so this stage's summary covers every site (outside a StageRun this does nothing and each site waits in turn, as before)
+        from agentapi import sentinel_dispatch
+        sentinel_dispatch.prefetch_wpscan(domain.project, scan, [_base_of(by_name[h]) for h in todo], token, internal=internal)
     started = time.monotonic()
     for index, host in enumerate(todo):
         if time.monotonic() - started > stage_seconds():
             for waiting in todo[index:]:
-                record_state(project, domain.id, waiting, 'waiting', 'the WPScan stage used its time budget; it goes first next time')
+                record_state(project, domain.id, waiting, 'waiting', 'the WordPress scan stage used its time budget; it goes first next time')
                 deferred.append(waiting)
             break
         sub, url = by_name[host], _base_of(by_name[host])
         use = token if token_ok else ''
         try:
             report = _scan_site(runner, url, use, sub, project)
-        except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): WPScan says the site is up and is not WordPress
+        except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): the scan says the site is up and is not WordPress
             if host in positive or _probe_positive(project, host):
-                # the probe read a WordPress signature and WPScan did not: a WAF served WPScan a decoy page, or it was sent elsewhere. Not "not
+                # the probe read a WordPress signature and the scan did not: a WAF served the scan a decoy page, or it was sent elsewhere. Not "not
                 # WordPress": it stays a candidate that failed, and is asked again at the next scan
                 ledger.record(SERVICE, [host], project, scan, 'failed')
-                record_state(project, domain.id, host, 'failed', 'WPScan could not see WordPress, the probe did: the site may serve WPScan a '
+                record_state(project, domain.id, host, 'failed', 'the scan could not see WordPress, the probe did: the site may serve the scan a '
                              'different page than it serves other visitors')
-                errors.append(f'{host}: WPScan could not see WordPress')
+                errors.append(f'{host}: the scan could not see WordPress')
                 continue
             ledger.record(SERVICE, [host], project, scan)
             record_state(project, domain.id, host, 'not_wordpress', str(exc))
@@ -758,20 +719,22 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
             errors.append(f'{host}: blocked by the edge')
             continue
         except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no memory for it: not the site's fault, and nothing after it can run
+            no_scanner = exc if isinstance(exc, resources.ScannerUnavailable) else None  # a scanner that is offline is not memory pressure
             for waiting in todo[index:]:
-                record_state(project, domain.id, waiting, 'waiting', 'the scan was stopped or memory was short; it goes first next time')
+                record_state(project, domain.id, waiting, 'waiting', (f'no scanner could take this work ({no_scanner.kind}); it goes first next time' if no_scanner
+                                                                       else 'the scan was stopped or memory was short; it goes first next time'))
                 if not isinstance(exc, resources.ScanAborted):  # a person stopped the scan: nothing is queued behind them
                     deferred.append(waiting)
             break
         except Exception as exc:  # noqa: BLE001 - one site failing must not stop the rest
-            logger.warning('wpscan failed for %s: %s', host, _redact(str(exc), token))
+            logger.warning('WordPress scan failed for %s: %s', host, _redact(str(exc), token))
             ledger.record(SERVICE, [host], project, scan, 'failed')
             record_state(project, domain.id, host, 'failed', _redact(str(exc), token))
-            activity.diagnostic(f'WPScan on {host}', _redact(str(exc), token))  # the raw text goes to the worker log, not the feed
-            errors.append(f'{host}: WPScan failed (see the host page)')
+            activity.diagnostic(f'WordPress scan on {host}', _redact(str(exc), token))  # the raw text goes to the worker log, not the feed
+            errors.append(f'{host}: the scan failed (see the host page)')
             continue
+        titles = {} if internal else plugin_titles(scan, sub, url, report)  # before the report is saved: a wait for a scanner repeats this pass
         new, techs = persist_report(scan, sub, url, report)
-        titles = {} if internal else plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project)
         versioned = record_components(project, domain.id, host, report, titles)
         data = 'exhausted' if token and not use else vulnerability_data(report, use)  # a site run after the budget ran out has no vulnerability data
         left = remaining_requests(report)
@@ -793,9 +756,10 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
     summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
     summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
     failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
-    message = (f'WPScan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
+    message = (f'WordPress scan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
                + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')
-               + (f'; {len(errors)} problem(s): {errors[0]}' if errors else ''))
+               + (f'; {len(errors)} problem(s): {errors[0]}' if errors else '')
+               + (f'; no scanner could take the remaining sites ({no_scanner.kind}), so they stay due until one can' if no_scanner else ''))
     activity.settle(running, 'failed' if failed_all else 'done', message=message, **summary)
     if failed_all:
         summary['error'] = errors[0][:290]
@@ -805,7 +769,7 @@ def run_wpscan(scan_id, runner=None, force=False, probe_get=None, sleep=None, in
 # ----------------------------------------------------------------------------- the queued quick pass
 
 def queue_quick(scan, hosts, attempt=0, dispatch=True):
-    """Queue the quick pass for hosts the stage could not reach (``wpscan_quick``, on the WPScan queue, a little later each attempt): they are
+    """Queue the quick pass for hosts the stage could not reach (``wpscan_quick``, on the WordPress scan queue, a little later each attempt): they are
     marked ``queued`` and not left for the next scan. Past ``QUICK_ATTEMPTS`` they stay ``waiting`` for it. Returns the hosts queued."""
     hosts = sorted(set(hosts))
     if not hosts or not dispatch or attempt >= QUICK_ATTEMPTS:
@@ -813,17 +777,27 @@ def queue_quick(scan, hosts, attempt=0, dispatch=True):
     domain = scan.domain
     try:
         from cveFeed.tasks import wpscan_quick
-        wpscan_quick.apply_async(args=[scan.id, hosts, attempt + 1], countdown=QUICK_DELAY * (attempt + 1), queue=THOROUGH_QUEUE)
+        wpscan_quick.apply_async(args=[scan.id, hosts, attempt + 1], countdown=QUICK_DELAY * (attempt + 1), queue=QUEUE)
     except Exception:  # noqa: BLE001 - the hosts stay waiting: the next scan's quick pass asks again
-        logger.exception('could not queue the WPScan quick pass for %s', domain.name)
+        logger.exception('could not queue the WordPress quick pass for %s', domain.name)
         return []
     for host in hosts:
-        record_state(domain.project_id, domain.id, host, 'queued', f'WPScan could not reach this site in time; it is queued and asked again (attempt {attempt + 1} of {QUICK_ATTEMPTS})')
+        record_state(domain.project_id, domain.id, host, 'queued', f'The scan could not reach this site in time; it is queued and asked again (attempt {attempt + 1} of {QUICK_ATTEMPTS})')
     return hosts
 
 
-def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None):
-    """The queued quick pass: the stage's WPScan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
+def _requeue_quick(scan, hosts, attempt):
+    """Ask again at the same attempt, after the same delay, without using one up and without touching any host's recorded state: the quick pass
+    that found no scanner online (``scanner_state``) has not failed, so it waits for one instead of spending its tries."""
+    try:
+        from cveFeed.tasks import wpscan_quick
+        wpscan_quick.apply_async(args=[scan.id, sorted(hosts), attempt], countdown=QUICK_DELAY * max(1, attempt), queue=QUEUE)
+    except Exception:  # noqa: BLE001 - the hosts stay recorded as they were: the next scan's quick pass asks again
+        logger.exception('could not queue the WordPress quick pass for %s', scan.domain.name)
+
+
+def run_quick(scan_id, hosts, attempt=1, runner=None):
+    """The queued quick pass: the stage's WordPress scan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
     spent. Returns the run's summary, or ``{'skipped': why}``."""
     from cveFeed import ledger
@@ -836,11 +810,36 @@ def run_quick(scan_id, hosts, attempt=1, runner=None, sleep=None, probe_get=None
     if resources.global_pause_requested(fail_closed=True) or resources.abort_requested(scan_id):
         queue_quick(scan, only, attempt, dispatch=not resources.abort_requested(scan_id))
         return {'skipped': 'scanning is paused: the hosts stay queued'}
-    with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', f'quick-{os.getpid()}', 600) as holder:
+    from agentapi import scanner_state
+    waiting = scanner_state.skip_note('wpscan')
+    if waiting:  # no scanner can run it and this server may not: asked again at the same attempt a little later, with no run and no activity line
+        _requeue_quick(scan, only, attempt)
+        return {'skipped': waiting}
+    if runner is None:
+        # the sites a Sentinel scans are waited for without holding the worker (agentapi.stage_runs): the callback finishes the pass
+        from agentapi import stage_runs
+        context = {'scan_id': scan_id, 'hosts': sorted(only), 'attempt': attempt}
+        return stage_runs.run('wpscan.quick', context, first=lambda: _quick(scan, only, attempt), project=scan.domain.project_id, scan=scan_id)
+    return _quick(scan, only, attempt, runner=runner)
+
+
+def _resume_quick(context):
+    from startScan.models import ScanHistory
+    scan = ScanHistory.objects.select_related('domain').filter(pk=context['scan_id']).first()
+    if scan is None:
+        return {'skipped': 'the scan is gone'}
+    return _quick(scan, set(context['hosts']), context['attempt'])
+
+
+def _quick(scan, only, attempt, runner=None):
+    from agentapi import stage_runs
+    from reNgine import resources
+    claim = stage_runs.claim_kwargs('wpscan-quick', f'quick-{os.getpid()}')
+    with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', claim.pop('owner'), 600, **claim) as holder:
         if holder is not True:
             queue_quick(scan, only, attempt)
             return {'skipped': 'another quick pass is running for this project'}
-        return run_wpscan(scan_id, runner=runner, probe_get=probe_get, sleep=sleep, only=only, attempt=attempt)
+        return run_wpscan(scan.pk, runner=runner, only=only, attempt=attempt)
 
 
 # ----------------------------------------------------------------------------- the thorough pass
@@ -857,7 +856,7 @@ def queue_thorough(project_id, hosts, domain_id, dispatch=True):
             from cveFeed.tasks import wpscan_thorough
             wpscan_thorough.apply_async(args=[project_id], queue=THOROUGH_QUEUE)
         except Exception:  # noqa: BLE001 - the hosts stay pending: the next scan's quick pass asks again
-            logger.exception('could not start the thorough WPScan pass for project %s', project_id)
+            logger.exception('could not start the thorough WordPress scan pass for project %s', project_id)
     return len(due)
 
 
@@ -877,22 +876,21 @@ def _latest_row(project_id, host):
             .filter(in_target_scope_q()).select_related('scan_history', 'target_domain').order_by('-scan_history_id').first())
 
 
-def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
-    """The thorough WPScan pass for one project: every host waiting for it, one at a time, with plugin and theme detection in mixed mode and
-    as long a timeout as it needs (``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default; WPScan writes a partial report before then).
-    One pass per project at a time (a Redis claim kept alive while it runs). It stops when scans are paused or stopped, leaves the host
-    waiting, and a later run carries on. A site that cannot be reached or that an edge challenges is recorded as such, never retried in a loop.
+def run_thorough(project_id, runner=None):
+    """The thorough pass for one project: every host waiting for it, one at a time, each handed to a Sentinel as one ``wpscan_thorough`` task
+    (plugin and theme detection in mixed mode, as long a budget as it needs: ``CVENGINE_WPSCAN_THOROUGH_TIMEOUT``, 12 hours by default; the
+    Sentinel ends the scan 30 seconds before it and reports what it read). One pass per project at a time (a Redis claim kept alive while it runs, and
+    the Sentinel side runs one such task per project at a time too). It stops when scans are paused or stopped, leaves the host waiting, and a later
+    run carries on. A site that cannot be reached or that an edge challenges is recorded as such, never retried in a loop.
     Returns ``{'done', 'partial', 'blocked', 'failed', 'skipped'}`` counts.
 
-    Never dispatched to a Sentinel, unlike ``run_wpscan``: ``agentapi.sentinel_dispatch.dispatch_or_none`` waits out a bounded
-    timeout before falling back to local execution, which fits a per-scan stage, not a pass that may legitimately run for
-    hours - the same one-shot-dispatch mismatch that already keeps vhost/subdirectory discovery off Sentinels."""
-    from cveFeed import activity, exclusions, ledger, probes, wp_correlation
+    This server never runs it (``wpscan_thorough`` is in ``agentapi.sentinel_dispatch.NEVER_LOCAL``): with no scanner able to take the work, or
+    one that did not finish it in time, the host stays ``pending`` and nothing is recorded as done, so a later pass asks again. The report is
+    classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
+    (``runner(url, token, timeout) -> report``)."""
+    from cveFeed import activity, exclusions, ledger, wp_correlation
     from reNgine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
-    if runner is None and not installed():
-        return {**summary, 'skipped': 'wpscan is not installed'}
-    runner = runner or (lambda url, token: run_wpscan_process(url, token, thorough=True))
     owner = f'thorough-{os.getpid()}'
     with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:
         if holder is not True:
@@ -920,30 +918,39 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
                 continue
             scan, url = sub.scan_history, _base_of(sub)
             token = api_token(sub.target_domain.project)
-            record_thorough(project_id, domain_id, host, 'running', 'WPScan is asking the site for every plugin and theme it knows; this takes hours')
-            running = activity.log('run_check', f'Thorough WPScan pass on one WordPress site of {sub.target_domain.name}', project=project_id, status='running',
+            record_thorough(project_id, domain_id, host, 'running', 'a Sentinel is asking the site for every plugin and theme it knows; this takes hours')
+            running = activity.log('run_check', f'Thorough WordPress scan on one WordPress site of {sub.target_domain.name}', project=project_id, status='running',
                                    scan_id=scan.id)
             try:
-                report = _scan_site(runner, url, token, sub, project_id)
+                if runner is None:
+                    from agentapi import sentinel_dispatch
+                    report = _scan_site(sentinel_dispatch.wrap_wpscan_thorough_runner(sub.target_domain.project, scan=scan, timeout_seconds=thorough_timeout()),
+                                        url, token, sub, project_id)
+                else:
+                    report = _scan_site(runner, url, token, sub, project_id)
             except Blocked as exc:
                 record_thorough(project_id, domain_id, host, 'blocked', _hint(str(exc), token))
                 ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
                 summary['blocked'] += 1
-                activity.settle(running, 'done', message=f'Thorough WPScan pass: {host} is protected by an edge that challenged the scanner')
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass: {host} is protected by an edge that challenged the scanner')
                 continue
+            except resources.ScannerUnavailable as exc:  # no scanner can take it, or none finished it: not a failure, nothing is recorded as done
+                record_thorough(project_id, domain_id, host, 'pending', f'no scanner could take this work ({exc.kind}); it runs again later')
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: no scanner could take this work ({exc.kind}); the host stays waiting')
+                return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the hosts stay waiting', 'unavailable': True}
             except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped or no memory: the host stays waiting, a later run carries on
                 record_thorough(project_id, domain_id, host, 'pending', 'the pass was stopped or memory was short; it runs again later')
-                activity.settle(running, 'done', message=f'Thorough WPScan pass on {host}: stopped before it finished ({type(exc).__name__}); the host stays waiting')
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: stopped before it finished ({type(exc).__name__}); the host stays waiting')
                 return {**summary, 'skipped': 'scanning was stopped or memory was short: the hosts stay waiting'}
             except Exception as exc:  # noqa: BLE001 - ValueError (not WordPress), a timeout, a crash: recorded, and the next host goes on
-                reason = _redact(str(exc), token) or 'WPScan failed'
+                reason = _redact(str(exc), token) or 'the thorough scan failed'
                 record_thorough(project_id, domain_id, host, 'failed', reason)
                 ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
                 summary['failed'] += 1
-                activity.settle(running, 'failed', message=activity.diagnostic(f'Thorough WPScan pass on {host}', reason))
+                activity.settle(running, 'failed', message=activity.diagnostic(f'Thorough WordPress scan pass on {host}', reason))
                 continue
+            titles = plugin_titles(scan, sub, url, report)  # before the report is saved: a wait for a scanner repeats this pass
             new, _techs = persist_report(scan, sub, url, report)
-            titles = plugin_titles(url, report, probes.allowed_names(sub), get=probe_get, sleep=sleep, project=project_id)
             versioned = record_components(project_id, domain_id, host, report, titles)
             wp_correlation.run_for_host(sub)
             cut = report.get('cvengine_partial') or ''
@@ -953,16 +960,16 @@ def run_thorough(project_id, runner=None, sleep=None, probe_get=None):
             record_thorough(project_id, domain_id, host, state, cut and 'the scan stopped before it finished; what it read is kept and it runs again tomorrow',
                             plugins=versioned, new_findings=new, **({'cut_short': cut} if cut else {}))
             summary[state] += 1
-            activity.settle(running, 'done', message=f'Thorough WPScan pass on {host}: {state}, {versioned} plugin/theme version(s), {new} new finding(s)')
+            activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: {state}, {versioned} plugin/theme version(s), {new} new finding(s)')
 
 
 REDIRECT = re.compile(r'redirects? to:?\s*(https?://[^\s\'"]{1,300})', re.I)
 
 
 def _scan_site(runner, url, token, sub, project):
-    """Run WPScan on ``url``. WPScan stops at a main redirect it will not follow (an apex that redirects to www); the redirect is asked once,
+    """Run the scan on ``url``. The scan stops at a main redirect it will not follow (an apex that redirects to www); the redirect is asked once,
     and only when its target is a name of this host's own group that passes the probe gate (a safe address, not excluded). It never follows
-    redirects to anywhere else and never uses WPScan's own ``--follow-redirect``."""
+    redirects to anywhere else and never asks the scanner to follow redirects itself."""
     from urllib.parse import urlsplit
 
     from cveFeed import probes
@@ -985,5 +992,13 @@ def _probe_positive(project_id, host):
 
 
 def _hint(reason, token):
-    return ('the edge refused or challenged WPScan (' + _redact(reason, token)[:120] + '). Allow the scanner\'s address or user agent in the WAF or '
+    return ('the edge refused or challenged the scan (' + _redact(reason, token)[:120] + '). Allow the scanner\'s address or user agent in the WAF or '
             'bot rules for this host, then rescan; cvENGINE never tries to get past a challenge')
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('wpscan.quick', queue='wpscan_queue')(_resume_quick)
+
+
+_register()

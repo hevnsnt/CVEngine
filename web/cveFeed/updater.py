@@ -135,6 +135,32 @@ def host_updater():
     return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
 
 
+DISK_STALE_SECONDS = 15 * 60  # the host measures once a minute; older than this is a host that stopped, and then nothing is said about disk
+
+
+def disk_sentence(need_mb, free_mb):
+    """The one sentence the Update screen and the updater (scripts/update-disk.sh) both say when there is not room for an update."""
+    return (f'This update needs about {-(-int(need_mb) // 1000)} GB of free disk; this server has {int(free_mb) // 1000} GB free. '
+            'Free some space or add disk, then try again.')
+
+
+def disk():
+    """Whether there is room for the next update, as the host measured it (``.update-disk.json``, written by scripts/update-watch.sh; the web container
+    cannot ask Docker where its data is). ``known`` is False when the host has not said or has not said lately: nothing is blocked on a guess.
+    ``short`` is True when free space is under what the update needs; ``text`` is then the sentence to show."""
+    unknown = {'known': False, 'short': False, 'free_mb': None, 'need_mb': None, 'text': ''}
+    try:
+        with open(_file('.update-disk.json')) as f:
+            data = json.load(f)
+        free, need, at = int(data['free_mb']), int(data['need_mb']), float(data['at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return unknown
+    if free < 0 or need < 0 or not math.isfinite(at) or time.time() - at > DISK_STALE_SECONDS or at - time.time() > 60:
+        return unknown
+    short = free < need
+    return {'known': True, 'short': short, 'free_mb': free, 'need_mb': need, 'text': disk_sentence(need, free) if short else ''}
+
+
 CERT_WARN_DAYS = 30  # the host renews the web interface certificate with this many days left (scripts/renew-certs.sh); a warning at that point means it did not
 CERT_STALE_SECONDS = 3 * 86400  # the host checks twice a day; this is days of silence
 
@@ -214,6 +240,8 @@ def auto_approve(row):
     """In automatic mode, approve the version the check just found, as the administrator would have. Returns whether it did."""
     if read_mode() != 'auto' or state(row)['status'] != 'available':
         return False
+    if disk()['short']:
+        return False  # nobody is there to read the sentence; the Update screen says it, and the next check tries again
     approve(row, 'automatic')
     return True
 
@@ -290,7 +318,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
     commit = data.get('commit') or {}
     date = ((commit.get('committer') or {}).get('date')) or ''
     out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
-           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': ''}
+           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': '', 'compare_status': ''}
     if not installed:
         return out
     if installed == sha:
@@ -307,6 +335,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
         out['compare_error'] = f'GitHub answered {cmp.status_code} when this build was compared with {branch}, so whether it is behind cannot be told'
     if cmp.status_code == 200:
         body = cmp.json()
+        out['compare_status'] = str(body.get('status') or '')
         if body.get('status') in ('behind', 'identical'):
             out['behind_by'] = 0  # the installation is already at or past the remote head
         else:
@@ -360,7 +389,7 @@ def sync_applied(row):
 
 
 def _remove_flag():
-    for name in ('.update-approved', '.update-branch'):
+    for name in ('.update-approved', '.update-branch', '.update-sentinels'):
         try:
             os.remove(_file(name))
         except OSError:
@@ -373,12 +402,22 @@ def local_commits(row):
     return host['ahead'] if host else 0
 
 
-def approve(row, user):
-    """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
+def approve(row, user, plan=None):
+    """Record the administrator's approval of the commit currently shown, and hand it to the host updater. ``plan`` (internal, both or external) is the
+    answer to the question the Update button asked about which scanners run (``cveFeed.scanner_plan``); it travels in ``.update-sentinels`` and the host applies
+    it with the update. Without one the host applies its automatic default and never removes a scanner."""
+    from cveFeed import scanner_plan
+    try:
+        wanted = scanner_plan.validate(plan) if plan not in (None, '') else None
+    except scanner_plan.PlanError as exc:
+        raise UpdateError(str(exc))
     if not SHA_RE.match(row.latest_sha or ''):
         raise UpdateError('there is no update to approve; run a check first')
     if not update_available(row, installed_sha()):
         raise UpdateError('this installation is already up to date, or cannot tell whether it is (see its status)')
+    room = disk()
+    if room['short']:
+        raise UpdateError(room['text'])
     own = local_commits(row)
     if own:
         raise UpdateError(f'this server has {own} commit{"s" if own != 1 else ""} of its own, so the update cannot be applied for you (it moves the checkout '
@@ -391,6 +430,10 @@ def approve(row, user):
     with open(branch_tmp, 'w') as f:
         f.write(row.branch + '\n')
     os.replace(branch_tmp, _file('.update-branch'))
+    if wanted:
+        scanner_plan.with_update(wanted)  # before the approval: the host reads it when it sees the approval
+    else:
+        scanner_plan.clear_pending()
     os.replace(tmp, _file('.update-approved'))
     row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, getattr(user, 'username', user), timezone.now()
     row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
@@ -456,6 +499,7 @@ def state(row):
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
         'host_updater': host_updater(),
+        'disk': disk(),
         'certificate': certificate(),
         'mode': read_mode(),
     }

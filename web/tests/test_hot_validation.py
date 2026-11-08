@@ -252,6 +252,29 @@ class HotValidationTests(TestCase):
         self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'completed')
         self.assertEqual((row.classification, row.reason), ('likely', 'earlier answer'))
 
+    def _feed_lines_for(self, provider, run_triage):
+        from cveFeed import tasks
+        from cveFeed.models import AgentActivity
+        row = Triage.objects.get(vulnerability=self.high)
+        job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id, signature=row.signature, priority=6)
+        with mock.patch('cveFeed.validation_authority.require_authority'), \
+                mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
+                mock.patch('cveFeed.triage._resolve_provider', return_value=provider), \
+                mock.patch('cveFeed.triage.run_triage', return_value=run_triage):
+            tasks.automatic_validate_finding(job.pk)
+        return list(AgentActivity.objects.filter(detail__job_id=job.pk).order_by('id').values_list('message', flat=True))
+
+    def test_with_no_ai_model_a_finding_costs_one_activity_line_not_four(self):
+        lines = self._feed_lines_for(None, {'not_triaged': 1})
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn('no AI model is connected', lines[0])
+        self.assertNotIn('AI unavailable', lines[0])
+
+    def test_with_an_ai_model_the_progress_lines_are_still_written(self):
+        lines = self._feed_lines_for(object(), {'asked': 1})
+        self.assertGreaterEqual(len(lines), 3, lines)
+        self.assertTrue(any('AI review started' in line for line in lines))
+
     def test_backfill_existing_untracked_findings(self):
         Triage.objects.all().delete()
         with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'), \
@@ -385,6 +408,41 @@ class HotValidationTests(TestCase):
         self.assertNotEqual(AutomaticValidation.objects.get(pk=job.pk).signature, old_signature)
         self.assertEqual(hot_validation.enqueue(Triage.objects.get(pk=row.pk), 'smoke'), 'fresh')
 
+    def _route_job(self):
+        route = RouteAuth.objects.create(project=self.project, domain=self.domain, host=self.sub.name,
+            url='https://www.a.example/admin', path='/admin', auth_state='open', http_status=200)
+        row = triage.track([route])[0][0]
+        with mock.patch('cveFeed.tasks.automatic_validate_finding.apply_async'):
+            self.assertEqual(hot_validation.enqueue(row, 'smoke'), 'queued')
+        return row, AutomaticValidation.objects.get(triage=row)
+
+    def _run_job(self, row, job, checks):
+        from cveFeed.models import AgentActivity
+        from cveFeed.tasks import automatic_validate_finding
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
+                mock.patch('cveFeed.validation.run_validation', return_value=checks), \
+                mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+            automatic_validate_finding(job.pk)
+        return AgentActivity.objects.filter(kind='validate', detail__job_id=job.pk).exclude(status='running').order_by('-id').first()
+
+    def test_a_validation_held_by_the_cap_or_by_policy_is_not_a_failed_line(self):
+        for checks, words in (({'ran': 0, 'capped': 1}, 'daily cap'), ({'ran': 0, 'blocked': 1}, 'blocked by scope or policy')):
+            with self.subTest(words=words):
+                Triage.objects.all().delete()
+                RouteAuth.objects.filter(path="/admin").delete()
+                row, job = self._route_job()
+                line = self._run_job(row, job, checks)
+                self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'failed')  # the job is still retried
+                self.assertEqual(line.status, 'done')
+                self.assertIn(words, line.message)
+                self.assertNotIn('failed', line.message)
+
+    def test_a_check_that_really_failed_is_still_a_failed_line(self):
+        row, job = self._route_job()
+        line = self._run_job(row, job, {'ran': 0, 'failed': 1})
+        self.assertEqual(line.status, 'failed')
+        self.assertIn('failed', line.message)
+
     def test_route_worker_real_plan_and_result_path_with_fixture_runner(self):
         from cveFeed.tasks import automatic_validate_finding
         from cveFeed import validation
@@ -414,12 +472,16 @@ class HotValidationTests(TestCase):
         provider.complete.return_value = json.dumps({
             'classification': 'likely', 'reason': 'fixture evidence', 'impact': 'fixture impact',
             'severity_adjust': 0, 'severity_reason': '', 'remediation': 'Review fixture', 'validation_steps': []})
-        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]), \
-                mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider):
+        from tests import ai_queue
+        ai_queue.ensure_configured(provider)
+        with mock.patch('targetApp.target_types.scannable_hosts', return_value=[row.host]):
             result = automatic_validate_finding(job.pk)
         self.assertNotIn('error', result)
-        self.assertEqual(result['ai_state'], 'completed')
+        self.assertEqual(result['ai_state'], 'queued')  # asked of the AI reviewer container
         self.assertEqual(AutomaticValidation.objects.get(pk=job.pk).status, 'completed')
+        ai_queue.serve(provider)
+        row.refresh_from_db()
+        self.assertEqual((row.status, row.classification), ('triaged', 'likely'))
 
     def test_scope_recheck_blocks_checks_and_ai_review(self):
         from cveFeed.tasks import automatic_validate_finding
@@ -684,7 +746,9 @@ class KevLaneTests(TestCase):
     def test_hot_cves_take_the_fire_lane_first_and_a_critical_score_alone_is_ice(self):
         result, calls = self.sweep()
         self.assertEqual((result['fire'], result['smoke'], result['ice']), (3, 1, 1))
-        self.assertEqual(result['stale'], 1)  # the high finding is a candidate of the smoke lane too (as under legacy); no CVE match is
+        # the high finding is a candidate of the smoke lane too (as under legacy), where it is turned away as not that lane's: counted as stale when the
+        # sweep looks at it under its lock, as in-flight when its job (queued a moment ago in the fire lane) is read from the page first; no CVE match is
+        self.assertEqual(result['stale'] + result['inflight'], 1)
         self.assertEqual([priority for _name, priority in calls], [0, 0, 0, 6, 9])
         self.assertEqual(self.queued(), {'CVE-2099-20': 0, 'CVE-2099-21': 0, 'CVE-2099-22': 9})
         again, calls = self.sweep()

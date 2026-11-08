@@ -192,6 +192,12 @@ def main():
                 destination.flush()
                 os.fsync(destination.fileno())
             os.unlink('.update-requeue.json', dir_fd=web_fd)
+        elif action == 'disk':
+            # `disk FREE_MB NEED_MB`: how much room Docker's directory has and what the next update needs (scripts/update-disk.sh), for the Update screen
+            free, need = int(sys.argv[2]), int(sys.argv[3])
+            if not (0 <= free < 10**9 and 0 <= need < 10**9):
+                raise ValueError('invalid disk figures')
+            publish(web_fd, '.update-disk.json', [json.dumps({'free_mb': free, 'need_mb': need, 'at': time.time()}).encode('ascii') + b'\n'])
         elif action == 'approval':
             with os.fdopen(regular_fd('.update-approved', dir_fd=web_fd), 'rb') as source:
                 value = source.read(256).strip()
@@ -250,9 +256,50 @@ def main():
                     or not isinstance(row.get('at'), int)):
                 raise ValueError('invalid OpenVAS answer')
             publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
+        elif action in ('sentinels-choice', 'plan-wanted'):
+            # the answer to "which scanners run" the app handed over: one of internal, both, external, nothing else, read without following a link the
+            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; plan-wanted stays until plan-done.
+            name = '.update-sentinels' if action == 'sentinels-choice' else '.scanner-plan-wanted'
+            try:
+                with os.fdopen(regular_fd(name, dir_fd=web_fd), 'rb') as source:
+                    value = source.read(16).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                return
+            if action == 'sentinels-choice':
+                try:
+                    os.unlink(name, dir_fd=web_fd)
+                except OSError:
+                    pass
+            if value in (b'internal', b'both', b'external'):
+                print(value.decode('ascii'))
+        elif action == 'plan-done':
+            # PLAN ok|failed NOTE: the answer to .scanner-plan-wanted; the request is removed so it is carried out once
+            plan, outcome, note = sys.argv[2], sys.argv[3], (sys.argv[4] if len(sys.argv) > 4 else '')
+            if plan not in ('internal', 'both', 'external') or outcome not in ('ok', 'failed') or len(note) > 200:
+                raise ValueError('invalid scanner plan answer')
+            publish(web_fd, '.scanner-plan-applied.json', [json.dumps({'plan': plan, 'ok': outcome == 'ok', 'note': note, 'at': time.time()}).encode('utf-8') + b'\n'])
+            try:
+                os.unlink('.scanner-plan-wanted', dir_fd=web_fd)
+            except OSError:
+                pass
+        elif action == 'notice':
+            # what an update that could not ask leaves for the Sentinels page and the update result: `notice scanner_kept LIMIT EXTERNALS`, or `notice clear`
+            if sys.argv[2:3] == ['clear']:
+                try:
+                    os.unlink('.update-notice.json', dir_fd=web_fd)
+                except OSError:
+                    pass
+            else:
+                code, limit, externals = sys.argv[2], sys.argv[3], int(sys.argv[4])
+                if code != 'scanner_kept' or not re.fullmatch(r'\d+[kmg]?', limit) or not 0 <= externals <= 100000:
+                    raise ValueError('invalid update notice')
+                publish(web_fd, '.update-notice.json', [json.dumps({'code': code, 'limit': limit, 'externals': externals, 'at': time.time()}).encode('utf-8') + b'\n'])
         elif action == 'openvas-restarted':
             # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
             publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
+        elif action == 'scanner-update-done':
+            # scripts/update-watch.sh started the scanner update the app asked for (web/.scanner-update-requested): one marker, so one request runs once
+            publish(web_fd, '.scanner-update-done', [json.dumps({'at': int(time.time())}).encode('ascii') + b'\n'])
         elif action == 'openvas-log':
             # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:

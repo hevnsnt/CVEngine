@@ -1,0 +1,53 @@
+# AppArmor profile for the built-in scanner container (docs/DEPLOYMENT.md, "Screenshots and AppArmor").
+#
+# Why: on a host whose AppArmor restricts unprivileged user namespaces (Ubuntu 24.04 and later, recent Debian and Kali), Docker's own `docker-default`
+# profile refuses the user namespace Chromium's sandbox is built on, and the screenshot browser dies at launch ("FATAL credentials.cc ... Permission
+# denied (13)"). The seccomp profile the compose file already sets is not enough on its own. This is `docker-default` (what Docker generates for every
+# container) under another name, plus one allowance: `userns,`. Nothing else is loosened, and nothing outside this container is affected.
+#
+# Load it (needs AppArmor 4.0 or newer, which is also what introduced the restriction; an older AppArmor does not block Chromium and needs nothing):
+#     sudo apparmor_parser -r -W config/apparmor/cvengine-scanner
+# then, in docker-compose.override.yml (or by removing the comment in docker-compose.yml), add to the `scanner` service:
+#     security_opt:
+#       - seccomp=./config/seccomp/playwright-chromium.json
+#       - apparmor=cvengine-scanner
+# and `make up`. The profile stays loaded until the host reboots; load it at boot (copy it to /etc/apparmor.d/ and `sudo systemctl reload apparmor`) to keep it.
+
+abi <abi/4.0>,
+#include <tunables/global>
+
+profile cvengine-scanner flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+
+  # Host processes may signal container processes (docker kill, stop); processes of this container may signal each other.
+  signal (receive) peer=unconfined,
+  signal (receive) peer=docker-default,
+  signal (send,receive) peer=cvengine-scanner,
+  ptrace (trace,read,tracedby,readby) peer=cvengine-scanner,
+
+  # The one addition to docker-default: Chromium's sandbox creates user namespaces.
+  userns,
+
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny mount,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

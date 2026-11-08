@@ -20,15 +20,11 @@ protect the sign-in. For HTTPS, the Nuclei pass withholds it unless the owner ex
 or shown: scanner request and response dumps, evidence, error messages. Nothing in this module logs a value.
 """
 import base64
-import contextlib
 import datetime
 import ipaddress
 import json
 import math
-import os
 import re
-import shutil
-import tempfile
 from urllib.parse import quote, quote_plus
 
 from django.utils import timezone
@@ -278,7 +274,8 @@ def origin_of(scheme, port):
 
 class AuthScope:
     """The credentials of one target, and the rule for when one may be sent. Build it with ``for_domain``; ask ``credential(host, scheme,
-    port)`` for the credential that applies to a destination (None when none does) or ``headers_for`` for what to put on the request."""
+    port)`` for the credential that applies to a destination (None when none does). This server puts a credential on no request: the signed-in
+    route check is the built-in scanner's (``cveFeed.auth_routes``)."""
 
     def __init__(self, creds, now=None):
         self.now = now
@@ -321,20 +318,6 @@ class AuthScope:
             elif best is None and host_in_target(host, cred.domain):
                 best = cred
         return best
-
-    def accepts_untrusted_certificate(self, host, scheme, port):
-        """Whether the credential that applies to ``scheme://host:port`` may be sent over a connection whose certificate does not verify (the
-        owner's per-target switch). False when no credential applies."""
-        cred = self.credential(host, scheme, port)
-        return bool(cred is not None and cred.allow_untrusted_certificate)
-
-    def headers_for(self, host, scheme, port):
-        """``[(name, value), ...]`` for a request to ``scheme://host:port``, ``[]`` when no credential applies."""
-        cred = self.credential(host, scheme, port)
-        if cred is None:
-            return []
-        self.used[cred.pk] = cred
-        return request_headers(cred)
 
     def mark_used(self):
         """Stamp ``last_used_at`` on every credential this scope sent (once per scan stage, not per request)."""
@@ -445,29 +428,6 @@ def target_parts(target):
     return host, (int(port) if port else None)
 
 
-def certificate_verifies(host, port, project=None, timeout=3):
-    """``(True, '')`` when a TLS handshake with ``host:port`` (vetted and pinned like every scanner connection) verifies the certificate
-    chain and name, else ``(False, reason)``; the reason is the verifier's own words and holds no secret. This one-off check must not
-    authorize a later Nuclei request, because Nuclei does not verify the certificate on its separate credential-bearing connection."""
-    import ssl
-    from cveFeed import pinned_transport
-    try:
-        addresses = pinned_transport.resolve(host, port, project=project)
-        context = ssl.create_default_context()
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        raw = pinned_transport.open_socket(addresses, timeout, project=project)
-        try:
-            raw.settimeout(timeout)
-            context.wrap_socket(raw, server_hostname=host).close()
-        finally:
-            raw.close()
-        return True, ''
-    except ssl.SSLCertVerificationError as exc:
-        return False, (getattr(exc, 'verify_message', None) or 'the certificate does not verify')[:120]
-    except (OSError, ValueError) as exc:  # a refused connection, a timeout, another TLS failure, a destination the vetting refuses
-        return False, f'the server could not be checked ({type(exc).__name__})'
-
-
 def _url(host, scheme, port):
     name = f'[{host}]' if ':' in host else host
     default = 443 if scheme == 'https' else 80
@@ -533,45 +493,7 @@ def entries_for(items):
     return [(cred, list(dict.fromkeys(domains))) for cred, domains in grouped.values()]
 
 
-def secrets_document(entries):
-    """The nuclei secrets file (the ``static`` format of nuclei's authenticated scans) for ``entries``, as a dict: one ``Header`` secret per
-    credential, limited to exactly the listed domains. Nuclei applies it only to a request whose host (and port, unless 80 or 443) equals one."""
-    secrets = []
-    for cred, domains in entries:
-        headers = [{'key': name, 'value': value} for name, value in request_headers(cred)]
-        if headers and domains:
-            secrets.append({'type': 'Header', 'domains': list(domains), 'headers': headers})
-    return {'id': 'cvengine-authenticated-checks', 'info': {'name': 'cvENGINE authenticated checks', 'author': 'cvENGINE'}, 'static': secrets}
-
-
-@contextlib.contextmanager
-def secrets_file(entries):
-    """Write the nuclei secrets file for ``entries`` to a private directory (0700) as a 0600 file, yield its path, and delete both afterwards,
-    whatever happens. The path goes on the command line; the values never do."""
-    scratch = tempfile.mkdtemp(prefix='cvengine-auth-')
-    try:
-        os.chmod(scratch, 0o700)
-        path = os.path.join(scratch, 'secrets.json')
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump(secrets_document(entries), handle)
-        yield path
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
 # ----------------------------------------------------------------------------- lookups for the stages
-
-def credentials_for_hosts(project_id, hosts):
-    """The credentials of ``project_id`` that could apply to any of ``hosts`` (an exact host match, or a target-wide one whose target contains
-    the host), for the template checks, which know a project and host names but not a target."""
-    from cveFeed.models import AuthCredential
-    wanted = {str(h).strip().lower().rstrip('.') for h in hosts if h}
-    if not wanted:
-        return []
-    rows = AuthCredential.objects.filter(project_id=project_id).select_related('domain')
-    return [c for c in rows if (c.host in wanted) or (not c.host and any(host_in_target(h, c.domain) for h in wanted))]
-
 
 def revision(cred):
     """A short token that changes whenever the credential is replaced or edited, for the ledger key of its checks (a new credential is

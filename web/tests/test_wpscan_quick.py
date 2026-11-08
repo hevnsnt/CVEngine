@@ -67,7 +67,7 @@ class QueueQuickTests(WordPressFixture, TestCase):
         self.assertEqual(queued, ['rt.test', 'www.rt.test'])
         _args, kwargs = start.call_args
         self.assertEqual(kwargs['args'], [self.scan_obj.id, ['rt.test', 'www.rt.test'], 2])
-        self.assertEqual((kwargs['countdown'], kwargs['queue']), (wpscan_scan.QUICK_DELAY * 2, wpscan_scan.THOROUGH_QUEUE))
+        self.assertEqual((kwargs['countdown'], kwargs['queue']), (wpscan_scan.QUICK_DELAY * 2, wpscan_scan.QUEUE))
         self.assertEqual(self.state('www.rt.test')['state'], 'queued')
 
     def test_the_attempts_are_bounded_and_the_host_stays_waiting(self):
@@ -92,7 +92,7 @@ class RunQuickTests(WordPressFixture, TestCase):
         self.table = dict(WP)
 
     def test_it_runs_the_stage_for_just_the_queued_hosts(self):
-        out = wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=1, runner=self.runner, probe_get=self.probe_get, sleep=lambda s: None)
+        out = wpscan_scan.run_quick(self.scan_obj.id, ['rt.test'], attempt=1, runner=self.runner)
         self.assertNotIn('skipped', out)
         self.assertEqual({u for u, _t in self.calls}, {'https://rt.test'})
 

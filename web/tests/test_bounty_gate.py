@@ -122,7 +122,7 @@ def host_pipeline_unattended(self, w):
 def retest_hosts_task(self, w):
     from cveFeed.tasks import retest_hosts
     with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('reNgine.tasks.persist_bbot_result'), \
-            mock.patch('cveFeed.discovery.resolve_names', side_effect=lambda names, **kw: {(n, PUBLIC_IP) for n in names}):
+            mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lambda domain, names, errors=None, scan=None: {(n, PUBLIC_IP) for n in names}):
         retest_hosts(w.domain.id, [w.host])
     return _pipeline_scans(w) > 0
 
@@ -134,7 +134,8 @@ def full_port_sweep(self, w):
 
 def weekly_deep_nuclei(self, w):
     from cveFeed.tasks import weekly_deep_nuclei as sweep
-    with mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+    with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=object()), \
+            mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
             mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({w.host}, set(), set())), \
             mock.patch('cveFeed.nuclei_scan.run_nuclei', return_value={'targets': 1, 'findings': 0}) as run:
         sweep()
@@ -154,7 +155,7 @@ def thorough_wpscan(self, w):
     wpscan_scan.record_thorough(w.project.id, w.domain.id, w.host, 'pending', 'queued')
     runner = mock.Mock(side_effect=ValueError('not running WordPress'))
     with mock.patch('cveFeed.route_auth.host_allowed', return_value=True):
-        wpscan_scan.run_thorough(w.project.id, runner=runner, sleep=lambda s: None, probe_get=mock.Mock())
+        wpscan_scan.run_thorough(w.project.id, runner=runner)
     return runner.called
 
 

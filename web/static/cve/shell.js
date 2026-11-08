@@ -3,7 +3,7 @@ import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "suppliers"];
+const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "secrets", "suppliers"];
 
 // Where the switcher sends you when the project changes. On the dashboard and the asset graph it stays there (?project= names
 // the project or "_all"); on a section page it keeps the section. The server remembers the choice for pages with no project.
@@ -215,8 +215,9 @@ function collect() {
   const out = [];
   $$("[data-nav]").forEach((a) => {
     const label = a.dataset.nav;
-    if (seen.has(a.getAttribute("href"))) return;
-    seen.add(a.getAttribute("href"));
+    const key = `${a.getAttribute("href")}|${label}`; // the same page under two names (Assets, Hosts) is two rows: either word finds it
+    if (seen.has(key)) return;
+    seen.add(key);
     out.push({ label, hint: "Go to", href: a.getAttribute("href"), section: "Go to" });
   });
   if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click(), section: "Go to" });

@@ -21,7 +21,9 @@ from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
-from cveFeed import js_libraries, versions
+from cvengine_scanner import versions
+
+from cveFeed import js_libraries
 
 """
 Celery tasks.
@@ -43,7 +45,7 @@ def persist_bbot_result(result, ctx):
 		scan = ScanHistory.objects.select_related('domain').filter(pk=ctx['scan_history_id']).first()
 		own_project, own_name = (scan.domain.project_id, scan.domain.name) if scan and scan.domain else (None, None)
 		project_id = own_project
-		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
+		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id, names_only=True), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
 		if ctx.get('domain_id'):
 			ctx['_domain'] = Domain.objects.filter(id=ctx['domain_id']).first()
 	subdomains = {}
@@ -190,24 +192,26 @@ def _persist_bbot_findings(result, ctx, subdomains):
 	if not (scan and domain):
 		return
 	from cveFeed.labels import record_label
-	from reNgine.bbot import finding_key, label_for
+	from reNgine.discovery_events import finding_key, label_for
 	from cveFeed.exclusions import excluded_names, normalize
 	banned = ctx.get('_excluded_hosts')
 	if banned is None:
-		banned = excluded_names(domain.project_id)
+		banned = excluded_names(domain.project_id, names_only=True)
+	from cveFeed import dangling_dns
+	pending = [f for f in result.findings if f['module'] == 'baddns' and not f.get('informational') and not (banned and normalize(f['host']) in banned)]
+	ratings = dict(zip(map(id, pending), dangling_dns.assess_all(pending, project=domain.project)))  # one batch, through a Sentinel when one can take it
 	for f in result.findings:
 		if banned and normalize(f['host']) in banned:  # nothing is recorded for a host the organization excluded for good
 			continue
 		if f.get('informational'):
-			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.bbot)
+			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.discovery_events)
 			record_label(domain.project_id, domain.id, f['host'], label_for(f['name']), detail=f['description'])
 			continue
 		severity, description = f['severity'], f['description']
 		if f['module'] == 'baddns':
 			# rated by what an outsider can claim, at the client's own zone cut (cveFeed.dangling_dns); a provider's DNS reached through a
 			# CNAME, or a "not found" page the provider shows for every host, is not a finding
-			from cveFeed import dangling_dns
-			rating = dangling_dns.assess(f)
+			rating = ratings.get(id(f))
 			if rating is not None and rating.drop:
 				logger.info(f'bbot baddns finding on {f["host"]} dropped: {rating.note}')
 				continue
@@ -565,6 +569,11 @@ def save_vulnerability(**vuln_data):
 	# remove nulls
 	vuln_data = replace_nulls(vuln_data)
 
+	# A token template or a bbot secret module carries the secret itself: it goes to the secrets inventory and the finding keeps only its mask
+	# (docs/SECRETS-PLAN.md 8.3). Taken out before anything is stored or compared.
+	from cveFeed import secrets_inventory
+	secret_values = secrets_inventory.take_from_finding(vuln_data, tags)
+
 	# One row per finding: the key is where and what (host, template, name, URL, matcher), never the response body, which
 	# differs on every request (a Date: header, a nonce) and would create a new row each time the finding is seen again. A finding an
 	# earlier scan (or another target of the project) filed on the same host is that same row, moved onto this scan
@@ -628,6 +637,9 @@ def save_vulnerability(**vuln_data):
 		vuln.vuln_subscan_ids.add(subscan)
 		vuln.save()
 
+	if secret_values:
+		secrets_inventory.feed_finding_quietly(vuln, secret_values)
+
 	return vuln, was_created
 
 
@@ -679,7 +691,7 @@ def save_subdomain(subdomain_name, ctx={}):
 		from cveFeed.exclusions import excluded_names, normalize
 		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch
 		if banned is None:
-			banned = excluded_names(domain.project_id)
+			banned = excluded_names(domain.project_id, names_only=True)  # an address-excluded host is still recorded (it stays visible, unscanned)
 		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
 			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
 			return None, False

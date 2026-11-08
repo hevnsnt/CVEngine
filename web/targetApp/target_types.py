@@ -460,7 +460,7 @@ def scannable_hosts(names, resolver=None, project=None):
     if project:
         from cveFeed.exclusions import excluded_names
         from cveFeed.archive_rediscovery import archived_names
-        banned = excluded_names(project) | archived_names(project)
+        banned = excluded_names(project, names_only=True) | archived_names(project)
         from cveFeed.bounty_gate import Gate
         gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name is never a scan target
     verdict, out, seen = {}, [], set()

@@ -1,5 +1,5 @@
-"""Settings > Proxy applied to the scans that run on this server: the helper, each integration point, the pinned transport's proxy path
-(the SSRF decision stays), a live run against a tiny forward-proxy fixture, and the encrypted storage."""
+"""Settings > Proxy: the helper, the setting's selection and storage, and a live run of the scanner library's proxy path (the request code a Sentinel
+runs; this server opens no connection to a target) against a tiny forward-proxy fixture, the SSRF decision unchanged."""
 import http.server
 import importlib
 import os
@@ -11,15 +11,18 @@ import struct
 import tempfile
 import threading
 import time
-import unittest
 from unittest import mock
 
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import db_exposure, egress_proxy, nuclei_scan, pinned_transport as transport, route_auth, testssl_scan, waf_scan, wpscan_scan
-from reNgine import bbot, crypto_fields
+from cvengine_scanner.probes import egress_proxy as lib_proxy
+
+from cveFeed import egress_proxy
+from reNgine import crypto_fields
 from scanEngine.models import Proxy
+from tests import library_http
+from tests.library_http import transport
 
 HTTP_PROXY = 'http://203.0.113.50:3128'
 SOCKS_PROXY = 'socks5://203.0.113.51:1080'
@@ -178,147 +181,6 @@ class SelectionTests(ProxyOn, TestCase):
         self.assertNotIn('hunter2', '\n'.join(logs.output))
 
 
-class ToolFragmentTests(ProxyOn, TestCase):
-    def test_direct_when_off_or_when_every_destination_is_loopback(self):
-        for tool in egress_proxy.TOOLS:
-            self.assertEqual(egress_proxy.for_tool(tool), [])
-        self.turn_on(HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'http://localhost:9']), [])
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['127.0.0.1:8080', 'www.example.com']), ['-proxy', HTTP_PROXY])
-
-    def test_each_tool_gets_its_own_arguments(self):
-        self.turn_on(LOGIN_PROXY)
-        self.assertEqual(egress_proxy.for_tool('nuclei', ['www.example.com']), ['-proxy', LOGIN_PROXY])
-        self.assertEqual(egress_proxy.for_tool('wafw00f', ['www.example.com']), ['-p', LOGIN_PROXY])
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com']), ['--proxy', 'http://203.0.113.52:3128', '--proxy-auth', 'bob:hunter2'])
-        self.assertEqual(egress_proxy.for_tool('bbot'), ['-c', f'web.http_proxy={LOGIN_PROXY}'])
-
-    def test_testssl_takes_a_plain_http_proxy_only(self):
-        self.turn_on(LOGIN_PROXY, SOCKS_PROXY)
-        with self.assertRaises(egress_proxy.ProxyUnavailable):
-            egress_proxy.for_tool('testssl', ['www.example.com'])
-        self.turn_on(LOGIN_PROXY, HTTP_PROXY)
-        self.assertEqual(egress_proxy.for_tool('testssl', ['www.example.com']), ['--proxy', '203.0.113.50:3128'])
-
-    def test_a_tool_that_cannot_use_any_proxy_fails_closed(self):
-        self.turn_on('socks5h://203.0.113.5:1080')
-        with self.assertRaises(egress_proxy.ProxyUnavailable) as raised:
-            egress_proxy.for_tool('nuclei', ['www.example.com'])
-        self.assertNotIn('203.0.113.5', str(raised.exception))
-        self.assertEqual(egress_proxy.for_tool('wpscan', ['www.example.com'])[0], '--proxy')
-
-
-class IntegrationTests(ProxyOn, TestCase):
-    def test_argv_builders_add_the_proxy_only_when_given(self):
-        self.assertNotIn('-proxy', nuclei_scan.build_flags())
-        self.assertEqual(nuclei_scan.build_flags(proxy_args=['-proxy', HTTP_PROXY])[-2:], ['-proxy', HTTP_PROXY])
-        self.assertNotIn('--proxy', wpscan_scan.wpscan_args(600))
-        self.assertEqual(wpscan_scan.wpscan_args(600, proxy_args=['--proxy', HTTP_PROXY])[-2:], ['--proxy', HTTP_PROXY])
-        self.assertNotIn('--proxy', testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x'))
-        args = testssl_scan.command('a.example.com', '203.0.113.5', 443, None, '/tmp/x', ['--proxy', '203.0.113.50:3128'])
-        self.assertEqual((args[args.index('--proxy') + 1], args[-1]), ('203.0.113.50:3128', 'a.example.com:443'))
-
-    def run_nuclei(self, hosts):
-        path = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False)
-        self.addCleanup(os.unlink, path.name)
-        path.write('\n'.join(hosts) + '\n')
-        path.close()
-        captured = {}
-
-        class Stop(Exception):
-            pass
-
-        def popen(argv, **kwargs):
-            captured['argv'] = argv
-            raise Stop
-
-        with mock.patch.object(nuclei_scan.subprocess, 'Popen', popen), \
-                mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/templates', None, None)):
-            try:
-                list(nuclei_scan.stream_nuclei(path.name))
-            except Stop:
-                pass
-        return captured.get('argv')
-
-    def test_nuclei_runs_through_the_proxy_when_on_and_directly_when_off(self):
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY, use=False)
-        self.assertNotIn('-proxy', self.run_nuclei(['www.example.com']))
-        self.turn_on(HTTP_PROXY)
-        argv = self.run_nuclei(['www.example.com', '203.0.113.9:8443'])
-        self.assertEqual(argv[argv.index('-proxy') + 1], HTTP_PROXY)
-        self.assertNotIn('-proxy', self.run_nuclei(['127.0.0.1:8080']))  # a loopback fixture stays local
-        self.turn_on('socks5h://203.0.113.5:1080')
-        with self.assertRaises(egress_proxy.ProxyUnavailable):  # never a direct run behind the administrator's back
-            self.run_nuclei(['www.example.com'])
-
-    def test_wafw00f_wpscan_and_testssl_runs(self):
-        from cveFeed import heavy_process
-        seen = []
-
-        def fake_run(kind, argv, timeout, **kwargs):
-            seen.append(argv)
-            out = argv[argv.index('-o') + 1] if '-o' in argv else None
-            if out:
-                with open(out, 'w') as handle:
-                    handle.write('[]')
-            return mock.Mock(returncode=0, stderr='')
-
-        with mock.patch.object(heavy_process, 'run', fake_run):
-            waf_scan.run_wafw00f('https://www.example.com/')
-            self.assertNotIn('-p', seen[-1])
-            self.turn_on(HTTP_PROXY)
-            waf_scan.run_wafw00f('https://www.example.com/')
-            self.assertEqual((seen[-1][seen[-1].index('-p') + 1], seen[-1][-1]), (HTTP_PROXY, 'https://www.example.com/'))
-            waf_scan.run_wafw00f('http://127.0.0.1:8080/')
-            self.assertNotIn('-p', seen[-1])
-            self.turn_on('socks5h://203.0.113.5:1080')
-            self.assertIn('cannot use', waf_scan.run_wafw00f('https://www.example.com/')['error'])
-            self.turn_on(LOGIN_PROXY)
-            try:
-                wpscan_scan.run_wpscan_process('https://www.example.com/', '', timeout=120)
-            except Exception:  # the fake wrote no report: only the arguments matter here
-                pass
-            wp = seen[-1]
-            self.assertEqual((wp[wp.index('--proxy') + 1], wp[wp.index('--proxy-auth') + 1]), ('http://203.0.113.52:3128', 'bob:hunter2'))
-            self.turn_on(SOCKS_PROXY)
-            with self.assertRaises(testssl_scan.TestsslError) as raised:
-                testssl_scan.run_testssl('www.example.com', '203.0.113.5', 443)
-            self.assertIn('testssl', str(raised.exception))
-
-        captured = []
-        self.turn_on(HTTP_PROXY)
-        with self.assertRaises(testssl_scan.TestsslError):
-            testssl_scan.run_testssl('www.example.com', '203.0.113.5', 443, runner=lambda args, env, timeout: captured.append(args))
-        self.assertEqual(captured[0][captured[0].index('--proxy') + 1], '203.0.113.50:3128')  # a runner that writes no report: only the args matter
-
-    def test_bbot_gets_the_proxy_in_its_private_config_file_never_on_the_command_line(self):
-        seen = {}
-
-        def fake(targets, presets, mode, timeout, extra_args, **kwargs):
-            seen['args'] = list(extra_args)
-            seen['secrets'] = kwargs.get('secrets')
-            seen['file'] = None
-            if bbot.PRESET_FLAG in extra_args:
-                path = extra_args[extra_args.index(bbot.PRESET_FLAG) + 1]
-                seen['mode'] = oct(os.stat(path).st_mode & 0o777)
-                with open(path) as handle:
-                    seen['file'] = handle.read()
-            return iter(())
-
-        with mock.patch.object(bbot, '_stream_events', fake):
-            list(bbot.stream_events(['example.com']))
-            self.assertEqual((seen['args'], seen['file']), ([], None))  # off: nothing added, no preset file
-            self.turn_on(LOGIN_PROXY)
-            list(bbot.stream_events(['example.com'], extra_args=['-c', 'modules.shodan_dns.api_key=abc123']))
-        self.assertNotIn('hunter2', ' '.join(seen['args']))
-        self.assertNotIn('web.http_proxy', ' '.join(seen['args']))
-        self.assertIn('http_proxy: http://bob:hunter2@203.0.113.52:3128', seen['file'])
-        self.assertIn('api_key: abc123', seen['file'])
-        self.assertEqual(seen['mode'], '0o600')
-        self.assertIn(LOGIN_PROXY, seen['secrets'])  # redacted from bbot's error output like an API key
-
-
 # ----------------------------------------------------------------------------- a tiny forward proxy that records what it is asked
 
 ORIGIN_BODY = b'<html><head><title>origin behind the proxy</title></head><body>hello</body></html>'
@@ -435,9 +297,25 @@ def self_signed(directory):
     return cert_path, key_path
 
 
-class LiveProxyTests(ProxyOn, TestCase):
+class LibraryProxyOn(ProxyOn):
+    """The probe proxy of the scanner library (``CVENGINE_SENTINEL_PROBE_PROXY``): a Sentinel's request code is where a proxy is used, this server opens no
+    connection to a target. The cases below run that code (``cvengine_scanner.probes``) on real sockets against a proxy fixture."""
+
+    def setUp(self):
+        super().setUp()
+        lib_proxy.reset_cache()
+        self.addCleanup(lib_proxy.reset_cache)
+        library_http.allow_test_net(self)
+
+    def turn_on(self, *lines, use=True):
+        os.environ[lib_proxy.ENV] = '\n'.join(lines) if use else ''
+        lib_proxy.reset_cache()
+
+
+class LiveProxyTests(LibraryProxyOn, TestCase):
     """A real probe, real sockets, a real proxy process-in-a-thread: the traffic must arrive at the proxy, addressed to the vetted IP."""
     DNS = {'app.example.test': '203.0.113.10'}
+    allow_network = True  # the point of these cases: real sockets and the real resolver (a stand-in for it answers only the names in DNS)
 
     @classmethod
     def setUpClass(cls):
@@ -457,7 +335,7 @@ class LiveProxyTests(ProxyOn, TestCase):
 
     def probe(self, url, **kwargs):
         with mock.patch.object(socket, 'getaddrinfo', fake_dns(self.DNS)):
-            return route_auth.probe_url(url, **kwargs)
+            return library_http.probe_url(url, **kwargs)
 
     def test_plain_http_goes_to_the_proxy_as_an_absolute_uri_for_the_vetted_address_with_the_original_host(self):
         fixture = self.proxy()
@@ -524,7 +402,7 @@ class LiveProxyTests(ProxyOn, TestCase):
                 return [answer('2001:db8::7', int(port), socket.AF_INET6)]
             return real(host, port, *args, **kwargs)
         with mock.patch.object(socket, 'getaddrinfo', lookup):
-            route_auth.probe_url('http://v6.example.test/')
+            library_http.probe_url('http://v6.example.test/')
         self.assertEqual(fixture.records[0]['destination'], ('2001:db8::7', 80))
 
     def test_a_dead_proxy_fails_the_request_and_never_falls_back_to_a_direct_connection(self):
@@ -563,8 +441,8 @@ class LiveProxyTests(ProxyOn, TestCase):
         origin = http.server.HTTPServer(('127.0.0.1', 0), Origin)
         threading.Thread(target=origin.serve_forever, daemon=True).start()
         self.addCleanup(origin.shutdown)
-        with mock.patch.object(transport, 'is_scannable_ip', return_value=True):  # the gate refuses loopback; the fixture tests lift that
-            page = route_auth.probe_url(f'http://127.0.0.1:{origin.server_port}/')
+        library_http.allow_loopback(self)  # the gate refuses loopback; the fixture tests lift that
+        page = library_http.probe_url(f'http://127.0.0.1:{origin.server_port}/')
         self.assertEqual(page['title'], 'local fixture')
         self.assertEqual(fixture.records, [])
 
@@ -573,16 +451,16 @@ class LiveProxyTests(ProxyOn, TestCase):
         self.turn_on(fixture.url_without_login)
         for ip in ('127.0.0.1', '169.254.169.254', '10.1.2.3'):
             with mock.patch.object(socket, 'getaddrinfo', fake_dns({'evil.example.test': ip})), self.assertRaises(ValueError):
-                route_auth.probe_url('http://evil.example.test/')
+                library_http.probe_url('http://evil.example.test/')
         with mock.patch.object(socket, 'getaddrinfo', fake_dns({'mixed.example.test': '203.0.113.10'})):
-            addresses = transport.resolve('mixed.example.test', 80)
-        with mock.patch.object(transport, 'is_scannable_ip', return_value=False), self.assertRaises(ValueError):
-            transport.open_socket(addresses, 3)  # re-vetted at connect: refused before any byte goes to the proxy
-        with mock.patch.object(transport, 'is_scannable_ip', return_value=False), self.assertRaises(ValueError):
-            transport.HTTPConnection('mixed.example.test', 80, addresses, 3).connect()
+            addresses = transport.resolve('mixed.example.test', 80, library_http.policy())
+        with mock.patch.object(library_http.ScopePolicy, 'address_refusal', return_value='prohibited'), self.assertRaises(ValueError):
+            transport.open_socket(addresses, 3, library_http.policy())  # re-vetted at connect: refused before any byte goes to the proxy
+        with mock.patch.object(library_http.ScopePolicy, 'address_refusal', return_value='prohibited'), self.assertRaises(ValueError):
+            transport.HTTPConnection('mixed.example.test', 80, addresses, 3, library_http.policy()).connect()
         self.assertEqual(fixture.records, [])
         with self.assertRaises(ValueError):  # the vetted connect_ip path too
-            route_auth.probe_url('http://app.example.test/', connect_ip='169.254.169.254')
+            library_http.probe_url('http://app.example.test/', connect_ip='169.254.169.254')
         self.assertEqual(fixture.records, [])
 
     def test_off_means_a_direct_connection_exactly_as_before(self):
@@ -590,36 +468,16 @@ class LiveProxyTests(ProxyOn, TestCase):
         self.turn_on(fixture.url_without_login, use=False)
         sock = mock.Mock()
         with mock.patch.object(socket, 'getaddrinfo', fake_dns(self.DNS)), mock.patch.object(socket, 'socket', return_value=sock):
-            addresses = transport.resolve('app.example.test', 443)
-            self.assertIs(transport.open_socket(addresses, 3), sock)
+            addresses = transport.resolve('app.example.test', 443, library_http.policy())
+            self.assertIs(transport.open_socket(addresses, 3, library_http.policy()), sock)
         sock.connect.assert_called_once_with(('203.0.113.10', 443))
         self.assertEqual(fixture.records, [])
 
-    def test_db_exposure_http_checks_use_the_proxy_through_requests(self):
-        fixture = self.proxy()
-        self.turn_on(fixture.url_without_login)
-        body = b'{"cluster_name": "c1", "version": {"number": "8.1"}}'
-        fixture_response = (b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(body)) + body
-        with mock.patch(__name__ + '.origin_response', return_value=fixture_response):
-            self.assertTrue(db_exposure.check_elasticsearch('203.0.113.20', 9200))
-        self.assertEqual(fixture.records[0]['line'], 'GET http://203.0.113.20:9200/ HTTP/1.1')
-        self.turn_on(fixture.url_without_login, use=False)
-        with mock.patch('requests.sessions.Session.get', side_effect=OSError('direct')) as get:
-            self.assertFalse(db_exposure.check_elasticsearch('203.0.113.20', 9200))
-        self.assertEqual(get.call_args.kwargs['proxies'], {})
-
-    @unittest.skipUnless(shutil.which('wafw00f'), 'wafw00f is not installed')
-    def test_the_real_wafw00f_sends_its_requests_to_the_proxy(self):
-        fixture = self.proxy()
-        self.turn_on(fixture.url_without_login)
-        result = waf_scan.run_wafw00f('http://203.0.113.9:8080/', timeout_s=60)
-        self.assertEqual(result['error'], '')
-        self.assertTrue(any(r['line'].startswith('GET http://203.0.113.9:8080/') for r in fixture.records), fixture.records[:3])
 
 
-class PinnedForwardingUnitTests(ProxyOn, TestCase):
+class PinnedForwardingUnitTests(LibraryProxyOn, TestCase):
     def test_a_missing_host_header_still_names_the_original_host_not_the_ip(self):
-        connection = transport.HTTPConnection('app.example.test', 8080, ((socket.AF_INET, ('203.0.113.10', 8080)),), 3)
+        connection = transport.HTTPConnection('app.example.test', 8080, ((socket.AF_INET, ('203.0.113.10', 8080)),), 3, library_http.policy())
         sent = []
 
         class Sock:
@@ -632,7 +490,7 @@ class PinnedForwardingUnitTests(ProxyOn, TestCase):
             def close(self):
                 pass
         self.turn_on(HTTP_PROXY)
-        with mock.patch.object(egress_proxy, 'connect_proxy', return_value=Sock()):
+        with mock.patch.object(lib_proxy, 'connect_proxy', return_value=Sock()):
             connection.connect()
             connection.putrequest('GET', '/p')
             connection.endheaders()
@@ -643,8 +501,8 @@ class PinnedForwardingUnitTests(ProxyOn, TestCase):
 
     def test_an_https_proxy_cannot_carry_the_in_process_checks_and_says_so(self):
         self.turn_on('https://203.0.113.5:443')
-        with mock.patch.object(socket, 'socket') as direct, self.assertRaises(egress_proxy.ProxyUnavailable):
-            transport.open_socket(((socket.AF_INET, ('203.0.113.10', 443)),), 3)
+        with mock.patch.object(socket, 'socket') as direct, self.assertRaises(lib_proxy.ProxyUnavailable):
+            transport.open_socket(((socket.AF_INET, ('203.0.113.10', 443)),), 3, library_http.policy())
         direct.assert_not_called()
 
 

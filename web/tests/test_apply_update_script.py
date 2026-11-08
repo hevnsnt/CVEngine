@@ -35,9 +35,12 @@ case " $* " in
     esac; echo; exit 0;;
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
+    if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
+  *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
+  *" --force-recreate reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
   *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
     if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
@@ -558,11 +561,43 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         other = self.tmp / 'other'
         (other / 'scripts').mkdir(exist_ok=True)
         shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        shutil.copy(SCRIPTS / 'update-disk.sh', other / 'scripts' / 'update-disk.sh')
         shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
         self.git('add', '-A', cwd=other)
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
         return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_an_install_with_the_ai_reviewer_builds_and_restarts_it_and_its_failure_never_fails_the_update(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'has_reviewer').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml build reviewer', calls)
+        recreate = 'docker compose -f docker-compose.yml up -d --no-deps --force-recreate reviewer'
+        self.assertIn(recreate, calls)
+        self.assertGreater(calls.index(recreate), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        # a reviewer that cannot be built or started is logged; the update is still done
+        self.git('reset', '--hard', self.prev, cwd=self.work)
+        for path in self.work.glob('web/.update-*'):
+            path.unlink()
+        (self.stub / 'calls.log').unlink()
+        (self.stub / 'reviewer_fails').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('could not build the AI reviewer image', log)
+        self.assertIn('could not start the AI reviewer', log)
+
+    def test_an_install_without_the_ai_reviewer_never_asks_for_it(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse([c for c in self.calls() if 'reviewer' in c])
 
     def test_too_little_disk_space_stops_the_update_before_anything_is_built_and_says_so(self):
         self.new = self.publish_deploy_file()
@@ -570,10 +605,51 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         log = (self.work / 'web' / '.update-log').read_text()
-        self.assertIn('MB are free where Docker keeps its images', log)
+        self.assertIn('This update needs about', log)
+        self.assertIn('(nothing was stopped or changed)', log)
         self.assertEqual(self.head(), self.prev)  # a failure before the migration returns to the previous version
         # the way back is not stopped by the same disk check: the previous version is restarted and scanning is resumed
         self.assertNotIn('could not restart the previous version', log)
+
+    def test_a_host_that_has_the_disk_check_refuses_before_it_pauses_or_stops_anything(self):
+        """From the second update on, the host's own copy of the script has the check, so it runs before scanning is paused: the screen says why."""
+        self.new = self.publish_deploy_file()  # carries scripts/update-disk.sh
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)  # the checkout now has the check
+        newest = self.publish_deploy_file_again()
+        self.approve(newest)
+        (self.stub / 'calls.log').unlink()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='', CVENGINE_FAKE_DISK_FREE_MB='9500')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        sentence = 'This update needs about 14 GB of free disk; this server has 9 GB free. Free some space or add disk, then try again.'
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn(sentence, log)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual((phase['phase'], phase['detail']), ('failed', sentence))
+        self.assertFalse(self.approved())  # asked again after the space is freed
+        self.assertEqual(self.head(), self.new)  # the files did not move
+        self.assertFalse([c for c in self.calls() if 'update_scan_pause' in c or ' build ' in c or ' stop ' in c or ' up ' in c], self.calls())
+        # with room, the same approval goes through
+        self.approve(newest)
+        self.assertEqual(self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='', CVENGINE_FAKE_DISK_FREE_MB='20000').returncode, 0)
+        self.assertEqual(self.head(), newest)
+
+    def test_a_deploy_that_stops_for_disk_tells_the_screen_why_after_the_way_back(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual(phase['phase'], 'failed')
+        self.assertIn('This update needs about', phase['detail'])
+
+    def test_ghost_scans_are_closed_before_the_drain_counts_and_a_real_one_still_waits(self):
+        self.approve()
+        (self.stub / 'running_count').write_text('2\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)  # a real scan: still waiting
+        self.assertIn('exec -T web python3 manage.py update_ghost_scans --idle-minutes 5', ' '.join(self.calls()))
+        self.assertTrue(self.approved())
 
     def test_a_verified_update_removes_the_image_it_replaced_and_a_failed_one_does_not(self):
         self.new = self.publish_deploy_file()

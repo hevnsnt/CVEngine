@@ -1,7 +1,5 @@
 """1.3.2: a JavaScript library's version is read from the file itself, never from a ?ver= string, and several copies on one page are resolved
 (cveFeed.js_libraries, the route check's script reading, the html-libraries probe and correlation)."""
-import gzip
-import io
 import unittest
 from unittest import mock
 from urllib.parse import urlsplit
@@ -9,9 +7,10 @@ from urllib.parse import urlsplit
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import correlation, js_libraries, pinned_transport, probes, route_auth, triage
+from cveFeed import correlation, js_libraries, probes, route_auth, triage
 from cveFeed.models import HostExclusion, ProbeObservation, RouteAuth
 from startScan.models import Subdomain, Technology
+from tests import library_http, probe_scanner
 from tests.test_route_auth import RouteFixture, probe
 
 PAGE_URL = 'https://www.rt.test/'
@@ -253,28 +252,6 @@ class FetchLimitTests(NoCache, SimpleTestCase):
         self.assertEqual(records['jquery']['version'], '3.4.1')
         self.assertEqual(records['jquery']['script_sha256'], '')  # a cut body is not the file: no identity is claimed for it
 
-    def test_a_gzip_body_is_decoded_within_the_cap(self):
-        raw = gzip.compress((JQ_341_MIN + '\n' + 'var a=1;' * 100000).encode())  # 800 KB decoded
-
-        class Response:
-            def __init__(self):
-                self.stream = io.BytesIO(raw)
-
-            def getheader(self, name, default=None):
-                return 'gzip' if name.lower() == 'content-encoding' else default
-
-            def read(self, n=-1):
-                return self.stream.read(n)
-        body = pinned_transport.read_body(Response(), js_libraries.MAX_SCRIPT_BYTES)
-        self.assertEqual(len(body), js_libraries.MAX_SCRIPT_BYTES)
-        records = read('<script src="/js/jquery.js"></script>', {'/js/jquery.js': body.decode()}, bytes=len(body))
-        self.assertEqual((records['jquery']['version'], records['jquery']['script_sha256']), ('3.4.1', ''))
-
-    def test_every_probe_read_is_capped(self):
-        self.assertEqual(route_auth.MAX_READ_BYTES, js_libraries.MAX_SCRIPT_BYTES)
-        with self.assertRaises(ValueError):  # the cap is applied before anything is sent
-            route_auth.probe_url('https://www.rt.test/x.js', max_bytes=-1)
-
     def test_a_page_served_for_a_missing_script_and_an_error_say_nothing(self):
         def fetch(url):
             if url.endswith('a.js'):
@@ -361,6 +338,10 @@ class RouteCheckTests(NoCache, RouteFixture, TestCase):
                 return probe(url=url, content_type='application/javascript', body=bodies[path])
             return self.probe(url)
         scan = self.scan()
+        # the scanner reads the page's scripts (cvengine_scanner/tests/probes/test_routes.py); what it reports is stored here
+        from tests import route_scanner
+        self.scanner().responders['route_probe'] = lambda task: route_scanner.result(
+            task, fake, scripts={'project': self.project.id, 'target': self.domain, 'reader': js_libraries.Reader(self.project.id)})
         self.run_it(scan, probe=fake)
         root = RouteAuth.objects.get(path='/')
         self.assertNotIn('page_scripts', root.evidence)
@@ -382,7 +363,7 @@ class ProbeTests(NoCache, SimpleTestCase):
         from tests.test_probes import answers, page
         table = {'/': page(body=TWO_COPIES), '/assets/jquery-3.4.1.min.js': page(body=JQ_341_MIN),
                  '/wp-includes/js/jquery/jquery.min.js?ver=3.7.1': page(body=JQ_371_MIN)}
-        found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
         self.assertEqual([(o['product'], o['version'], o['source'], o['confidence']) for o in found], [('jQuery', '3.7.1', 'script:body', 0.9)])
         self.assertEqual(len(found[0]['evidence']['library']['copies']), 2)
         self.assertEqual(probes.technology_names(found), ['jQuery:3.4.1', 'jQuery:3.7.1'])
@@ -391,7 +372,7 @@ class ProbeTests(NoCache, SimpleTestCase):
         from tests.test_probes import answers, page
         html = '<script async src="/js/jquery-3.6.0.js"></script><script src="/js/jquery-3.1.1.js"></script>'
         table = {'/': page(body=html), '/js/jquery-3.6.0.js': page(body=JQ_360_FULL), '/js/jquery-3.1.1.js': page(body=JQ_311_FULL)}
-        found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        found = probe_scanner.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
         self.assertEqual(sorted(probes.technology_names(found)), ['jQuery:3.1.1', 'jQuery:3.6.0'])
         self.assertLessEqual(found[0]['confidence'], js_libraries.UNRESOLVED_CAP)
 
@@ -691,11 +672,12 @@ class CacheTests(SimpleTestCase):
         self.assertEqual(asked[-1], {'If-None-Match': '"v1"'})
 
     def test_only_the_etag_header_may_be_added_to_an_anonymous_probe(self):
+        """The scanner library's anonymous GET (the one a Sentinel makes): a Cookie is refused before anything is sent, the ETag of a cached script is let through."""
         with self.assertRaises(ValueError):
-            route_auth.probe_url('https://www.rt.test/x.js', headers={'Cookie': 'a=b'})
-        with mock.patch.object(pinned_transport, 'resolve', side_effect=LookupError('stop before the network')):
+            library_http.probe_url('https://www.rt.test/x.js', headers={'Cookie': 'a=b'})
+        with mock.patch.object(library_http.transport, 'resolve', side_effect=LookupError('stop before the network')):
             with self.assertRaises(LookupError):
-                route_auth.probe_url('https://www.rt.test/x.js', headers={'If-None-Match': '"v1"'})
+                library_http.probe_url('https://www.rt.test/x.js', headers={'If-None-Match': '"v1"'})
 
 
 class TargetScopeTests(NoCache, RouteFixture, TestCase):
@@ -781,7 +763,7 @@ class ProbePageTests(NoCache, SimpleTestCase):
             def get(url, first=first):
                 asked.append(url)
                 return first if url.endswith('/') else answers({})(url)
-            found = probes.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=get, sleep=lambda s: None)
+            found = probe_scanner.run_http_probe('html-libraries', 'https://www.rt.test', {'www.rt.test'}, get=get)
             self.assertEqual([o for o in found if o['kind'] == 'version'], [])
             self.assertEqual(asked, ['https://www.rt.test/'])
 

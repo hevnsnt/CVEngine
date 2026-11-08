@@ -10,12 +10,14 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import ledger, probes, route_auth, slow_web, vhost_scan
+from cveFeed import ledger, vhost_scan
 from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, ProbeObservation, RouteAuth, ScanControl, ServiceRun, TlsCertificate
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
+from tests import library_http
+from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_tenancy import client_for
 
 DEFAULT_PAGE = {'status': 200, 'title': 'Welcome to nginx!', 'length': 615}
@@ -44,10 +46,6 @@ class Server:
 
     def asked(self, connect_ip='203.0.113.10'):
         return [host for host, ip in self.calls if ip == connect_ip]
-
-
-def pace():
-    return slow_web.Pace(sleep=lambda s: None, overall=0, per_host=0)
 
 
 class VhostFixture:
@@ -83,15 +81,88 @@ class VhostFixture:
             ('wiki.example.test', self.ADDRESS): answer(**WIKI_PAGE),  # the same application the name serves on its own address
         }
         self.server = Server(self.table)
+        LocalFallback('none').apply(self)  # vhost_probe has no local path: the sweep is the scanner's or nothing
+        self.guard = assert_ran_nowhere_locally(self, 'vhost_probe')
+        self.fake = None
+        self.tasks = []  # the vhost_probe tasks the fake scanner was handed
 
     def host(self, name, *ips, scan=True):
         sub = Subdomain.objects.create(target_domain=self.domain, name=name, scan_history=self.scan if scan else None)
         sub.ip_addresses.add(*ips)
         return sub
 
-    def run_sweep(self, **kw):
-        kw.setdefault('fetch', self.server)
-        kw.setdefault('pace', pace())
+    @staticmethod
+    def _page_of(response):
+        return {'status': response['status'], 'title': response['title'], 'server': response['server'], 'content_type': response['content_type'],
+                'powered_by': response['powered_by'], 'url': response['url'], 'body': response['body'], 'headers': response['headers']}
+
+    @staticmethod
+    def _state(response):
+        if response.get('challenge'):
+            return 'challenged'
+        return 'busy' if response['status'] in (429, 503) else 'answered'
+
+    def scanner_report(self, task):
+        """What a Sentinel's ``vhost_probe`` reads from ``self.table`` for ``task``, the way the real one walks an address: its default answer, then
+        each name in the order given; a challenge or a busy answer ends the address; a name that has no entry in the table did not answer; a name
+        the server sent no stored front page for is looked up at its own address. Every read is noted in ``self.server.calls``."""
+        self.tasks.append(task)
+        out = []
+        for item in task['target']['addresses']:
+            self.server.calls.append((item['address'], None))
+            default = self.table.get((item['address'], None))
+            if default is None:
+                out.append({'id': item['id'], 'default': {'state': 'no_answer'}, 'names': []})
+                continue
+            state = self._state(default)
+            if state != 'answered':
+                row = {'state': state, 'fingerprint': vhost_scan.fingerprint_of(default)}
+                if state == 'challenged':
+                    row['challenge'] = default['challenge']
+                out.append({'id': item['id'], 'default': row, 'names': []})
+                continue
+            default_fp = vhost_scan.fingerprint_of(default)
+            names = []
+            for entry in item['names']:
+                response = self.table.get((entry['name'], item['address']))
+                self.server.calls.append((entry['name'], item['address']))
+                if response is None:
+                    names.append({'name': entry['name'], 'state': 'no_answer'})
+                    continue
+                state = self._state(response)
+                fingerprint = vhost_scan.fingerprint_of(response)
+                if state != 'answered':
+                    row = {'name': entry['name'], 'state': state, 'fingerprint': fingerprint}
+                    if state == 'challenged':
+                        row['challenge'] = response['challenge']
+                    names.append(row)
+                    break
+                row = {'name': entry['name'], 'state': 'answered', 'fingerprint': fingerprint}
+                if not vhost_scan.similar(fingerprint, default_fp):
+                    if 'own' not in entry:
+                        self.server.calls.append((entry['name'], None))
+                        own = self.table.get((entry['name'], None))
+                        row['own'] = vhost_scan.fingerprint_of(own) if own is not None else None
+                    row['page'] = self._page_of(response)
+                names.append(row)
+            out.append({'id': item['id'], 'default': {'state': 'answered', 'fingerprint': default_fp}, 'names': names})
+        return {'outcome': 'done', 'addresses': out, 'touched': [item['address'] for item in task['target']['addresses']], 'refused': []}
+
+    def scanner(self):
+        """The fake Sentinel of the test (started once): it answers vhost_probe from ``self.table`` and subdir_probe from ``subdir_report``."""
+        if self.fake is None:
+            self.fake = FakeScanner(kinds=['vhost_probe', 'subdir_probe'], responders={'vhost_probe': self.scanner_report,
+                                                                                       'subdir_probe': lambda task: self.subdir_report(task)}).start_for(self)
+        return self.fake
+
+    def subdir_report(self, task):
+        raise AssertionError('this test did not expect a subdir_probe task')
+
+    def run_sweep(self, responder=None, **kw):
+        """The sweep with a fake Sentinel answering from ``self.table``: this server asks nothing itself (the guard fails the test if it does)."""
+        fake = self.scanner()
+        if responder is not None:
+            fake.responders['vhost_probe'] = responder
         return vhost_scan.sweep(self.project.id, **kw)
 
     def observations(self, **kw):
@@ -191,12 +262,15 @@ class SweepTests(VhostFixture, TestCase):
     def test_the_name_s_own_site_is_read_from_its_route_check_before_asking_for_it(self):
         self.run_sweep()
         self.assertNotIn(('wiki.example.test', None), self.server.calls)  # its stored front page answered the comparison
+        sent = {n['name']: n for t in self.tasks for a in t['target']['addresses'] for n in a['names']}
+        self.assertEqual(sent['wiki.example.test']['own']['title'], 'Wiki')  # the task carried the stored front page
 
-    def test_a_name_without_a_route_check_is_asked_once_at_its_own_address(self):
+    def test_a_name_without_a_route_check_is_looked_up_once_at_its_own_address_by_the_scanner(self):
         RouteAuth.objects.all().delete()
         self.table[('wiki.example.test', None)] = answer(**WIKI_PAGE)
         self.run_sweep()
         self.assertEqual(self.server.calls.count(('wiki.example.test', None)), 1)
+        self.assertNotIn('own', [n for t in self.tasks for a in t['target']['addresses'] for n in a['names'] if n['name'] == 'wiki.example.test'][0])  # nothing stored to send
         self.assertEqual(ProbeObservation.objects.get(host='wiki.example.test', probe=vhost_scan.PROBE).variant, 'same_app')
 
     def test_a_name_a_scan_found_on_the_address_is_never_asked(self):
@@ -259,16 +333,27 @@ class SweepTests(VhostFixture, TestCase):
         self.assertIn('automated testing', summary['skipped'])
         self.assertEqual(self.server.calls, [])
 
-    def test_a_pause_that_arrives_mid_sweep_stops_before_the_next_request(self):
-        summary = self.run_sweep(stop=lambda: len(self.server.calls) >= 3)
+    def test_a_pause_that_arrives_while_the_scanner_works_records_nothing_and_leaves_the_names_due(self):
+        summary = self.run_sweep(stop=lambda: bool(self.server.calls))  # paused once the scanner has asked
         self.assertIn('paused', summary['skipped'])
-        self.assertEqual(len(self.server.calls), 3)
-        self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE, asset=f'{self.ADDRESS}|wiki.example.test').exists())  # still due
+        self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE).exists())  # still due
+        self.assertFalse(ProbeObservation.objects.filter(probe=vhost_scan.PROBE).exists())
 
-    def test_the_sweep_waits_before_every_request(self):
-        counting = slow_web.Pace(sleep=lambda s: None, per_host=0, overall=0)
-        self.run_sweep(pace=counting)
-        self.assertEqual(counting.requests, len(self.server.calls))
+    def test_the_task_carries_the_pace_the_scanner_keeps_between_requests(self):
+        self.run_sweep()
+        gap = self.tasks[0]['target']['gap']
+        self.assertGreaterEqual(gap, 0.2)
+        self.assertLessEqual(gap, 60.0)
+
+    def test_the_stage_waits_with_the_scanner_offline_and_nothing_is_recorded(self):
+        self.run_sweep()  # starts the fake
+        ServiceRun.objects.all().delete()
+        ProbeObservation.objects.all().delete()
+        self.fake.go_offline()
+        summary = self.run_sweep()
+        self.assertIn('waiting for a scanner', summary['skipped'])
+        self.assertFalse(ServiceRun.objects.filter(service=vhost_scan.SERVICE).exists())
+        self.assertFalse(ProbeObservation.objects.filter(probe=vhost_scan.PROBE).exists())
 
     def test_it_can_be_switched_off(self):
         with mock.patch.dict('os.environ', {'CVENGINE_VHOST': '0'}):
@@ -393,9 +478,9 @@ class VettingTests(VhostFixture, TestCase):
 
     def test_an_address_that_resolves_nowhere_a_scanner_may_go_is_refused_by_the_transport_too(self):
         with self.assertRaises(ValueError):
-            route_auth.probe_url('https://portal.example.test/', connect_ip='127.0.0.1')
+            library_http.probe_url('https://portal.example.test/', connect_ip='127.0.0.1')
         with self.assertRaises(ValueError):
-            route_auth.probe_url('https://portal.example.test/', connect_ip='169.254.169.254')
+            library_http.probe_url('https://portal.example.test/', connect_ip='169.254.169.254')
 
 
 class HostMergeTests(VhostFixture, TestCase):
@@ -449,7 +534,9 @@ class ModelContextTests(VhostFixture, TestCase):
 
 
 class RequestTests(SimpleTestCase):
-    """The real transport against a local server: the request is a GET with no body, the name is the Host header, the address is the one asked."""
+    """The scanner library's GET (``cvengine_scanner.probes.http.probe_url``: the one a Sentinel makes, this server has none), against a local server: a
+    GET with no body and no cookie, the name is the Host header, the address is the one asked, a redirect is not followed. The sweep's own requests are
+    a Sentinel's (its transport is also tested in the Sentinel repository: cvengine_scanner/tests/probes/test_transport.py)."""
 
     @classmethod
     def setUpClass(cls):
@@ -460,6 +547,12 @@ class RequestTests(SimpleTestCase):
             def do_GET(self):
                 length = int(self.headers.get('Content-Length') or 0)
                 cls.seen.append((self.command, self.headers.get('Host'), self.path, length, self.headers.get('Cookie'), self.headers.get('Authorization')))
+                if self.path == '/moved':
+                    self.send_response(302)
+                    self.send_header('Location', 'http://169.254.169.254/latest/meta-data/')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
                 body = b'<html><head><title>Portal login</title></head><body>hello</body></html>'
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
@@ -486,63 +579,25 @@ class RequestTests(SimpleTestCase):
 
     def setUp(self):
         self.seen.clear()
-        for target in ('cveFeed.pinned_transport.is_scannable_ip', 'targetApp.target_types.is_scannable_ip'):
-            mock.patch(target, return_value=True).start()
-        self.addCleanup(mock.patch.stopall)
+        library_http.allow_loopback(self)
 
     def test_the_name_is_the_host_header_and_the_vetted_address_is_what_is_connected_to(self):
-        response = slow_web.get(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
+        response = library_http.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
         self.assertEqual(response['title'], 'Portal login')
         self.assertEqual(self.seen[0][:3], ('GET', f'portal.example.test:{self.port}', '/'))  # the name does not resolve: only the address was used
 
     def test_a_request_is_a_get_with_no_body_no_cookie_and_no_credential(self):
-        slow_web.get(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
+        library_http.probe_url(f'http://portal.example.test:{self.port}/', connect_ip='127.0.0.1')
         method, _host, _path, length, cookie, auth = self.seen[0]
         self.assertEqual((method, length, cookie, auth), ('GET', 0, None, None))
 
     def test_the_transport_refuses_anything_but_a_get_or_head(self):
         for method in ('POST', 'PUT', 'DELETE', 'PATCH'):
             with self.assertRaises(ValueError):
-                route_auth.probe_url(f'http://portal.example.test:{self.port}/', method=method, connect_ip='127.0.0.1')
+                library_http.probe_url(f'http://portal.example.test:{self.port}/', method=method, connect_ip='127.0.0.1')
         self.assertEqual(self.seen, [])
 
     def test_redirects_are_not_followed(self):
-        redirect = {'status': 302, 'location': 'http://169.254.169.254/latest/meta-data/'}
-        with mock.patch.object(route_auth, 'probe_url', return_value={**answer(302), **redirect}) as probe:
-            slow_web.get('http://portal.example.test/', connect_ip='203.0.113.10', project=1, probe=probe)
-        self.assertEqual(probe.call_count, 1)
-
-
-class PaceTests(SimpleTestCase):
-    def test_the_pace_waits_for_the_per_host_gap(self):
-        clock, slept = [100.0], []
-
-        def sleep(seconds):
-            slept.append(round(seconds, 3))
-            clock[0] += seconds
-        pace_ = slow_web.Pace(sleep=sleep, clock=lambda: clock[0], per_host=2.0, overall=0)
-        pace_.wait('203.0.113.10')
-        clock[0] += 0.5
-        pace_.wait('203.0.113.10')
-        pace_.wait('198.51.100.7')  # another host is not held back by the first
-        self.assertEqual(slept, [1.5])
-        self.assertEqual(pace_.requests, 3)
-
-    def test_the_global_gap_spaces_requests_across_hosts(self):
-        slept = []
-        clock = [1000.0]
-        pace_ = slow_web.Pace(sleep=slept.append, clock=lambda: clock[0], per_host=0, overall=1.0)
-        with mock.patch.object(slow_web, 'reserve_slot', side_effect=[0.0, 1.0, 1.0]):
-            for host in ('a', 'b', 'c'):
-                pace_.wait(host)
-        self.assertEqual(slept, [1.0, 1.0])
-
-    def test_reserve_slot_hands_out_slots_one_gap_apart(self):
-        fake = mock.Mock()
-        fake.r = None
-        with mock.patch('reNgine.resources.get_store', return_value=fake):
-            slow_web._local['next'] = 0.0
-            first = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-            second = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-            third = slow_web.reserve_slot(2.0, now=lambda: 50.0)
-        self.assertEqual((first, second, third), (0.0, 2.0, 4.0))
+        response = library_http.probe_url(f'http://portal.example.test:{self.port}/moved', connect_ip='127.0.0.1')
+        self.assertEqual((response['status'], response['location']), (302, 'http://169.254.169.254/latest/meta-data/'))
+        self.assertEqual(len(self.seen), 1)  # the answer is the redirect itself, nothing was asked of its target

@@ -1,0 +1,21 @@
+{
+  "outcome": "done",
+  "ratings": [
+    {
+      "id": "0",
+      "state": "rated",
+      "severity": 1,
+      "drop": false,
+      "note": "gone.example.net does not resolve, but example.net is registered, so no outsider can create it: a stale record to remove, not a takeover.",
+      "zone": ""
+    },
+    {
+      "id": "1",
+      "state": "unknown"
+    }
+  ],
+  "touched": [
+    "192.0.2.53"
+  ],
+  "refused": []
+}

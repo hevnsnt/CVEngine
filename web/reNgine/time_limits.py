@@ -24,7 +24,7 @@ MIN_SECONDS = 60
 VISIBILITY_MARGIN = 600
 
 # hard limit in seconds per queue (a value above the redelivery window is held to it, see ``_ceiling``); a queue that is not here has no
-# limit. openvas_queue is left out on purpose: a local OpenVAS task has a budget of 24 hours per host (cveFeed.openvas_scan.
+# limit. openvas_queue is left out on purpose: the Sentinel's OpenVAS task has a budget of 24 hours per host (cveFeed.openvas_scan.
 # DEFAULT_MAX_HOURS) and keeps its own deadline.
 SCAN_QUEUE = 24 * HOUR  # "as long as is safe"
 DEFAULTS = {

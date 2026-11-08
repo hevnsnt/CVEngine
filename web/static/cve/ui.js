@@ -44,6 +44,8 @@ export function emptyState({ icon, title, body, actions = [], tone = '' }) {
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
     svg.setAttribute('class', 'empty-icon');
+    svg.setAttribute('width', '40');
+    svg.setAttribute('height', '40');
     const use = document.createElementNS(ns, 'use');
     use.setAttribute('href', `#i-${icon}`);
     svg.append(use);
@@ -74,8 +76,9 @@ export function field(label, input, help) {
   return wrap;
 }
 export const text = (value = '', attrs = {}) => Object.assign(el('input', '', null, attrs), { value });
-export function selectOf(options, value) {
+export function selectOf(options, value, label) {
   const s = el('select');
+  if (label) s.setAttribute('aria-label', label);  // a select with no <label> needs a name of its own
   options.forEach(([v, t]) => s.append(Object.assign(el('option', '', t), { value: v })));
   if (value != null) s.value = value;
   return s;
@@ -108,6 +111,41 @@ export function dialog(title, build) {
   return d;
 }
 
+// A one-line button that opens its body OVER the page instead of pushing the rows down: the intro of a list page ("What is this"), a chart,
+// a settings card. Escape and a press outside close it. Built with the list head (app.js listHead) on the table lists.
+export function disclosure(label, ...body) {
+  const d = el('details', 'what-is');
+  const panel = el('div', 'what-body');
+  panel.append(...body);
+  d.append(el('summary', '', label), panel);
+  document.addEventListener('pointerdown', (e) => { if (d.isConnected && d.open && !d.contains(e.target)) d.open = false; }, true);
+  d.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !d.open) return;
+    e.stopPropagation();
+    d.open = false;
+    d.querySelector('summary').focus();
+  });
+  return d;
+}
+// A table wider than the box around it scrolls sideways (.scrolls on its .table-wrap); one that fits keeps overflow visible, which is what lets
+// its header stay in view while the page scrolls. Watches every table in root, now and when its rows are redrawn.
+export function watchWide(root) {
+  let queued = false;
+  const check = () => {
+    queued = false;
+    root.querySelectorAll('.table-wrap').forEach((wrap) => {
+      const t = wrap.querySelector('.table');
+      wrap.classList.toggle('scrolls', Boolean(t) && wrap.scrollWidth > wrap.clientWidth + 1 && t.offsetWidth > wrap.clientWidth + 1);
+    });
+  };
+  const later = () => { if (!queued) { queued = true; requestAnimationFrame(check); } };
+  if (window.ResizeObserver) new ResizeObserver(later).observe(root);
+  new MutationObserver(later).observe(root, { childList: true, subtree: true });
+  window.addEventListener('resize', later);
+  later();
+}
+export const whatIs = (words) => disclosure('What is this', el('p', 'note', words));
+
 export function table(columns, rows) {
   const t = el('table', 'table');
   const head = el('tr');
@@ -120,6 +158,7 @@ export function table(columns, rows) {
       const td = el('td', c.cls || '', null, { 'data-label': c.label });
       const out = c.render(r);
       if (out instanceof Node) td.append(out); else td.textContent = out == null ? '' : out;
+      if (/\bclip\b/.test(c.cls || '')) td.title = td.textContent; // a cell kept to one line says all of itself on hover
       tr.append(td);
     });
     tbody.append(tr);
@@ -188,6 +227,8 @@ export function copyButton(text, label = 'value', glyph = 'clip') {
   const NS = 'http://www.w3.org/2000/svg';
   const icon = (d) => {
     const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '15');
+    svg.setAttribute('height', '15');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
     d.forEach((part) => {

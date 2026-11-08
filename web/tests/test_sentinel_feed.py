@@ -1,4 +1,4 @@
-"""Keeping the Sentinels fed: hosts with no address are not a backlog, IPv6 is scanned with -6, the caps grow with the Sentinels' slots, and the
+"""Keeping the Sentinels fed: hosts with no address are not a backlog, the caps grow with the Sentinels' slots, and the
 work queued behind a Sentinel is twice its capacity."""
 import os
 from datetime import timedelta
@@ -10,64 +10,11 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from agentapi.models import Agent
-from cveFeed import assessment_review as ar
-from cveFeed import coverage_topup, hosting, host_assessment, nmap_scan, unresolved_archive
+from cveFeed import coverage_topup, hosting, host_assessment, unresolved_archive
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project
 from startScan.models import IpAddress, Subdomain
 from targetApp.models import Domain
-
-
-class NmapIpv6Tests(SimpleTestCase):
-    REPORT = '<?xml version="1.0"?><nmaprun><hosthint><address addr="{a}"/></hosthint>{hosts}<runstats/></nmaprun>'
-
-    def run_with(self, targets, answers):
-        """Run ``run_nmap_xml`` with Popen replaced: ``answers`` is the XML text per call, in order. Returns the commands run and the result."""
-        commands, replies = [], list(answers)
-
-        class Proc:
-            returncode = 0
-
-            def __init__(self, cmd, **kw):
-                commands.append(cmd)
-
-            def communicate(self, timeout=None):
-                return replies.pop(0), ''
-
-        class Job:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *e):
-                return False
-
-            def attach(self, proc):
-                pass
-
-            def raise_if_killed(self):
-                pass
-        with mock.patch('cveFeed.nmap_scan.subprocess.Popen', Proc), mock.patch('reNgine.resources.heavy_job', lambda *a, **k: Job()):
-            return commands, nmap_scan.run_nmap_xml(targets, ['-sU'], '5m')
-
-    def test_an_ipv6_target_runs_with_dash_6_and_an_ipv4_one_does_not(self):
-        commands, _ = self.run_with(['2606:4700:20::681a:907'], [self.REPORT.format(a='x', hosts='')])
-        self.assertEqual(commands[0][:3], ['nmap', '-6', '-sU'])
-        commands, _ = self.run_with(['203.0.113.5'], [self.REPORT.format(a='x', hosts='')])
-        self.assertNotIn('-6', commands[0])
-
-    def test_a_mixed_list_runs_once_per_family_and_one_report_answers_for_both(self):
-        v4 = self.REPORT.format(a='203.0.113.5', hosts='<host><address addr="203.0.113.5"/></host>')
-        v6 = self.REPORT.format(a='2001:db8::5', hosts='<host><address addr="2001:db8::5" addrtype="ipv6"/></host>')
-        commands, merged = self.run_with(['203.0.113.5', '2001:db8::5'], [v4, v6])
-        self.assertEqual([('-6' in c) for c in commands], [False, True])
-        self.assertIn('addr="203.0.113.5"/></host>', merged)
-        self.assertIn('2001:db8::5', merged.split('</hosthint>')[1])
-        self.assertTrue(merged.rstrip().endswith('</nmaprun>'))
-        self.assertEqual(len(nmap_scan.parse_xml(merged)), 2)
-
-    def test_merging_a_report_with_no_hosts_changes_nothing(self):
-        report = self.REPORT.format(a='x', hosts='<host><address addr="203.0.113.5"/></host>')
-        self.assertEqual(nmap_scan.merge_xml(report, self.REPORT.format(a='y', hosts='')), report)
 
 
 class ProviderRangeTests(SimpleTestCase):
@@ -108,7 +55,7 @@ class Base(TestCase):
 
 class NoAddressTests(Base):
     def due(self):
-        return ar.host_coverage_due(self.project, self.now, limit=50, need_count=False)[1]
+        return coverage_topup.host_coverage_due(self.project, self.now, limit=50, need_count=False)[1]
 
     def test_a_host_with_no_scannable_address_is_not_a_first_pass_backlog_and_does_not_gate_the_deep_sweeps(self):
         waiting = self.host('real')
@@ -222,7 +169,7 @@ class RefreshTests(Base):
 
     def setUp(self):
         super().setUp()
-        mock.patch('cveFeed.assessment_review.host_coverage_due', return_value=(0, [])).start()  # every host has its first pass
+        mock.patch('cveFeed.coverage_topup.host_coverage_due', return_value=(0, [])).start()  # every host has its first pass
         sender = mock.patch('cveFeed.tasks.assess_host.apply_async').start()
         sender.return_value.id = 'task'
 

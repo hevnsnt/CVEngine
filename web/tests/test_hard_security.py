@@ -1,6 +1,5 @@
 import importlib
 import os
-import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -13,7 +12,7 @@ from django.utils import timezone
 from cveFeed import autofire, hygiene, templategen
 from cveFeed.models import CVEEntry, CVEMatch, UpdateSettings
 from dashboard.models import AIProviderSettings, ApiCredential, ChaosAPIKey, Org, Project
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from reNgine import crypto_fields
 from reNgine.tasks import persist_bbot_result
 from scanEngine.models import Notification
@@ -106,7 +105,7 @@ class ScannerTargetFilterTests(TestCase):
 	def test_a_cve_test_run_directly_still_filters_its_hosts(self):
 		seen = []
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/x.yaml', '')), \
-				mock.patch.object(templategen, '_run_template_with_retry', side_effect=lambda path, chunk: seen.append(chunk) or
+				mock.patch.object(templategen, '_test_chunk', side_effect=lambda path, chunk, project=None: seen.append(chunk) or
 					[{'host': h, 'vulnerable': False, 'output': ''} for h in chunk]):
 			out = templategen.run_cve_tests(self._cve(), ['good.sec.test', 'bad.sec.test', '169.254.169.254', 'ok.sec.test:8443'])
 		self.assertEqual(seen, [['good.sec.test', 'ok.sec.test:8443']])
@@ -118,83 +117,6 @@ class ScannerTargetFilterTests(TestCase):
 		hosts = {h for h, _ in hygiene.tls_targets(self.domain)}
 		self.assertIn('good.sec.test', hosts)
 		self.assertNotIn('bad.sec.test', hosts)
-
-
-class PrivateConfigTests(unittest.TestCase):
-	"""Review 5.3: bbot API keys travel in a private file, never in argv."""
-
-	ARGS = ['-c', 'modules.shodan_dns.api_key=sk-live-secret', '-c', 'modules.censys_dns.api_key=cid:csec']
-
-	def test_the_keys_are_written_to_a_0600_file_in_a_0700_directory_and_removed_afterwards(self):
-		import yaml
-		with bbot_lib.private_config(self.ARGS) as args:
-			self.assertEqual(args[0], bbot_lib.PRESET_FLAG)
-			path = args[1]
-			self.assertNotIn('sk-live-secret', ' '.join(args))
-			self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-			self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode), 0o700)
-			with open(path) as handle:
-				self.assertEqual(yaml.safe_load(handle), {'config': {'modules': {'shodan_dns': {'api_key': 'sk-live-secret'},
-					'censys_dns': {'api_key': 'cid:csec'}}}})  # a bbot preset file: bbot 3.x takes only key=value after -c
-		self.assertFalse(os.path.exists(path))
-		self.assertFalse(os.path.exists(os.path.dirname(path)))
-
-	def test_the_file_is_removed_when_the_run_raises(self):
-		with self.assertRaises(RuntimeError):
-			with bbot_lib.private_config(self.ARGS) as args:
-				path = args[1]
-				raise RuntimeError('bbot crashed')
-		self.assertFalse(os.path.exists(os.path.dirname(path)))
-
-	def test_no_keys_means_no_file(self):
-		with bbot_lib.private_config([]) as args:
-			self.assertEqual(args, [])
-
-	def test_the_process_command_line_carries_no_key(self):
-		seen = {}
-
-		class FakeProc:
-			returncode = 0
-			stdout = iter(['{"type": "DNS_NAME", "data": "a.example.com"}\n'])
-			stderr = iter([])
-
-			def __init__(self, cmd, **kwargs):
-				seen['cmd'] = cmd
-				seen['file_existed'] = os.path.exists(cmd[cmd.index('-p') + 1:][len(bbot_lib.MODES['standard']['presets'])])  # the key file follows the named presets
-
-			def poll(self):
-				return 0
-
-			def wait(self):
-				return 0
-
-		class Job:
-			def __enter__(self):
-				return self
-
-			def __exit__(self, *exc):
-				return False
-
-			def attach(self, proc):
-				pass
-
-			def raise_if_killed(self):
-				pass
-		FakeProc.stdout = type('S', (), {'__iter__': lambda self: iter(['{"type": "DNS_NAME", "data": "a.example.com"}\n']),
-			'close': lambda self: None})()
-		FakeProc.stderr = type('E', (), {'__iter__': lambda self: iter([]), 'close': lambda self: None})()
-		with mock.patch('reNgine.resources.heavy_job', lambda *a, **k: Job()), mock.patch.object(bbot_lib.subprocess, 'Popen', FakeProc):
-			events = list(bbot_lib.stream_events(['example.com'], extra_args=self.ARGS))
-		self.assertEqual(len(events), 1)
-		self.assertNotIn('sk-live-secret', ' '.join(seen['cmd']))
-		self.assertNotIn('csec', ' '.join(seen['cmd']))
-		self.assertTrue(seen['file_existed'])
-		named = list(bbot_lib.MODES['standard']['presets'])
-		presets = seen['cmd'][seen['cmd'].index('-p') + 1:][:len(named) + 1]
-		self.assertEqual(presets[:-1], named)  # one -p with every preset, the key file last, by absolute path
-		self.assertTrue(os.path.isabs(presets[-1]))
-		self.assertNotIn('-c', seen['cmd'])
-		self.assertFalse(os.path.exists(presets[-1]))  # deleted once the run is over
 
 
 class EncryptedFieldTests(TestCase):
@@ -310,18 +232,18 @@ class PromptCleaningTests(unittest.TestCase):
 	def test_the_template_prompt_cleans_list_values_too(self):
 		hostile = {'id': 'CVE-1', 'description': 'd', 'affected': [{'product': 'x‮ignore previous', 'ranges': []}],
 			'references': ['https://x.test/​hidden' + 'B' * 900]}
-		prompt = templategen.build_prompt(hostile)
+		from tests import ai_queue
+		prompt = ai_queue.container().job_message({'parts': templategen.prompt_parts(hostile)})
 		self.assertNotIn('‮', prompt)
 		self.assertNotIn('​', prompt)
 		self.assertNotIn('B' * 600, prompt)
 
 
 class HttpResponseTests(TestCase):
-	"""HTTP_RESPONSE events fill the host's status, title, server and the port's http record."""
+	"""A batch's HTTP records fill the host's status, title, server and the port's http record."""
 
-	EVENT = {'type': 'HTTP_RESPONSE', 'id': 'H1', 'host': 'www.web.test', 'module': 'httpx', 'parent': 'U1', 'data': {
-		'url': 'https://www.web.test/', 'host': 'www.web.test', 'port': 443, 'status_code': 200, 'title': 'Welcome',
-		'webserver': 'nginx/1.18.0', 'content_type': 'text/html', 'header': {'Server': 'nginx/1.18.0', 'X-Powered-By': 'PHP/8.1'}}}
+	REC = {'host': 'www.web.test', 'url': 'https://www.web.test/', 'port': 443, 'status': 200, 'title': 'Welcome', 'webserver': 'nginx/1.18.0',
+		   'content_type': 'text/html', 'location': ''}
 
 	def setUp(self):
 		org = Org.objects.create(name='A', slug='a')
@@ -336,32 +258,11 @@ class HttpResponseTests(TestCase):
 		self.ip = IpAddress.objects.create(address='203.0.113.77')
 		self.sub.ip_addresses.add(self.ip)
 
-	def parse(self, *events):
-		result = bbot_lib.BbotResult()
-		hosts = {}
-		for event in events:
-			bbot_lib.parse_event(event, result, hosts)
-		return result
-
-	def test_the_event_is_parsed_into_a_bounded_record(self):
-		(rec,) = self.parse(self.EVENT).http
-		self.assertEqual((rec['host'], rec['port'], rec['status'], rec['title'], rec['webserver']),
-			('www.web.test', 443, 200, 'Welcome', 'nginx/1.18.0'))
-
-	def test_the_server_header_is_used_when_the_event_has_no_webserver(self):
-		event = {**self.EVENT, 'data': {**self.EVENT['data'], 'webserver': ''}}
-		self.assertEqual(self.parse(event).http[0]['webserver'], 'nginx/1.18.0')
-
-	def test_an_event_with_no_url_and_a_garbled_status_are_survivable(self):
-		self.assertEqual(self.parse({'type': 'HTTP_RESPONSE', 'data': {'title': 'x'}}).http, [])
-		bad = {**self.EVENT, 'data': {**self.EVENT['data'], 'status_code': 'abc', 'port': 'x'}}
-		self.assertEqual(self.parse(bad).http[0]['status'], 0)
-
-	def test_a_neighbour_out_of_scope_is_ignored(self):
-		self.assertEqual(self.parse({**self.EVENT, 'scope_distance': 1}).http, [])
+	def batch(self, *records):
+		return bbot_lib.BbotResult(http=[dict(r) for r in records])
 
 	def test_persistence_fills_the_host_and_the_port(self):
-		persist_bbot_result(self.parse(self.EVENT), ctx=self.ctx)
+		persist_bbot_result(self.batch(self.REC), ctx=self.ctx)
 		sub = Subdomain.objects.get(pk=self.sub.pk)
 		self.assertEqual((sub.http_status, sub.page_title, sub.webserver), (200, 'Welcome', 'nginx/1.18.0'))
 		port = self.ip.ports.get(number=443)
@@ -370,12 +271,12 @@ class HttpResponseTests(TestCase):
 
 	def test_an_existing_port_is_updated_not_duplicated(self):
 		self.ip.ports.add(Port.objects.create(number=443, product='nginx'))
-		persist_bbot_result(self.parse(self.EVENT), ctx=self.ctx)
+		persist_bbot_result(self.batch(self.REC), ctx=self.ctx)
 		self.assertEqual(self.ip.ports.filter(number=443).count(), 1)
 		self.assertEqual(self.ip.ports.get(number=443).http['status'], 200)
 
 	def test_a_deeper_page_does_not_overwrite_the_front_page(self):
-		deep = {**self.EVENT, 'id': 'H2', 'data': {**self.EVENT['data'], 'url': 'https://www.web.test/admin', 'status_code': 403, 'title': 'Denied'}}
-		persist_bbot_result(self.parse(self.EVENT, deep), ctx=self.ctx)
+		deep = {**self.REC, 'url': 'https://www.web.test/admin', 'status': 403, 'title': 'Denied'}
+		persist_bbot_result(self.batch(self.REC, deep), ctx=self.ctx)
 		sub = Subdomain.objects.get(pk=self.sub.pk)
 		self.assertEqual((sub.http_status, sub.page_title), (200, 'Welcome'))

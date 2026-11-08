@@ -13,7 +13,7 @@ Nothing here changes a host. The scripts only read.
 
 ## Quick start
 
-1. Open **Hosts**, then **Host inventory** (or **Agent access**, then **Set up host reporting**). Pick the platform.
+1. Open **Hosts**, then **Host inventory** (or **Scanners**, then **Integrations**, then **Set up host reporting**). Pick the platform.
 2. **Create a reporter token.** It belongs to one project and can only post that project's inventory reports (see [Safety](#safety)).
 3. Copy the command for the platform and run it on the machine (as root or Administrator for the fullest report). The dialog fills in your
    server address and the project. The command asks for the token (paste it when it asks): **no command contains the token**, so it never
@@ -98,7 +98,7 @@ contents other than the OS metadata above, user accounts, network shares, browse
 - **The token is never a command-line argument, and never in a command you copy.** Arguments are visible to every user in `ps` and are saved
   in shell history and PowerShell's PSReadLine history; so is `CVENGINE_TOKEN=cve_... sh ...`. The generated commands read the token from the
   keyboard (into a file only you can read, or a secure string); an environment variable (`CVENGINE_TOKEN`) or a root-only file (`--token-file`,
-  `-TokenFile`) are how the scripts take it. They refuse `--token`, warn when the token file is readable by other users, refuse a token with
+  `-TokenFile`, or `CVENGINE_TOKEN_FILE` in the environment) are how the scripts take it. The address and project take the same way: `--server` or `CVENGINE_URL`, `--project` or `CVENGINE_PROJECT`. They refuse `--token`, warn when the token file is readable by other users, refuse a token with
   anything but the characters a token has (a newline would add a setting to curl's configuration), and give `curl` the token on its standard
   input (`-K -`) so it is not in `curl`'s argument list either.
 - **TLS is verified by default,** TLS 1.2 or newer, https only (an `http://` server is refused before any token is read). `--ca-file` trusts
@@ -114,7 +114,7 @@ contents other than the OS metadata above, user accounts, network shares, browse
   report for any machine that no other token already owns, so it can invent machines (they fill the small unmatched allowance, below), show an
   operating system and packages for a host nobody else reports for (which also raises findings on that host), and, if the project allows
   `create_hosts`, have its own claimed name or its own address added as a target (capped per day). It cannot take over a host that another
-  machine reports for, cannot update or close another token's machine, and cannot change any other project's data. Revoke it on **Agent access**.
+  machine reports for, cannot update or close another token's machine, and cannot change any other project's data. Revoke it on **Scanners, Integrations**.
   A fleet that shares one token trusts every machine holding it with the machines that report by host name only (no machine id); machines that
   send a machine id are told apart by it.
 - **A machine belongs to the token that first reported it.** A report for a machine another live token owns is a `409`; an administrator deletes

@@ -100,6 +100,9 @@ class AIProviderSettings(models.Model):
 	structured_mode = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', auto, all, off
 	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
 	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
+	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
+	# cheapest haiku the provider lists as available, else the model above (reNgine/ai_nuclei_model.py). Never written by a migration.
+	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -251,6 +254,20 @@ class SystemTimings(models.Model):
 	ct_watch_minutes = models.PositiveIntegerField(default=20)       # how often every target is re-checked against crt.sh
 	discovery_timeout_hours = models.PositiveSmallIntegerField(default=6)
 	nuclei_timeout_hours = models.PositiveSmallIntegerField(default=4)
+
+	@classmethod
+	def current(cls):
+		return cls.objects.first() or cls()
+
+
+class SetupWizard(models.Model):
+	"""Single-row, server-side state of the first-run setup wizard (cveFeed.setup_flow): what each step saved, which were skipped, and when it was
+	completed. Stored on the server so the wizard resumes from any browser and a finished one never comes back. Holds no secret: a key or password
+	goes to its own settings row the moment it is entered and is never kept here."""
+	started_at = models.DateTimeField(null=True, blank=True)
+	completed_at = models.DateTimeField(null=True, blank=True)
+	completed_by = models.CharField(max_length=150, blank=True, default='')
+	data = models.JSONField(default=dict, blank=True)
 
 	@classmethod
 	def current(cls):

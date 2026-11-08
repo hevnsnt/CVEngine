@@ -189,14 +189,14 @@ class SavingTests(Isolated, TestCase):
 		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5, 'discovery_concurrency': 12}})
 		status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
 		self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0, 'autotune_pace': 0,
-			'egress': 0, 'heat': 0}))
+			'retention': 0, 'egress': 0, 'heat': 0}))
 		self.assertEqual(ScanConcurrency.current().values, {})
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.scan_concurrency_reset_all').exists())
 		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'autotune', 'title': 'Auto-tuning'},
 			{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
 			{'id': 'throughput', 'title': 'Scan pacing'}, {'id': 'autotune_pace', 'title': 'Auto-tuning pace'},
-			{'id': 'egress', 'title': 'Outbound connections'}, {'id': 'heat', 'title': 'Heat policy'}]})
+			{'id': 'retention', 'title': 'Data retention'}, {'id': 'egress', 'title': 'Outbound connections'}, {'id': 'heat', 'title': 'Heat policy'}]})
 
 	def test_every_change_is_audited_with_before_and_after_and_a_no_change_is_not(self):
 		os.environ['HEAVY_MAX_NMAP'] = '3'
@@ -333,31 +333,16 @@ class AdmissionTests(Isolated, TestCase):
 
 
 class TunerBoundsTests(Isolated, TestCase):
-	"""The AI review moves a cap one step at a time inside the bounds; what the admin saved is the baseline and, unless the environment says
-	otherwise, the top of that range."""
+	"""What the admin saved is the cap in force; a step a retired tuner left in Redis is not read (the auto-tuner, cveFeed.autotune, moves the
+	caps now)."""
 
 	def setUp(self):
 		super().setUp()
 		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
 
-	def test_without_a_saved_value_the_bounds_are_what_they_were(self):
-		self.assertEqual(res.adaptive_bounds('nmap'), (1, 2))
-		os.environ.update(HEAVY_TUNE_MAX_NMAP='4', HEAVY_TUNE_MIN_NMAP='2')
-		self.assertEqual(res.adaptive_bounds('nmap'), (2, 4))
-
 	def test_the_saved_value_is_the_baseline_and_the_top_of_the_range(self):
 		sc.update({'heavy.nmap': 6}, self.root)
-		self.assertEqual(res.adaptive_bounds('nmap'), (1, 6))
 		self.assertEqual(res.max_concurrent('nmap'), 6)
-
-	def test_the_environment_may_still_give_the_tuner_more_room_but_never_less_than_the_saved_value(self):
-		sc.update({'heavy.nmap': 6}, self.root)
-		os.environ['HEAVY_TUNE_MAX_NMAP'] = '8'
-		self.assertEqual(res.adaptive_bounds('nmap'), (1, 8))
-		os.environ['HEAVY_TUNE_MAX_NMAP'] = '3'
-		self.assertEqual(res.adaptive_bounds('nmap'), (1, 6))
-		os.environ['HEAVY_TUNE_MIN_NMAP'] = '7'
-		self.assertEqual(res.adaptive_bounds('nmap'), (6, 6))  # the minimum cannot push the saved value out either
 
 	def test_a_tuner_step_above_the_saved_value_is_held_to_it(self):
 		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 5}))
@@ -367,32 +352,12 @@ class TunerBoundsTests(Isolated, TestCase):
 		self.assertEqual(res.max_concurrent('nmap'), 3)
 
 	def test_a_leftover_step_of_the_retired_three_hour_tuner_changes_nothing(self):
-		"""The three-hour review no longer moves admission caps (the auto-tuner does, cveFeed.autotune): a step it left in Redis is not read."""
+		"""The retired capacity review no longer moves admission caps (the auto-tuner does, cveFeed.autotune): a step it left in Redis is not read."""
 		sc.update({'heavy.nmap': 4}, self.root)
 		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 3, 'direction': 'down'}))
 		self.assertEqual(res.max_concurrent('nmap'), 4)
 		sc.update({'heavy.nmap': 5}, self.root)
 		self.assertEqual(res.max_concurrent('nmap'), 5)
-
-	def test_the_review_candidate_never_leaves_the_bounds_the_admin_set(self):
-		from cveFeed import performance_review as pr
-		sc.update({'heavy.nmap': 3}, self.root)
-		low, high = res.adaptive_bounds('nmap')
-		self.assertEqual((low, high), (1, 3))
-		kinds = {'nmap': (low, high)}
-		caps = {'nmap': res.max_concurrent('nmap')}
-		self.assertEqual(caps, {'nmap': 3})
-		busy = {'samples': 100, 'span_minutes': 180, 'free_p10': 0.9, 'waiting': {'nmap': 50}, 'running': {'nmap': 3}}
-		with mock.patch.object(pr, 'KINDS', ('nmap',)):
-			candidate = pr.safe_candidate(busy, memory_kills=0, scanner_failures=0, scanner_runs=50, stage_outcomes={}, provider_throttles=0,
-				caps=caps, bounds=kinds, previous={}, now=1_000_000.0)
-			self.assertEqual(candidate['kind'], 'none', candidate)  # queued work and plenty of memory, yet nmap is at the top of what the admin allowed
-			sc.update({'heavy.nmap': 2}, self.root)
-			caps['nmap'] = res.max_concurrent('nmap')
-			wider = {'nmap': (1, 4)}
-			self.assertEqual(pr.safe_candidate(busy, memory_kills=0, scanner_failures=0, scanner_runs=50, stage_outcomes={}, provider_throttles=0,
-				caps=caps, bounds=wider, previous={}, now=1_000_000.0)['direction'], 'up')  # control: with room above, the same telemetry does step up
-
 
 class MemoryPlanTests(unittest.TestCase):
 	COSTS = {'nmap': 400, 'nuclei': 1000, 'bbot-deep': 2400}

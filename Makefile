@@ -5,9 +5,10 @@
 
 # This for future release of Compose that will use Docker Buildkit, which is much efficient.
 COMPOSE_PREFIX_CMD := COMPOSE_DOCKER_CLI_BUILD=1
+SENTINEL_BUILD_ENV = SENTINEL_SHA=$$(./scripts/sentinel-ref.sh)# the newest Sentinel library, resolved when an image is built (docs/UPDATES.md)
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
-SERVICES          := db web proxy redis celery celery-beat
+SERVICES          := db web proxy redis celery celery-beat reviewer
 # the optional OpenVAS (Greenbone) add-on: docs/OPENVAS.md. Named in full because `--profile openvas stop` would stop the whole stack.
 OPENVAS_SERVICES  := openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gvm openvas-pg-gvm-migrator openvas-configure openvas-gpg-data openvas-vulnerability-tests openvas-notus-data openvas-scap-data openvas-cert-bund-data openvas-dfn-cert-data openvas-data-objects openvas-report-formats
 
@@ -17,7 +18,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-user openvas-down
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-down uninstall-updater scanner-build scanner-update scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -39,13 +40,16 @@ up: check-env		## Build and start all services.
 	@python3 scripts/update-state.py upstream || true
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
 	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
+	@# The built-in scanner (docs/BUILTIN-SCANNER.md) shares celery's network namespace too: the newest published image is fetched and it is recreated after celery
+	@# (with CVENGINE_BUILTIN_SCANNER=0 it is taken away instead). Never fails make up: until it runs, the scans that need it wait.
+	@bash -c '. scripts/scanner.sh && cvengine_scanner_fetch ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} && cvengine_scanner_start --no-wait ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
 
 build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
 admin:		## Create the admin account; its password is generated and printed once (after make up).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin
@@ -90,15 +94,25 @@ rm:				## Remove all services containers.
 test:			## Run the test suite (the stack must be running).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
 
-openvas-up: check-env	## Start the optional OpenVAS (Greenbone) add-on (docs/OPENVAS.md). The first start loads the feeds for a long time and needs about 60 GB of Docker's disk; add COMPOSE_PROFILES=openvas to .env to keep it across updates.
+openvas-up: check-env	## Start the old in-stack OpenVAS (Greenbone) containers, which the application no longer uses (a Sentinel runs OpenVAS, docs/OPENVAS.md). Costs about 4 GB of RAM and 60 GB of Docker's disk; only for someone who wants them by hand.
 	@./scripts/openvas-disk-check.sh
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas up -d ${OPENVAS_SERVICES}
 
-openvas-user:	## Create the GVM user cvENGINE uses and save its generated login, encrypted (after make openvas-up).
-	./scripts/openvas-user.sh
-
 openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
+
+uninstall-updater:	## Remove the host's update watcher (the cron line install.sh added); run with sudo if install.sh ran as root (docs/UPDATES.md).
+	bash scripts/uninstall-updater.sh
+
+scanner-build:	## Build the built-in scanner image from source, the known-good floor commit scanner.lock.json names (the offline fallback when the published image cannot be pulled).
+	@tag=$$(bash -c '. scripts/scanner.sh && cvengine_scanner_build' | tail -n1) && echo "Built $$tag (also cvengine-sentinel-local:latest)." && \
+	echo "To run it instead of the published image, set CVENGINE_SCANNER_IMAGE=$$tag in .env, then make up. Remove the line to follow the newest published image again."
+
+scanner-update:	## Bring the built-in scanner to the newest published image: pull, start, keep it only once it checked in, else put the previous one back.
+	@scripts/scanner-update.sh
+
+scanner-logs:	## Tail the built-in scanner's log.
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} logs --follow --tail=200 scanner
 
 inventory-sync:	## Copy the host inventory reporter scripts to the copies the server hands out (web/static/cve/inventory).
 	cp -p scripts/inventory/cvengine-inventory.sh scripts/inventory/cvengine-inventory.py scripts/inventory/cvengine-inventory.ps1 web/static/cve/inventory/

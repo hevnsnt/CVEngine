@@ -142,12 +142,13 @@ if (mount) {
         { label: "Stage", render: (r) => r.stage },
         { label: "Attempts", render: (r) => count(r.attempts) },
         { label: "Errors", render: (r) => count(r.errors) },
+        { label: "Answered by", render: (r) => (r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model" },
       ], data.stages)));
       output.append(expandable("Recent attempts and errors", wrap([
         { label: "When (UTC)", render: (r) => shortDate(r.at) },
         { label: "Provider / model", render: (r) => `${r.provider} · ${r.actual_model || r.model || "unknown"}` },
         { label: "Stage", render: (r) => r.stage },
-        { label: "Result", render: (r) => r.error_category || r.status },
+        { label: "Result", render: (r) => (r.status === "failed" ? (r.reason || r.error_category || "failed") : r.status) + (r.stop_reason ? ` [${r.stop_reason}]` : "") },
         { label: "Input / output", render: (r) => `${count(r.input_tokens)} / ${count(r.output_tokens)}` },
         { label: "Latency", render: (r) => latency(r.duration_ms) },
       ], data.recent)));

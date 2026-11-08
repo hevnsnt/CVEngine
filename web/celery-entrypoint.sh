@@ -6,6 +6,12 @@ until python3 manage.py migrate --check >/dev/null 2>&1; do
     sleep 3
 done
 
+# The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). CVENGINE_BUILTIN_SCANNER=0 revokes it instead,
+# and never a reason for the container not to start.
+python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
+# The same for the AI reviewer container's token (docs/AI-REVIEWER.md); CVENGINE_REVIEWER=0 revokes it instead.
+python3 manage.py ensure_reviewer_token >/dev/null 2>&1 || true
+
 # (This used to run `makemigrations` for five apps against the bind-mounted source, which is the git checkout on the host: model drift became
 # untracked migration files that later conflicted with the real ones. A migration is written and committed by a developer; CI checks for drift.)
 
@@ -30,12 +36,11 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
-# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: the
-# screenshot browser runs as nobody in this container and has no business with scan output, PDF reports or log archives. Applied at every start.
+# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: no other
+# account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
 chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
-# test the scanners the pipeline runs, required for configuration
-naabu -version
+# the one tool the server runs itself (it refreshes and reads the template set); every scan runs on a Sentinel
 nuclei -version
 
 # geeknik/the-nuclei-templates produces false positives (#1521), drop copies left by older installs
@@ -84,11 +89,6 @@ generate_worker_command() {
 # (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
 python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
 
-# Chromium's sandbox for the web screenshots (cveFeed/web_shot.py): started once here as the screenshot worker starts it. While it cannot engage
-# (a container without config/seccomp/playwright-chromium.json, a kernel without unprivileged user namespaces) screenshots stay off and the host
-# page, get_system_status and this log say why. It never stops the workers from starting.
-python3 manage.py check_screenshot_sandbox || echo "Web screenshots stay off until Chromium's sandbox can start (see above)."
-
 echo "Starting Celery Workers..."
 
 # Three gevent workers instead of one process per queue: every worker process loads all of Django (150-250 MB), so
@@ -97,11 +97,11 @@ echo "Starting Celery Workers..."
 # api_queue has no tasks any more (the legacy /api/ surface that used it is gone), but the classic worker keeps consuming it: the
 # status page, the update script and the admin worker panel recognise this worker by that queue name.
 classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
-# wpscan_queue: the thorough WPScan pass (hours per site, one per project at a time) must not hold a feed worker
+# wpscan_queue: a long, per-site, one-per-project-at-a-time pass must not hold a feed worker
 # testssl_queue: the daily TLS audit (a minute per port, one sweep at a time) likewise
 # bucketscan_queue: the daily cloud storage sweep (a few requests per second, one sweep at a time) likewise
 # vhost_queue: the slow, polite sweeps for other sites on an address and for applications under subdirectories (one request at a time)
-# udp_queue: the background UDP sweep (nmap -sU waits on silent ports, one IP at a time) likewise
+# udp_queue: the background UDP sweep (it waits on silent ports, one IP at a time) likewise
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
 # ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
@@ -110,14 +110,14 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # hours; the slots here are greenlets (10, CLASSIC_CONCURRENCY; a certificate lookup may sleep up to 30 s in one waiting for crt.sh's pacing), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
 # tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
-# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+# screenshot_queue: the web screenshot drain and the hourly sweep (they hand pages to Sentinels and wait for them, one drain at a time: a second task returns at once; no browser runs here)
 classic_queues+=",screenshot_queue"
 # report_queue: the one-click PDF report (cveFeed/report_export.py): seconds to minutes of work for one person who is waiting for it. Its own queue, so a long feed run or
 # a certificate lookup in backoff on the cve_feed worker cannot hold it; the classic worker has the free slots.
 classic_queues+=",report_queue"
 
 commands=""
-# each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
+# each discovery run is memory hungry, so discovery gets a small pool of its own
 # How many discovery tasks and host assessments run at once: what an App Admin saved on Settings, configMaxxing, else DISCOVERY_CONCURRENCY, else 8.
 # (A save also resizes the running worker live, see cveFeed/scan_concurrency.py; this makes a restart or an update land on the same number.)
 discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concurrency 2>/dev/null | tail -n 1)

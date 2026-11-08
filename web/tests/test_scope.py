@@ -8,7 +8,6 @@ from django.utils import timezone
 
 from cveFeed import discovery, ctmonitor, tasks
 from dashboard.models import Org, Project
-from reNgine import bbot as bbot_lib
 from reNgine import resources
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory
@@ -125,25 +124,23 @@ class ApexSweepScopeTests(TestCase):
 
 
 class StrictScopeTests(TestCase):
-	def test_the_command_carries_strict_scope_only_when_asked(self):
-		self.assertIn('--strict-scope', bbot_lib.build_command(['acme.jfrog.com'], strict_scope=True))
-		self.assertNotIn('--strict-scope', bbot_lib.build_command(['acme-example.ai']))
-
-	def test_discovery_of_a_host_scoped_target_runs_bbot_strict(self):
+	def test_the_task_carries_strict_scope_only_for_a_host_scoped_target(self):
 		org = Org.objects.create(name='S2', slug='scp3')
 		project = Project.objects.create(name='P3', slug='scp3', insert_date=timezone.now(), org=org)
 		engine = EngineType.objects.create(engine_name='e2', yaml_configuration='x', default_engine=True)
 		seen = {}
 
-		def stream(targets, **kwargs):
-			seen[targets[0]] = kwargs.get('strict_scope')
-			return iter([])
+		def dispatch(project, kind, target, scan, on_partial, **kwargs):
+			seen[target['domain']] = target['strict_scope']
+			return {'result': {'outcome': 'done', 'partials': 0, 'mode': 'standard'}, 'consumed': 0}
 		for name in ('acme.jfrog.com', 'acme-example.ai'):
 			domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())
 			scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(),
 				scan_status=discovery.QUEUED, results_dir='/tmp')
-			with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
-				discovery.run_discovery(scan.id, stream=stream)
+			with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+					mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch), \
+					mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):  # no real DNS in tests
+				discovery.run_discovery(scan.id)
 		self.assertEqual(seen, {'acme.jfrog.com': True, 'acme-example.ai': False})
 
 

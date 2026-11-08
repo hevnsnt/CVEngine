@@ -6,7 +6,7 @@
 // internal networks its projects declared.
 import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
-import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
+import { detailCache, kindChips, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
 
 const LIVE = "/api/v1/sentinels/live";
@@ -18,7 +18,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check", alive_check: "retired host checks", bucket_check: "cloud storage checks", supplier_check: "supplier posture checks", vhost_probe: "virtual host checks", subdir_probe: "subdirectory application checks", hygiene_check: "TLS and email checks", dangling_dns_check: "dangling DNS checks", route_probe: "web route checks", route_probe_signed: "signed-in web route checks", page_read: "validation page reads", identity_check: "name and certificate reads", web_screenshot: "web screenshots", ssh_probe: "SSH inspection", wpscan_thorough: "thorough WordPress scan" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {
@@ -72,6 +72,19 @@ function recent(t) {
 
 const INTERNAL = "network:internal";
 
+// How busy a Sentinel's slots were in the last hour (the server's `load`): a meter and one line, both set with textContent / attributes only.
+function utilisationBar(load) {
+  if (!load || load.utilisation_1h == null) return null;
+  const pct = Math.round(Math.min(1, Math.max(0, Number(load.utilisation_1h) || 0)) * 100);
+  const wrap = el("div", "sl-util");
+  const wait = load.wait_p50_seconds == null ? "no tasks claimed" : `queue wait ${span(load.wait_p50_seconds)} typical, ${span(load.wait_p95_seconds)} at worst`;
+  wrap.append(
+    el("meter", "sl-util-bar", `${pct}%`, { min: 0, max: 100, value: pct, "aria-label": `Slots busy in the last hour: ${pct} percent` }),
+    el("p", "sl-util-text", `Busy ${pct}% of the last hour · ${load.tasks_1h || 0} finished · ${wait}`),
+  );
+  return wrap;
+}
+
 // The state in words. A suspended Sentinel says why on the same line ("Suspended: <reason>"), so its reason never reads as a remark on a
 // working one.
 export function stateLine(s) {
@@ -100,6 +113,7 @@ function card(s, reload, detail, group) {
   const title = el("div", "sl-title");
   const state = el("p", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
+  if (s.builtin) state.append(" ", el("span", "chip sl-builtin", s.last_resort ? "Built-in, last resort" : "Built-in", { title: s.last_resort ? "This install's own scanner. It takes work only when no external Sentinel can." : "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
   head.append(title);
   const actions = el("div", "sl-actions");
@@ -142,8 +156,9 @@ function card(s, reload, detail, group) {
   const beat = el("p", "sl-beat");
   beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
   c.append(beat);
-  const version = versionBlock(detail, { onChange: reload });
+  const version = versionBlock(detail, { onChange: reload, builtin: s.builtin });
   if (version) c.append(version);
+  if (s.contract_note) c.append(el("p", s.contract_state === "unsupported" ? "sl-note msg err" : "sl-note", s.contract_note));
   if (s.problem) c.append(el("p", "sl-note", s.problem));
   else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 
@@ -161,15 +176,20 @@ function card(s, reload, detail, group) {
   };
   stats.append(stat("Done, last hour", st.done_1h), stat("Failed, last hour", st.failed_1h), stat("Done, 24 hours", st.done_24h), stat("Average task", st.average_seconds == null ? "none yet" : span(st.average_seconds)));
   c.append(stats);
+  const util = utilisationBar(s.load);
+  if (util) c.append(util);
 
   if (s.recent.length) {
     const list = el("ul", "sl-recent", null, { "aria-label": `Recent tasks of ${s.name}` });
     s.recent.forEach((t) => list.append(recent(t)));
     c.append(list);
   }
+  // the capability chips (allowed, denied, withheld) come from the Sentinel's detail; the plain list is the fallback while it has not loaded or on an older server
+  const chips = detail && detail.kinds ? kindChips(detail.kinds) : null;
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
-  c.append(el("p", "sl-foot", `${tools}${s.os ? ` · ${s.os}` : ""} · up to ${s.max_concurrent} at once`));
+  if (chips) c.append(chips);
+  c.append(el("p", "sl-foot", [...(chips ? [] : [tools]), s.os, `up to ${s.max_concurrent} at once`].filter(Boolean).join(" · ")));
   Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
     const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
@@ -188,7 +208,40 @@ function summary(data) {
     return d;
   };
   bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
+  if (data.stage_runs) bar.append(cell(data.stage_runs.waiting, "stages waiting, no worker held"));
   return bar;
+}
+
+// GET sentinels/live `routing`: what the built-in scanner is for and how the last day's work was shared. One plain text, or "" when the server sent none.
+export function routingText(r) {
+  if (!r || !r.explanation) return "";
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const done = (r.builtin_24h || 0) + (r.external_24h || 0);
+  const share = done ? `In the last 24 hours the built-in scanner handled ${plural(r.builtin_24h, "task")} and external Sentinels handled ${plural(r.external_24h, "task")}.`
+    : "No task was finished by a Sentinel in the last 24 hours.";
+  const none = r.externals ? "" : " No external Sentinel is set up, so the built-in scanner does all the scanning.";
+  return `${r.explanation} ${share}${none}`;
+}
+
+const STAGE = { nmap_scan: "nmap", nuclei_light_scan: "nuclei (light)", nuclei_targeted_scan: "nuclei (targeted)", wpscan: "WPScan",
+  "sweep.testssl": "TLS audit", "sweep.udp": "UDP sweep", "nuclei.weekly": "weekly deep nuclei", "wpscan.quick": "WPScan quick pass",
+  "internal.discover": "internal discovery", "openvas.import": "OpenVAS" };
+
+// The asynchronous stages (queue Q4): the scan stages that handed their work to Sentinels and gave their worker back while they wait, from
+// GET sentinels/live `stage_runs`. One sentence, or "" when nothing waits and nothing came back in the last hour.
+export function stageRunsText(m) {
+  if (!m || (!m.waiting && !m.resumed_1h)) return "";
+  const parts = [];
+  if (m.waiting) {
+    const kinds = Object.entries(m.waiting_by_kind || {}).map(([k, n]) => `${STAGE[k] || k} ${n}`).join(", ");
+    parts.push(`${m.waiting} stage${m.waiting === 1 ? "" : "s"} wait${m.waiting === 1 ? "s" : ""} on Sentinels without holding a worker (${kinds})` +
+      (m.oldest_wait_seconds != null ? `, the oldest for ${span(m.oldest_wait_seconds)}` : ""));
+  }
+  if (m.callback_latency_p50_seconds != null) {
+    parts.push(`a finished stage continues ${span(m.callback_latency_p50_seconds)} after its last task typically, ${span(m.callback_latency_p95_seconds)} at worst`);
+  }
+  if (m.freed_seconds_1h) parts.push(`${span(m.freed_seconds_1h)} of worker time given back in the last hour`);
+  return parts.join("; ") + ".";
 }
 
 function openvasQueue(queue) {
@@ -362,7 +415,13 @@ export function sentinelLive(mount) {
     if (!data.results.length) {
       mount.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
       if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
-    } else mount.append(summary(data));
+    } else {
+      mount.append(summary(data));
+      const route = routingText(data.routing);
+      if (route) mount.append(el("p", "note sl-routing", route));
+      const waits = stageRunsText(data.stage_runs);
+      if (waits) mount.append(el("p", "note sl-stage-runs", waits));
+    }
     if (data.openvas) mount.append(openvasQueue(data.openvas));
     const drawn = groups(data);
     drawn.forEach((g) => mount.append(section(g, reload, details)));

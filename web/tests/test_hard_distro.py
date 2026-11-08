@@ -234,8 +234,8 @@ class DistroCorrelationTests(Fixture):
 		self.assertEqual((match.distro_status, match.ai_verdict), ('patched', ''))
 
 	def test_nmap_persists_the_distro_on_the_port(self):
-		from cveFeed import nmap_scan
-		nmap_scan.persist_inventory([{'ip': '192.0.2.61', 'ports': [
+		from cveFeed import port_inventory
+		port_inventory.persist_inventory([{'ip': '192.0.2.61', 'ports': [
 			{'number': 22, 'state': 'open', 'product': 'OpenSSH', 'version': '8.9p1 Ubuntu 3ubuntu0.6',
 			 'service_extra': 'Ubuntu Linux; protocol 2.0', 'cpe': 'cpe:/a:openbsd:openssh:8.9p1',
 			 'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04']}]}])
@@ -296,17 +296,19 @@ class PatchedConsequencesTests(Fixture):
 			('patched', 'patched by distro (fixed in 1:8.9p1-3ubuntu0.10)', 'ice'))
 
 	def test_the_ai_may_clear_a_patched_match_but_not_a_vulnerable_one(self):
-		from cveFeed.correlation import ai_confirm_match
+		from cveFeed import triage
+		from tests import ai_queue
 		provider = mock.Mock(model='m')
-		provider.name = 'test'
-		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "backported fix"}'
+		provider.name = 'anthropic'
+		provider.complete.return_value = json.dumps({'classification': 'likely_false_positive', 'reason': 'backported fix'})
 		self._patched_match()
+		matches = lambda: triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))  # noqa: E731
 		with mock.patch('cveFeed.activity.log', return_value=None):
-			patched = ai_confirm_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(), provider=provider)
-			self.assertEqual(patched.ai_verdict, 'not_affected')
+			ai_queue.run_triage(triage.track(matches()), provider=provider)
+			self.assertEqual(CVEMatch.objects.get().ai_verdict, 'not_affected')
 			CVEMatch.objects.update(distro_status='vulnerable')
-			vulnerable = ai_confirm_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(), provider=provider)
-		self.assertEqual(vulnerable.ai_verdict, 'affected')  # the distribution's own tracker lists it: hard evidence, confirmed
+			ai_queue.run_triage(triage.track(matches()), provider=provider)
+		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'affected')  # the distribution's own tracker lists it: hard evidence, confirmed
 
 
 # --- the sync ---------------------------------------------------------------------------------------------------------

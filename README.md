@@ -46,6 +46,27 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 | **Hunt** | A [bug bounty workbench](docs/BUG-BOUNTY.md): program scope from HackerOne, Bugcrowd, Intigriti, and YesWeHack, and report drafts |
 | **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, LM Studio, or vLLM. Without a model it still discovers, scans, matches, and validates |
 
+## New in 1.4 (in development)
+
+### Every scan runs on a Sentinel
+
+The server runs no scan tool. Every install starts a **built-in scanner** next to it (the cvENGINE Sentinel image, enrolled with nobody typing a secret), and every kind of scan work (36 kinds: nmap, naabu, nuclei, testssl.sh, WPScan, wafw00f, bbot, secret detection, SSH inspection, screenshots and the web, DNS and mail probes) runs there or on external [Sentinels](docs/SENTINELS.md) you add. External Sentinels take work first; the [built-in scanner](docs/BUILTIN-SCANNER.md) is the path of last resort. With no scanner able to take work, scans wait and nothing is marked failed. The server image is smaller for it (one tool, nuclei, stays, for templates).
+
+### Set up in the browser
+
+`sudo ./install.sh` is a thin bootstrap; the [setup wizard](docs/DEPLOYMENT.md#setup-wizard) takes your organization, project and first domain (a discovery starts at once), then how you scan and whether to switch OpenVAS on.
+
+### More checks, an AI reviewer, a simpler shell
+
+- **Exposed secrets.** A project [secrets inventory](docs/SECRETS-PLAN.md) fed by [Kingfisher](https://github.com/mongodb/kingfisher) in the scanner, with browser keys told apart from server secrets.
+- **SSH inspection.** [sshamble](https://github.com/runZeroInc/sshamble) reads each SSH service's own handshake and checks its host keys against the badkeys blocklist. Nothing logs in or submits a credential.
+- **AI reviewer.** A [boxed-in container](docs/AI-REVIEWER.md) reviews every open finding once and checks operations.
+- **OpenVAS** is a Greenbone stack on a Sentinel, off until you turn it on ([OpenVAS](docs/OPENVAS.md)).
+- **Screenshots** are taken by a Sentinel's headless Chromium.
+- **The left rail has 6 links** (Overview, Findings, Assets, Scans, Scanners, Bug bounty); Settings, Administration and Help are in the footer.
+
+Upgrading from 1.3: [upgrading to 1.4](docs/UPGRADE.md#upgrading-to-14). Everything the product is built from, with versions and licenses, is on the About page and in [THIRD-PARTY.md](THIRD-PARTY.md).
+
 ## New in 1.3
 
 ### Sentinels: scale out, and scan inside your network
@@ -120,7 +141,7 @@ flowchart LR
     class H step
 ```
 
-Each scanner runs once per host inside a time window, so repeat scans stay fast. Any scanning stage can run on a [Sentinel](docs/SENTINELS.md) instead of the server. See the [pipeline](docs/PIPELINE.md) for every stage.
+Each scanner runs once per host inside a time window, so repeat scans stay fast. Every scanning stage runs on a [Sentinel](docs/SENTINELS.md) (the built-in scanner or one you add), never on the server. See the [pipeline](docs/PIPELINE.md) for every stage.
 
 ## Built on the best
 
@@ -128,7 +149,7 @@ cvENGINE stands on excellent open source work. Full credits and licenses are in 
 
 | | |
 | --- | --- |
-| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [testssl.sh](https://github.com/testssl/testssl.sh), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner), and optionally [OpenVAS](docs/OPENVAS.md) from [Greenbone](https://greenbone.github.io/docs/) |
+| **Scanners** | [bbot](https://github.com/blacklanternsecurity/bbot), [Nuclei](https://github.com/projectdiscovery/nuclei) and its [templates](https://github.com/projectdiscovery/nuclei-templates), [naabu](https://github.com/projectdiscovery/naabu), [nmap](https://nmap.org), [testssl.sh](https://github.com/testssl/testssl.sh), [gowitness](https://github.com/sensepost/gowitness), [wafw00f](https://github.com/EnableSecurity/wafw00f), [WPScan](https://wpscan.com/), [Kingfisher](https://github.com/mongodb/kingfisher), [sshamble](https://github.com/runZeroInc/sshamble), [Playwright](https://playwright.dev)'s Chromium, [aardwolf](https://github.com/skelsec/aardwolf), [node2shell](https://github.com/assetnote/node2shell-scanner), and optionally [OpenVAS](docs/OPENVAS.md) from [Greenbone](https://greenbone.github.io/docs/) |
 | **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [VulnCheck KEV](https://vulncheck.com), [CVE List V5](https://github.com/CVEProject/cvelistV5) |
 | **Also** | [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [crt.sh](https://crt.sh), [MailFail](https://github.com/ACK-J/MailFail), [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), [Bugcrowd VRT](https://github.com/bugcrowd/vulnerability-rating-taxonomy), [Tailscale](https://github.com/tailscale/tailscale), [runZero](https://www.runzero.com), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm), [Model Context Protocol](https://modelcontextprotocol.io) |
 
@@ -142,7 +163,7 @@ cd CVEngine
 sudo ./install.sh
 ```
 
-It asks nothing: it installs what is missing, generates every secret, creates the HTTPS certificate, starts cvENGINE, and prints the address and your admin password. Open the address, sign in, and add a domain. The setup wizard does the rest. Your browser will warn about the private certificate until you trust `secrets/certs/ca.crt`.
+It is a thin bootstrap: it installs what is missing, generates every secret, creates the HTTPS certificate, starts cvENGINE, waits until it answers, and prints the address and where your generated admin password is. Open the address and sign in: the setup wizard in the browser does the rest (your first target, scanners, Sentinels). Automation can pass `--sentinels=internal|both|external` and `-n`; on a terminal one optional question offers the same choice. OpenVAS is never installed by it. Your browser will warn about the private certificate until you trust `secrets/certs/ca.crt`.
 
 Step-by-step install, a public name with a trusted certificate, and Mac and Windows are in [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md).
 
@@ -164,7 +185,8 @@ Read-only checks, no password lists, and no scanning of loopback, link-local, or
 | [Tenancy](docs/TENANCY.md), [Agent API](docs/AGENT-API.md), [AI usage](docs/AI-USAGE.md) | Teams, the REST API and MCP, and AI cost |
 | [Bug bounty](docs/BUG-BOUNTY.md) and [Front end](docs/FRONTEND.md) | The bounty workbench and the interface |
 | [Host inventory](docs/HOST-INVENTORY.md) | Hosts reporting their own OS, packages and patches with a script |
-| [Sentinels](docs/SENTINELS.md) | Scaling scans across machines, and scanning private networks |
+| [Sentinels](docs/SENTINELS.md), [Built-in scanner](docs/BUILTIN-SCANNER.md) and [Scanner architecture](docs/SCANNER-ARCHITECTURE.md) | Where every scan runs, scaling across machines, and scanning private networks |
+| [AI reviewer](docs/AI-REVIEWER.md) and [Secrets](docs/SECRETS-PLAN.md) | The boxed-in reviewer, and the exposed-secrets inventory |
 | [Tailscale](docs/TAILSCALE.md) | Scanning a tailnet and its Tailscale checks |
 | [OpenVAS](docs/OPENVAS.md) | The optional Greenbone scanner: enabling it, its resource floor and what it imports |
 

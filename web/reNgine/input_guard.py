@@ -79,14 +79,20 @@ BOUNTY_TEXT_PATH = re.compile(r'^/cve/api/bounty/(reports|engagements)(/|$)')
 # body is not scanned here because it is not free text: cveFeed.inventory_schema allows one fixed shape and cleans every string, and
 # nothing in it reaches a shell, a query or a template. Its address and query string are still checked.
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/[-\w]+/inventory/?$')
-# What a Sentinel reports (the result of a scan-stage task, its heartbeat) is machine data about scanned hosts: a nuclei template's description,
-# a testssl finding, a WPScan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
+# What a Sentinel reports (the result of a scan-stage task, the partial batches of a streamed one, its heartbeat) is machine data about scanned hosts: a nuclei template's description,
+# a TLS audit finding, a WordPress scan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
 # and SQL fragments appear in it routinely. Counting it against the Sentinel's owner would disable an administrator's account and revoke
 # its tokens for one template with a backtick in its description (and the result would be lost). Its body is not scanned here because it is
-# not free text: ``agentapi.sentinel_broker.clean_result`` and ``sentinel_settings.clean_info`` allow one fixed shape per kind, clip every
+# not free text: ``agentapi.sentinel_broker.clean_result``, ``sentinel_stream.clean_partial`` and ``sentinel_settings.clean_info`` allow one fixed shape per kind, clip every
 # string and cap every list, and nothing in it reaches a shell, a query or a template. Its address and query string are still checked, and
 # so is every other Sentinel route (registration and bootstrap carry what a person typed).
-SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/result|heartbeat)/?$')
+SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/(?:result|partial)|heartbeat)/?$')
+# The AI reviewer's verdicts and operations report are the same kind of machine data: a model's note about a finding quotes what the scanned
+# host served (a script tag, an SQL fragment, a template expression) as a matter of course. cveFeed.reviewer accepts only enums and one note,
+# which it strips of markup and links and stores as text; nothing in it reaches a shell, a query or a template. An answer to one of the
+# pipeline's AI jobs (cveFeed.ai_jobs) is a model's reply about scanned hosts, a nuclei template among them: it is checked by the stage's own
+# validator, stored as data and never reaches a shell, a query or a template either.
+REVIEWER_MACHINE_PATH = re.compile(r'^/api/v1/reviewer/(?:findings/t\d{1,12}/verdict|ops/report|jobs/\d{1,12}/result)/?$')
 BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
@@ -188,7 +194,7 @@ def _request_pairs(request):
         length = 0
     data = None
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY and not INVENTORY_PATH.match(request.path) \
-            and not SENTINEL_MACHINE_PATH.match(request.path):
+            and not SENTINEL_MACHINE_PATH.match(request.path) and not REVIEWER_MACHINE_PATH.match(request.path):
         if ctype == 'application/json':
             try:
                 data = json.loads(request.body.decode('utf-8', 'replace'))

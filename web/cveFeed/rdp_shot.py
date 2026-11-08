@@ -1,18 +1,16 @@
 """Shodan-style RDP login-screen capture: for a server nmap already confirmed is RDP and showed will accept a connection
-without Network Level Authentication (``cveFeed.service_intel.rdp_without_nla``), take one screenshot of the
-pre-authentication screen and ask the configured AI model to read who, if anyone, it shows signed in.
+without Network Level Authentication (``cveFeed.service_intel.rdp_without_nla``), a Sentinel (task kind ``rdp_shot``) takes one screenshot of the
+pre-authentication screen and the configured AI model reads who, if anyone, it shows signed in.
 
 This is never attempted against a server that requires NLA: CredSSP must complete, with real credentials, before the
-server sends any graphical frame, so there is nothing to capture and nothing is guessed. ``aardwolf`` (a headless,
-pure-Python RDP client) connects with the "none" auth method, which sends no credentials at all, and the capture is
-discarded unless it is a real, non-blank frame. The username the AI reads back is not a secret; it is exactly what the
-screen already shows to anyone who can reach the port.
+server sends any graphical frame, so there is nothing to capture and nothing is guessed. The Sentinel connects with the "none" auth
+method, which sends no credentials at all, and the capture is discarded here unless it is a real, non-blank frame. The username the AI
+reads back is not a secret; it is exactly what the screen already shows to anyone who can reach the port.
 
-The capture is bounded (connect timeout, a short wait for the frame, a hard wall-clock cap), one per host and port per
-window (the service ledger, ``CVENGINE_TTL_RDP_SHOT``), and runs in its own thread so the asyncio event loop it needs
-never touches the gevent hub the Celery worker runs on.
+The capture runs nowhere but on a Sentinel (``sentinel_dispatch.NEVER_LOCAL``): with none able to take it the servers stay due. This module
+validates what comes back (size, a real frame), stores it, one per host and port per window (the service ledger, ``CVENGINE_TTL_RDP_SHOT``),
+and queues the AI reading.
 """
-import concurrent.futures
 import io
 import json
 import logging
@@ -22,18 +20,15 @@ import re
 from django.conf import settings
 from django.utils import timezone
 
+from reNgine import ai_prompts
+
 logger = logging.getLogger(__name__)
 
 SERVICE = 'rdp-shot'
-CONNECT_TIMEOUT = 8      # seconds to complete the RDP security and MCS handshake
-SCREEN_WAIT = 5          # seconds to let the server paint its pre-authentication screen once connected
-VIDEO_WIDTH, VIDEO_HEIGHT = 1024, 768
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
-CAP_GRACE = 15          # seconds past connect and paint that the whole capture may take before it is abandoned
 MAX_HOSTS_PER_SCAN = 10  # a screenshot is comparatively expensive (a live RDP session plus an AI call); bound it per scan
 
-VISION_SYSTEM = ('You read unauthenticated screenshots of Windows Remote Desktop (RDP) login screens for a security '
-                  'scanner. Reply with exactly one line of JSON and nothing else.')
+VISION_SYSTEM = ai_prompts.compose('rdp_screenshot', 'Reply with exactly one line of JSON and nothing else.')
 VISION_PROMPT = (
     'This screenshot was captured before any credentials were sent, by a scanner that never attempted to sign in. Say '
     'whether the screen plainly shows an account already signed in or mid sign-in (not just a username field waiting to '
@@ -53,65 +48,6 @@ def max_hosts():
 
 def enabled():
     return os.environ.get('CVENGINE_RDP_SHOT', '1').strip().lower() not in ('0', 'false', 'no', 'off')
-
-
-def available():
-    try:
-        import aardwolf  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-async def _capture_async(host, port, wait, connect_timeout=CONNECT_TIMEOUT):
-    import asyncio
-
-    from aardwolf.commons.factory import RDPConnectionFactory
-    from aardwolf.commons.iosettings import RDPIOSettings
-    from aardwolf.commons.queuedata.constants import VIDEO_FORMAT
-
-    io_settings = RDPIOSettings()
-    io_settings.video_width, io_settings.video_height = VIDEO_WIDTH, VIDEO_HEIGHT
-    io_settings.video_bpp_min, io_settings.video_bpp_max = 15, 32
-    io_settings.video_out_format = VIDEO_FORMAT.PNG
-    io_settings.clipboard_use_pyperclip = False
-    # "none": the same no-credentials handshake as "plain", for a server that does not insist on CredSSP (NLA).
-    factory = RDPConnectionFactory.from_url(f'rdp+none://{host}:{port}', io_settings)
-    connection = factory.get_connection(io_settings)
-    try:
-        _, err = await asyncio.wait_for(connection.connect(), connect_timeout)  # a server that accepts TCP and never finishes the handshake
-        if err is not None:
-            raise err
-        await asyncio.sleep(wait)
-        if not connection.desktop_buffer_has_data:
-            return None
-        image = connection.get_desktop_buffer(VIDEO_FORMAT.PIL)
-        buf = io.BytesIO()
-        image.save(buf, 'PNG')
-        return buf.getvalue()
-    finally:
-        try:
-            await connection.terminate()
-        except Exception:  # noqa: BLE001 - teardown must never mask or replace a real capture
-            pass
-
-
-def capture(host, port, connect_timeout=CONNECT_TIMEOUT, wait=SCREEN_WAIT):
-    """PNG bytes of the server's pre-authentication screen, no credentials sent, or ``None`` if it never painted
-    anything within the wait. Raises on a connection or protocol error. Runs its own asyncio loop on a dedicated thread
-    (never the calling gevent greenlet), with a hard wall-clock cap on top of the connect and paint timeouts."""
-    import asyncio
-
-    limit = connect_timeout + wait + CAP_GRACE
-
-    def run():
-        return asyncio.run(asyncio.wait_for(_capture_async(host, port, wait, connect_timeout), limit))
-    # not a ``with`` block: leaving it would wait for the thread, which is the very thing the cap is for
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return pool.submit(run).result(timeout=limit)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def is_meaningful(png_bytes):
@@ -153,26 +89,50 @@ def _parse_vision_reply(text):
             'summary': str(obj.get('description') or '')[:500]}
 
 
-def read_logged_in_user(png_bytes):
-    """Ask the configured AI model what the login screen shows. Returns ``{'summary', 'logged_in_user'}`` or
-    ``{'error'}``. Never raises: a model that is unconfigured, lacks vision, or answers oddly is reported, not fatal."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
-    from reNgine.ai_settings import get_configured_provider
-    try:
-        provider = get_configured_provider()
-    except AIProviderError as e:
-        return {'error': str(e)}
-    if provider is None:
-        return {'error': 'No AI model is configured'}
-    try:
-        with usage_stage('rdp_screenshot'):
-            reply = provider.complete_vision(VISION_SYSTEM, VISION_PROMPT, png_bytes)
-    except AIProviderError as e:
-        return {'error': str(e)}
-    parsed = _parse_vision_reply(reply)
+def queue_reading(shot, scan, sub, address, port, png_bytes):
+    """Ask the AI model what the login screen shows: one AI job (cveFeed.ai_jobs) carrying the image, answered by the AI reviewer
+    container; ``job_answer`` stores the reading on ``shot`` when it lands. Returns True when queued (False with no AI configured, which
+    is recorded on the shot as before)."""
+    import base64
+    from cveFeed import ai_jobs
+    if not ai_jobs.ai_on():
+        _set(shot.pk, ai_error='No AI model is configured')
+        return False
+    ai_jobs.enqueue('rdp_screenshot', 'rdp_screenshot', system=VISION_SYSTEM, parts=[{'text': VISION_PROMPT}],
+                    image={'media_type': 'image/png', 'data': base64.b64encode(png_bytes).decode()}, project=shot.project_id,
+                    context={'shot': shot.pk, 'scan': scan.pk, 'sub': sub.pk, 'address': address, 'port': port, 'image_hash': shot.image_hash},
+                    dedupe=f'rdp_screenshot:{shot.pk}', priority=6)
+    return True
+
+
+def _set(pk, **fields):
+    from cveFeed.models import RdpScreenshot
+    RdpScreenshot.objects.filter(pk=pk).update(**fields)
+
+
+def job_answer(job, text):
+    """The model read the screen: stored on the screenshot when it is still the image that was read, and a signed-in account becomes
+    the informational finding, as when the server read it itself."""
+    from cveFeed.models import RdpScreenshot
+    from startScan.models import ScanHistory, Subdomain
+    ctx = job.context
+    shot = RdpScreenshot.objects.filter(pk=ctx.get('shot'), image_hash=ctx.get('image_hash')).first()
+    if shot is None:
+        return None  # a newer capture replaced it: its own reading is on its way
+    parsed = _parse_vision_reply(text)
     if parsed is None:
-        return {'error': 'the AI model did not answer in the expected format'}
-    return parsed
+        _set(shot.pk, ai_error='the AI model did not answer in the expected format')
+        return None
+    _set(shot.pk, logged_in_user=parsed['logged_in_user'], ai_summary=parsed['summary'], ai_error='')
+    scan = ScanHistory.objects.select_related('domain').filter(pk=ctx.get('scan')).first()
+    sub = Subdomain.objects.filter(pk=ctx.get('sub')).first()
+    if parsed['logged_in_user'] and scan is not None and sub is not None:
+        _record_logged_in_finding(scan, sub, ctx.get('address'), ctx.get('port'), parsed)
+    return None
+
+
+def job_failure(job, category, detail):
+    _set(job.context.get('shot'), ai_error=f'the AI model could not read it ({category})')
 
 
 def _allowed(project, name, address):
@@ -204,17 +164,18 @@ def rdp_candidates(scan):
     return out
 
 
-def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=False):
-    """Screenshot every confirmed, NLA-free RDP server this scan found, store the image, and have the AI read who it
-    shows signed in. A capture or read failure is recorded and never raised; it leaves any previous screenshot in
-    place. Returns a summary dict."""
+def run_for_scan(scan_id, reader=None, force=False):
+    """Screenshot every confirmed, NLA-free RDP server this scan found through a Sentinel, store the image, and have the AI read who it
+    shows signed in: the reading is queued for the AI reviewer container (``queue_reading``), or done by ``reader(png)`` when one is
+    given. A capture or read failure is recorded and never raised; it leaves any previous screenshot in place. With no scanner able to take the
+    work the servers stay due and nothing is recorded. Returns a summary dict (``read`` counts the readings done or queued)."""
     from cveFeed import ledger
     from cveFeed.models import RdpScreenshot
     from startScan.models import ScanHistory
+    from agentapi import sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
     if not enabled():
         return {'attempted': 0, 'skipped': 'disabled'}
-    if capturer is capture and not available():
-        return {'attempted': 0, 'skipped': 'aardwolf is not installed'}
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project = scan.domain.project_id
     candidates = rdp_candidates(scan)
@@ -223,41 +184,50 @@ def run_for_scan(scan_id, capturer=capture, reader=read_logged_in_user, force=Fa
     assets = [f'{addr}:{port}' for _sub, addr, port in candidates]
     covered = set() if force else ledger.fresh(SERVICE, assets, project)
     todo = [(sub, addr, port) for (sub, addr, port), asset in zip(candidates, assets) if asset not in covered][:max_hosts()]
+    if not todo:
+        return {'attempted': 0, 'captured': 0, 'read': 0, 'reused': len(covered)}
+    try:
+        sentinel_dispatch.scanner_or_local(scan.domain.project, 'rdp_shot')  # raises ScannerUnavailable when none is live: the kind has no local path
+    except ScannerUnavailable as exc:  # no scanner can take it and no session may be opened from here: the servers stay due
+        return {'attempted': 0, 'captured': 0, 'read': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
+    shots, waiting = {}, None  # index -> PNG bytes (None: nothing was painted); an index not in here was not taken by a scanner
+    todo = [(sub, addr, port) for sub, addr, port in todo if _allowed(project, sub.name, addr)]  # excluded since the candidates were listed
+    try:
+        for index, result in sentinel_dispatch.dispatch_each(scan.domain.project, 'rdp_shot', todo, lambda item: {'address': item[1], 'port': item[2]},
+                                                             scan=scan, label_of=lambda item: f'{item[1]}:{item[2]}', ips_of=lambda item: [item[1]]):
+            if result is not None:
+                shots[index] = sentinel_dispatch.rdp_image(result)
+    except ScannerUnavailable as exc:  # what the scanner captured is stored below; the rest stays due
+        waiting = exc
     attempted = captured = read_ok = 0
-    for sub, addr, port in todo:
-        attempted += 1
+    for index, (sub, addr, port) in enumerate(todo):
         asset = f'{addr}:{port}'
-        if not _allowed(project, sub.name, addr):  # excluded since the candidates were listed
-            continue
-        from cveFeed import local_egress
-        held = local_egress.admit_one(port, 'rdp-shot', addr)  # the opt-in skip list and the egress governor: a held port stays due
-        if held:
-            logger.info('rdp screenshot of %s not taken from this server: %s', asset, local_egress.held_text(port, held))
-            continue
-        local_egress.record_one(port, 'rdp-shot', project=project, address=addr)
-        try:
-            png = capturer(addr, port)
-        except Exception as exc:  # noqa: BLE001 - one bad target must never interrupt the scan
-            logger.info('rdp screenshot failed for %s: %s', asset, exc)
-            ledger.record(SERVICE, [asset], project, scan, 'failed')
-            continue
+        if index not in shots:
+            continue  # no scanner took it: stays due, nothing recorded
+        attempted += 1
+        png = shots[index]
         if not png or len(png) > MAX_IMAGE_BYTES or not is_meaningful(png):
             ledger.record(SERVICE, [asset], project, scan, 'failed')
             continue
         rel_path, image_hash = save_image(scan, addr, port, png)
         captured += 1
-        ai = reader(png)
-        RdpScreenshot.objects.update_or_create(
+        ai = reader(png) if reader is not None else {}
+        shot, _ = RdpScreenshot.objects.update_or_create(
             project_id=project, host=sub.name, port=port,
             defaults={'domain_id': scan.domain_id, 'address': addr, 'image_path': rel_path, 'image_hash': image_hash,
                       'logged_in_user': ai.get('logged_in_user', ''), 'ai_summary': ai.get('summary', ''),
                       'ai_error': ai.get('error', ''), 'captured_at': timezone.now()})
-        if 'error' not in ai:
+        if reader is None:
+            read_ok += queue_reading(shot, scan, sub, addr, port, png)
+        elif 'error' not in ai:
             read_ok += 1
         if ai.get('logged_in_user'):
             _record_logged_in_finding(scan, sub, addr, port, ai)
         ledger.record(SERVICE, [asset], project, scan)
-    return {'attempted': attempted, 'captured': captured, 'read': read_ok, 'reused': len(covered)}
+    out = {'attempted': attempted, 'captured': captured, 'read': read_ok, 'reused': len(covered)}
+    if waiting is not None:
+        out['skipped'] = f'no scanner could take this work ({waiting.kind})'
+    return out
 
 
 def _record_logged_in_finding(scan, sub, address, port, ai):

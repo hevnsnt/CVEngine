@@ -12,6 +12,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
+from tests import ai_queue
 
 
 def call(token, method, path, body=None):
@@ -991,7 +992,7 @@ class AgentsPageTests(TestCase):
 		self.assertEqual(Client().get('/cve/agents/').status_code, 302)
 		r = client_for(user).get('/cve/agents/')
 		self.assertEqual(r.status_code, 200)
-		self.assertContains(r, 'Agent access')
+		self.assertContains(r, 'Integrations')
 
 
 class ModernUiTests(TestCase):
@@ -1315,6 +1316,9 @@ class LiveDashboardTests(TestCase):
 	def test_dashboard_redirects_to_welcome_until_onboarded(self):
 		root = User.objects.create_superuser('liveroot', 'l@x.io', 'x')
 		c = client_for(root)
+		self.assertEqual(c.get('/cve/').status_code, 200)  # this install already has targets: the wizard is not forced on it (cveFeed.setup_flow.needs_wizard)
+		from dashboard.models import SetupWizard
+		SetupWizard.objects.create(started_at=timezone.now())  # a wizard somebody started resumes
 		r = c.get('/cve/')
 		self.assertEqual((r.status_code, r['Location']), (302, '/cve/welcome/'))
 		self.assertEqual(c.get('/cve/welcome/').status_code, 200)
@@ -1692,6 +1696,10 @@ class HostSearchTests(TestCase):
 		host(da, 'www.srch.example', ip='10.0.1.9', tech='PHP', title='Welcome to Acme Tomcat')
 		host(db, 'theirs.other.example', ip='10.0.0.7', tech='PHP', port=(3306, 'MySQL', '8.0'))
 
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()  # the whole-match counts are a shared snapshot (15 s): a test that edits hosts must not read another test's
+
 	def search(self, q, **extra):
 		from urllib.parse import urlencode
 		status, data = call(self.tok, 'GET', '/api/v1/projects/srch-a/search?' + urlencode({'q': q, **extra}))
@@ -1936,7 +1944,7 @@ class TriageApiTests(TestCase):
 			findings = triage.with_cves(CVEMatch.objects.filter(subdomain__target_domain=self.da).select_related('subdomain__target_domain'))
 			findings += triage.vulnerabilities(__import__('startScan.models', fromlist=['Vulnerability']).Vulnerability.objects.filter(target_domain=self.da))
 			findings += [self.route, self.hyg]
-			triage.run_triage(triage.track(findings), provider=provider)
+			ai_queue.run_triage(triage.track(findings), provider=provider)
 
 	def get(self, path, token=None):
 		return call(token or self.t_alice, 'GET', f'/api/v1/projects/proj-a/{path}')

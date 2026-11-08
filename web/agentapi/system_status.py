@@ -8,6 +8,7 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 
 Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
 the whole answer. Nothing here returns an address, credential, command line or task argument."""
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 QUEUES = ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'api_queue', 'wpscan_queue', 'testssl_queue', 'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue', 'live_cache_queue', 'screenshot_queue', 'report_queue', 'celery')
 PRIORITY_SUFFIXES = ('', '\x06\x163', '\x06\x166', '\x06\x169')  # kombu's Redis priority steps share one queue name
@@ -47,6 +50,43 @@ def _scanning():
     row = ScanControl.current()
     return {'paused': bool(row.paused), 'paused_by_update': bool(row.paused_by_update), 'reason': row.reason or None,
             'by': row.actor or None, 'changed_at': _iso(row.changed_at), 'last_error': row.last_error or None}
+
+
+def _scanner(admin):
+    """The derived "scanner offline" state (``agentapi.scanner_state``): the kinds that have no live scanner, the ones no
+    scanner ever registered for, and the wording the interface shows. Read only; nothing is paused or failed by it."""
+    from agentapi import scanner_state
+    return scanner_state.status(admin=admin)
+
+
+BUILTIN_ENROLL_GRACE = timedelta(minutes=10)  # a freshly switched-on scanner needs a beat run, the blob and its own start; longer than this is a problem
+
+
+def _builtin_scanner(admin, problems):
+    """The built-in scanner's own block (``agentapi.builtin_scanner.status``: enabled, enrolled, live, last_seen, agent_id, name), ``{'enabled': False}``
+    while the switch is off (no query). With it on and nothing enrolled, the age is that of the one enrollment the server is holding for it (the
+    unredeemed ``SentinelEnrollment``: ``ensure_builtin_scanner`` keeps at most one), the only timestamp there is; with none written yet nothing is
+    claimed. An App Admin gets the problem lines; anyone else gets only whether it is enabled, enrolled and live."""
+    from agentapi import builtin_scanner
+    out = builtin_scanner.status()
+    if not out.get('enabled'):
+        return out
+    now = timezone.now()
+    if admin and not out.get('enrolled'):
+        from agentapi.models import SentinelEnrollment
+        since = SentinelEnrollment.objects.filter(builtin=True, used_at__isnull=True).order_by('created_at').values_list('created_at', flat=True).first()
+        if since and now - since > BUILTIN_ENROLL_GRACE:
+            problems.append(f'built-in scanner: switched on but not enrolled after {int((now - since).total_seconds() // 60)} minutes; check that '
+                            'COMPOSE_PROFILES includes builtin-scanner and read the scanner container log (docker compose logs scanner)')
+    elif admin and not out.get('live'):
+        seen = datetime.fromisoformat(out['last_seen']) if out.get('last_seen') else None
+        heard = f'last heard from {int((now - seen).total_seconds() // 60)} minutes ago' if seen else 'never heard from'
+        problems.append(f'built-in scanner: enrolled but not checking in ({heard}); check the scanner container (docker compose ps scanner)')
+    if admin and out.get('enrolled') and out.get('contract_state') == 'unsupported':
+        problems.append(f'built-in scanner: {out["contract_note"]}; the Scanner update keeps the previous image and says why (docs/BUILTIN-SCANNER.md)')
+    if not admin:  # the agent's id and name describe the server, not the caller's projects
+        out = {k: out[k] for k in ('enabled', 'enrolled', 'live') if k in out}
+    return out
 
 
 def _update():
@@ -81,7 +121,7 @@ def _project_row(project):
                   'stalled': counts.stalled_scans(scans).count()},
         'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
         'cve_matches': snap['cve_matches'],
-        # WordPress hosts: how many, how many WPScan has covered, and why the rest were not (blocked by an edge, failed, waiting)
+        # WordPress hosts: how many, how many the WordPress scan has covered, and why the rest were not (blocked by an edge, failed, waiting)
         'wordpress': wpscan_scan.status_counts([project.id]),
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
         'web_discovery': subdir_apps.status_counts([project.id]),
@@ -99,26 +139,17 @@ def _screenshots_of(project):
 
 
 def _screenshots(problems, notes):
-    """The screenshot browser of this server: switched on, installed (the Chromium the pinned Playwright drives), the last time the browser itself failed
-    to run, and what waits (cveFeed.web_shot). A missing browser or a failing one is a problem worth seeing: no host will get a picture."""
-    from django.core.cache import cache
+    """The web screenshots: switched on, what waits (cveFeed.web_shot) and what the last scanner result said of the browser sandbox on the Sentinel that
+    took the pictures. This server runs no browser. A sandbox that did not engage is a problem worth seeing: that scanner takes no picture."""
     from cveFeed import web_shot
     from cveFeed.models import HostScreenshot
-    pinned = web_shot.pinned_browser()
-    try:
-        last = cache.get('screenshots:last_browser_error')
-    except Exception:  # noqa: BLE001
-        last = None
     sandbox = web_shot.sandbox_status()
-    out = {'enabled': web_shot.enabled(), 'chromium_installed': web_shot.browser_installed(), 'chromium_version': pinned.get('version') or None,
-           'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'last_browser_error': last, 'sandbox': sandbox}
+    out = {'enabled': web_shot.enabled(), 'queued': HostScreenshot.objects.filter(outcome='queued').count(), 'sandbox': sandbox}
     reason = web_shot.unavailable_reason()
-    if web_shot.enabled() and sandbox['state'] in ('failed', 'off'):
-        problems.append(f"screenshots: {sandbox['reason']}")  # off until the celery container can give Chromium its sandbox, or running without it
-    elif reason and web_shot.enabled():
-        notes.append(f'screenshots: {reason}')  # a note, not a problem: an image that predates the feature runs everything else fine
-    elif last:
-        problems.append(f"screenshots: the browser last failed to run at {last.get('at')}: {last.get('error')}")
+    if web_shot.enabled() and sandbox['state'] == 'failed':
+        problems.append(f"screenshots: {sandbox['reason']}")  # a scanner whose browser could not be sandboxed opened no page
+    elif reason:
+        notes.append(f'screenshots: {reason}')
     return out
 
 
@@ -290,8 +321,8 @@ def _os_detection():
     return os_detection.status()
 
 
-def _ai():
-    from cveFeed import autotune, tunables
+def _ai(problems=None):
+    from cveFeed import ai_jobs, autotune, tunables
     from cveFeed.models import ValidationBudget
     from dashboard.models import AIProviderSettings
     cfg = AIProviderSettings.objects.first()
@@ -299,7 +330,16 @@ def _ai():
     return {'provider_enabled': bool(cfg and cfg.enabled), 'provider': cfg.provider if cfg and cfg.enabled else None,
             'validation_attempts_today': today,
             'autotune_advisor_today': {'used': autotune.advisor_calls_today(), 'cap': tunables.value('autotune_ai_max_per_day'),
-                                       'since': 'UTC midnight'}}
+                                       'since': 'UTC midnight'},
+            'jobs': _ai_jobs(problems, ai_jobs)}
+
+
+def _ai_jobs(problems, ai_jobs):
+    """The pipeline's AI jobs, which the AI reviewer container answers (docs/AI-REVIEWER.md): a problem when they wait for it."""
+    state = ai_jobs.waiting()
+    if state['waiting_for_reviewer'] and problems is not None:
+        problems.append('ai: ' + ai_jobs.waiting_message(state))
+    return state
 
 
 def _autotune():
@@ -334,7 +374,7 @@ def _tool_version(argv):
         return cached[1]
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # testssl.sh colours its banner
+        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # a tool may colour its banner
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
         value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
@@ -342,11 +382,6 @@ def _tool_version(argv):
         value = None
     _VERSION_CACHE[argv] = (now, value)
     return value
-
-
-def _chromium_version():
-    from cveFeed import web_shot
-    return web_shot.pinned_browser().get('version') if web_shot.browser_installed() else None
 
 
 def _template_refresh():
@@ -398,11 +433,7 @@ def _tools():
                                  'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
                                  'last_refresh_dispatch': _iso(last_run),
                                  'last_refresh': refresh},  # the last run of the refresh itself and what it said
-            'versions': {'nuclei': _tool_version(('nuclei', '-version')), 'nmap': _tool_version(('nmap', '--version')),
-                         'wpscan': _tool_version(('wpscan', '--version', '--no-banner')),
-                         'testssl': _tool_version(('testssl.sh', '--version')),
-                         # the screenshot browser: the Chromium the pinned Playwright drives, when it is on disk (looked up, never launched)
-                         'chromium': _chromium_version()}}
+            'versions': {'nuclei': _tool_version(('nuclei', '-version'))}}
 
 
 def _runzero(problems):
@@ -471,21 +502,41 @@ def _sentinels(problems):
     queue = {status: tasks.filter(status=status).count() for status in ('queued', 'claimed', 'running')}
     finished_24h = {status: tasks.filter(status=status, finished_at__gte=day_ago).count() for status in ('done', 'failed', 'expired')}
     finished_total = sum(finished_24h.values())
-    bad = finished_24h['failed'] + finished_24h['expired']
+    from agentapi import sentinel_broker as _sb
+    waiting = tasks.filter(_sb.waiting_q(), finished_at__gte=day_ago).count()  # expired only because no slot was free: the targets stay due, not a failure
+    finished_24h['waiting_for_slot'] = waiting
+    bad = finished_24h['failed'] + finished_24h['expired'] - waiting
+    finished_total -= waiting
     if finished_total >= 5 and bad / finished_total >= SENTINEL_ERROR_RATE_PROBLEM:
-        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or expired")
-    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).order_by('-finished_at')
+        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or stopped reporting")
+    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).exclude(_sb.waiting_q()).order_by('-finished_at')
                          .values('id', 'kind', 'error', 'finished_at', 'agent__name')[:SENTINEL_RECENT_ERRORS])
+    from agentapi import sentinel_broker
+    with sentinel_broker.memoised_rights():  # the live Sentinels' rights are built once for both answers below
+        by_kind = sentinel_broker.kinds_overview(now)
+        load = sentinel_broker.load_overview(now)
+    from agentapi import stage_runs
+    waiting_stages = stage_runs.metrics(now)
+    stuck = (waiting_stages['oldest_wait_seconds'] or 0) > STAGE_RUN_OLD_SECONDS
+    if stuck:
+        problems.append(f"sentinels: a stage has waited on Sentinels for {waiting_stages['oldest_wait_seconds'] // 60} minutes "
+                        f"({waiting_stages['waiting']} stage(s) waiting)")
     return {'registered': by_status, 'live': live, 'queue': queue, 'finished_24h': finished_24h,
+           'stage_runs': waiting_stages,  # Q4: the stages waiting on Sentinels without a worker, by kind, the oldest wait, callback latency, worker slots freed
+           'by_kind': by_kind,  # per kind: the live Sentinels offering it, the free slots under the per-kind caps, and why none does
+           'load': load,  # how the live Sentinels share the work: each one's load now and utilisation, queue waits and tasks in the last hour; the queue depth and waits per kind
            'recent_errors': [{'task_id': r['id'], 'kind': r['kind'], 'sentinel': r['agent__name'], 'error': r['error'],
                               'at': _iso(r['finished_at'])} for r in recent_errors]}
+
+
+STAGE_RUN_OLD_SECONDS = 4 * 3600  # a stage waiting longer than the longest completion budget (an hour) plus its queue wait is a problem worth a line
 
 
 def _egress(problems):
     """Outbound connections from this server's own scanners (``cveFeed.local_egress``): the last hour, 24 hours and seven days per watched
     port (25, 465, 587, 23, 3389 by default) and for all ports, the budget of each paced port and its use this hour, ports owed to the paced
     pass, the top sources (scan kind and project), and how many Sentinel tasks fell back to local execution in the last hour (a problem while it
-    stays high). nmap, naabu, testssl.sh and nuclei are counted from their probe plan, an estimate."""
+    stays high). nmap, naabu and nuclei are counted from their probe plan, an estimate."""
     from cveFeed import local_egress
     return local_egress.status(problems)
 
@@ -499,6 +550,40 @@ def _work():
     out['paused'] = pause_requested(fail_closed=False)
     out['targets'] = Domain.objects.exclude(project=None).exists()
     return out
+
+
+CONDUCTOR_STALE_SECONDS = 5 * 60  # the conductor is scheduled every minute: no round for five means its task is not running, whatever beat says
+
+
+def _ago(seconds):
+    """``seconds`` as a plain span, so no time zone is needed to read it."""
+    if seconds is None:
+        return 'never'
+    minutes = seconds // 60
+    if minutes < 1:
+        return 'less than a minute ago'
+    if minutes < 120:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    return f'{minutes // 60} hours ago'
+
+
+def _work_problem(work, beat_state=None):
+    """The one sentence for a stuck work conductor, or None. Nothing running or queued is normal when no target is due (every target scanned inside the
+    minimum gap, set to manual, excluded, ...): that is the conductor doing its job (``conductor.next_targets`` is the single definition of due). A
+    problem is a target that is due while nothing runs or waits, a last round older than ``CONDUCTOR_STALE_SECONDS`` while beat is ticking (a silent beat
+    has its own line), or a last round that ended in an error. Times are spans, not clock times: the server does not know the reader's time zone."""
+    if not isinstance(work, dict) or 'error' in work or not work.get('wanted_depth') or work.get('paused'):
+        return None
+    last = work.get('last_round') or {}
+    age = work.get('last_round_age_seconds')
+    ran = f'the work conductor last ran {_ago(age)}' if last else 'the work conductor has not run yet'
+    if last.get('error'):
+        return f"work: the last round of the work conductor failed ({last['error']}); first check the worker's log for a line starting 'work conductor'"
+    if work.get('targets') and work.get('due') and not work.get('running') and not work.get('queued'):
+        return f'work: a target is due for a scan but nothing is running or queued; {ran}; first check that the celery worker for the cve_feed_queue is up and that celery beat is running'
+    if age is not None and age > CONDUCTOR_STALE_SECONDS and beat_state != 'silent':
+        return f'work: {ran}, though it is scheduled every minute; first check that the celery worker for the cve_feed_queue is consuming (docker compose logs celery)'
+    return None
 
 
 def _system(user, problems, notes):
@@ -524,12 +609,10 @@ def _system(user, problems, notes):
         elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
     out['work'] = _probe(problems, 'work', _work)
-    work = out['work']
-    if isinstance(work, dict) and 'error' not in work and work.get('wanted_depth') and not work.get('paused') \
-            and work.get('targets') and not work.get('running') and not work.get('queued'):
-        problems.append('work: nothing is running or queued although there are targets to scan; the work conductor '
-                        + ('has not run yet' if not work.get('last_round') else f"last ran at {work['last_round'].get('at')}")
-                        + ' (is celery beat running?)')
+    beat_state = ((out.get('schedules') or {}).get('beat') or {}).get('state')
+    problem = _work_problem(out['work'], beat_state)
+    if problem:
+        problems.append(problem)
     out['memory'] = _probe(problems, 'memory', _memory)
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
@@ -550,7 +633,7 @@ def _system(user, problems, notes):
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
-    out['ai'] = _probe(problems, 'ai', _ai)
+    out['ai'] = _probe(problems, 'ai', lambda: _ai(problems))
     out['autotune'] = _probe(problems, 'autotune', _autotune)
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
@@ -577,11 +660,18 @@ def system_status(ctx):
     scanning = _probe(problems, 'scan control', _scanning)
     if scanning.get('paused'):
         notes.append('scanning is paused' + (f": {scanning['reason']}" if admin and scanning.get('reason') else ''))
+    scanner = _probe(problems, 'scanner', lambda: _scanner(admin))
+    if scanner.get('message'):
+        notes.append(scanner['message'])
+    if admin and scanner.get('never_seen'):
+        problems.append(scanner['never_seen_message'])
+    scanning['scanner'] = scanner
+    scanning['builtin_scanner'] = _probe(problems, 'built-in scanner', lambda: _builtin_scanner(admin, problems))
     update = _probe(problems, 'update', _update)
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
-        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error') if k in scanning}
+        scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner', 'builtin_scanner') if k in scanning}
         update = {k: update.get(k) for k in ('phase', 'error') if k in update}
     projects = _probe(problems, 'inventory', lambda: _projects(ctx))
     totals = _totals(projects) if isinstance(projects, list) else None

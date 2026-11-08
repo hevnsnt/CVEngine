@@ -12,6 +12,7 @@ from django.core.exceptions import RequestDataTooBig
 from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
+from agentapi import secrets_api
 from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
@@ -69,6 +70,14 @@ SLUG_OR_ALL = {'type': 'string', 'description': "Project slug (see list_projects
 
 def _schema(props=None, required=()):
     return {'type': 'object', 'properties': props or {}, 'required': list(required)}
+
+
+def _only(args, keys):
+    """``args`` restricted to ``keys``, which must include at least one: a call that sends none changes nothing (an omitted value is never a reset)."""
+    out = {k: args[k] for k in keys if k in args}
+    if not out:
+        raise ApiError(400, f'send at least one of {", ".join(keys)}')
+    return out
 
 
 def _page_props(extra=None):
@@ -169,7 +178,7 @@ TOOLS = [
     ('start_scan', 'Start a scan of a target: bbot discovery, then nmap and nuclei (work already done recently is reused). engine_id is optional and ignored.', _schema(
         {'project': SLUG, 'target_id': {'type': 'integer'}, 'engine_id': {'type': 'integer'}}, ['project', 'target_id']),
      lambda c, a: svc.start_scan(c, a.get('project'), int(a['target_id']), int(a['engine_id']) if a.get('engine_id') else None), True),
-    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
+    ('search_hosts', 'Shodan-style host search. q is ANDed terms: a bare word matches hostname, IP, technology, port product/service/version/CPE, OS, finding name, CVE id and page title; field filters tech: port: product: service: os: cve: ip: (address or CIDR) host: vuln: sev: auth: (open|login|session_required|sso) sensitive: (any|credentials|pii|internal) secret: (any|s|p|i|live|<provider>) zombie: (yes|no) country: (ISO code or name) alias: note: (the display name and note a person gave a host or target; a bare word and host: also match the alias); a filter value takes a comma-separated list for OR (port:80,443) unless quoted; -term negates; "quoted phrase"; a bare word followed by a dotted version (wordpress 7.1, nginx 1.24.0) is that product at that release (7.1 also finds 7.1.4, never 7.10). heat narrows the page to that value; the response\'s facets.heat always counts every value (fire, smoke, ice, clean, unscanned) over the whole match of q, ignoring heat itself; facets (comma-separated, among port, product, tech, os, country) adds the same whole-match counting for those fields, each up to facet_size values (default 10, max 50), highest count first. Each result says what matched and carries check_coverage (which of the checks that apply to the host have run). Sorted by score, highest first (sort=name for names). facets=none skips every facet, and page_size=0 returns only the count: both are much cheaper on a large project.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
@@ -234,6 +243,9 @@ TOOLS = [
                                      with_aliases=bool(a.get('with_aliases'))), True),
     ('list_exclusions', 'Hosts excluded for the project\'s organization (never scanned again).', _schema({'project': SLUG}, ['project']),
      lambda c, a: hosts.list_exclusions(c, a.get('project')), False),
+    ('list_excluded_addresses', 'The organization\'s do-not-scan address list (IPv4/IPv6 addresses and CIDR networks): no task is created for an address inside one or a host that resolves into one. Pass host to ask whether a name or address is covered and why.',
+     _schema({'project': SLUG, 'host': {'type': 'string'}}, ['project']),
+     lambda c, a: hosts.list_excluded_addresses(c, a.get('project'), a.get('host')), False),
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
         {'project': SLUG, 'host': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.remove_exclusion(c, a.get('project'), a['host']), True),
@@ -278,6 +290,21 @@ TOOLS = [
     ('list_hygiene_findings', 'TLS / certificate / SPF / DKIM / DMARC findings, and cleartext services (Telnet, FTP, rlogin, a login over plain HTTP). check: spf|dmarc|dkim|tls|caa|cleartext.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'check': {'type': 'string'}, 'status': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_hygiene(c, a.get('project'), a), False),
+    ('list_secrets', 'Exposed secrets (API keys, tokens, private keys) the scans found, worst first. Never returns a value: only the mask (AIza…x7Qz), '
+     'provider, kind, class (P browser key, S server secret, I identifier), severity and where it was seen. status: open|quiet|all|<status>; class: P|S|I.',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string'}, 'class': {'type': 'string'}, 'provider': {'type': 'string'},
+                          'severity': {'type': 'string'}, 'host': {'type': 'string'}, 'q': {'type': 'string'}}), ['project']),
+     lambda c, a: secrets_api.list_secrets(c, a.get('project'), a), False),
+    ('get_secret', 'One exposed secret: its occurrences, severity basis, remediation and linked findings. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']), lambda c, a: secrets_api.get_secret(c, a.get('project'), a.get('id')), False),
+    ('set_secret_status', 'Record a decision on a secret: status unverified|public_by_design|accepted|revoked|false_positive, with a note. Audited. '
+     'A quiet status takes it out of the host scores. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}, 'status': {'type': 'string'}, 'note': {'type': 'string'}}, ['project', 'id', 'status']),
+     lambda c, a: secrets_api.set_secret_status(c, a.get('project'), a.get('id'), a), True),
+    ('request_secret_validation', 'Org Admin or App Admin, for a project that switched secret validation on (never a bug bounty project): queue a '
+     'read-only identity check of one secret by the built-in scanner, with reviewed validators only. Audited. Never returns the value.',
+     _schema({'project': SLUG, 'id': {'type': 'integer'}}, ['project', 'id']),
+     lambda c, a: secrets_api.request_validation(c, a.get('project'), a.get('id')), True),
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'since': {'type': 'string'}, 'kind': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_changes(c, a.get('project'), a), False),
@@ -298,7 +325,7 @@ TOOLS = [
      'as read-only data (version ranges, HTTP markers, package and config checks, nuclei template). The same for every organization.',
      _schema({'cve_id': {'type': 'string'}}, ['cve_id']), lambda c, a: svc.get_cve_detection(c, a.get('cve_id', '')), False),
     ('update_cve_detection', 'App Admin only. Change the shared detection record of one CVE (identify, confirm steps, true and false positive '
-     'signs, checks, scope). Give guidance (plain text with new facts; the onboard AI revises the record with it) OR strategy (a whole '
+     'signs, checks, scope). Give guidance (plain text with new facts; the AI reviewer container revises the record with it, which changes when its answer lands) OR strategy (a whole '
      'record you wrote; it is validated and never overwritten by the model afterwards). Commands are rendered by the app, never taken from input.',
      _schema({'cve_id': {'type': 'string'}, 'guidance': {'type': 'string'}, 'strategy': {'type': 'object'}}, ['cve_id']),
      lambda c, a: svc.update_cve_detection(c, a.get('cve_id', ''), guidance=a.get('guidance'), strategy=a.get('strategy')), True),
@@ -484,16 +511,17 @@ TOOLS = [
      _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.revert_decision(c, a['decision_id']), True),
     ('release_tuning_pin', 'App Admin only, auto mode. Let auto-tuning manage a setting a person pinned: the saved value is removed and the same number becomes the tuned one.',
      _schema({'setting': {'type': 'string'}}, ['setting']), lambda c, a: tuning.release(c, a['setting']), True),
-    ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now. It applies to every Sentinel with no value of its own.',
+    ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now, and the capability policy defaults builtin_kinds (for the built-in scanner; OpenVAS denied until changed) and external_kinds (every other Sentinel; empty allows every declared kind), each {kind: {mode: allow|deny|prefer, max_concurrent}}. They apply to every Sentinel with no value of its own.',
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
-    ('set_sentinel_defaults', 'App Admin only. Set the instance-wide Sentinel default {self_update: off|manual|automatic|null}: off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice.',
-     _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]}}, ['self_update']),
-     lambda c, a: sentinel_settings.set_defaults(c.user, {'self_update': a['self_update']}), True),
+    ('set_sentinel_defaults', 'App Admin only. Set instance-wide Sentinel defaults, any of: self_update (off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice); builtin_kinds and external_kinds, the capability policy {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}} that applies to the built-in scanner and to every other Sentinel for a kind it has no policy of its own for (deny never offers the kind, prefer holds work for a Sentinel that prefers it, max_concurrent caps the kind at once). A map replaces the whole map; builtin_kinds null restores the shipped default (OpenVAS denied on the built-in scanner), external_kinds null or {} means every declared kind is allowed.',
+     _schema({'self_update': {'type': ['string', 'null'], 'enum': ['off', 'manual', 'automatic', None]},
+              'builtin_kinds': {'type': ['object', 'null']}, 'external_kinds': {'type': ['object', 'null']}}),
+     lambda c, a: sentinel_settings.set_defaults(c.user, _only(a, ('self_update', 'builtin_kinds', 'external_kinds'))), True),
     ('get_sentinel_dispatch', 'How long scan work waits for Sentinels, in seconds: claim_seconds (a Sentinel with a free slot), queue_seconds (a slot to free up when every live Sentinel is at its limit), completion_seconds per kind (counted from the claim) and per_target_seconds for each target beyond the first. A Sentinel row (list_sentinels, get_sentinel) carries slots {max, in_use, free, by_kind}, and get_sentinel queued_for_it (tasks waiting that it could take, by kind).',
      _schema(), lambda c, a: sentinel_dispatch.budgets(), False),
     ('get_agent', 'One agent with its effective rights and recent tasks.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
-    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here; a new agent of someone (not an App Admin) with another agent an administrator suspended or revoked in the last CVENGINE_AGENT_HOLD_DAYS days starts suspended (the agent of an administrator with such a decision older than that, still standing, starts pending), its note and held_by naming that agent (reinstate or approve it, or delete_agent the revoked one). Any status you send for such an agent, the same one included, makes it your decision. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), disabled_kinds, max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
+    ('update_agent', 'Administrator only (not for your own agent). Set an agent status (active to approve a new agent or reinstate one, suspended, revoked), a note, and/or limits {capabilities, projects, max_concurrent} (null for no limit). A suspended or revoked agent loses its leases at once. New agents of people who are not administrators start pending until approved here; a new agent of someone (not an App Admin) with another agent an administrator suspended or revoked in the last CVENGINE_AGENT_HOLD_DAYS days starts suspended (the agent of an administrator with such a decision older than that, still standing, starts pending), its note and held_by naming that agent (reinstate or approve it, or delete_agent the revoked one). Any status you send for such an agent, the same one included, makes it your decision. For a Sentinel (kind=scanner), settings {name, network (external|internal), profile (full|light), kinds ({kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null} or null to remove the policy of that kind}, merged per kind: what the Sentinel may take, prefer or run at once, for the built-in scanner too; only a kind get_agent shows as declared can be allowed or preferred, and a kind its machine turned off cannot be turned back on from here), disabled_kinds (the older list of denied kinds), max_concurrent, self_update (off|manual|automatic)} changes how it runs from here (null restores the provisioned network grant or clears another server value; a Sentinel cannot grant itself internal access), and update=now asks its host updater to update it now.',
      _schema({'agent_id': {'type': 'integer'}, 'status': {'type': 'string', 'enum': list(broker.ADMIN_STATUSES)}, 'note': {'type': 'string'},
               'limits': {'type': 'object'}, 'settings': {'type': 'object'}, 'update': {'type': 'string', 'enum': ['now']}}, ['agent_id']),
      lambda c, a: broker.update_agent(c, a.get('agent_id'), {k: v for k, v in a.items() if k != 'agent_id'}), True),
@@ -502,7 +530,7 @@ TOOLS = [
     # --- Sentinels: scan-stage agents (kind=scanner). A Sentinel is an Agent, so register_agent/agent_heartbeat/list_agents/
     # get_agent/update_agent above already work for one; the tools below are the matching scan-stage-work verbs (SentinelTask,
     # not AgentTask) and thin, kind-forced or kind-filtered aliases of the agent tools for a predictable Sentinel-only surface.
-    ('register_sentinel', 'Register this token as a Sentinel (kind is always scanner), or update the registration. Say what it covers: name, scope {orgs, projects, hosts}, capabilities drawn from nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover, os, tools and max_concurrent (network:internal is granted by the server, not claimed). A new Sentinel waits for an administrator to approve it unless you are one yourself. Prefer the one-time enrollment secret from generate_sentinel_enrollment for a brand new Sentinel with no token yet (bootstrap is REST-only: POST /api/v1/sentinels/bootstrap, since this endpoint itself needs a bearer token).',
+    ('register_sentinel', 'Register this token as a Sentinel (kind is always scanner), or update the registration. Say what it covers: name, scope {orgs, projects, hosts}, capabilities drawn from nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, wpscan_thorough, openvas, discover, os, tools and max_concurrent (network:internal is granted by the server, not claimed). A new Sentinel waits for an administrator to approve it unless you are one yourself. Prefer the one-time enrollment secret from generate_sentinel_enrollment for a brand new Sentinel with no token yet (bootstrap is REST-only: POST /api/v1/sentinels/bootstrap, since this endpoint itself needs a bearer token).',
      _schema({'name': {'type': 'string'}, 'scope': AGENT_SCOPE, 'capabilities': {'type': 'array', 'items': {'type': 'string', 'enum': list(SentinelTask.KINDS)}},
               'os': {'type': 'array', 'items': {'type': 'string', 'enum': list(broker.scope_lib.OS_FAMILIES)}},
               'tools': {'type': 'array', 'items': {'type': 'string'}}, 'max_concurrent': {'type': 'integer'}}),
@@ -541,7 +569,7 @@ TOOLS = [
     ('list_sentinels', 'Registered Sentinels (kind=scanner) you may see: your own, and for an administrator those of the users they manage. Same shape as list_agents, filtered to Sentinels.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, {**a, 'kind': 'scanner'}), False),
-    ('get_sentinel', 'One Sentinel with its effective rights and recent SentinelTask history.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
+    ('get_sentinel', 'One Sentinel with its effective rights and recent SentinelTask history, and kinds: per task kind whether it declares it, whether cvENGINE offers it work of that kind (effective), its policy mode (allow, deny, prefer), where that comes from (agent, instance default, machine, contract, cool-off, default), its per-kind cap and how many it holds now.', _schema({'agent_id': {'type': 'integer'}}, ['agent_id']),
      lambda c, a: broker.get_agent(c, a.get('agent_id')), False),
     ('suspend_sentinel', 'Administrator only (not for your own Sentinel). Suspend a Sentinel: no new work is offered and its in-flight SentinelTasks are released at once.',
      _schema({'agent_id': {'type': 'integer'}, 'note': {'type': 'string'}}, ['agent_id']),

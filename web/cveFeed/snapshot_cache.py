@@ -46,7 +46,7 @@ BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval',
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
 OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'refresher')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'refresher')
 
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
 
@@ -186,6 +186,11 @@ def keep_seconds(fresh):
     return max(int(fresh * STALE_FACTOR) or 1, livecache_config.refresh_seconds() * 3)
 
 
+def store_seconds(fresh):
+    """How long the cache keeps a snapshot: ``keep_seconds`` (the 1.4 refresher's window) and at least ``STALE_KEEP_SECONDS`` (the 1.3.6 fix), so a\n    slow count leaves an old copy to serve while one request recomputes it. ``keep_seconds`` alone still decides how stale a refresher's entry may\n    be served as current."""
+    return max(keep_seconds(fresh), STALE_KEEP_SECONDS)
+
+
 def scope_hash(*params):
     """Who may share a snapshot: a hash of the effective allowed project ids of the running request, plus ``params`` (the selected project and
     organization, which already narrowed that set but are kept in the key for clarity). Call it inside ``project_scoped``.
@@ -288,7 +293,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         count(name, 'miss')
         entry = _build(compute, etag_of, rev)
         try:
-            cache.set(key, entry, max(int(fresh * STALE_FACTOR) or 1, STALE_KEEP_SECONDS))
+            cache.set(key, entry, store_seconds(fresh))
         except Exception:  # noqa: BLE001
             logger.warning('could not store the %s snapshot: the cache is not answering', name)
         return entry
@@ -315,7 +320,7 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
         return 'busy', previous, previous
     try:
         entry = _build(compute, etag_of, rev, by='refresher')
-        cache.set(key, entry, keep_seconds(fresh))
+        cache.set(key, entry, store_seconds(fresh))
         count(name, 'refreshed')
         return 'refreshed', entry, previous
     finally:

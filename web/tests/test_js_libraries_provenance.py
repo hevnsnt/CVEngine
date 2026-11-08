@@ -14,11 +14,13 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import correlation, js_libraries, match_policy, probes
+from cveFeed import correlation, js_libraries, match_policy
 from cveFeed.models import ProbeObservation, RouteAuth
 from startScan.models import Subdomain, Technology
+from tests import probe_scanner
 from tests.test_js_library_versions import JQ_371_MIN, PAGE_URL, NoCache, read
 from tests.test_probes import answers, page
+from tests import route_scanner
 from tests.test_route_auth import RouteFixture
 
 
@@ -281,7 +283,7 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
                                               url='https://rt.test/js/jquery-3.2.1.min.js')}
 
     def run_probe(self, probe_id, base, table):
-        return probes.run_http_probe(probe_id, base, {'blog.rt.test', 'rt.test', 'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe(probe_id, base, {'blog.rt.test', 'rt.test', 'www.rt.test'}, get=answers(table))
 
     def test_the_libraries_probe_records_nothing_for_a_host_that_redirected_elsewhere(self):
         self.assertEqual([o for o in self.run_probe('html-libraries', 'https://blog.rt.test', self.TARGET) if o['kind'] == 'version'], [])
@@ -296,27 +298,6 @@ class RedirectProbeTests(NoCache, SimpleTestCase):
         self.assertEqual([(o['product'], o['version']) for o in found if o['version']], [('jQuery', '3.2.1')])
         found = self.run_probe('headers-root', 'https://rt.test', self.TARGET)
         self.assertIn(('jQuery', '3.2.1'), {(o['product'], o['version']) for o in found})
-
-    def test_through_the_real_redirect_following_fetch(self):
-        def probe_url(url, **_kw):
-            if url == 'https://blog.rt.test/':
-                return {'status': 301, 'location': 'https://rt.test/', 'body': '', 'url': url, 'headers': {'server': 'cloudflare'},
-                        'server': 'cloudflare', 'powered_by': '', 'content_type': 'text/html', 'title': '301 Moved Permanently'}
-            path = '/' + url.split('://', 1)[1].split('/', 1)[1]
-            return {**self.TARGET.get(path, page(404, body='not found')), 'url': url}
-
-        def get(url, **kw):
-            return probes.fetch(url, probe=probe_url, sleep=lambda s: None, allowed={'blog.rt.test', 'rt.test', 'www.rt.test'})
-        with mock.patch.object(probes, '_permitted', return_value=True):
-            alias = probes.run_http_probe('html-libraries', 'https://blog.rt.test', set(), get=get, sleep=lambda s: None)
-            target = probes.run_http_probe('html-libraries', 'https://rt.test', set(), get=get, sleep=lambda s: None)
-        self.assertEqual([o for o in alias if o['kind'] == 'version'], [])
-        self.assertEqual([(o['product'], o['version']) for o in target if o['version']], [('jQuery', '3.2.1')])
-        with mock.patch.object(probes, '_permitted', return_value=True):
-            headers = probes.run_http_probe('headers-root', 'https://blog.rt.test', set(), get=get, sleep=lambda s: None)
-        products = {o['product'] for o in headers if o['kind'] == 'version'}
-        self.assertIn('Cloudflare', products)  # what the alias's own redirect answer says about itself stays
-        self.assertFalse(products & {'nginx', 'jQuery', 'Bootstrap'}, products)  # the page it leads to is not its
 
     def test_a_redirect_inside_the_same_host_still_records_the_page(self):
         table = {'/': {**self.TARGET['/'], 'final_url': 'https://blog.rt.test/en/', 'url': 'https://blog.rt.test/en/'},
@@ -557,7 +538,7 @@ class LiveSiteOracleTests(RouteFixture, TestCase):
             url = f'https://{host}/'
             result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, **answer})
             with mock.patch.object(js_libraries, '_cache', return_value=None):
-                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
                                          target=self.site)
             RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
                                      http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
@@ -665,7 +646,7 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
 
     def read_front_pages(self):
         from cveFeed import route_auth
-        cut = self.CUT or route_auth.ROOT_READ_BYTES
+        cut = self.CUT or route_scanner.ROOT_READ_BYTES
 
         def probe(url, **_kw):
             body = self.SCRIPTS.get(url.split('?', 1)[0])
@@ -679,7 +660,7 @@ class RawLiveSiteOracleTests(LiveSiteOracleTests):
             url = f'https://{host}/'
             result = route_auth.analyse({'url': url, 'content_type': 'text/html', 'headers': {}, 'title': '', **answer})
             with mock.patch.object(js_libraries, '_cache', return_value=None):
-                route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
+                route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id),
                                          target=self.site)
             RouteAuth.objects.create(project=self.project, domain=self.site, host=host, path='/', url=url, auth_state=result['state'],
                                      http_status=answer['status'], redirect_to=result['evidence'].get('redirect_to', ''),
@@ -762,7 +743,7 @@ class ReviewScenarioBase(RouteFixture, TestCase):
             return ({'status': 200, 'body': text, 'url': target, 'content_type': 'application/javascript', 'headers': {}} if text is not None
                     else {'status': 404, 'body': 'nf', 'url': target, 'content_type': 'text/html', 'headers': {}})
         with mock.patch.object(js_libraries, '_cache', return_value=None):
-            route_auth._read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id), target=self.site)
+            route_scanner.read_scripts(result, probe, 0, project=self.project.id, reader=js_libraries.Reader(self.project.id), target=self.site)
         RouteAuth.objects.update_or_create(project=self.project, url=url, defaults={
             'domain': self.site, 'host': host, 'path': '/', 'auth_state': result['state'], 'http_status': status,
             'redirect_to': result['evidence'].get('redirect_to', ''), 'evidence': result['evidence'], 'checked_at': timezone.now()})
@@ -804,7 +785,7 @@ class ReviewScenarioTests(ReviewScenarioBase):
         self.assertEqual(self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')].ai_verdict, '')
         # read whole (the route check reads a front page up to ROOT_READ_BYTES), the old copy is on the page: matched from its name
         self.read_root('big2.x.test', 200, page, scripts={'https://big2.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN},
-                       bytes=len(page), read_limit=route_auth.ROOT_READ_BYTES, truncated=False)
+                       bytes=len(page), read_limit=route_scanner.ROOT_READ_BYTES, truncated=False)
         match = self.correlate(sub)[('big2.x.test', 'CVE-2020-11023', '1.8.3')]
         self.assertEqual((match.ai_verdict, match.evidence['version_source']), ('', 'filename'))
 
@@ -979,7 +960,7 @@ class RereviewScenarioTests(ReviewScenarioBase):
         page = ('<html><head><script src="/wp-includes/js/jquery/jquery.min.js?ver=3.7.1"></script></head><body>' + filler +
                 '<script src="/js/bootstrap.min.js"></script><script src="/legacy/jquery-1.8.3.min.js"></script></body></html>')
         self.read_root('many.x.test', 200, page, scripts={'https://many.x.test/wp-includes/js/jquery/jquery.min.js': JQ_371_MIN},
-                       bytes=len(page), read_limit=route_auth.ROOT_READ_BYTES, truncated=False)
+                       bytes=len(page), read_limit=route_scanner.ROOT_READ_BYTES, truncated=False)
         self.assertTrue(RouteAuth.objects.get(host='many.x.test').evidence['script_page']['capped'])
         found = self.correlate(sub)
         self.assertEqual(found[('many.x.test', 'CVE-2024-6484', '3.4.1')].ai_verdict, '')
@@ -1073,20 +1054,10 @@ class RereviewScenarioTests(ReviewScenarioBase):
 
 
 class FrontPageReadTests(SimpleTestCase):
-    def test_the_route_check_reads_a_front_page_further_than_any_other_route(self):
-        import functools
-        from cveFeed import route_auth
-        with mock.patch.object(route_auth, 'probe_url', return_value={'status': 200}) as probe_url:
-            probe = functools.partial(route_auth.probe_url, project=7)
-            route_auth._read_route(probe, 'https://x.test/')
-            route_auth._read_route(probe, 'https://x.test/login')
-        self.assertEqual(probe_url.call_args_list[0].kwargs, {'project': 7, 'max_bytes': route_auth.ROOT_READ_BYTES})
-        self.assertEqual(probe_url.call_args_list[1].kwargs, {'project': 7})
-
     def test_hostile_front_pages_of_the_full_read_size_stay_fast(self):
         import time
         from cveFeed import route_auth
-        n = route_auth.ROOT_READ_BYTES
+        n = route_scanner.ROOT_READ_BYTES
         bodies = {'meta without an end': '<meta ' * (n // 6), 'csrf meta without an end': '<meta name="csrf ' * (n // 17),
                   'meta refresh': '<meta http-equiv=refresh ' * (n // 25), 'script openings': '<script ' * (n // 8),
                   'inputs': '<input ' * (n // 7), 'comment openings': '<!--<script src=/a.js>' * (n // 22),
@@ -1099,6 +1070,6 @@ class FrontPageReadTests(SimpleTestCase):
                 self.assertLess(time.perf_counter() - started, 3.0, (path, label))
 
     def test_the_csrf_meta_token_is_still_taken_out(self):
-        from cveFeed import soft404
+        from cvengine_scanner import soft404
         page = '<meta name="csrf-token" content="abc123XYZ"><meta name="description" content="keep me">'
         self.assertEqual(soft404.normalise(page), '<meta name="csrf-token" content=""><meta name="description" content="keep me">')

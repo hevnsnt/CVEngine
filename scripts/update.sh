@@ -6,7 +6,7 @@
 # application containers, and waits until the site, every worker queue and the scheduler answer.
 # It never stops host services, never replaces the database or Redis, and never deletes a volume.
 #
-# Usage: scripts/update.sh [--check] [--stop-scans] [--force] [--help]
+# Usage: scripts/update.sh [--check] [--stop-scans] [--force] [--sentinels internal|both|external] [--help]
 #   --check       Preflight only. Shows the Compose layout, port owners, database volumes, workers
 #                 and scans, and says whether an update can run now. Changes nothing.
 #   --stop-scans  Stop running and queued discovery scans cleanly instead of waiting for them,
@@ -16,6 +16,12 @@
 #                 worker that cannot be inspected or paused does not stop the update. Any other task
 #                 running at that moment is lost and runs again only when its schedule next fires. The
 #                 database, Redis and volumes are still never replaced, and a failed migration still stops.
+#
+#   --sentinels PLAN  Which scanners run, the three choices install.sh asks: internal (the built-in scanner only), both (your Sentinels and the built-in
+#                     scanner), external (your own Sentinels only: the built-in scanner is removed). The same as CVENGINE_INSTALL_SENTINELS=PLAN in the
+#                     environment. Without it nothing is asked and nothing waits: the host-size rule gives a host under 7 GB a 1g scanner limit when
+#                     SCANNER_MEM_LIMIT is not set, and a scanner is never removed without an answer (docs/UPGRADE.md, "From the command line").
+#                     The Update button in Settings > Updates asks the same question in a dialog and hands the answer to the updater.
 #
 # Settings, from the environment or the same keys in .env:
 #   CVENGINE_COMPOSE_FILES         Compose files, comma separated (default docker-compose.yml).
@@ -51,23 +57,30 @@ check_only=0
 after_fetch=0
 stop_scans=0
 force=0
-for arg in "$@"; do
+sentinel_plan=${CVENGINE_INSTALL_SENTINELS:-}
+while (( $# )); do
+    arg=$1; shift
     case $arg in
         --check) check_only=1 ;;
         --stop-scans) stop_scans=1 ;;
         --force) force=1; stop_scans=1 ;;
         --after-fetch) after_fetch=1 ;;
+        --sentinels) (( $# )) || { echo "--sentinels needs internal, both or external." >&2; exit 2; }; sentinel_plan=$1; shift ;;
+        --sentinels=*) sentinel_plan=${arg#--sentinels=} ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+case $sentinel_plan in ''|internal|both|external) ;; *) echo "--sentinels (CVENGINE_INSTALL_SENTINELS) must be internal, both or external, not '$sentinel_plan'." >&2; exit 2 ;; esac
 forward_args=()
 (( stop_scans )) && forward_args+=(--stop-scans)
 (( force )) && forward_args+=(--force)
+[[ -z $sentinel_plan ]] || forward_args+=(--sentinels "$sentinel_plan")
 
 from_commit=${CVENGINE_UPDATE_FROM:-unknown}
 from_sha=${CVENGINE_UPDATE_FROM_SHA:-}
 database_migrated=0
+images_built=0  # 1 once this update's images exist: from then on the commands that load the application run in them (celery_cli, web_python)
 # The fetched script runs preflight again before it reaches the migration path. If any of those
 # checks fail, put the checkout back before the old containers read new bind-mounted code.
 revert_unmigrated() {
@@ -189,8 +202,19 @@ docker compose version >/dev/null
 web_python() {
     local code=$1; shift
     [[ -n $("${compose[@]}" ps -q --status running web 2>/dev/null) ]] || return 0
-    "${compose[@]}" exec -T "$@" web python3 manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    if (( images_built )); then
+        "${compose[@]}" run --rm --no-deps -T "$@" --entrypoint python3 web manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    else
+        "${compose[@]}" exec -T "$@" web python3 manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    fi
 }
+
+# Celery's command line, run in a throwaway container of the image built for this update. The checkout is fast-forwarded before the build and ./web is
+# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (reNgine.tasks
+# loads every installed app), so inside a running old container it dies on whatever the new code needs and the old image lacks (1.3.x to 1.4:
+# ModuleNotFoundError cvengine_scanner) and every inspection reads as "worker state unknown". The one-off container has an image and code that agree,
+# and asks the same broker, so it sees the same workers. A worker that cannot be inspected still fails the command: nothing here hides an error.
+celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks "$@"; }
 
 # consumer_control add_consumer|cancel_consumer WORKER QUEUE. A worker busy with CPU work (the correlation and template passes right
 # after it starts) can miss a short reply window, so it is asked up to three times with a longer wait each time. Both commands are safe
@@ -198,7 +222,7 @@ web_python() {
 consumer_control() {
     local verb=$1 worker=$2 queue=$3 wait
     for wait in 5 15 30; do
-        "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t "$wait" -d "$worker" "$verb" "$queue" \
+        celery_cli control -j -t "$wait" -d "$worker" "$verb" "$queue" \
             >/dev/null 2>>"${diagnostic_log:-/dev/null}" && return 0
         echo "No reply from $worker to $verb $queue within ${wait}s." >>"${diagnostic_log:-/dev/null}"
     done
@@ -410,6 +434,20 @@ if (( check_only )); then
         echo "  Scans:     $running running, $queued queued$( (( running + queued )) && { (( stop_scans )) && echo ' (they will be stopped and queued again)' || echo ' (the drain waits for running ones; --stop-scans stops and re-queues them)'; })"
     else echo "  Scans:     web is not running, so scans could not be counted"; fi
     [[ ! -s $requeue_file ]] || echo "  Pending:   $requeue_file holds scans to queue again after the next successful update"
+    if [[ -f scripts/host-fit.sh ]]; then
+        # shellcheck source=host-fit.sh
+        . scripts/host-fit.sh
+        fit_kb=$(cvengine_fit_mem_kb); fit_file=$(_cv_fit_env_file "${compose[@]}")
+        fit_own=$(cvengine_fit_value SCANNER_MEM_LIMIT "$fit_file"); fit_rule=$(cvengine_fit_scanner_limit "$fit_kb")
+        if (( fit_kb > 0 )); then
+            if [[ -n $fit_own ]]; then echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; SCANNER_MEM_LIMIT=$fit_own is yours and stays"
+            elif [[ -n $fit_rule && -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$fit_file") ]]; then echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the update will write SCANNER_MEM_LIMIT=$fit_rule (hosts under 7 GB)"
+            else echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the scanner keeps its default limit"; fi
+        fi
+        fit_live=$(CV_FIT_ASK=exec cvengine_fit_externals "${compose[@]}")
+        if [[ -n $fit_live ]]; then echo "  Sentinels: $fit_live of your own live; scanners: $(cvengine_fit_plan_words "$(cvengine_fit_value CVENGINE_SENTINEL_PLAN "$fit_file" | grep -E '^(internal|both|external)$' || echo internal)")"
+        else echo "  Sentinels: the running server could not say how many of your own are live (an older version cannot; the update asks again with the new image); nothing is changed now"; fi
+    fi
     if (( problems )); then echo "Result: fix the items above before updating."; exit 1; fi
     echo "Result: ready. Run scripts/update.sh${forward_args[*]:+ ${forward_args[*]}}"
     exit 0
@@ -465,6 +503,24 @@ if legacy_database_volume; then
     die "Legacy PostgreSQL volume exists without a PostgreSQL 18 volume. Run and verify $upgrade_command before this routine update."
 fi
 
+# Do the expensive, fallible build while the old workers are still processing work.
+# Only then pause dispatch and perform a bounded drain before migration/recreation.
+step 'Building application images while everything keeps running'
+# The proxy image is a moving tag that is meant to move with every update (nginx's security releases). Fetch it now, while nothing is stopped:
+# an unreachable registry only keeps the image already on the host, where a pull inside `up` after the migration would fail the update.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
+    "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
+fi
+SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now: a moved main rebuilds that layer
+export SENTINEL_SHA
+"${compose[@]}" build web celery celery-beat
+# The AI reviewer has its own small image (docs/AI-REVIEWER.md); an install whose compose file has it builds it here too. A failed build
+# never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+    "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
+fi
+images_built=1
+# Counted after the build, in the new image: the running containers read the new code on the old image (see celery_cli), so they cannot count.
 scans=$(web_python "$scan_count_code" | grep '^SCANS ' || true)
 if [[ -n $scans ]]; then
     read -r _ running_scans queued_scans <<< "$scans"
@@ -474,21 +530,26 @@ if [[ -n $scans ]]; then
     fi
 fi
 
-# Do the expensive, fallible build while the old workers are still processing work.
-# Only then pause dispatch and perform a bounded drain before migration/recreation.
-step 'Building application images while everything keeps running'
-# The proxy image is a moving tag that is meant to move with every update (nginx's security releases). Fetch it now, while nothing is stopped:
-# an unreachable registry only keeps the image already on the host, where a pull inside `up` after the migration would fail the update.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
-    "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
+# What fits this host, before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external): scripts/host-fit.sh,
+# the rules the Update button's dialog and install.sh use too. After the build because the count of Sentinels is read with the new image. An answer given
+# with --sentinels is applied; otherwise the host-size rule and the automatic default, which never removes a scanner and never asks.
+if [[ -f scripts/host-fit.sh ]]; then
+    # shellcheck source=host-fit.sh
+    . scripts/host-fit.sh
+    cvengine_fit_run "$sentinel_plan" "${compose[@]}"
 fi
-"${compose[@]}" build web celery celery-beat
+# The built-in scanner's pinned image (scanner.lock.json), pulled while everything keeps running. It never fails the update (scripts/scanner.sh).
+if [[ -f scripts/scanner.sh ]]; then
+    # shellcheck source=scanner.sh
+    . scripts/scanner.sh
+    cvengine_scanner_fetch "${compose[@]}"
+fi
 
 # Freeze consumers, not producers: requests arriving during maintenance stay in Redis for
 # the restarted workers. Each worker's original queues are captured so a failed update can
 # restore precisely its prior routing. Beat is stopped before the drain to prevent new sweeps.
 step 'Checking the workers'
-if ! queue_snapshot=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 active_queues 2>>"$diagnostic_log"); then
+if ! queue_snapshot=$(celery_cli inspect -j -t 5 active_queues 2>>"$diagnostic_log"); then
     # An absent managed worker can be repaired by recreating it. A running container
     # whose workers cannot be inspected is different: its active jobs are unknown.
     running_celery=$("${compose[@]}" ps -q --status running celery) || die 'Could not inspect the Celery container.'
@@ -678,13 +739,13 @@ else
         fi
         # Busy workers (a gevent worker parsing templates, a long CPU step) can miss a broadcast reply, and a worker that restarted
         # resumes its queues: one poll proves neither "gone" nor "still consuming", so both must persist before the update stops.
-        activity=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active 2>>"$diagnostic_log") ||
+        activity=$(celery_cli inspect -j -t 10 active 2>>"$diagnostic_log") ||
             die 'Could not inspect active tasks during drain.'
-        reserved=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 reserved 2>>"$diagnostic_log") ||
+        reserved=$(celery_cli inspect -j -t 10 reserved 2>>"$diagnostic_log") ||
             die 'Could not inspect reserved tasks during drain.'
-        scheduled=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 scheduled 2>>"$diagnostic_log") ||
+        scheduled=$(celery_cli inspect -j -t 10 scheduled 2>>"$diagnostic_log") ||
             die 'Could not inspect scheduled tasks during drain.'
-        queue_state=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active_queues 2>>"$diagnostic_log") ||
+        queue_state=$(celery_cli inspect -j -t 10 active_queues 2>>"$diagnostic_log") ||
             die 'Could not inspect queue consumers during drain.'
         worker_list=$(IFS=,; echo "${worker_names[*]}")
         drain_state=$(printf '%s\0' "$activity" "$reserved" "$scheduled" "$queue_state" "$worker_list" | python3 -c '
@@ -814,6 +875,10 @@ if [[ -f scripts/renew-certs.sh ]]; then
 fi
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
+# The AI reviewer is recreated after the application (it waits for the server's token on its own); its failing to start never fails the update.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+    "${compose[@]}" up -d --no-deps --force-recreate reviewer || echo 'Could not start the AI reviewer: docker compose up -d reviewer; scanning is not affected.' >&2
+fi
 # The Tailscale sidecar joins the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route for
 # scans) once celery is recreated. Only present when the tailscale profile is on.
 if "${compose[@]}" config --services 2>/dev/null | grep -qx tailscale; then
@@ -857,6 +922,13 @@ while (( SECONDS < deadline )); do
         "$ready_url" || true)
     if [[ "$status" =~ ^[23][0-9][0-9]$ ]] && worker_queues_ready && beat_ready; then
         python3 scripts/update-state.py commit "$(git rev-parse HEAD)"
+        # The built-in scanner, now that the server answers: recreated after celery (it shares celery's network namespace), kept on the new image
+        # only once a heartbeat of it reaches the server, else put back on the previous one. It never fails the update.
+        if declare -F cvengine_scanner_start >/dev/null; then
+            step 'Starting the built-in scanner'
+            cvengine_scanner_start "${compose[@]}"
+        fi
+        if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
         dispatch_paused=0
         requeued=''
         if [[ -s $requeue_file ]]; then

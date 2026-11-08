@@ -1,3 +1,4 @@
+import contextlib
 import os
 from datetime import timedelta
 from unittest import mock
@@ -5,13 +6,16 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import discovery, fullscan, nmap_scan
+from cvengine_scanner import flags as scan_flags
+
+from cveFeed import discovery, fullscan
 from cveFeed.models import AgentActivity, AssetChange, HostState, ServiceRun
 from dashboard.models import Org, Project
 from reNgine import resources
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.port_stage_stub import port_double
 
 
 def xml(ip, ports, closed=True):
@@ -19,6 +23,36 @@ def xml(ip, ports, closed=True):
 	extra = '<extraports state="closed" count="65000"/>' if closed else ''
 	return (f'<?xml version="1.0"?><nmaprun><scaninfo type="syn" protocol="tcp" services="1-65535"/><host><status state="up"/>'
 		f'<address addr="{ip}" addrtype="ipv4"/><ports>{extra}{body}</ports></host><runstats><finished exit="success"/></runstats></nmaprun>')
+
+
+@contextlib.contextmanager
+def scanner_reports(runner=None, fingerprint_runner=None):
+    """Stand in for the Sentinel's reports: ``runner(targets, flags, timeout)`` gives the raw XML of the sweep and ``fingerprint_runner`` that of the
+    -sV pass on new ports, read the way the server reads a Sentinel's report (``sentinel_dispatch.nmap_hosts``: strict, cut to the address)."""
+    from agentapi import sentinel_dispatch
+    from cvengine_scanner.flags import port_argument
+
+    def sweep(ip, project_id):
+        return sentinel_dispatch.nmap_hosts(runner([ip.address], list(scan_flags.NMAP_FULL_PORT_FLAGS), '10m'), ip.address)
+
+    def fingerprint(ip, project_id, ports):
+        return sentinel_dispatch.nmap_hosts(fingerprint_runner([ip.address], [*fullscan.FINGERPRINT_FLAGS, '-p', port_argument(ports)], '8m'), ip.address)
+    with contextlib.ExitStack() as stack:
+        if runner is not None:
+            stack.enter_context(mock.patch('cveFeed.fullscan._sentinel_sweep', sweep))
+        if fingerprint_runner is not None:
+            stack.enter_context(mock.patch('cveFeed.fullscan._sentinel_fingerprint', fingerprint))
+        yield
+
+
+def run_fullscan(runner=None, fingerprint_runner=None, **kwargs):
+    with scanner_reports(runner, fingerprint_runner):
+        return fullscan.run(**kwargs)
+
+
+def sweep_ip_with(ip, runner, fingerprint_runner=None, **kwargs):
+    with scanner_reports(runner, fingerprint_runner):
+        return fullscan.sweep_ip(ip, **kwargs)
 
 
 class FullScanBase(TestCase):
@@ -83,7 +117,7 @@ class InFlightTests(FullScanBase):
 		busy = self.ip('192.0.2.1', scanned=None, full_scan_started_at=timezone.now() - timedelta(minutes=1))
 		fresh = self.ip('192.0.2.2', scanned=timezone.now() - timedelta(days=2))
 		seen = []
-		out = fullscan.run(runner=lambda t, f, h: seen.append(t[0]) or xml(t[0], []), fingerprint_runner=lambda *a: xml('x', []), pipeline=lambda d, n: None)
+		out = run_fullscan(runner=lambda t, f, h: seen.append(t[0]) or xml(t[0], []), fingerprint_runner=lambda *a: xml('x', []), pipeline=lambda d, n: None)
 		self.assertEqual(seen, ['192.0.2.2'])  # the in-flight one is never swept
 		self.assertNotIn('192.0.2.1', seen)
 
@@ -136,9 +170,9 @@ class SweepTests(FullScanBase):
 	def test_a_sweep_records_the_time_and_count_and_persists_the_ports(self):
 		ip = self.ip('192.0.2.1')
 		calls = []
-		out = fullscan.run(runner=self.runner(xml('192.0.2.1', [(22, 'ssh'), (9999, 'x')]), calls), fingerprint_runner=self.runner(''),
+		out = run_fullscan(runner=self.runner(xml('192.0.2.1', [(22, 'ssh'), (9999, 'x')]), calls), fingerprint_runner=self.runner(''),
 			pipeline=lambda d, n: None)
-		self.assertEqual(calls, [(['192.0.2.1'], nmap_scan.FULL_PORT_FLAGS, nmap_scan.HOST_TIMEOUT_FULL)])
+		self.assertEqual(calls, [(['192.0.2.1'], scan_flags.NMAP_FULL_PORT_FLAGS, '10m')])
 		ip.refresh_from_db()
 		self.assertIsNotNone(ip.full_scanned_at)
 		self.assertEqual(ip.full_scan_ports, 2)
@@ -147,7 +181,7 @@ class SweepTests(FullScanBase):
 
 	def test_a_port_open_before_and_gone_now_is_closed(self):
 		ip = self.ip('192.0.2.1', ports=[22, 8080])
-		fullscan.run(runner=self.runner(xml('192.0.2.1', [(22, 'ssh')])), fingerprint_runner=self.runner(''), pipeline=lambda d, n: None)
+		run_fullscan(runner=self.runner(xml('192.0.2.1', [(22, 'ssh')])), fingerprint_runner=self.runner(''), pipeline=lambda d, n: None)
 		self.assertEqual({p.number: p.state for p in ip.ports.all()}, {22: 'open', 8080: 'closed'})
 		ip.refresh_from_db()
 		self.assertEqual(ip.full_scan_ports, 1)
@@ -157,7 +191,7 @@ class SweepTests(FullScanBase):
 		self.ip('192.0.2.2')
 		seen = []
 		for _ in range(3):
-			out = fullscan.run(runner=lambda t, f, h: seen.append(t[0]) or xml(t[0], []), fingerprint_runner=self.runner(''))
+			out = run_fullscan(runner=lambda t, f, h: seen.append(t[0]) or xml(t[0], []), fingerprint_runner=self.runner(''))
 			self.assertEqual(len(out['swept']), 1)
 		self.assertEqual(seen, ['192.0.2.1', '192.0.2.2', '192.0.2.1'])
 
@@ -165,7 +199,7 @@ class SweepTests(FullScanBase):
 		self.ip('192.0.2.1')
 		self.ip('192.0.2.2')
 		with mock.patch.dict(os.environ, {'CVENGINE_FULLSCAN_BATCH': '2'}):
-			out = fullscan.run(runner=lambda t, f, h: xml(t[0], []), fingerprint_runner=self.runner(''))
+			out = run_fullscan(runner=lambda t, f, h: xml(t[0], []), fingerprint_runner=self.runner(''))
 		self.assertEqual(len(out['swept']), 2)
 
 	def test_a_failed_sweep_records_attempt_without_claiming_fresh_coverage(self):
@@ -173,7 +207,7 @@ class SweepTests(FullScanBase):
 
 		def boom(targets, flags, host_timeout):
 			raise RuntimeError('nmap timed out')
-		out = fullscan.run(runner=boom)
+		out = run_fullscan(runner=boom)
 		ip.refresh_from_db()
 		self.assertIsNone(ip.full_scanned_at)
 		self.assertIsNotNone(ip.full_scan_started_at)
@@ -187,7 +221,7 @@ class SweepTests(FullScanBase):
 		for report in ('', '<nmaprun><host>', '<error/>'):
 			with self.subTest(report=report):
 				ip = self.ip(f'192.0.2.{10 + len(report)}')
-				out = fullscan.sweep_ip(ip, runner=self.runner(report))
+				out = sweep_ip_with(ip, self.runner(report))
 				ip.refresh_from_db()
 				self.assertFalse(out['ok'])
 				self.assertIsNone(ip.full_scanned_at)
@@ -196,7 +230,7 @@ class SweepTests(FullScanBase):
 	def test_a_paused_scan_picks_and_claims_nothing(self):
 		ip = self.ip('192.0.2.1')
 		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
-			out = fullscan.run(runner=self.runner(xml('192.0.2.1', [])))
+			out = run_fullscan(runner=self.runner(xml('192.0.2.1', [])))
 		self.assertEqual(out, {'skipped': 'scanning is paused'})
 		ip.refresh_from_db()
 		self.assertIsNone(ip.full_scan_started_at)  # S04-14
@@ -206,7 +240,7 @@ class SweepTests(FullScanBase):
 		"""S04-4: nmap's --host-timeout leaves a host element marked timedout with no ports."""
 		ip = self.ip('192.0.2.1', ports=[22])
 		text = xml('192.0.2.1', []).replace('<host>', '<host timedout="true">')
-		out = fullscan.run(runner=self.runner(text), fingerprint_runner=self.runner(''), pipeline=lambda d, n: None)
+		out = run_fullscan(runner=self.runner(text), fingerprint_runner=self.runner(''), pipeline=lambda d, n: None)
 		ip.refresh_from_db()
 		self.assertFalse(out['swept'][0]['ok'])
 		self.assertEqual((ip.full_scanned_at, ip.full_scan_failures), (None, 1))
@@ -221,7 +255,7 @@ class SweepTests(FullScanBase):
 
 		def boom(targets, flags, host_timeout):
 			raise RuntimeError('nmap crashed reading /srv/private/x')
-		fullscan.run(runner=boom)
+		run_fullscan(runner=boom)
 		ip.refresh_from_db()
 		self.assertEqual(ip.full_scan_failures, 1)
 		self.assertAlmostEqual((ip.full_scan_retry_at - timezone.now()).total_seconds(), 6 * 3600, delta=60)
@@ -247,7 +281,7 @@ class SweepTests(FullScanBase):
 
 		def busy(targets, flags, host_timeout):
 			raise MemoryBusy('nmap-full-bg waited too long for memory')
-		fullscan.run(runner=busy)
+		run_fullscan(runner=busy)
 		ip.refresh_from_db()
 		self.assertEqual((ip.full_scan_failures, ip.full_scan_retry_at), (0, None))
 
@@ -258,13 +292,13 @@ class SweepTests(FullScanBase):
 			if mine is not True:
 				self.skipTest('nothing to hold the claim with')
 			with mock.patch('cveFeed.fullscan.sweep_ip') as sweep:
-				out = fullscan.run(runner=runner)
+				out = run_fullscan(runner=runner)
 		self.assertIn('another background sweep', out['skipped'])
 		sweep.assert_not_called()
 
 	def test_the_claim_is_released_after_a_firing(self):
 		self.ip('192.0.2.1')
-		fullscan.run(runner=lambda t, f, h: xml(t[0], []), fingerprint_runner=self.runner(''))
+		run_fullscan(runner=lambda t, f, h: xml(t[0], []), fingerprint_runner=self.runner(''))
 		with resources.redis_claim(fullscan.CLAIM_KEY, 'next', 60) as got:
 			self.assertIs(got, True)
 
@@ -272,7 +306,7 @@ class SweepTests(FullScanBase):
 		ip = self.ip('192.0.2.1')
 		runner = mock.Mock()
 		with mock.patch.dict(os.environ, {'CVENGINE_FULLSCAN': '0'}):
-			out = fullscan.run(runner=runner)
+			out = run_fullscan(runner=runner)
 		runner.assert_not_called()
 		self.assertIn('skipped', out)
 		ip.refresh_from_db()
@@ -284,27 +318,10 @@ class SweepTests(FullScanBase):
 		self.assertEqual(resources.BASE_COSTS_MB['nmap-full-bg'], 500)
 		self.assertEqual(resources.MAX_CONCURRENT['nmap-full-bg'], 1)
 
-	def test_the_default_runner_uses_the_background_heavy_job(self):
-		with mock.patch('cveFeed.nmap_scan.run_nmap_xml', return_value='') as run:
-			fullscan._sweep_runner(['192.0.2.1'], nmap_scan.FULL_PORT_FLAGS, '10m')
-		self.assertEqual(run.call_args.kwargs['kind'], 'nmap-full-bg')
-
 	def test_the_schedule_migration_created_the_periodic_task(self):
 		from django_celery_beat.models import PeriodicTask
 		task = PeriodicTask.objects.get(name='cvengine-background-full-scan')
 		self.assertEqual((task.task, task.queue, task.enabled), ('background_full_scan', 'cve_feed_queue', True))
-
-	def test_the_pipeline_no_longer_sweeps_every_port(self):
-		self.ip('192.0.2.1')
-		seen = []
-
-		def runner(targets, flags, host_timeout):
-			seen.append(flags)
-			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		with mock.patch.dict(os.environ, {'CVENGINE_NMAP_FULL': '1'}):
-			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-		self.assertTrue(seen)
-		self.assertNotIn('-p-', [f for flags in seen for f in flags])
 
 
 class InvestigationTests(FullScanBase):
@@ -326,13 +343,12 @@ class InvestigationTests(FullScanBase):
 		def run(domain_id, names):
 			self.pipelines.append(list(names))
 			return discovery.run_host_pipeline(domain_id, names, retest=True, resolver=lambda n: {(x, '192.0.2.1') for x in n},
-				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda t, f, h: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
-				db_exposure_checks=checks if checks is not None else {}, provider=None,
-				route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+				light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(),
+				db_exposure_checks=checks if checks is not None else {}, provider=None)
 		return run
 
 	def sweep(self, ports, fp=None, pipeline=None, checks=None):
-		return fullscan.run(runner=lambda t, f, h: xml('192.0.2.1', ports), fingerprint_runner=fp or self.fingerprint_runner(),
+		return run_fullscan(runner=lambda t, f, h: xml('192.0.2.1', ports), fingerprint_runner=fp or self.fingerprint_runner(),
 			pipeline=pipeline or self.pipeline(checks))
 
 	def test_a_new_port_is_fingerprinted_checked_retested_and_recorded_as_a_change(self):
@@ -403,7 +419,7 @@ class InvestigationTests(FullScanBase):
 
 	def test_without_an_injected_pipeline_the_retest_task_is_queued(self):
 		with mock.patch('cveFeed.tasks.retest_hosts.delay') as delay:
-			fullscan.run(runner=lambda t, f, h: xml('192.0.2.1', [(6379, 'redis')]), fingerprint_runner=self.fingerprint_runner())
+			run_fullscan(runner=lambda t, f, h: xml('192.0.2.1', [(6379, 'redis')]), fingerprint_runner=self.fingerprint_runner())
 		delay.assert_called_once_with(self.domain.id, ['www.fs.test'])
 
 

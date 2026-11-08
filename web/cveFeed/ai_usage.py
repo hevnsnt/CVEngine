@@ -7,6 +7,11 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 
+def plain_failure(category, stop_reason=''):
+    from reNgine.ai_providers import plain_failure as say
+    return say(category, stop_reason, fix=True)
+
+
 def _iso(value):
     return value.isoformat() if value else None
 
@@ -73,9 +78,22 @@ def snapshot(days=7):
         attempts=Count('id'), errors=Count('id', filter=Q(status='failed'))).order_by('day'))
     stages = list(qs.values('stage').annotate(attempts=Count('id'), errors=Count('id', filter=Q(status='failed')))
                   .order_by('-attempts')[:30])
+    # which model answered each job: per stage, the models that gave an answer (and the ones that did not), by the model the provider named
+    by_stage = {}
+    for row in qs.filter(stage__in=[st['stage'] for st in stages]).values('stage', 'model', 'actual_model').annotate(
+            attempts=Count('id'), successes=Count('id', filter=Q(status='succeeded'))):
+        name = row['actual_model'] or row['model'] or 'unknown model'
+        entry = by_stage.setdefault(row['stage'], {}).setdefault(name, {'model': name, 'attempts': 0, 'successes': 0})
+        entry['attempts'] += row['attempts']
+        entry['successes'] += row['successes']
+    for st in stages:
+        used = sorted(by_stage.get(st['stage'], {}).values(), key=lambda e: (-e['successes'], -e['attempts'], e['model']))
+        st['models'] = used
+        st['answered_by'] = [e['model'] for e in used if e['successes']]
     recent = [{'at': _iso(r.started_at), 'provider': r.provider, 'model': r.model,
                'actual_model': r.actual_model, 'stage': r.stage, 'status': r.status,
-               'error_category': r.error_category, 'input_tokens': r.input_tokens,
+               'error_category': r.error_category, 'stop_reason': r.stop_reason,
+               'reason': plain_failure(r.error_category, r.stop_reason) if r.status == 'failed' else '', 'input_tokens': r.input_tokens,
                'output_tokens': r.output_tokens, 'cache_read_tokens': r.cache_read_tokens,
                'cache_write_tokens': r.cache_write_tokens, 'duration_ms': r.duration_ms}
               for r in qs.order_by('-started_at', '-id')[:50]]

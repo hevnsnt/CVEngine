@@ -174,9 +174,27 @@ def caps(project=None):
             max(BASE_PROJECT_CAP, SENTINEL_QUEUE_FACTOR * mine))
 
 
-def _admit(project, sub, unattended=True):
-    """``(target domain, host name)`` for a stored host owned by this project that may be assessed, else ``ValueError``."""
-    from cveFeed.exclusions import is_excluded
+class _Gates:
+    """What every host of one project is held to, read once for a whole batch (``enqueue_batch``): the bug bounty gate, the declared internal networks, the
+    excluded names and which of the batch's hosts are archived. ``_admit`` asked for each of them again for every host: 11 statements a host, 2,100 for a
+    top-up that queues 190 hosts."""
+
+    def __init__(self, project, hosts):
+        from cveFeed.bounty_gate import Gate
+        from cveFeed.exclusions import excluded_names
+        from cveFeed.models import HostState
+        from targetApp.target_types import internal_networks
+        self.gate = Gate()
+        self.networks = internal_networks(project.pk)
+        self.excluded = excluded_names(project.pk)
+        self.archived = set(HostState.objects.filter(project=project, host__in=hosts, archived_at__isnull=False).values_list('host', flat=True))
+        self.active = set(HostAssessment.objects.filter(project=project, host__in=hosts, status__in=ACTIVE).values_list('host', flat=True))
+
+
+def _admit(project, sub, unattended=True, gates=None):
+    """``(target domain, host name)`` for a stored host owned by this project that may be assessed, else ``ValueError``. ``gates``: what a batch read once
+    for all of its hosts (``_Gates``)."""
+    from cveFeed.exclusions import is_excluded, normalize
     from cveFeed.models import HostState
     from targetApp.models import Domain
     from targetApp.target_types import sentinel_only_target
@@ -186,20 +204,20 @@ def _admit(project, sub, unattended=True):
     if not domain or domain.project_id != project.pk or not (host == domain.name.lower() or
             (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
         raise ValueError('host is outside its stored target scope')
-    if sentinel_only_target(host, project.pk):
+    if sentinel_only_target(host, project.pk, None if gates is None else gates.networks):
         raise ValueError('internal hosts are assessed by an internal Sentinel scan')
     if unattended and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's request assesses its hosts
         from cveFeed.manual_only import other_holder
         domain = other_holder(project.pk, host)  # unless a target that is not manual only holds the host too: then it is that target's
         if domain is None:
             raise ValueError('the target is set to manual only; assess its hosts yourself, or pick a discovery mode for it')
-    if is_excluded(project.pk, host):
+    if (bool(normalize(host)) and normalize(host) in gates.excluded) if gates is not None else is_excluded(project.pk, host):
         raise ValueError('host is excluded')
     from cveFeed.bounty_gate import Gate
-    why = Gate().refusal(project.pk, host, unattended=unattended)  # no person behind it: a bug bounty project must have confirmed automated testing; any caller: the host must be in scope
+    why = (gates.gate if gates is not None else Gate()).refusal(project.pk, host, unattended=unattended)  # no person behind it: a bug bounty project must have confirmed automated testing; any caller: the host must be in scope
     if why:
         raise ValueError(f'host is not scanned: {why}')
-    if HostState.objects.filter(project=project, host=host, archived_at__isnull=False).exists():
+    if (host in gates.archived) if gates is not None else HostState.objects.filter(project=project, host=host, archived_at__isnull=False).exists():
         raise ValueError('host is archived; restore it before scanning')
     return domain, host
 
@@ -259,16 +277,17 @@ def enqueue_batch(project, subs, *, source='topup'):
             return [job], []
         return [], [(subs[0], 'already queued' if not created else job.error or job.status)]
     admitted, skipped, domain = [], [], None
+    gates = _Gates(project, {s.name.lower().rstrip('.') for s in subs})
     for sub in subs:
         try:
-            sub_domain, host = _admit(project, sub)
+            sub_domain, host = _admit(project, sub, gates=gates)
         except ValueError as exc:
             skipped.append((sub, str(exc)))
             continue
         if domain is not None and sub_domain.pk != domain.pk:
             skipped.append((sub, 'a batch holds the hosts of one target'))
             continue
-        if HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).exists():
+        if host in gates.active:
             skipped.append((sub, 'already queued'))
             continue
         domain = sub_domain
@@ -277,12 +296,17 @@ def enqueue_batch(project, subs, *, source='topup'):
         return [], skipped
     _require_capacity(project)
     created = []  # (sub, row)
-    for sub, host in admitted:
-        try:
-            with transaction.atomic():
-                created.append((sub, HostAssessment.objects.create(project=project, domain=domain, host=host, source=source)))
-        except IntegrityError:  # a second sweep queued it between the check and now
-            skipped.append((sub, 'already queued'))
+    try:  # one INSERT for the batch
+        with transaction.atomic():
+            rows = HostAssessment.objects.bulk_create([HostAssessment(project=project, domain=domain, host=host, source=source) for _, host in admitted])
+        created = [(sub, row) for (sub, _host), row in zip(admitted, rows)]
+    except IntegrityError:  # a second sweep queued one of them between the check and now: one by one, so only that host is left out
+        for sub, host in admitted:
+            try:
+                with transaction.atomic():
+                    created.append((sub, HostAssessment.objects.create(project=project, domain=domain, host=host, source=source)))
+            except IntegrityError:
+                skipped.append((sub, 'already queued'))
     jobs = [job for _, job in created]
     if not jobs:
         return [], skipped
@@ -374,14 +398,50 @@ def execute(job_id, celery_id=None):
         if _unassessable(job):
             result = dict(REFUSED)
         else:
-            result = _diagnosed(job, run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True,
-                                                       force=True, hygiene=True, assessment_id=job_id,
-                                                       by_person=job.requested_by_id is not None))
+            outcome = run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True, force=True, hygiene=True,
+                                        assessment_id=job_id, by_person=job.requested_by_id is not None,
+                                        then=('host_assessment.one', {'job_id': job_id}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # its stages wait on Sentinels without this worker: the callback finishes the assessment
+                return outcome
+            result = _diagnosed(job, outcome)
     except Exception as exc:
         logger.exception('host assessment %s failed', job_id)
         result = _failed(job, exc)
     _finish(job, result)
     return result
+
+
+def _finish_one(result, job_id):
+    """The continuation of an assessment whose stages waited on Sentinels (``agentapi.stage_runs``): what ``execute`` does with the result."""
+    job = HostAssessment.objects.select_related('domain', 'project').filter(pk=job_id).first()
+    if job is not None:
+        _finish(job, _diagnosed(job, result))
+
+
+def _settle_batch(eligible, outcome, statuses):
+    """Give each host of a batch run its own outcome: the one the pipeline named for it, else the run's."""
+    own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
+    for job in eligible:
+        if job.host in own:
+            result = own[job.host]
+        else:  # the host went through the stages: the run's result, with this host's own count of what resolved
+            result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
+        status = _finish(job, _diagnosed(job, result))
+        statuses[status] = statuses.get(status, 0) + 1
+
+
+def _finish_batch(result, job_ids):
+    """The continuation of a batch whose stages waited on Sentinels: what ``execute_batch`` does with the run's result."""
+    jobs = list(HostAssessment.objects.select_related('domain', 'project').filter(pk__in=job_ids, status='running').order_by('pk'))
+    if jobs:
+        _settle_batch(jobs, dict(result or {}), {})
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.continuation('host_assessment.one')(_finish_one)
+    stage_runs.continuation('host_assessment.batch')(_finish_batch)
 
 
 def execute_batch(job_ids, celery_id=None):
@@ -419,15 +479,13 @@ def execute_batch(job_ids, celery_id=None):
             if not eligible:
                 continue
             outcome = run_host_pipeline(domain_id, [job.host for job in eligible], celery_id=celery_id, retest=True, force=True, hygiene=True,
-                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None)
-            own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
-            for job in eligible:
-                if job.host in own:
-                    result = own[job.host]
-                else:  # the host went through the stages: the run's result, with this host's own count of what resolved
-                    result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
-                status = _finish(job, _diagnosed(job, result))
-                statuses[status] = statuses.get(status, 0) + 1
+                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None,
+                                        then=('host_assessment.batch', {'job_ids': [job.pk for job in eligible]}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # the stages wait on Sentinels without this worker: the callback settles these hosts
+                statuses['waiting'] = statuses.get('waiting', 0) + len(eligible)
+                continue
+            _settle_batch(eligible, outcome, statuses)
         except Exception as exc:
             logger.exception('host assessment batch %s failed', [job.pk for job in group])
             for job in group:
@@ -435,3 +493,6 @@ def execute_batch(job_ids, celery_id=None):
                     status = _finish(job, _failed(job, exc))
                     statuses[status] = statuses.get(status, 0) + 1
     return {'hosts': len(jobs), 'statuses': statuses}
+
+
+_register()

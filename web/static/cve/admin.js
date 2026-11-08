@@ -539,6 +539,69 @@ function openOrgApiKeys(o) {
   });
 }
 
+// "Addresses we must never scan": a plain list of IPv4/IPv6 addresses and networks the server never sends work to, whatever name leads there.
+function openOrgExcludedAddresses(o) {
+  dialog(`${o.name}: addresses we must never scan`, (body, close) => {
+    body.append(
+      el(
+        "p",
+        "note",
+        "Nothing is scanned at these addresses, and nothing is scanned at a host name that resolves to one. Private ranges are fine. If this list cannot be read, no address work runs. Adding an entry cancels the work already waiting for it.",
+      ),
+    );
+    const list = el("div");
+    body.append(list);
+    async function draw() {
+      list.textContent = "";
+      const data = await api("GET", `${A}/orgs/${o.id}/excluded-addresses`);
+      if (!data.results.length) list.append(el("p", "empty", "No addresses listed."));
+      data.results.forEach((r) => {
+        const row = el("div", "access-row");
+        row.append(el("code", "", r.cidr), el("span", "note", r.note || ""));
+        row.append(
+          button(
+            "Remove",
+            async () => {
+              if (!(await ask("Scans may reach this address again.", { title: `Remove ${r.cidr}?`, ok: "Remove" }))) return;
+              await api("DELETE", `${A}/orgs/${o.id}/excluded-addresses/${r.id}`);
+              toast("Removed");
+              draw();
+            },
+            "btn ghost sm",
+          ),
+        );
+        list.append(row);
+      });
+      list.append(el("p", "note", `${data.results.length} of at most ${data.limit} entries`));
+    }
+    const cidr = text("", { placeholder: "198.51.100.7 or 198.51.100.0/24 or 2001:db8::/48", maxlength: "64", autocomplete: "off", spellcheck: "false" });
+    const note = text("", { placeholder: "why (optional)", maxlength: "300" });
+    body.append(field("Address or network", cidr), field("Note", note));
+    async function add(confirm_broad) {
+      const r = await api("POST", `${A}/orgs/${o.id}/excluded-addresses`, { cidr: cidr.value, note: note.value, confirm_broad });
+      toast(r.cancelled_tasks ? `Added; ${r.cancelled_tasks} waiting task(s) cancelled` : "Added");
+      cidr.value = "";
+      note.value = "";
+      draw();
+    }
+    const actions = el("div", "actions");
+    actions.append(
+      el("span", "grow"),
+      button("Close", async () => close(), "btn ghost"),
+      button("Add", async () => {
+        try {
+          await add(false);
+        } catch (e) {
+          if (!String(e.message).includes("confirm it to add it")) throw e;
+          if (await ask(e.message, { title: "Add a very large network?", ok: "Add it" })) await add(true);
+        }
+      }),
+    );
+    body.append(actions);
+    draw();
+  });
+}
+
 function openOrgApiKeyEditor(o, svc, onSaved) {
   dialog(`${o.name}: ${svc.label}`, (body, close) => {
     if (svc.retired) body.append(el("p", "note", svc.retired));
@@ -647,6 +710,7 @@ async function orgsTab(panel) {
         "btn ghost sm",
       ),
       button("API keys", () => openOrgApiKeys(o), "btn ghost sm"),
+      button("Addresses we must never scan", () => openOrgExcludedAddresses(o), "btn ghost sm"),
     );
     if (me.is_superuser) {
       row.append(
@@ -1038,22 +1102,6 @@ async function healthTab(panel) {
       { label: "Oldest", render: (r) => shortDate(r[1].oldest) },
     ], Object.entries(data.jobs).filter(([kind]) => kind !== "scans")));
     output.append(el("p", "note", `${data.jobs.scans.pending} scans queued; ${data.jobs.scans.running} running.`));
-    output.append(el("h3", "", "Three-hour assessment review"));
-    const review = data.assessment_review;
-    output.append(el("p", "note", data.scanning_paused ? "Scanning is paused; review dispatch waits for resume." :
-      review ? `Review #${review.id} · ${review.status} · ${review.reviewed}/${review.total} project summaries processed · ${review.model_calls} AI attempts · ${review.actions} actions queued · ${review.errors} deferred or failed. Started ${shortDate(review.started_at)}.${review.note ? ` ${review.note}` : ""}` :
-        "No assessment review has run yet. The three-hour Beat schedule appears below."));
-    if (review) {
-      const performance = review.performance || {};
-      output.append(el("p", "note", `Capacity review: ${performance.status || "pending"}. ${performance.reason || "No measurement yet."}`));
-      if (performance.status === "changed") output.append(el("p", "note", `${performance.kind}: admission cap ${performance.before} → ${performance.after}${performance.rollback ? " (rollback)" : ""}.`));
-      if (review.recent_decisions.length) output.append(table([
-        { label: "Project", render: (r) => r.project },
-        { label: "Decision", render: (r) => r.action },
-        { label: "Status", render: (r) => r.status },
-        { label: "Why / job", render: (r) => `${r.reason}${r.job_id ? ` · job #${r.job_id}` : ""}` },
-      ], review.recent_decisions));
-    }
     const archived = data.archive_rediscovery;
     if (archived) {
       output.append(el("h3", "", "Archived asset rediscovery"));

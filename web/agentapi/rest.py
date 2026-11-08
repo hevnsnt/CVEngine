@@ -13,6 +13,7 @@ from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
 from agentapi import sentinel_dispatch
+from agentapi import sentinel_stream
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -20,6 +21,8 @@ from agentapi import egress
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
+from agentapi import reviewer_api
+from agentapi import secrets_api
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
 from tenancy import roles
@@ -106,8 +109,15 @@ def _register_sentinel(request, ctx, **_):
 
 
 def _setup_choices(request):
-    """``(network, profile)`` from ``?network=external|internal&profile=full|light`` (each optional), for the Sentinel setup lines."""
-    return request.GET.get('network') or None, request.GET.get('profile') or None
+    """``(network, profile)`` from ``?network=external|internal&profile=full|light``, both required on ``?format=blob``: the
+    Provision form never picks for the person (Full runs OpenVAS and is heavy), so a missing or blank one is a 400, and
+    an invalid one is refused by ``clean_setup_choices``. The MCP tool keeps the Sentinel client's own defaults."""
+    network, profile = request.GET.get('network') or None, request.GET.get('profile') or None
+    if not network:
+        raise ApiError(400, 'network is required: external or internal (where the Sentinel runs)')
+    if not profile:
+        raise ApiError(400, 'profile is required: full or light (whether it also runs OpenVAS)')
+    return network, profile
 
 
 def _sentinel_enroll(request, ctx, slug, **_):
@@ -198,7 +208,7 @@ ROUTES = [
      lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)', 'One target',
      lambda r, c, slug, target_id, **k: svc.get_target(c, slug, int(target_id))),
-    ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans (?status=running|queued|active|stalled|failed|finished|aborted; active is running and queued together)', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/scans', 'Start a scan on a target (bbot discovery, then nmap and nuclei; engine_id is optional)',
      lambda r, c, slug, **k: (svc.start_scan(c, slug, int(_need(_body(r), 'target_id')[0]),
                                              int(_body(r)['engine_id']) if _body(r).get('engine_id') not in (None, '') else None), 202)),
@@ -254,6 +264,8 @@ ROUTES = [
                                                       with_aliases=bool(_body(r).get('with_aliases')))),
     ('GET', r'projects/(?P<slug>[-\w]+)/exclusions', 'Hosts excluded for this project\'s organization (never scanned again)',
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/excluded-addresses', 'The organization\'s do-not-scan address list (IPv4/IPv6 addresses and CIDR networks, stored normalised, with note, who and when): no Sentinel task is created, leased or kept for an address inside one, nor for a host that resolves into one. Read only; organization admins edit it in Administration. Add ?host=<name or address> to ask whether one is covered ({host, excluded, reason})',
+     lambda r, c, slug, **k: hosts.list_excluded_addresses(c, slug, r.GET.get('host'))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
     ('POST', r'projects/(?P<slug>[-\w]+)/inventory', 'Post a host inventory report (inventory v1 JSON from scripts/inventory; the only route a reporter token can call). 201 for a machine\'s first report, 200 after; the answer says matched, created or unmatched, never which host',
@@ -270,7 +282,7 @@ ROUTES = [
      lambda r, c, slug, inventory_id, **k: inventory.delete_inventory(c, slug, int(inventory_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/inventory', 'The host inventory report tied to a host (newest if several): OS, packages, patches, listening services, with its age and whether it is stale',
      lambda r, c, slug, host, **k: inventory.get_inventory(c, slug, host=host, params=r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
+    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Your saved searches in this project, with the limits and the notification channels Settings has on',
      lambda r, c, slug, **k: saved.list_saved_searches(c, slug)),
@@ -294,10 +306,26 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/activity-days', 'Exact per-day counts for the dashboard Activity card: new findings (status=all rules of the findings list) by heat tier and type, and inventory changes, for the last days (default 90, at most 366) in tz (IANA name, default UTC); series=findings,changes,scans picks which (scans: started per day, for the Scans page); totals are the sum of the days shown',
+     lambda r, c, slug, **k: svc.activity_days(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
      lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=)',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/secrets', 'Exposed secrets, worst first, masked: never a value (status=open|quiet|all|<status>, class=P|S|I, provider=, severity=, host=, q=, paged)',
+     lambda r, c, slug, **k: secrets_api.list_secrets(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/secrets/settings', 'The project\'s secret validation switch: {validation: {enabled, blocked_reason, bounty_project, can_switch, by, at, attestation, rules}}',
+     lambda r, c, slug, **k: secrets_api.secrets_settings(c, slug)),
+    ('PUT', r'projects/(?P<slug>[-\w]+)/secrets/settings', 'Org Admin or App Admin: switch secret validation on ({validation: {enabled: true, attestation}}: the attestation word for word) or off; never on for a bug bounty project. Audited',
+     lambda r, c, slug, **k: secrets_api.set_secrets_settings(c, slug, _body(r))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)', 'One secret: where it was seen, why it is rated as it is, how to fix it, the findings it came from. Never the value',
+     lambda r, c, slug, secret_id, **k: secrets_api.get_secret(c, slug, secret_id)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/status', 'Set a secret\'s status {status: unverified|public_by_design|accepted|revoked|false_positive, note}; a write role. Audited',
+     lambda r, c, slug, secret_id, **k: secrets_api.set_secret_status(c, slug, secret_id, _body(r))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/assign', 'Give a secret to a person {assignee: <user id from members>|null}; a write role. Audited',
+     lambda r, c, slug, secret_id, **k: secrets_api.set_secret_assignee(c, slug, secret_id, _body(r))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/validate', 'Org Admin or App Admin, a project with validation on: queue a read-only check of this secret by the built-in scanner (202). Audited',
+     lambda r, c, slug, secret_id, **k: (secrets_api.request_validation(c, slug, secret_id), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hygiene/run', 'Run the hygiene checks now (all targets, or {target_id})',
      lambda r, c, slug, **k: (svc.run_hygiene_checks(c, slug, _body(r).get('target_id')), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/api-keys', 'External-service API keys configured for this project (never the secrets)',
@@ -431,14 +459,14 @@ ROUTES = [
     ('POST', r'agent/tasks/(?P<task_id>\d+)/release', 'Give a task back to the queue; body {reason}',
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents); a Sentinel row carries slots {max, in_use, free, by_kind}', lambda r, c, **k: broker.list_agents(c, r.GET)),
-    ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
-    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, disabled_kinds, max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
+    ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks; a Sentinel also has kinds {kind: {declared, effective, mode, source, cap, held, state, note}}, the capability policy per task kind', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, kinds: {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}|null} (the capability policy, merged per kind; only a kind the Sentinel declares can be allowed or preferred), disabled_kinds (the older list: each kind is deny), max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
     ('DELETE', r'agents/(?P<agent_id>\d+)', 'Administrator: delete a revoked agent and revoke its API token, so it no longer holds back its user\'s new agents; {deleted, id, token_revoked, released_tasks, still_held: [{id, name}]} (agents it held stay suspended until reinstated); 409 unless revoked',
      lambda r, c, agent_id, **k: broker.delete_agent(c, agent_id)),
-    ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, changed_by, changed_at}; self_update applies to every Sentinel with no value of its own (null follows the instance\'s Automatic or Manual update choice)',
+    ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, builtin_kinds, builtin_kinds_is_shipped, external_kinds, changed_by, changed_at}; each applies to every Sentinel with no value of its own (self_update null follows the instance\'s Automatic or Manual update choice; builtin_kinds and external_kinds are the capability policy {kind: {mode, max_concurrent}} for the built-in scanner and for every other Sentinel, OpenVAS denied on the built-in one until changed)',
      lambda r, c, **k: sentinel_settings.get_defaults()),
-    ('PUT', r'sentinels/defaults', 'App Admin: set the instance-wide Sentinel default {self_update: off|manual|automatic|null}',
+    ('PUT', r'sentinels/defaults', 'App Admin: set any of the instance-wide Sentinel defaults {self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode: allow|deny|prefer, max_concurrent}}|null (null restores the shipped one), external_kinds: {...}|null}; the two kind maps replace the whole map',
      lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r)))[1]),
     ('GET', r'tuning', 'App Admin: auto-tuning of the configMaxxing throughput settings: mode (off|suggest|auto, default auto) and effective_mode (off when CVENGINE_AUTOTUNE=0), the AI advisor (enabled, provider, used_today, cap), the tuned numbers, the pinned settings (saved by a person) with who saved them, the managed settings with their range and step, the last run (per setting: value and why_not_raised) and the last ten decisions',
      lambda r, c, **k: tuning.get_status(c)),
@@ -462,24 +490,50 @@ ROUTES = [
      lambda r, c, slug, **k: broker.list_unassignable(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/agent-tasks/(?P<task_id>\d+)/cancel', 'Cancel queued or leased agent work',
      lambda r, c, slug, task_id, **k: broker.cancel_task(c, slug, task_id)),
+    ('GET', r'reviewer/config', 'AI reviewer token only (docs/AI-REVIEWER.md): whether the reviewer may work, the provider, base URL, key and model of each job (review, ops), the daily cap and what is left of it, whether the operations job is due, and the allowed verdicts, confidences and reason codes',
+     lambda r, c, **k: reviewer_api.config(r, c)),
+    ('GET', r'reviewer/findings/next', 'AI reviewer token only: up to ?limit= (at most 25) review packets of open findings not yet reviewed in their current state, each leased for 15 minutes: {packets: [{ref, review_key, kind, trusted: {...}, untrusted: {...}}]}',
+     lambda r, c, **k: reviewer_api.next_findings(r, c)),
+    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/verdict', 'AI reviewer token only: one verdict {review_key, verdict, confidence, reason_code, note, model, usage: {input_tokens, output_tokens}}; answers {outcome: closed|recorded|disputed|held, reason, review_id}, 409 when the finding or its host changed since the packet',
+     lambda r, c, ref, **k: reviewer_api.verdict(r, c, ref, _body(r))),
+    ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
+     lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
+    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
+     lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
+    ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
+     lambda r, c, **k: reviewer_api.usage(r, c, _body(r))),
+    ('GET', r'reviewer/jobs/next', 'AI reviewer token only (docs/AI-REVIEWER.md): up to ?limit= (at most 20) of the pipeline\'s queued AI jobs (triage and the other stages), each leased to the container with a fresh lease token: {jobs: [{id, kind, stage, attempt, lease, system, parts: [{text} | {fence, data}], schema, options, image?}]}; none while no provider is configured, CVENGINE_REVIEWER=0 or scanning is paused',
+     lambda r, c, **k: reviewer_api.next_jobs(r, c)),
+    ('POST', r'reviewer/jobs/(?P<job_id>\d{1,12})/result', 'AI reviewer token only: the answer to one leased job {lease, text | error (a failure category), provider, model, calls: [{status, category, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms, model, actual_model}]}; answers {accepted: true} (the server checks and applies it in the background), 409 when the lease is not the job\'s current one',
+     lambda r, c, job_id, **k: reviewer_api.job_result(r, c, job_id, _body(r))),
     ('POST', r'sentinels/bootstrap', 'A Sentinel\'s first call: trade a one-time enrollment secret (from the project\'s sentinels/enroll) for its own API token and Agent row (kind=scanner), pre-scoped to what the secret was generated for; body {enrollment_token, name, capabilities, os, tools, max_concurrent}. No bearer token needed; the token is returned once',
      _sentinel_bootstrap),
     ('GET', r'sentinel', 'The Sentinel registered on this token: scope, capabilities, open assignments', lambda r, c, **k: sentinels.identity(c)),
-    ('PUT', r'sentinel', 'Register or update this token\'s Sentinel (kind is always scanner): {name, scope: {orgs, projects, hosts}, capabilities: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover], os, tools, max_concurrent}',
+    ('PUT', r'sentinel', 'Register or update this token\'s Sentinel (kind is always scanner): {name, scope: {orgs, projects, hosts}, capabilities: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, wpscan_thorough, openvas, discover, waf, secrets_scan], os, tools, max_concurrent}',
      _register_sentinel),
     ('DELETE', r'sentinel', 'Unregister this token\'s Sentinel and hand its tasks back', lambda r, c, **k: sentinels.unregister(c)),
     ('POST', r'sentinel/heartbeat', 'Say the Sentinel is alive; extends the leases of its running tasks (same call as agent/heartbeat). Optional {running: [task ids]}: its own tasks accepted over 120 seconds ago and not listed are ended as expired',
      lambda r, c, **k: sentinels.heartbeat(c, _body(r))),
+    ('GET', r'sentinel/secret-rules/bundle', 'Sentinel token only: the instance\'s custom secret rules as Kingfisher YAML (application/yaml, ETag = the sha256 in quotes, If-None-Match answers 304; 404 when there are none)',
+     lambda r, c, **k: secrets_api.rules_bundle_response(c, r.headers.get('If-None-Match'))),
+    ('GET', r'secrets/rules', 'App Admin: the secrets scan\'s custom rules and skip lists {rules_yaml, rule_ids, skip_words, skip_regex, bundle_sha256, updated_at}',
+     lambda r, c, **k: secrets_api.secret_rules(c)),
+    ('PUT', r'secrets/rules', 'App Admin: change {rules_yaml, skip_words, skip_regex} (each optional). Rules may have only name, id (custom.*), pattern, min_entropy, confidence, keywords, examples: never a validation. Audited',
+     lambda r, c, **k: secrets_api.set_secret_rules(c, _body(r))),
     ('GET', r'sentinel/template-policy', 'Sentinel token only: the Nuclei template policy in force and its approved template bundle: {rev, read_only, bundle: {sha256, bytes, templates, path}}',
      lambda r, c, **k: sentinels.template_policy(c)),
     ('GET', r'sentinel/template-policy/bundle', 'Sentinel token only: the approved Nuclei templates as a .tar.gz (application/gzip, ETag = the sha256 in quotes, If-None-Match answers 304)',
      lambda r, c, **k: sentinels.template_bundle_response(c, r.headers.get('If-None-Match'))),
-    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, openvas, discover]}',
+    ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, wpscan_thorough, openvas, discover, waf, bbot_discovery, secrets_scan]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/partial', 'One numbered batch of partial results of a streamed SentinelTask it is running (bbot_discovery, contract version 3): {seq, ...the lists of $defs/partials/<kind>}. Answers {accepted, duplicate, seq}: a batch at or below the last one taken is a duplicate and stored once, any other seq than the next is a 409. A 409 also means stop the run (cancelled, expired or its scan stopped); a 429 means send it again shortly',
+     lambda r, c, task_id, **k: sentinel_stream.report_partial(c, task_id, _body(r))),
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+     lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB, with ready-to-run setup steps; &network=external|internal and &profile=full|light (default external, full) choose the .env lines in them',
@@ -490,7 +544,7 @@ ROUTES = [
      _sentinel_org_enroll),
     ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
      _sentinel_org_enroll),
-    ('GET', r'sentinels/live', 'What every Sentinel you manage is doing right now: {server_time, queued, results: [{name, state: working|idle|offline|pending|suspended, last_seen, current: [task], recent: [task], stats}]}',
+    ('GET', r'sentinels/live', 'What every Sentinel you manage is doing right now: {server_time, queued, results: [{name, builtin, state: working|idle|offline|pending|suspended, last_seen, current: [task], recent: [task], stats}]}',
      lambda r, c, **k: sentinels.live_overview(c)),
     ('GET', r'sentinels/enroll', 'App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this instance, present and future: {enrollment_token, server_url, expires_at, scope: "instance"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_instance_enroll),
@@ -509,6 +563,7 @@ ROUTES = [
 NO_TOKEN_ROUTES = ('sentinels/bootstrap',)  # authenticated by their own one-time secret, not a bearer token
 MAX_ID_DIGITS = 18  # an id in a path longer than this cannot exist (the keys are 64-bit)
 READ_ONLY_POSTS =re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
+SELF_GATED_POSTS = re.compile(r'^sentinel/tasks/\d+/secret$')  # refuses a read-only token itself, so that the refusal is audited (sentinel_broker.read_secret)
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 
 
@@ -560,11 +615,15 @@ def dispatch(request, path):
         if any(len(v) > MAX_ID_DIGITS for k, v in match.groupdict().items() if k.endswith('id') and v.isdigit()):
             return JsonResponse({'error': 'not found'}, status=404)  # no such id: and int() of thousands of digits is refused by Python
         try:
-            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path):
+            if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path) and not SELF_GATED_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
-            return JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
+            response = JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
+            wait = getattr(e, 'extra', {}).get('retry_after_seconds')
+            if e.status in (429, 503) and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait >= 0:
+                response['Retry-After'] = str(int(wait))  # a client waits this long instead of guessing
+            return response
         except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
             if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
                 return schema_guard.unavailable(request)

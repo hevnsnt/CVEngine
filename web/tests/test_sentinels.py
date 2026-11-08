@@ -136,7 +136,7 @@ class EnrollmentTests(SentinelBase):
     def test_format_blob_packages_the_same_payload_and_still_bootstraps(self):
         # The provisioning blob (the Sentinels page's Provision button, and CVENGINE_SENTINEL_BLOB): generate_enrollment's
         # own contract is unchanged, ?format=blob only adds one opaque {blob} string alongside it.
-        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         self.assertIn('blob', out)
         self.assertIn('enrollment_token', out)  # the plain fields are still there: this is presentation, not a new contract
@@ -215,12 +215,12 @@ class OrgAndInstanceEnrollmentTests(SentinelBase):
         self.assertEqual(status, 403)
 
     def test_org_and_instance_blob_formats_round_trip(self):
-        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll?format=blob')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         decoded = sentinels.decode_enrollment_blob(out['blob'])
         self.assertEqual(decoded['scope'], 'org')
         self.assertEqual(decoded['org'], 'one')
-        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll?format=blob')
+        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         decoded = sentinels.decode_enrollment_blob(out['blob'])
         self.assertEqual(decoded['scope'], 'instance')
@@ -297,8 +297,8 @@ class ScopeAndClaimTests(SentinelBase):
         status, reported = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', result)
         self.assertEqual(status, 200)
         self.assertEqual(reported['task']['status'], 'done')
-        # Apply the same way sentinel_dispatch.try_nmap would: through the exact local persistence function.
-        from cveFeed.nmap_scan import persist_inventory
+        # Apply the same way sentinel_dispatch.try_nmap would: through the one persistence function.
+        from cveFeed.port_inventory import persist_inventory
         task.refresh_from_db()
         inventory = [{'ip': h['ip'], 'os_guess': h.get('os_guess', ''), 'os_accuracy': None, 'ports': h['ports']} for h in task.result['hosts']]
         persist_inventory(inventory)
@@ -317,6 +317,49 @@ class ScopeAndClaimTests(SentinelBase):
         task.refresh_from_db()
         self.assertEqual(task.status, 'expired')
         self.assertIsNone(task.agent_id)
+
+    def test_a_result_after_the_stage_stopped_waiting_is_audited_and_still_discarded(self):
+        from cveFeed.models import AgentActivity
+        from dashboard.models import AuditLog
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        sentinels.expire(task, 'the dispatch wait timed out; the stage fell back to local execution')
+        url = f'/api/v1/sentinel/tasks/{task.pk}/result'
+        host = {'ip': '192.0.2.50', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh'}]}
+        status, out = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': [host]})
+        self.assertEqual((status, out['duplicate'], out['late']), (200, True, True))
+        self.assertEqual(out['task']['status'], 'expired')
+        task.refresh_from_db()
+        self.assertEqual((task.status, task.result), ('expired', {}))  # discarded: nothing stored on the task...
+        self.assertFalse(IpAddress.objects.get(address='192.0.2.50').ports.exists())  # ...and nothing persisted as ports
+        late = AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk)
+        self.assertEqual(late.count(), 1)
+        self.assertEqual(late.get().detail['agent'], 'scoped-sentinel')
+        self.assertIn('stage fell back', late.get().detail['reason'])
+        line = AgentActivity.objects.get(detail__sentinel_task_id=task.pk, message__contains='after the stage stopped waiting')
+        self.assertEqual(line.message, 'Sentinel scoped-sentinel reported nmap work for www.a.example after the stage stopped waiting '
+                                       '(the dispatch wait timed out; the stage fell back to local execution)')
+        status, again = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': [host]})  # a retry says the same, and adds no second row
+        self.assertEqual((status, again['late']), (200, True))
+        self.assertEqual(late.count(), 1)
+
+    def test_a_result_for_an_expired_task_from_a_sentinel_that_never_held_it_is_still_not_found(self):
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        sentinels.expire(task, 'the dispatch wait timed out')
+        register_sentinel(self.t['root'], name='bystander', scope={'projects': ['sen-a']})
+        status, _ = call(self.t['root'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'done', 'hosts': []})
+        self.assertEqual(status, 404)
+
+    def test_a_result_for_a_finished_task_is_a_plain_duplicate_not_late(self):
+        task = self._queue('sen-a')
+        call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        url = f'/api/v1/sentinel/tasks/{task.pk}/result'
+        self.assertEqual(call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': []})[1]['duplicate'], False)
+        again = call(self.t['dana'], 'POST', url, {'outcome': 'done', 'hosts': []})[1]
+        self.assertEqual((again['duplicate'], 'late' in again), (True, False))
 
     def test_malformed_or_oversized_result_is_rejected_not_trusted(self):
         task = self._queue('sen-a')
@@ -360,6 +403,28 @@ class ScopeAndClaimTests(SentinelBase):
         self.assertEqual(len(host['ports'][0]['product']), 120)
         self.assertEqual(len(host['ports'][0]['version']), 80)
 
+    def test_every_task_has_its_own_trace_id_and_the_payload_and_audit_rows_carry_it(self):
+        from dashboard.models import AuditLog
+        first, second = self._queue('sen-a'), self._queue('sen-a')
+        self.assertNotEqual(first.trace_id, second.trace_id)
+        for task in (first, second):
+            self.assertRegex(task.trace_id, r'^[0-9a-f]{32}$')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
+        self.assertEqual(status, 200)
+        task = SentinelTask.objects.get(pk=out['task']['id'])
+        self.assertEqual(out['task']['trace_id'], task.trace_id)  # what the Sentinel receives
+        call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
+        status, _ = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/result', {'outcome': 'done', 'hosts': []})
+        self.assertEqual(status, 200)
+        rows = {r.action: r.detail for r in AuditLog.objects.filter(action__startswith='sentinel.task.', detail__task_id=task.pk)}
+        self.assertEqual(set(rows), {'sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete'})
+        for action, detail in rows.items():
+            self.assertEqual(detail['trace_id'], task.trace_id, action)
+        other = second if task.pk == first.pk else first
+        self.assertFalse(AuditLog.objects.filter(detail__trace_id=other.trace_id).exists())  # the other task's id is on nothing yet
+        sentinels.expire(other, 'the dispatch wait timed out')
+        self.assertEqual(AuditLog.objects.get(action='sentinel.task.expire', detail__task_id=other.pk).detail['trace_id'], other.trace_id)
+
     def test_release_puts_it_back_for_another_sentinel(self):
         task = self._queue('sen-a')
         call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
@@ -368,7 +433,7 @@ class ScopeAndClaimTests(SentinelBase):
         task.refresh_from_db()
         self.assertEqual(task.status, 'expired')
 
-    def test_wpscan_result_accepted_and_classified_by_the_same_function_a_local_run_uses(self):
+    def test_wpscan_result_accepted_and_classified_by_the_one_classifier(self):
         task = self._queue('sen-a', kind='wpscan', target={'url': 'https://www.a.example/', 'token': 'secret-token'})
         call(self.t['dana'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})
         call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/accept')
@@ -570,9 +635,14 @@ class McpToolTests(SentinelBase):
         self.assertEqual(status, 201, out)
         self.assertEqual((out['setup']['network'], out['setup']['profile']), ('internal', 'light'))
         before = SentinelEnrollment.objects.count()
-        for query in ('network=lan', 'profile=huge'):
+        for query in ('network=lan&profile=light', 'network=external&profile=huge', 'profile=light', 'network=external', 'network=&profile=light', 'network=external&profile=', ''):
             status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&{query}')
-            self.assertEqual(status, 400, out)
+            self.assertEqual(status, 400, (query, out))
+            self.assertIn('required' if 'lan' not in query and 'huge' not in query else 'must be one of', out.get('error', ''), query)
+        for path in ('/api/v1/orgs/one/sentinels/enroll', '/api/v1/sentinels/enroll'):
+            for query in ('', 'network=external', 'profile=light'):
+                status, out = call(self.t['root'], 'POST', f'{path}?format=blob&{query}')
+                self.assertEqual(status, 400, (path, query, out))
         self.assertEqual(SentinelEnrollment.objects.count(), before)
 
     def test_enrollment_and_list_tasks_tools_over_mcp(self):
@@ -615,7 +685,7 @@ class HeartbeatTests(SentinelBase):
 
 class TestsslResultCleanerTests(SimpleTestCase):
     """``sentinel_broker.clean_result('testssl', ...)``: a Sentinel's testssl.sh report, typed and clipped into exactly the
-    four fields ``cveFeed.testssl_scan.evaluate`` reads from a local report item."""
+    four fields ``cveFeed.tls_audit.evaluate`` reads from a local report item."""
 
     def _body(self, **over):
         item = {'id': 'heartbleed', 'severity': 'HIGH', 'finding': 'VULNERABLE, exploitable', 'cve': 'CVE-2014-0160'}
@@ -660,7 +730,7 @@ class TestsslResultCleanerTests(SimpleTestCase):
 
 class NmapUdpResultCleanerTests(SimpleTestCase):
     """``sentinel_broker.clean_result('nmap_udp', ...)``: unlike every other kind, the stored result is raw XML text,
-    bounded only by size - parsing it safely is ``cveFeed.nmap_scan.parse_xml``'s job, not the cleaner's."""
+    bounded only by size - parsing it safely is ``cveFeed.port_inventory.parse_xml``'s job, not the cleaner's."""
 
     def test_a_well_formed_report_round_trips_untouched(self):
         xml = '<nmaprun><host><address addr="192.0.2.10" addrtype="ipv4"/></host></nmaprun>'
@@ -832,8 +902,8 @@ class NaabuResultTests(SimpleTestCase):
         self.assertEqual(clean['ports'], {'192.0.2.1': [22, 8443], '192.0.2.2': None, '192.0.2.3': None})  # nothing open is left out, as before
 
     def test_naabu_discover_hands_a_sentinel_tarpit_to_nmaps_default_ports(self):
-        from cveFeed import naabu_scan
-        self.assertTrue(all(ports is None or len(ports) <= naabu_scan.MAX_OPEN_PER_IP
+        from cveFeed import port_stage
+        self.assertTrue(all(ports is None or len(ports) <= port_stage.MAX_OPEN_PER_IP
                             for ports in sentinels.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.2': list(range(1, 601))}})['ports'].values()))
 
 
@@ -1019,7 +1089,7 @@ class ProvisionPickerTests(SentinelBase):
 
     def test_an_org_admin_picks_from_their_own_organizations_only(self):
         html = self.page(self.dana)
-        self.assertIn('<select id="enroll-org"><option value="one">One</option></select>', html)
+        self.assertIn('<option value="" selected disabled>Choose an organization</option><option value="one">One</option></select>', html)
         self.assertNotIn('value="two"', html)
         self.assertNotIn('value="instance"', html)
 

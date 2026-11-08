@@ -5,9 +5,13 @@ import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.j
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { dashboardNote } from "/staticfiles/cve/finding-groups-logic.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
-import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
+import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
+import { dialog } from "/staticfiles/cve/ui.js";
+import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -101,7 +105,6 @@ function setNum(id, value) {
 // (expired certificates, no DMARC) and not only how many. Reads the worst three severities; a group counts what those pages hold.
 const HY_AREA = { tls_expired: "Expired certificates", tls_expiring: "Certificates expiring", tls_legacy: "Old TLS versions", tls_weak: "Weak TLS" };
 const HY_PREFIX = { spf: "SPF", dkim: "DKIM", dmarc: "DMARC", caa: "CAA", mx: "Mail exchangers", mta_sts: "MTA-STS", smtp_tlsrpt: "TLS reporting", dane: "DANE", tls: "TLS" };
-const HY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 const hyName = (check) => {
   if (HY_AREA[check]) return HY_AREA[check];
   const word = check.replace(/_/g, " ");
@@ -148,6 +151,9 @@ async function paintCoverage() {
     const approx = capped ? "~" : "";
     $("s-coverage").textContent = `${approx}${total - never}`;
     $("s-coverage_of").textContent = `of ${approx}${total}`;
+    // the hosts left out of "of N" are said, with how many, so 29 of 29 and 40 hosts elsewhere reconcile on the tile itself
+    const note = $("s-coverage_note");
+    if (note) note.textContent = noAddress ? `${noAddress} more with no address to scan` : never ? `${never} not scanned yet` : "";
     const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
     $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
       (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts are counted.` : "");
@@ -156,27 +162,28 @@ async function paintCoverage() {
   }
 }
 let hygieneSig = null;
-async function paintHygiene(open) {
+async function paintHygiene(open, topChecks) {
   const box = $("hy-top");
-  if (!box || open === hygieneSig) return;
-  hygieneSig = open;
+  const sig = JSON.stringify([open, topChecks]);
+  if (!box || sig === hygieneSig) return;
+  hygieneSig = sig;
   try {
-    const path = `/api/v1/projects/${encodeURIComponent(slug || "_all")}/hygiene`;
-    const pages = await Promise.all(["critical", "high", "medium"].map((sev) => get(`${path}?severity=${sev}&page_size=100`).catch(() => ({ results: [] }))));
-    const groups = new Map();
-    pages.flatMap((p) => p.results || []).forEach((f) => {
-      const g = groups.get(f.check) || { check: f.check, worst: f.severity, n: 0 };
-      g.n += 1;
-      if ((HY_RANK[f.severity] || 0) > (HY_RANK[g.worst] || 0)) g.worst = f.severity;
-      groups.set(f.check, g);
-    });
-    const top = [...groups.values()].sort((a, b) => (HY_RANK[b.worst] || 0) - (HY_RANK[a.worst] || 0) || b.n - a.n).slice(0, 3);
+    // counted by the server over every actionable finding (stats.hygiene_top), never from a page of the list
+    const top = (topChecks || []).map((g) => ({ check: g.check, worst: g.worst, n: g.n }));
     box.textContent = "";
     top.forEach((g) => {
       const li = el("li", `sev-${g.worst}`);
       li.append(el("i", "hy-dot"), el("span", "", hyName(g.check)), el("b", "", String(g.n)));
       box.append(li);
     });
+    // the rows add up to the number above them: whatever is not in a row above is one more row (other checks, low severity)
+    const shownN = top.reduce((n, g) => n + g.n, 0);
+    const restN = Number(open) - shownN;
+    if (top.length && restN > 0) {
+      const li = el("li", "sev-rest");
+      li.append(el("i", "hy-dot"), el("span", "", "Other checks and low severity"), el("b", "", String(restN)));
+      box.append(li);
+    }
     if (!top.length) box.append(el("li", "hy-none", open ? "Low severity only" : "All clear"));
   } catch (_) {
     hygieneSig = null;
@@ -244,7 +251,7 @@ async function pollStats() {
       certNote.textContent = s.certs_total ? `of ${s.certs_total}` : "";
       certNote.title = s.certs_total ? `${s.certs_total} certificates tracked` : "";
     }
-    paintHygiene(s.hygiene_open);
+    paintHygiene(s.hygiene_open, s.hygiene_top);
     const stuck = $("n-queue");
     if (stuck) {
       // the activity feed also shows scans that run under a finished scan record (weekly deep Nuclei, host rescans): those are work, so not stuck
@@ -293,13 +300,48 @@ function fillTip(cell) {
     tip.append(el("div", "tip-vuln", `Worst finding: ${info.max_sev}`));
   }
   if ((info.score_parts || []).length) {
-    (info.score_parts || []).forEach((part) => tip.append(el("div", "tip-reason", `${part.label}: +${part.points}`)));
+    // every line of the score, so the lines add up to the number in the header; a click on the tile opens each one with its evidence
+    const view = scoreLines(info.score_parts, {});
+    view.lines.forEach((part) => tip.append(el("div", "tip-reason", `${part.label}: +${part.points}`)));
+    tip.append(el("div", "tip-sum", view.capped ? `Lines add up to ${view.sum}, capped at 100` : `Lines add up to ${view.total}`));
+    tip.append(el("div", "tip-hint", "Click for what each line means"));
   } else {
     (info.reasons || []).slice(0, 3).forEach((r) => tip.append(el("div", "tip-reason", r)));
   }
 }
 tip.hidden = true;
 document.body.append(tip);
+
+// "Why does this host score N": every line of the score with what it means and a link to its evidence, then a way into the host
+function openScore(cell) {
+  let info = {};
+  try { info = JSON.parse(cell.dataset.info || "{}"); } catch (_) {}
+  const project = info.project_slug || slug;
+  const name = cell.dataset.name;
+  const dlg = dialog(`Why ${name} scores ${cell.dataset.score || 0}`, (body, close) => {
+    body.classList.add("score-dlg");
+    body.append(el("p", "note", [info.org, info.project].filter(Boolean).join(" / ") || "The score is the sum of these lines, at most 100."));
+    body.append(scoreList(info.score_parts || [], { slug: project, host: name }, {
+      score: Number(cell.dataset.score || 0),
+      // a secret opens in its side panel, over this dialog's page, without leaving the dashboard
+      onOpen: (l) => {
+        if (!l.ref || l.ref.type !== "secret" || !l.ref.id) return false;
+        close();
+        openSecret(project, l.ref.id);
+        return true;
+      },
+    }));
+    const actions = el("div", "actions");
+    const done = el("button", "btn ghost sm", "Close", { type: "button" });
+    done.onclick = close;
+    actions.append(done, el("a", "btn sm", "Open host", { href: hostsHref(name, project) }));
+    body.append(actions);
+  });
+  // focus starts on the title, not on the first link: a screen reader reads what the dialog is before it reads a line
+  const title = dlg.querySelector("h2");
+  title.tabIndex = -1;
+  title.focus();
+}
 
 // The dashboard spans every project the viewer can see, so a host opens in its own project, not the selected one
 function hostsHref(name, project) {
@@ -451,8 +493,14 @@ function hostDetails(info) {
   if (info.findings) box.append(el("span", "hx-d", `${info.findings} finding${info.findings === 1 ? "" : "s"}`));
   if (info.ips) box.append(el("span", "hx-d", `${info.ips} IP${info.ips === 1 ? "" : "s"}`));
   if ((info.aliases || []).length) box.append(el("span", "hx-d", `Also ${info.aliases.slice(0, 3).join(", ")}${info.aliases.length > 3 ? ` +${info.aliases.length - 3}` : ""}`));
-  const reasons = (info.score_parts || []).length ? info.score_parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
+  const parts = info.score_parts || [];
+  const reasons = parts.length ? parts.map((p) => `${p.label} +${p.points}`) : (info.reasons || []);
   reasons.slice(0, 3).forEach((r) => box.append(el("span", "hx-d hx-why", r)));
+  if (parts.length > 3) {
+    // the lines the tile has no room for are one row with their own total, so the visible lines and this row add up to the score
+    const rest = parts.slice(3);
+    box.append(el("span", "hx-d hx-why hx-more", `${rest.length} more line${rest.length === 1 ? "" : "s"} +${rest.reduce((n, p) => n + p.points, 0)}`));
+  }
   return box;
 }
 
@@ -521,6 +569,13 @@ function drawMap(nodes) {
         tip.style.left = `${Math.max(8, x)}px`;
         tip.style.top = `${Math.max(8, y)}px`;
       };
+      cell.addEventListener("click", (e) => {
+        // a plain click explains the score; a new-tab click, or the "Open host" link in the dialog, goes to the host
+        if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        tip.hidden = true;
+        openScore(cell);
+      });
       cell.addEventListener("mouseenter", (e) => { fillTip(cell); tip.hidden = false; place(e); });
       cell.addEventListener("mousemove", place);
       cell.addEventListener("mouseleave", () => (tip.hidden = true));
@@ -911,71 +966,77 @@ poll(pollFeed, 6000);
 })();
 
 // --- trends ---------------------------------------------------------------------------------------
-// Two charts under the counters (new findings per day, inventory changes per day) and a small trend line in the CVE matches and
-// scanner findings counters. They are built in the browser from the dates the API already returns, so they show what arrived
-// and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
-(async () => {
+// One chart under the counters (new findings per day and inventory changes per day, 90 days) and a small trend line in the CVE matches and
+// scanner findings counters. The server counts them, exactly, with one grouped query per series (GET .../activity-days, cached like the counters),
+// so every number is the real count of the window and the answer is a few kilobytes however large the project is. Nothing is asked for until the
+// Trends section is about to be seen: a dashboard that is read at the top never pays for it.
+const loadTrends = async () => {
   if (!slug) return;
-  const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
-  const PAGES = 5;
-  // rows: what was fetched; total: what the project has (the findings list is hottest first, so a cut-off one is not the newest)
-  const collect = async (path) => {
-    const rows = [];
-    let total = 0;
-    for (let page = 1; page <= PAGES; page += 1) {
-      const sep = path.includes("?") ? "&" : "?";
-      const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
-      const got = data.results || [];
-      rows.push(...got);
-      total = data.total ?? data.count ?? rows.length;
-      if (got.length < 200) break;
-    }
-    return { rows, total };
-  };
   try {
-    const [found, changed] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
-    const findings = found.rows;
-    const changes = changed.rows;
-    const cutFindings = found.total > findings.length;
+    const data = await get(`${base}/activity-days?days=90&tz=${encodeURIComponent(displayZone())}`);
+    const found = data.findings;
+    const moved = data.changes;
     const section = $("trends");
-    if (!findings.length && !changes.length) return;
-    const tierOf = (f) => {
-      if (TIERS.includes(f.heat)) return f.heat;
-      const sev = String(f.severity || "").toLowerCase();
-      return sev === "critical" || sev === "high" ? "fire" : sev === "medium" ? "smoke" : "ice";
-    };
+    if (!found.total && !moved.total) return;
+    const lists = `/cve/${encodeURIComponent(slug)}`;
     section.append(
       activityMatrix({
         title: "Activity",
+        first: data.first,
+        last: data.last,
         rows: [
-          { key: "findings", label: "New findings", unit: "findings", tiered: true, items: findings.map((f) => ({ date: f.detected, tier: tierOf(f) })) },
-          { key: "changes", label: "Inventory changes", unit: "changes", items: changes.map((c) => ({ date: c.detected })) },
+          {
+            key: "findings", label: "New findings", unit: "findings", tiered: true, days: found.days,
+            explain: "Findings first seen in the last 90 days, all severities and statuses: CVE matches, scanner findings and configuration checks. The Findings page (Everything) lists them with older ones.",
+            href: `${lists}/vulns/?status=all`,
+          },
+          {
+            key: "changes", label: "Inventory changes", unit: "changes", days: moved.days,
+            explain: "Inventory changes (new or retired hosts, ports, versions, certificates) detected in the last 90 days. The Changes page lists exactly these.",
+            href: `${lists}/changes/?since=${encodeURIComponent(data.since)}`,
+          },
         ],
       }),
     );
-    // the list is ordered by heat, not by date: when it was cut, the counts are those of the hottest findings only, and say so
-    if (cutFindings) {
-      section.append(el("p", "note", `New findings counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings, so recent low-severity ones may be missing.`));
-    }
-    if (changed.total > changes.length) {
-      section.append(el("p", "note", `Inventory changes counts the newest ${changes.length.toLocaleString()} of ${changed.total.toLocaleString()} in the last 90 days.`));
-    }
     section.hidden = false;
-    const spark = (anchorId, dates, label) => {
+    const spark = (anchorId, type, label) => {
       const a = $(anchorId);
-      if (!a || !dates.length) return;
-      const values = dailyCounts(dates, 14).map((p) => p.v);
-      const svg = sparkline(values);
-      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days${cutFindings ? " among the hottest findings" : ""}`);
-      if (cutFindings) a.title = `Counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings`;
-      a.append(svg, sr);
+      if (!a) return;
+      const byDay = new Map(found.days.map((d) => [d.date, d[type] || 0]));
+      const end = new Date(`${data.last}T00:00:00`);
+      const values = [];
+      for (let i = 13; i >= 0; i -= 1) {
+        const d = new Date(end.getFullYear(), end.getMonth(), end.getDate() - i);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        values.push(byDay.get(key) || 0);
+      }
+      if (!values.some((v) => v)) return;
+      a.append(sparkline(values), el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`));
     };
-    spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");
-    spark("n-findings", findings.filter((f) => f.type === "scanner").map((f) => f.detected), "Scanner findings");
+    spark("n-matches", "cve", "CVE matches");
+    spark("n-findings", "scanner", "Scanner findings");
   } catch (_) {
     /* trends are extra: leave the section hidden when the data does not come */
   }
+};
+(() => {
+  const section = $("trends");
+  if (!slug || !section) return;
+  if (!("IntersectionObserver" in window)) {
+    loadTrends();
+    return;
+  }
+  // the section is hidden until it has data, so a one-pixel marker after it stands in for "the end of the page is near"
+  const marker = el("div", "trends-marker", null, { "aria-hidden": "true", style: "height:1px;grid-column:1/-1" });
+  section.after(marker);
+  const watch = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    watch.disconnect();
+    marker.remove();
+    loadTrends();
+  }, { rootMargin: "400px 0px" });
+  watch.observe(marker);
 })();
 
 // --- scanning now ---------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
-import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
+import { areaChart, displayZone, heatmap } from "/staticfiles/cve/charts.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
 import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
@@ -15,19 +15,26 @@ import {
   copyButton,
   copyText,
   dialog,
+  disclosure,
   emptyState,
   field,
   text as uiText,
+  watchWide,
+  whatIs,
 } from "/staticfiles/cve/ui.js";
-import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
+import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pageAnchor, pageUrl } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import { secretsPage } from "/staticfiles/cve/secrets.js";
+import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
+import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -245,6 +252,8 @@ function createList({
   onReset,
   prepare, // async (items) before the rows are drawn: what they need to know first (a project's SLA)
   pageSize = 30, // a number, or a function for a list that asks for more at a time when a filter narrows it
+  noun = "item", // for the "Loaded 30 more items, 90 of 217 shown" message
+  plural = "items",
 }) {
   let page = 1;
   let timer = null;
@@ -255,7 +264,56 @@ function createList({
   let seq = 0; // the newest request: an answer to an older one (an earlier filter, a slower response) is dropped
   const body = el("div");
   const more = el("div", "more-row");
-  mount.append(body, more);
+  // the polite live region: what a press of "Load more" added
+  const say = el("p", "sr", "", { role: "status", "aria-live": "polite", "aria-atomic": "true" });
+  mount.append(body, more, say);
+  let moreBtn = null; // the button under the rows: the same element from page to page, so a reader's place and focus stay on it
+  const announce = (text) => {
+    say.textContent = "";
+    setTimeout(() => (say.textContent = text), 30); // a changed node is what a screen reader reads out
+  };
+  function ensureBtn() {
+    if (moreBtn && moreBtn.isConnected) return;
+    more.textContent = "";
+    moreBtn = el("button", "btn ghost", "", { type: "button" });
+    moreBtn.onclick = () => {
+      const focused = document.activeElement === moreBtn;
+      page += 1;
+      busyMore();
+      load(false, false, focused);
+    };
+    more.append(moreBtn);
+  }
+  // the button while a page is on its way: disabled, aria-busy, saying how many are coming
+  function busyMore() {
+    const size = typeof pageSize === "function" ? pageSize() : pageSize;
+    const total = lastCount == null ? 0 : lastCount;
+    const view = LM.moreView({ phase: "busy", total, page: Math.max(1, page - 1), size: lastSize || size });
+    ensureBtn();
+    moreBtn.disabled = true;
+    moreBtn.setAttribute("aria-busy", "true");
+    moreBtn.textContent = view.kind === "button" ? view.label : LM.busyLabel(size);
+  }
+  // after a page arrived: the button says how many are left, or "All N shown" takes its place
+  function paintMore(data, added, hadFocus) {
+    const view = LM.moreView({ total: data.count, page: data.page, size: data.page_size });
+    if (view.kind !== "button") {
+      more.textContent = "";
+      moreBtn = null;
+      if (view.kind === "done") {
+        const done = el("p", "note more-done", view.label, { tabindex: "-1" });
+        more.append(done);
+        if (hadFocus) done.focus({ preventScroll: true });
+      }
+    } else {
+      ensureBtn();
+      moreBtn.disabled = false;
+      moreBtn.removeAttribute("aria-busy");
+      moreBtn.textContent = view.label;
+      if (hadFocus) moreBtn.focus({ preventScroll: true });
+    }
+    if (added) announce(LM.loadedMessage(added, LM.shownCount(data.count, data.page, data.page_size), data.count, noun, plural));
+  }
 
   // The auto-refresh of a list that is waiting on something (a running scan): quiet, only while the tab is visible and the reader has
   // not asked for more rows, and backing off after a failure. A hidden tab resumes on visibilitychange.
@@ -281,7 +339,7 @@ function createList({
   }
 
   // quiet: a refresh the reader did not ask for. The rows are swapped when the answer arrives, with no skeleton in between.
-  async function load(reset, quiet = false) {
+  async function load(reset, quiet = false, hadFocus = false) {
     const mine = ++seq;
     if (reset) page = 1;
     if (reset && !quiet) {
@@ -290,7 +348,10 @@ function createList({
       body.setAttribute("aria-busy", "true");
       body.append(...loadingSkeleton(skeleton));
     }
-    more.textContent = "";
+    if (reset) {
+      more.textContent = "";
+      moreBtn = null;
+    } else if (!moreBtn || !moreBtn.isConnected) busyMore(); // a retry, or the gallery asking for more: the same busy button
     try {
       const size = typeof pageSize === "function" ? pageSize() : pageSize;
       const data = await api("GET", `${path}?${query({ ...params(), page, page_size: size })}`);
@@ -308,20 +369,7 @@ function createList({
       if (reset && !items.length) body.append(emptyNode(empty));
       else render(body, items, reset);
       if (onLoaded) onLoaded(data, reset, quiet);
-      more.textContent = "";
-      if (data.page * data.page_size < data.count) {
-        const b = el(
-          "button",
-          "btn ghost",
-          `Load more (${data.count - data.page * data.page_size} left)`,
-        );
-        b.type = "button";
-        b.onclick = () => {
-          page += 1;
-          load(false);
-        };
-        more.append(b);
-      }
+      paintMore(data, reset ? 0 : items.length, hadFocus);
       disarm();
       refreshing = Boolean(autoRefresh && autoRefresh(items));
       if (refreshing) arm(REFRESH_MS);
@@ -337,7 +385,9 @@ function createList({
       if (!reset) {
         // a failed "Load more" keeps the rows already shown and offers the same page again
         page = Math.max(1, page - 1);
-        more.append(loadError(err, () => { page += 1; load(false); }, true));
+        more.textContent = "";
+        moreBtn = null;
+        more.append(loadError(err, () => { page += 1; load(false, false, true); }, true));
         return;
       }
       if (onReset) onReset();
@@ -357,6 +407,7 @@ function createList({
     // the next page of rows, for a view that shows the same rows another way (the host gallery)
     more: () => {
       page += 1;
+      busyMore();
       return load(false);
     },
     left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * lastSize)),
@@ -633,6 +684,123 @@ function select(label, options, onChange) {
   return s;
 }
 
+// The head of a split list (Findings, CVE matches, Hosts): a search line and one line of buttons stay in view, and every other filter
+// (chip groups, dropdowns, saved views) sits in a panel that opens OVER the rows, so the rows keep the column. The filters that are
+// not at their first option show as removable chips; "Filters (3)" counts them. Open or closed is remembered per page.
+// `lead`: nodes for the search line (the Filters button joins them). `panelNodes`: everything else. `meta`: the count and tools row, which gets the chips.
+// A button with data-flag is a standalone on/off filter (Show every host); in a .picker the first button is the unfiltered one.
+function listHead({ page, lead, panelNodes, meta }) {
+  const key = `cvengine.filters.${page}`;
+  const id = `filters-${page}`;
+  const head = el("div", "list-head");
+  const bar = el("div", "list-bar");
+  bar.append(...lead.filter(Boolean));
+  const btn = el("button", "filters-btn btn sm ghost", "Filters", { type: "button", "aria-expanded": "false", "aria-controls": id });
+  const pop = el("div", "filters-pop", null, { id, role: "group", "aria-label": "Filters" });
+  pop.hidden = true;
+  pop.append(...panelNodes.filter(Boolean));
+  const chips = el("div", "active-chips", null, { "aria-label": "Active filters" });
+  chips.hidden = true;
+  bar.append(btn);
+  meta.prepend(chips); // the chips sit on the count line, wrapping with it
+  head.append(bar, pop, meta);
+  const labelOf = (b) => [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim() || b.textContent.trim();
+  const active = () => {
+    const out = [];
+    pop.querySelectorAll(".picker").forEach((p) => {
+      if (p.hidden) return;
+      const bs = [...p.querySelectorAll("button:not([data-flag])")];
+      const at = bs.findIndex((b) => b.getAttribute("aria-pressed") === "true");
+      if (at > 0) out.push({ label: labelOf(bs[at]), group: p.getAttribute("aria-label") || "", clear: () => bs[0].click() });
+    });
+    pop.querySelectorAll("button[data-flag]").forEach((b) => {
+      if (b.getAttribute("aria-pressed") === "true") out.push({ label: labelOf(b), group: "", clear: () => b.click() });
+    });
+    pop.querySelectorAll("select:not([data-quiet])").forEach((sel) => {
+      if (sel.selectedIndex > 0) out.push({ label: sel.options[sel.selectedIndex].text, group: sel.getAttribute("aria-label") || "", clear: () => { sel.selectedIndex = 0; sel.dispatchEvent(new Event("change", { bubbles: true })); } });
+    });
+    return out;
+  };
+  const refresh = () => {
+    const now = active();
+    chips.textContent = "";
+    now.forEach((a) => {
+      const c = el("button", "chip-x", null, { type: "button", "aria-label": `Remove filter ${a.group ? `${a.group}: ` : ""}${a.label}`, title: "Remove this filter" });
+      c.append(a.label, el("span", "", "\u00d7", { "aria-hidden": "true" }));
+      c.onclick = () => {
+        a.clear();
+        btn.focus();
+      };
+      chips.append(c);
+    });
+    chips.hidden = !now.length;
+    btn.textContent = now.length ? `Filters (${now.length})` : "Filters";
+  };
+  const setOpen = (open, focus = false) => {
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    head.classList.toggle("filters-open", open);
+    try {
+      localStorage.setItem(key, open ? "1" : "0");
+    } catch {}
+    if (focus) (open ? pop.querySelector("input, select, button") || pop : btn).focus();
+  };
+  btn.onclick = () => setOpen(pop.hidden, true);
+  head.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || pop.hidden) return;
+    e.stopPropagation();
+    setOpen(false, true);
+  });
+  const outside = (e) => {
+    if (!head.isConnected) return document.removeEventListener("pointerdown", outside, true);
+    if (!pop.hidden && !head.contains(e.target)) setOpen(false);
+  };
+  document.addEventListener("pointerdown", outside, true);
+  let queued = false;
+  const later = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      refresh();
+    });
+  };
+  new MutationObserver(later).observe(pop, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["aria-pressed", "hidden"] });
+  pop.addEventListener("change", later);
+  // the rows scroll under this head: how tall it is says how far a row must be kept from the top when it scrolls into view
+  if (window.ResizeObserver) new ResizeObserver(() => head.parentElement && head.parentElement.style.setProperty("--head-h", `${head.offsetHeight}px`)).observe(head);
+  // the column ends at the bottom of the screen wherever the page is scrolled: its top is the pinned edge once the page has scrolled past it, and
+  // wherever the page put it before that, so a row scrolled to the bottom of the column is on screen
+  const fit = () => {
+    const side = head.parentElement;
+    if (!side) return removeEventListener("scroll", fit);
+    if (!window.matchMedia("(min-width:900px)").matches) return side.style.removeProperty("--fit");
+    const bar = document.querySelector(".topbar");
+    const top = Math.max(side.getBoundingClientRect().top, (bar ? bar.offsetHeight : 56) + 4);
+    side.style.setProperty("--fit", `${Math.max(240, window.innerHeight - top - 8)}px`);
+  };
+  addEventListener("scroll", fit, { passive: true });
+  addEventListener("resize", fit);
+  requestAnimationFrame(fit);
+  requestAnimationFrame(() => head.parentElement && head.parentElement.classList.contains("table-page") && watchWide(head.parentElement));
+  let was = false;
+  try {
+    was = localStorage.getItem(key) === "1";
+  } catch {}
+  if (was) setOpen(true);
+  refresh();
+  return { head, refresh, setOpen };
+}
+
+// A row the reader picked opens its detail at the top: the list stays pinned while the page scrolls, so the pane's top may be above the
+// screen. Only for a pick (a click), never for the first row the page selects by itself.
+function revealPane(pane) {
+  const bar = document.querySelector(".topbar");
+  const edge = (bar ? bar.offsetHeight : 56) + 8;
+  const top = pane.getBoundingClientRect().top;
+  if (top < edge) window.scrollBy({ top: top - edge - 8 });
+}
+
 // --- asset changes (the Changes page and the host pane share these) ------------------------------
 const CHANGE_LABEL = {
   host_new: "New host",
@@ -737,7 +905,8 @@ function routeLine(r) {
   line.append(badge(authLabel(r.auth_state), AUTH_BADGE[r.auth_state] || ""));
   if (r.zombie_since) line.append(badge("zombie", "smoke"));
   else if (r.retired_at) line.append(badge("retired", "queued"));
-  line.append(el("span", "mono", r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
+  const page = { url: r.url, host: r.host, path: r.path };  // the page itself, on the scanned host: its path is the link
+  line.append(pageAnchor(page, r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
   const types = Object.keys(r.sensitive || {});
   if (types.some((t) => SENSITIVE_GROUP.credentials.includes(t))) line.append(badge("credentials", "fire"));
   if (types.some((t) => SENSITIVE_GROUP.pii.includes(t))) line.append(badge("PII", "smoke"));
@@ -747,7 +916,10 @@ function routeLine(r) {
   if (types.length) {
     // counts and a masked sample only: the API never returns the values
     const first = r.sensitive[types[0]];
-    line.append(el("span", "note", `GET ${r.path} → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`));
+    // the path is a link to the page; the masked sample stays text after it and is never part of an address
+    const note = el("span", "note");
+    note.append("GET ", pageAnchor(page, r.path, "host-link"), ` → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`);
+    line.append(note);
   }
   return line;
 }
@@ -901,6 +1073,7 @@ const hostOverview = (h) => {
   const rows = [];
   if (h.alias) rows.push({ label: "Alias", value: h.alias });
   if (h.note) rows.push({ label: "Note", value: h.note });
+  if (h.scan_blocked) rows.push({ label: "Not scanned", value: h.scan_blocked });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
@@ -977,13 +1150,13 @@ const technologyTable = (h) => {
   }
   return box;
 };
-// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
+// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions the WordPress scan read.
 const WP_STATE_LABELS = {
-  scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
-  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting for the next scan", queued: "Queued, WPScan runs on it in the background", unavailable: "WPScan not available",
+  scanned: "Scanned", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
+  blocked: "Blocked by the edge", failed: "Scan failed", waiting: "Waiting for the next scan", queued: "Queued, the scan runs on it in the background", unavailable: "Scan not available",
   not_wordpress: "Not WordPress",
 };
-// The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
+// The thorough pass asks the site for every plugin and theme the scanner knows (hours per site) after the quick pass, in the background, on a Sentinel.
 const WP_THOROUGH_LABELS = {
   pending: "Thorough pass queued (takes hours, runs in the background)", running: "Thorough pass running (takes hours)", done: "Thorough pass finished",
   partial: "Thorough pass stopped early, what it read is kept", blocked: "Thorough pass blocked by the edge", failed: "Thorough pass failed",
@@ -998,7 +1171,7 @@ const wordpressCard = (h) => {
   if (st.reason) rows.push({ label: "Why", value: st.reason });
   if (st.detected_how) rows.push({ label: "Detected by", value: st.detected_how });
   if (wp.core) rows.push({ label: "Core version", value: wp.core });
-  if (st.scanned_at) rows.push({ label: "WPScan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
+  if (st.scanned_at) rows.push({ label: "Scan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
   if (st.vulnerability_data) rows.push({ label: "Vulnerability data", value: st.vulnerability_data });
   if (st.next_scan) rows.push({ label: "Next scan", value: st.next_scan });
   if (st.hint) rows.push({ label: "What to do", value: st.hint });
@@ -1094,8 +1267,8 @@ const subdirectoryCard = (h) => {
 // title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
 const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
 const OUTCOME_TEXT = {
-  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
-  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+  ok: "Captured", queued: "Waiting for a scanner", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Scanner could not take it", too_big: "Page too heavy", error: "Failed",
 };
 function screenshotsSection(h, project, isCurrent) {
   const box = el("div", "shots-box");
@@ -1120,7 +1293,15 @@ function screenshotsSection(h, project, isCurrent) {
         alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
       });
       img.onerror = () => img.remove();
-      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      const own = `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}`;
+      const caption = el("figcaption", "note");
+      // the page's own address is the link (a page on the scanned host); the rest of the caption is text
+      caption.append(pageAnchor({ scheme: r.scheme, host: h.host, port: r.port, path: "/" }, `${r.scheme}://${h.host}:${r.port}`, "host-link"));
+      const rest = [r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean);
+      if (r.final_url && r.final_url.replace(/\/$/, "") !== own) {
+        caption.append(" · ended at ", pageUrl({ url: r.final_url }) ? pageAnchor({ url: r.final_url }, r.final_url, "host-link") : r.final_url);
+      }
+      if (rest.length) caption.append(` · ${rest.join(" · ")}`);
       figure.append(img, caption);
       if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
       if (r.has_previous) {
@@ -1624,6 +1805,13 @@ function renderFinding(d, cfg, row) {
     fix.append(el("p", "note", "No remediation advice is recorded yet."));
   }
   if (d.agent_task) fix.append(el("p", "note", agentLine(d.agent_task)));
+  (d.secrets || []).forEach((s) => {
+    // a token finding's secret lives in the secrets inventory: its mask, kind and rating, and a link there (never the value)
+    const line = el("p", "note");
+    line.append("Tracked in Secrets: ", el("code", "", s.masked), ` (${s.label}, ${s.status === "unverified" ? s.severity_basis : s.status.replace(/_/g, " ")}) `);
+    line.append(el("a", "", "Open Secrets", { href: `/cve/${encodeURIComponent(projectOf(row) || slug)}/secrets/` }));
+    fix.append(line);
+  });
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
     if (!ALL) fix.append(cfg.statusControl(d));
@@ -2137,8 +2325,11 @@ function findingPage(mount, cfg) {
     );
   }
   if (bulk) metaTools.append(bulk.toggle);
-  metaRow.append(el("span"), metaTools);
-  side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
+  const countLine = el("span", "list-count note");
+  metaRow.append(countLine, metaTools);
+  const isSearch = (n) => n instanceof Element && n.matches("input[type=search]");
+  const lh = listHead({ page: cfg.seenPage || cfg.kind || "findings", lead: cfg.filters.filter(isSearch), panelNodes: cfg.filters.filter((n) => !isSearch(n)), meta: metaRow });
+  side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
   const byId = new Map();
   let current = null;
   let token = 0;
@@ -2219,7 +2410,13 @@ function findingPage(mount, cfg) {
     path: cfg.path,
     params: cfg.params,
     empty: cfg.empty,
-    onLoaded: cfg.onLoaded,
+    noun: cfg.noun,
+    plural: cfg.plural,
+    onLoaded: (data, reset, quiet) => {
+      countLine.textContent = `${data.count} ${data.count === 1 ? cfg.noun : cfg.plural}`;
+      lh.refresh();
+      if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
+    },
     prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
     render: (_, items, reset) => {
       if (reset) {
@@ -2234,8 +2431,14 @@ function findingPage(mount, cfg) {
         if (r.title instanceof Node) title.append(r.title);
         else title.textContent = r.title;
         row.append(title);
+        // a row is two lines: the title, then one line of meta that opens with the host (and product) and carries the badges; what does not fit
+        // on that line (the description, the badges past the edge) is in the pane, and the row's tooltip says all of it
         const meta = el("span", "host-meta");
+        const lines = (r.notes || []).filter(Boolean);
+        const hostLine = lines.length && lines[0] instanceof Node ? lines.shift() : null;
+        if (hostLine) meta.append(hostLine);
         meta.append(...r.meta.filter(Boolean));
+        r.notes = lines;
         if (isNewSince(detectedOf(item), lastLook)) {
           row.dataset.fresh = "1";
           meta.prepend(newTag());
@@ -2244,6 +2447,7 @@ function findingPage(mount, cfg) {
         if (aging) meta.append(...ageTags(item));
         if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
+        row.title = [title.textContent, ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
@@ -2297,6 +2501,7 @@ function findingPage(mount, cfg) {
           if (e.target.closest("a, summary, details")) return; // a link inside the row goes where it points; a group's host list opens in place
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
+          revealPane(pane);
         };
         if (bulk) bulk.decorate(row, item, keyOf(item));
         rows.append(row);
@@ -2616,7 +2821,7 @@ const pages = {
           render: (t) => {
             const box = named(hostLink(t.name), t);
             // the edit sits with the name it labels (the actions column is already full)
-            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}` });
             edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
             edit.onclick = () => editLabel(t);
             box.append(el("br"), edit);
@@ -2742,19 +2947,31 @@ const pages = {
       }
       stopAll.disabled = false;
     };
-    const bar = el("div", "scans-bar");
-    bar.append(status.node);
-    if (!ALL) bar.append(stopAll); // stopping scans is per project
+    // the same head as Findings and Hosts: the status chips are the Filters panel, Stop all and the activity chart open from the count line
+    const root = el("div", "table-page");
+    mount.append(root);
     const rhythm = el("div", "chart-slot");
-    mount.append(rhythm, bar);
-    api("GET", `${base}/scans?${query({ page_size: 200 })}`)
+    const activity = disclosure("Scan activity", rhythm);
+    activity.hidden = true;
+    const countLine = el("span", "list-count note", "", { role: "status" });
+    const tools = el("span", "meta-tools");
+    tools.append(activity);
+    if (!ALL) tools.append(stopAll); // stopping scans is per project
+    const metaRow = el("div", "list-meta");
+    metaRow.append(countLine, tools);
+    const lh = listHead({ page: "scans", lead: [], panelNodes: [status.node], meta: metaRow });
+    root.append(lh.head);
+    // counted by the server, exactly (the newest 200 scans are a page, not the 18 weeks the chart draws)
+    api("GET", `${base}/activity-days?${query({ days: 126, series: "scans", tz: displayZone() })}`)
       .then((r) => {
-        const dates = r.results.map((x) => x.started).filter(Boolean);
-        if (dates.length > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+        if (r.scans.total > 1) {
+          rhythm.append(heatmap({ title: "Scan activity", unit: "scans", perDay: r.scans.days }));
+          activity.hidden = false;
+        }
       })
       .catch(() => {});
     const list = createList({
-      mount,
+      mount: root,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
       empty: () =>
@@ -2768,7 +2985,11 @@ const pages = {
             },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
-      onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
+      onLoaded: (data, reset, quiet) => {
+        countLine.textContent = `${data.count} ${data.count === 1 ? "scan" : "scans"}`;
+        lh.refresh();
+        if (reset && !quiet) status.refresh();
+      },
       render: table(
         withProject(readOnlyColumns([
           {
@@ -2851,9 +3072,9 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all", exposed: "0" };
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter, exposed: exposedFilter ? "1" : "0" }, HOST_DEFAULTS, ["host"]);
       views.refresh();
       if (searches) searches.refresh();
     };
@@ -2877,11 +3098,19 @@ const pages = {
     );
     sortBy.value = readParam("sort", "score", ["score", "name"]);
     const rows = el("div", "host-rows");
-    const controls = el("div", "list-tools");
-    controls.append(q, sortBy);
+    sortBy.dataset.quiet = "1"; // an order, not a filter: no chip, not counted
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
+    // ?exposed=1: only the hosts the dashboard's Exposed hosts tile counts (an open CVE match the AI has not ruled out, or an open medium-or-worse finding)
+    let exposedFilter = readParam("exposed", "0", ["0", "1"]) === "1";
+    const exposedBtn = el("button", "", "Exposed only", { type: "button", "data-flag": "1", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
+    exposedBtn.onclick = () => {
+      exposedFilter = !exposedFilter;
+      exposedBtn.setAttribute("aria-pressed", String(exposedFilter));
+      syncUrl();
+      list.reload();
+    };
     let totalHosts = 0;
     let heatFacets = null; // {fire, smoke, ice, clean, unscanned, truncated}: counted by the server over every host the search matches
     const heatChips = el("div", "picker heat-chips", null, { role: "group", "aria-label": "Temperature" });
@@ -2899,6 +3128,7 @@ const pages = {
       chipBtn.set(key, b);
       heatChips.append(b);
     });
+    heatChips.append(exposedBtn);
     // scope filter (?internal=): hosts inside a network a project declared internal are scanned only by a Sentinel there; the chips appear
     // once the server says a visible project declared one
     const SCOPE_CHIPS = [["all", "All hosts"], ["0", "External"], ["1", "Internal"]];
@@ -3175,10 +3405,11 @@ const pages = {
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
+    const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), heatChips, scopeChips], meta: metaRow });
+    side.append(lh.head, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
-    let hostTab = "overview";
+    let hostTab = new URLSearchParams(location.search).get("tab") || "overview"; // ?tab=web: a link from a score line opens that tab
     let current = null;
 
     const kv = (k, v) => {
@@ -3453,6 +3684,10 @@ const pages = {
       if (chip) head.append(chip);
       if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
+      if (h.secrets) {
+        const s = el("a", "badge medium", `Secrets: ${h.secrets}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/secrets/`, title: "Exposed secrets this host serves (masked values only)" });
+        head.append(s);
+      }
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));
       if (h.pinned) head.append(badge("Pinned", "success"));
@@ -3621,24 +3856,27 @@ const pages = {
       }
       OV.main.prepend(surfaceCard(h, () => openTab("services")));
       OV.main.append(why);
-      // the score is the sum of these lines, so it can be checked rather than trusted
+      // the score is the sum of these lines, so it can be checked rather than trusted: every line says what it is, where and why it scores,
+      // and links to the evidence behind it (a stored line without a link still shows its label and points)
       if (h.score_detail && h.score_detail.length) {
-        const scoreBox = el("div", "why");
+        const scoreBox = el("div", "why score-why", null, { id: "score" });
         scoreBox.append(el("h3", "sec", `Why the score is ${h.score}`));
-        h.score_detail.forEach((d) => {
-          const line = el("div", "find");
-          // a line that cites a CVE match or a finding opens that item's page (the same links as the colour reasons above)
-          const hit =
-            reasons.find((r) => r.id && r.label && d.label.includes(r.label)) ||
-            (/CVE match/.test(d.label) ? reasons.find((r) => r.id && r.finding === "match") : null);
-          line.append(
-            hit
-              ? el("a", "", d.label, { href: `/cve/${encodeURIComponent(projectOf(h))}/${hit.finding === "match" ? "matches" : "vulns"}/#${hit.id}` })
-              : el("span", "", d.label),
-            el("span", "note mono", `+${d.points}`),
-          );
-          scoreBox.append(line);
-        });
+        scoreBox.append(
+          scoreList(h.score_detail, { slug: projectOf(h), host: h.host }, {
+            score: h.score,
+            // a line that points at a tab of this very page opens it in place
+            onOpen: (l) => {
+              if (l.ref && l.ref.type === "secret" && l.ref.id) {
+                openSecret(projectOf(h), l.ref.id);
+                return true;
+              }
+              if (!l.ref || l.ref.type !== "host_tab" || !(l.ref.tab in S)) return false;
+              openTab(l.ref.tab);
+              pane.scrollIntoView({ block: "start" });
+              return true;
+            },
+          }),
+        );
         OV.main.append(scoreBox);
       }
       if (h.title) hdr.append(el("p", "sub", h.title));
@@ -3800,6 +4038,8 @@ const pages = {
     const list = createList({
       mount: side,
       skeleton: "rows",
+      noun: "host",
+      plural: "hosts",
       onReset: () => {
         rows.textContent = "";
         byId.clear();
@@ -3807,10 +4047,10 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
-      pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
+      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}), ...(exposedFilter ? { exposed: 1 } : {}) }),
+      pageSize: () => (heatFilter === "all" && !exposedFilter ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: () =>
-        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all" || exposedFilter
           ? {
               icon: "search",
               title: "No host matches",
@@ -3822,6 +4062,8 @@ const pages = {
                     q.value = "";
                     heatFilter = "all";
                     scopeFilter = "all";
+                    exposedFilter = false;
+                    exposedBtn.setAttribute("aria-pressed", "false");
                     scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
                     syncUrl();
                     paintHeat();
@@ -3888,6 +4130,7 @@ const pages = {
             if (link) e.preventDefault();
             history.replaceState(null, "", `#${h.id}`);
             showHost(h);
+            revealPane(pane);
           };
           rows.append(row);
         });
@@ -3927,6 +4170,7 @@ const pages = {
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
+      "data-flag": "1",
       "aria-pressed": String(groupMode === FG.EVERY_HOST),
       title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
     });
@@ -4427,10 +4671,10 @@ pages.changes = function changes(mount) {
   );
   const trend = el("div", "chart-slot");
   mount.append(trend, tools, kinds.node);
-  api("GET", `${base}/changes?${query({ since: "30d", page_size: 200 })}`)
+  // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
+  api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      const dates = (r.results || []).map((c) => c.detected).filter(Boolean);
-      if (dates.length) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], dates, compare: false }));
+      if (r.changes.total) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false }));
     })
     .catch(() => {});
   const list = createList({
@@ -4571,7 +4815,7 @@ pages.scan = async function scanDetail(mount) {
       label: "Endpoints",
       open: (m) =>
         listTab(m, "endpoints", "Search URLs", [
-          { label: "URL", render: (r) => r.url },
+          { label: "URL", render: (r) => pageAnchor({ url: r.url }, r.url, "host-link") },
           { label: "HTTP", cls: "num", render: (r) => r.http_status || "-" },
           { label: "Title", render: (r) => r.title || "-" },
           { label: "Type", render: (r) => r.content_type || "-" },
@@ -4639,7 +4883,7 @@ pages.scan = async function scanDetail(mount) {
           { label: "Finding", render: (v) => v.name },
           { label: "Host", render: (v) => hostLink(v.host) },
           { label: "CVE", render: (v) => (v.cves.length ? joinNodes(v.cves.map((c) => cveLink(slug, c, v.cve_matches && v.cve_matches[c], v.host))) : "-") },
-          { label: "URL", render: (v) => v.url || "-" },
+          { label: "URL", render: (v) => (v.url ? pageAnchor({ url: v.url }, v.url, "host-link") : "-") },
         ],
         (v) => v.severity,
       ),
@@ -4779,6 +5023,9 @@ pages.scan = async function scanDetail(mount) {
 };
 
 // Third-party suppliers: host cards and the technology search (static/cve/suppliers.js)
-pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL });
+pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL, listHead });
+
+// Exposed secrets: the secrets inventory, masked values only (static/cve/secrets.js); the API refuses a change the caller's role does not allow
+pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL, listHead });
 
 pages[kind](root.querySelector("#view"));

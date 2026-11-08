@@ -1,43 +1,34 @@
-"""Web screenshots: a picture of the front page of every web port of every host, taken by a real browser (Playwright's Chromium).
+"""Web screenshots: a picture of the front page of every web port of every host, taken by a real browser on a Sentinel (task kind ``web_screenshot``).
 
-Why this exists: the only screenshots cvENGINE used to take were a side effect of a full bbot discovery (gowitness), so a host that was
+Why this exists: the only screenshots cvENGINE used to take were a side effect of a full discovery run, so a host that was
 rescanned, found by certificate transparency, retested or only ever assessed never got one, and a rescan could hide the one it had.
 
 How it works (docs/PIPELINE.md, "Web screenshots"):
 
 * **Queue, then capture.** Planning a capture only writes a ``HostScreenshot`` row with outcome ``queued``; it is cheap and happens in three
-  places: the scan stage after nmap (``queue_for_scan``: full scans, host assessments, Rescan host, certificate transparency hosts and
+  places: the scan stage after the port stage (``queue_for_scan``: full scans, host assessments, Rescan host, certificate transparency hosts and
   retests all run it), the Take screenshot button (``queue_host``) and an hourly backfill of hosts that have none (``backfill``). One drain
-  task (``drain``, on its own ``screenshot_queue``, one at a time) takes the queued rows and captures them, so a burst of scans can never pile
-  up browsers: the second drain finds the first holding the claim and returns.
-* **A child process per batch.** The browser runs in ``cveFeed/shot_worker.py`` (no Django; the Celery workers are gevent pools, where
-  Playwright does not belong), under ``resources.heavy_job('screenshot')`` so memory is admitted and a pause, stop or low-memory kill reaches
-  it. One browser, one page at a time, a fresh context for each, then the child exits and its memory is returned.
-* **Every address is vetted, every hop.** The browser cannot connect anywhere itself: all of its traffic, loopback included, goes to a loopback
-  vetting proxy in the worker (``cveFeed/shot_proxy.py``), which asks the platform's guards about EVERY connection (the page, each redirect hop,
-  every sub-resource: the organization's exclusions, the bug bounty scope and the addresses a scanner may never touch) and connects to the
-  address it vetted, through Settings > Proxy when one is set. A redirect to an internal address never leaves the proxy.
-* **Chromium's sandbox, or no picture.** The browser runs with its own sandbox (``CVENGINE_SCREENSHOT_SANDBOX``, on by default), which needs the
-  celery container's seccomp profile (``config/seccomp/playwright-chromium.json``). Every launch is checked (``shot_worker.launch``), the celery
-  container checks once at start (``check_sandbox``), and while the sandbox cannot be used no page is opened: the reason is shown on the host page,
-  in the system status and in the log.
+  task (``drain``, on its own ``screenshot_queue``, one at a time) takes the queued rows and hands them to Sentinels, so a burst of scans can
+  never pile up work: the second drain finds the first holding the claim and returns.
+* **The server chooses, a Sentinel photographs.** This server never runs a browser. ``drain`` re-checks every queued page (still in the inventory,
+  not excluded or archived, inside the bug bounty scope, not set to manual only), computes the scope policy of the task (``cveFeed.probe_scope.for_screenshots``:
+  the hosts of its pages, the exclusions, the address rules) and sends up to ``MAX_PAGES_PER_TASK`` pages of one project as a ``web_screenshot`` task.
+  The Sentinel's Chromium (``cvengine_scanner.probes.screenshots`` and the client's ``shot`` module there) opens each page through a vetting proxy
+  that asks the policy for EVERY connection: the page, each redirect hop and every sub-resource.
+* **Nothing a Sentinel sends is trusted.** ``agentapi.web_screenshot_results`` cuts the result to the task's own pages and checks every picture
+  (base64, size, a PNG signature and checksum, its sides, its closing chunk); ``finish_image`` then looks at it once more (a flat single color
+  is a blank page) and writes it to a path of this server's own making. No name a Sentinel reports is ever used.
+* **Chromium's sandbox, or no picture.** A Sentinel proves the sandbox engaged before it opens any page (the task's result says so, ``sandbox``);
+  one that cannot opens nothing, and the pages say why. The last proof is shown in the system status (``record_sandbox``).
+* **Without a scanner the pages wait.** ``web_screenshot`` is in ``sentinel_dispatch.NEVER_LOCAL``: with no Sentinel able to take it nothing is
+  recorded, the pages stay queued (``ScannerUnavailable``) and the next pass tries again.
 * **Nothing is silently missing.** Each attempt records an ``outcome`` and a plain ``reason`` on the row; the host page shows them instead of "none".
 """
-import concurrent.futures
+import base64
 import hashlib
-import io
-import json
 import logging
 import os
-import pwd
 import re
-import shutil
-import socket
-import stat
-import subprocess
-import sys
-import tempfile
-import threading
 import time
 from collections import namedtuple
 from datetime import timedelta
@@ -48,12 +39,10 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shot_worker.py')
-SANDBOX_KEY = 'screenshots:sandbox'          # what the last check of Chromium's sandbox found (cache, shared by the web and celery containers)
-SANDBOX_PREFIX = 'sandbox: '                 # shot_worker.SANDBOX_PREFIX: the child refused to load anything because of the sandbox
-SANDBOX_FAILED_SECONDS = 3600                # a failed check keeps screenshots off this long, then the next drain tries again (and every celery start)
+SANDBOX_KEY = 'screenshots:sandbox'          # what the last Sentinel result said of Chromium's sandbox (cache)
+SANDBOX_FAILED_SECONDS = 3600                # a failed proof is shown this long, then forgotten unless it is shown again
 SANDBOX_OK_SECONDS = 7 * 24 * 3600
-HEAVY_KIND = 'screenshot'                   # the heavy_job kind (reNgine.resources.BASE_COSTS_MB)
+KIND = 'web_screenshot'                      # the Sentinel task kind
 DRAIN_CLAIM = 'cvengine:screenshots:drain'  # one drain at a time, across workers
 SWEEP_CLAIM = 'screenshot-backfill'
 CURSOR_KEY = 'cvengine:screenshots:cursor'
@@ -61,9 +50,10 @@ QUEUE = 'screenshot_queue'
 
 OK, QUEUED, BLANK, BLOCKED, NLA = 'ok', 'queued', 'blank', 'blocked', 'nla_required'
 FAILURES = ('timeout', 'unreachable', 'tls_error', 'error', 'blank', 'unavailable', 'too_big')  # an attempt that produced nothing: tried again after the retry window
-STATIC = (BLOCKED, NLA)                    # decided without a browser, re-evaluated when the host is planned again
+STATIC = (BLOCKED, NLA)                    # decided without a scanner, re-evaluated when the host is planned again
 
 MAX_PORTS_PER_HOST = 6
+MAX_PAGES_PER_TASK = 6          # pages one web_screenshot task carries (the contract's bound, agentapi.web_screenshot_results.MAX_PAGES)
 DEFAULT_TTL_HOURS = 72          # a capture is refreshed after this long (CVENGINE_SCREENSHOT_TTL_HOURS)
 DEFAULT_RETRY_HOURS = 24        # a failed capture is tried again after this long (CVENGINE_SCREENSHOT_RETRY_HOURS)
 DEFAULT_PER_SCAN = 50           # most pages one scan queues (CVENGINE_SCREENSHOT_MAX_PER_SCAN)
@@ -71,10 +61,8 @@ DEFAULT_BACKFILL_PER_PROJECT = 20
 DEFAULT_BACKFILL_TOTAL = 100
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_PROJECT_MB = 500
-DEFAULT_MAX_RSS_MB = 1500       # the browser and everything it started may hold this much before it is killed (CVENGINE_SCREENSHOT_MAX_RSS_MB)
-BATCH_PAGES = 20                # pages one browser serves before it is replaced
+BATCH_PAGES = 60                # queued pages one round of the drain takes (several tasks of ``MAX_PAGES_PER_TASK``)
 DRAIN_SECONDS = 40 * 60         # one drain stops taking new batches after this long (the next backfill continues)
-HEAVY_WAIT_SECONDS = 30 * 60    # how long a batch waits for memory before the drain gives up for now
 THUMB_SUFFIX = '.thumb-320.jpg'  # what cveFeed.shots.thumbnail_path writes beside an image
 KNOWN_WEB_PORTS = {80: 'http', 443: 'https', 8080: 'http', 8443: 'https', 8000: 'http', 8008: 'http', 8081: 'http', 8888: 'http', 9443: 'https', 3000: 'http'}
 HTTP_SERVICE_NAMES = ('http', 'https', 'http-proxy', 'http-alt', 'https-alt', 'ssl/http', 'ssl/https', 'http-mgmt', 'https-mgmt')
@@ -90,12 +78,6 @@ def _env_int(name, default, low=0, high=10 ** 9):
 
 def enabled():
     return os.environ.get('CVENGINE_SCREENSHOTS', '1').strip().lower() not in ('0', 'false', 'no', 'off')
-
-
-def sandbox_wanted():
-    """Whether the browser must run inside Chromium's sandbox (the default). ``CVENGINE_SCREENSHOT_SANDBOX=0`` runs it without: unsafe, for a host
-    that cannot give the container user namespaces and accepts that a renderer exploit runs as ``nobody`` in the celery container."""
-    return os.environ.get('CVENGINE_SCREENSHOT_SANDBOX', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
 def ttl():
@@ -123,70 +105,30 @@ def project_cap_bytes():
     return _env_int('CVENGINE_SCREENSHOT_PROJECT_MB', DEFAULT_PROJECT_MB, 10, 100000) * 1024 * 1024
 
 
-def max_rss_mb():
-    return _env_int('CVENGINE_SCREENSHOT_MAX_RSS_MB', DEFAULT_MAX_RSS_MB, 300, 16384)
-
-
 def nav_timeout_seconds():
     return _env_int('CVENGINE_SCREENSHOT_TIMEOUT', 20, 8, 60)
 
 
-# ----------------------------------------------------------------------------- the browser
-
-def _playwright_root():
-    import importlib.util
-    spec = importlib.util.find_spec('playwright')
-    return os.path.join(os.path.dirname(spec.origin), 'driver', 'package') if spec and spec.origin else ''
-
-
-def pinned_browser():
-    """``{'revision', 'version'}`` of the Chromium the pinned Playwright drives (its own ``browsers.json``), or ``{}``."""
-    try:
-        with open(os.path.join(_playwright_root(), 'browsers.json'), encoding='utf-8') as handle:
-            for entry in json.load(handle).get('browsers', []):
-                if entry.get('name') == 'chromium-headless-shell':
-                    return {'revision': str(entry.get('revision') or ''), 'version': str(entry.get('browserVersion') or '')}
-    except (OSError, ValueError, AttributeError):
-        pass
-    return {}
-
-
-def browsers_dir():
-    path = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '').strip()
-    return path if path and path != '0' else os.path.expanduser('~/.cache/ms-playwright')
-
-
-def browser_installed():
-    """Whether the headless Chromium this Playwright release drives is on disk (its installer's completion marker). Looks, never launches."""
-    revision = pinned_browser().get('revision')
-    if not revision:
-        return False
-    return os.path.isfile(os.path.join(browsers_dir(), f'chromium_headless_shell-{revision}', 'INSTALLATION_COMPLETE'))
-
+# ----------------------------------------------------------------------------- availability and the sandbox proof
 
 def unavailable_reason():
-    """Why captures cannot be taken on this server, or ''."""
+    """Why captures are not taken at all, or ''. Only the switch: with no scanner able to take the kind the pages wait (the drain says so)."""
     if not enabled():
         return 'Screenshots are switched off on this server (CVENGINE_SCREENSHOTS=0).'
-    if not browser_installed():
-        return 'Chromium is not installed on this server, so screenshots cannot be taken (the image has to be rebuilt).'
-    state = sandbox_state() if sandbox_wanted() else None
-    if state and not state.get('engaged'):
-        return f"Screenshots are off: {state.get('reason') or 'Chromium sandbox did not engage.'}"
     return ''
 
 
 def sandbox_state():
-    """What the last check of Chromium's sandbox on this server found, ``{'engaged', 'reason', 'at', 'version'}``, or None (not checked lately)."""
+    """What the last Sentinel result said of Chromium's sandbox, ``{'engaged', 'reason', 'at', 'version'}``, or None (nothing reported lately)."""
     try:
         from django.core.cache import cache
         return cache.get(SANDBOX_KEY)
-    except Exception:  # noqa: BLE001 - a cache outage is "not known"; every launch is still checked by the child itself
+    except Exception:  # noqa: BLE001 - a cache outage is "not known"; every Sentinel proves the sandbox before each task by itself
         return None
 
 
 def record_sandbox(engaged, reason='', version=''):
-    """Remember what a check of the sandbox found, and say so in the log and the activity feed when it changes."""
+    """Remember what a Sentinel's proof of the sandbox found, and say so in the log and the activity feed when it changes."""
     previous = sandbox_state() or {}
     state = {'engaged': bool(engaged), 'reason': '' if engaged else (reason or 'Chromium sandbox did not engage.')[:400],
              'at': timezone.now().isoformat(), 'version': version or previous.get('version') or ''}
@@ -196,42 +138,19 @@ def record_sandbox(engaged, reason='', version=''):
     except Exception:  # noqa: BLE001
         pass
     if not engaged and (previous.get('engaged') is not False or previous.get('reason') != state['reason']):
-        logger.error('Web screenshots are off: %s', state['reason'])
+        logger.error('A scanner took no web screenshot, its browser sandbox did not engage: %s', state['reason'])
         try:
             from cveFeed import activity
-            activity.log('run_check', f"Screenshots are off: {state['reason']}"[:500])
+            activity.log('run_check', f"Screenshots are off on a scanner: {state['reason']}"[:500])
         except Exception:  # noqa: BLE001
             pass
     elif engaged and previous.get('engaged') is False:
-        logger.warning("Chromium's sandbox engaged: web screenshots are on again")
+        logger.warning("A scanner's Chromium sandbox engaged: web screenshots are on again")
     return state
 
 
-def check_sandbox(runner=None):
-    """Start the browser once, as the screenshot worker does (same account, same environment, ``shot_worker.py --probe``), and record whether its
-    sandbox engaged. The celery container runs this at start (``manage.py check_screenshot_sandbox``). Returns the recorded state, or None when
-    there is nothing to check (screenshots off, no browser, the sandbox switched off) or the check itself did not finish."""
-    if not enabled() or not browser_installed():
-        return None
-    if not sandbox_wanted():
-        logger.warning('CVENGINE_SCREENSHOT_SANDBOX=0: the screenshot browser runs without Chromium\'s sandbox (unsafe)')
-        return None
-    found = {}
-    workdir = make_workdir()
-    try:
-        failure = (runner or run_child)({}, found.update, 90, argv=[sys.executable, SCRIPT, '--probe'], heavy=False, label='sandbox check', workdir=workdir)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-    if 'engaged' not in found:
-        logger.warning('the screenshot sandbox check did not finish: %s', failure or 'no answer')
-        return None
-    return record_sandbox(found['engaged'], found.get('reason', ''), found.get('version', ''))
-
-
 def sandbox_status():
-    """For the system status: whether the sandbox is required here and what its last check found (``state``: engaged, failed, unchecked or off)."""
-    if not sandbox_wanted():
-        return {'required': False, 'state': 'off', 'reason': "CVENGINE_SCREENSHOT_SANDBOX=0: the screenshot browser runs without Chromium's sandbox (unsafe)."}
+    """For the system status: what the last proof of the sandbox found (``state``: engaged, failed or unchecked). A Sentinel proves it before every task."""
     state = sandbox_state()
     if not state:
         return {'required': True, 'state': 'unchecked', 'reason': None, 'checked_at': None}
@@ -261,7 +180,7 @@ def _is_cdn(sub):
 
 def web_targets(sub, manual=False, raw=False):
     """``[(scheme, port)]`` to photograph for a Subdomain row with ``ip_addresses__ports`` prefetched: the page its own URL names, and every open
-    TCP port that nmap or naabu identified as HTTP(S) or that is a well-known web port. HTTPS is tried first on 443, then 80, then the rest by
+    TCP port the port stage identified as HTTP(S) or that is a well-known web port. HTTPS is tried first on 443, then 80, then the rest by
     number, at most ``MAX_PORTS_PER_HOST``. A host behind a CDN is photographed on 80 and 443 only. ``manual`` (a person pressed the button)
     tries 443 and 80 for a host nothing is known about."""
     found = set()
@@ -286,7 +205,7 @@ def web_targets(sub, manual=False, raw=False):
 
 
 def rdp_outcomes(sub):
-    """``[(port, reason)]`` for the RDP ports nmap showed insist on Network Level Authentication: such a server paints nothing before sign-in,
+    """``[(port, reason)]`` for the RDP ports the port stage showed insist on Network Level Authentication: such a server paints nothing before sign-in,
     so the outcome is recorded instead of nothing. (A server that accepts a connection without NLA is captured by ``cveFeed.rdp_shot``.)"""
     from cveFeed import service_intel
     from startScan.models import open_ports
@@ -310,7 +229,7 @@ def _row_window_open(row, now):
 
 
 def queue(project_id, domain_id, host, scheme, port, *, by_person=False, force=False, now=None):
-    """Make sure ``scheme://host:port`` of the project is waiting for the capture worker. Returns ``'new'``, ``'queued'`` (an existing row
+    """Make sure ``scheme://host:port`` of the project is waiting for a scanner. Returns ``'new'``, ``'queued'`` (an existing row
     that was due, or forced) or ``'kept'`` (already queued, or captured or tried inside its window)."""
     from cveFeed.models import HostScreenshot
     now = now or timezone.now()
@@ -335,7 +254,7 @@ def _record_static(project_id, domain_id, host, scheme, port, outcome, reason, n
     row, created = HostScreenshot.objects.get_or_create(
         project_id=project_id, host=host, scheme=scheme, port=port,
         defaults={'domain_id': domain_id, 'outcome': outcome, 'reason': reason[:300], 'attempted_at': now})
-    if not created and row.outcome != QUEUED:  # a page already waiting for the worker is left to it
+    if not created and row.outcome != QUEUED:  # a page already waiting is left to the drain
         HostScreenshot.objects.filter(pk=row.pk).update(outcome=outcome, reason=reason[:300], attempted_at=now, domain_id=domain_id)
 
 
@@ -389,7 +308,7 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
             continue
         summary['hosts'] += 1
         if why or sentinel_only_target(host, project_id):
-            text = f'Not captured: {why}' if why else 'Blocked: the address is inside a network only a Sentinel can reach; this server never captures internal addresses.'
+            text = f'Not captured: {why}' if why else 'Blocked: the address is inside a network only a Sentinel can reach; screenshots of internal addresses are not taken yet.'
             for scheme, number in targets:
                 _record_static(project_id, domain_id, host, scheme, number, BLOCKED, text, now)
             summary['blocked'] += len(targets)
@@ -421,7 +340,7 @@ def planned_subs(scan):
 
 
 def queue_for_scan(scan_id, by_person=False, force=False):
-    """The scan stage: queue the web pages of the hosts this scan found (it runs after nmap, so the ports are known). Never captures; kicks the
+    """The scan stage: queue the web pages of the hosts this scan found (it runs after the port stage, so the ports are known). Never captures; kicks the
     drain when anything was queued. Returns the summary."""
     from startScan.models import ScanHistory
     if not enabled():
@@ -528,7 +447,7 @@ def _current_row(project_id, name):
 def backfill(now=None, per_project=None, total=None):
     """Queue the hosts that have no capture (or an old one) with per-project and overall caps, a project at a time starting after the one the
     last run ended on. Skips while scanning is paused or an update drains, for a project whose bug bounty engagement has not confirmed
-    automated testing, and when the browser is not installed. Returns ``{'queued', 'projects', 'skipped'}``."""
+    automated testing, and when screenshots are switched off. Returns ``{'queued', 'projects', 'skipped'}``."""
     from cveFeed.conductor import bounty_blocked_projects
     from cveFeed.scan_control import pause_requested
     from dashboard.models import Project
@@ -576,268 +495,17 @@ def backfill(now=None, per_project=None, total=None):
     return summary
 
 
-def sweep(runner=None):
+def sweep():
     """The hourly task: queue what is missing, then drain. One sweep at a time."""
     from cveFeed import ledger
     if not ledger.sweep_claim(SWEEP_CLAIM, 50 * 60):
         return {'skipped': 'another sweep is running'}
     out = {'backfill': backfill()}
-    out['drain'] = drain(runner=runner)
+    out['drain'] = drain()
     return out
 
 
-# ----------------------------------------------------------------------------- the guards, per request
-
-_stack = {'at': 0.0, 'value': (frozenset(), frozenset())}
-
-
-def stack_blocklist(refresh=False):
-    """``(names, addresses)`` of this installation's own services: the compose service names, the database, broker and cache hosts of the settings,
-    and every address they resolve to. A page is never allowed to reach them, whatever ``CVENGINE_ALLOW_PRIVATE_TARGETS`` says: with that opt-in
-    an internal address is a legitimate scan target, but the stack behind this server is not, and a screenshot of one would be a read of it.
-    Looked up in the calling thread and kept for a minute."""
-    from cveFeed import egress_proxy
-    if not refresh and time.monotonic() - _stack['at'] < 60 and _stack['at']:
-        return _stack['value']
-    names = set(egress_proxy.STACK_HOSTS)
-    configured = []
-    try:
-        configured = [getattr(settings, 'CELERY_BROKER_URL', None), (getattr(settings, 'DATABASES', {}).get('default') or {}).get('HOST')]
-    except Exception:  # noqa: BLE001 - settings not configured (the smoke script): the environment below is enough
-        pass
-    for raw in (os.environ.get('POSTGRES_HOST'), os.environ.get('CELERY_BROKER'), os.environ.get('CACHE_URL'), os.environ.get('CELERY_BACKEND'), *configured):
-        text = str(raw or '').strip()
-        if not text or text.startswith('/'):
-            continue  # a unix socket path is not a host
-        host = (urlsplit(text if '://' in text else f'//{text}').hostname or '').lower().rstrip('.')
-        if host:
-            names.add(host)
-    addresses = set()
-    for name in names:
-        try:
-            for info in socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP):
-                addresses.add(info[4][0])
-        except (OSError, UnicodeError):
-            continue
-    _stack.update(at=time.monotonic(), value=(frozenset(names), frozenset(addresses)))
-    return _stack['value']
-
-
-class Guard:
-    """The platform's answer to "may this page's browser connect to host:port?", for ONE page being captured. It is asked by the vetting proxy
-    (``cveFeed.shot_proxy``) for every connection the page makes: its own address, each redirect hop and every sub-resource. Every host is held
-    to the same rules: the organization's exclusions, the bug bounty scope (for a project that works a program, a host its scope does not name is
-    not visited, so a page's assets from a third party are not loaded) and the addresses a scanner may never touch (the name is resolved here,
-    every answer is vetted, and the connection is made to that vetted address). ``denied`` records what was refused, in order, so the result can
-    say why a page that never loaded is ``blocked``, and how many sub-resources were dropped."""
-
-    def __init__(self, project_id, primary, unattended, gate=None, excluded=None, resolver=None, stack=None):
-        from cveFeed.bounty_gate import Gate
-        self.project_id, self.primary, self.unattended = project_id, primary, unattended
-        self.gate = gate if gate is not None else Gate()
-        self.excluded = excluded
-        self.stack = stack if stack is not None else stack_blocklist()
-        self.resolver = resolver or self._resolve
-        self.denied = []          # [(host, reason)]
-        self._verdicts = {}
-
-    def _resolve(self, host, port):
-        """Every address of the name, vetted (``pinned_transport.resolve`` refuses a prohibited one). A literal address is judged as itself, with the
-        project's own tailnet as authority only for the page's own host."""
-        from cveFeed import pinned_transport
-        return pinned_transport.resolve(host, port, project=self.project_id if host == self.primary else None)
-
-    def admit(self, host, port):
-        """``((addresses, project), '')`` to let a connection through, or ``(None, reason)``. Remembered per host for this page, so one
-        page is judged consistently and the guards are not asked twice for a host."""
-        host = (host or '').lower().rstrip('.')
-        if host in self._verdicts:
-            return self._verdicts[host]
-        verdict = self._judge(host, port)
-        self._verdicts[host] = verdict
-        if verdict[0] is None:
-            self.denied.append((host, verdict[1]))
-        return verdict
-
-    def _judge(self, host, port):
-        from cveFeed.exclusions import excluded_names, normalize
-        try:
-            names = self.excluded if self.excluded is not None else excluded_names(self.project_id, strict=True)
-        except Exception:  # noqa: BLE001 - an unreadable exclusion list stops the request, never clears it
-            return None, 'The exclusion list could not be read.'
-        if normalize(host) in names:
-            return None, f'{host} is excluded for this organization.'
-        if host in self.stack[0]:
-            return None, f'{host} is one of this installation\'s own services; it is never visited.'
-        if host != self.primary:
-            why = self.gate.refusal(self.project_id, host, unattended=self.unattended)
-            if why:
-                return None, f'{host} cannot be visited: {why}'
-        try:
-            addresses = self.resolver(host, port)
-        except ValueError:
-            return None, f'{host} resolves to an internal or reserved address; it is not visited.'
-        except OSError as exc:
-            return None, f'{host} could not be resolved ({str(exc)[:80] or "no answer"}).'
-        own = self.stack[1]
-        if own and any(item[1][0] in own for item in addresses):
-            return None, f'{host} resolves to an address of this installation\'s own services; it is never visited.'
-        return (addresses, self.project_id if host == self.primary else None), ''
-
-    def warm(self):
-        """Read what the judgements need from the database now, in the calling thread: the exclusions and the bug bounty scope of the project."""
-        if self.excluded is None:
-            from cveFeed.exclusions import excluded_names
-            try:
-                self.excluded = excluded_names(self.project_id, strict=True)
-            except Exception:  # noqa: BLE001 - _judge refuses everything when it cannot read them
-                self.excluded = None
-        self.gate.refusal(self.project_id, self.primary, unattended=self.unattended)  # builds and keeps the project's scope
-
-    def relabel(self, outcome):
-        """Whether a page that failed with ``outcome`` failed because a guard refused it: the page's own host was refused, or the connection failed
-        outright and a redirect hop (any other host) was refused. A timeout, a TLS or other error is the page's own, whatever a sub-resource was refused."""
-        if not self.denied:
-            return False
-        return self.refused_primary() or outcome == 'unreachable'
-
-    def refused_primary(self):
-        return any(h == self.primary for h, _ in self.denied)
-
-    def blocked_reason(self):
-        """Why a page that failed to load was refused, from the first refusal that is not just a sub-resource, else the first of any."""
-        if not self.denied:
-            return ''
-        host, reason = next(((h, r) for h, r in self.denied if h == self.primary), self.denied[0])
-        return reason if host == self.primary else f'Redirects to {host}, which is not visited: {reason}'
-
-
-def connect(target, host, port, timeout):
-    """The socket the proxy uses for an admitted connection: to the vetted address, through Settings > Proxy when one is set (never directly
-    instead of it): ``pinned_transport.open_socket``."""
-    from cveFeed import pinned_transport
-    addresses, project = target
-    return pinned_transport.open_socket(addresses, timeout, project=project, host=host)
-
-
-# ----------------------------------------------------------------------------- the child process
-
-def _unprivileged():
-    """``(uid, gid)`` of the account the browser runs as, or None to run as the worker's own. The browser renders pages hostile hosts control: as root a
-    renderer exploit would get the worker's whole container, and Chromium's sandbox refuses to run as root at all. When the worker is root, the child runs
-    as ``nobody`` (``CVENGINE_SCREENSHOT_USER`` names another account; ``root`` or ``-`` turns this off, which with the sandbox on stops the captures)."""
-    if os.geteuid() != 0:
-        return None
-    name = os.environ.get('CVENGINE_SCREENSHOT_USER', 'nobody').strip() or 'nobody'
-    if name in ('root', '-', '0'):
-        return None
-    try:
-        entry = pwd.getpwnam(name)
-    except KeyError:
-        logger.warning('the screenshot account %r does not exist: the browser runs as the worker', name)
-        return None
-    return entry.pw_uid, entry.pw_gid
-
-
-def make_workdir():
-    """A private directory the browser child writes into (its profile, its temporary files, the pictures before they are checked and moved into
-    the media root)."""
-    path = tempfile.mkdtemp(prefix='cvengine-shots-')
-    identity = _unprivileged()
-    if identity:
-        os.chown(path, *identity)
-    os.chmod(path, 0o700)
-    return path
-
-
-def _child_env(workdir):
-    keep = ('PATH', 'LANG', 'LC_ALL', 'PLAYWRIGHT_BROWSERS_PATH', 'TZ')
-    env = {k: os.environ[k] for k in keep if k in os.environ}
-    env.setdefault('PATH', '/usr/local/bin:/usr/bin:/bin')
-    env['HOME'] = env['TMPDIR'] = workdir  # nothing of the worker's environment (database and broker passwords) reaches the browser
-    if 'PLAYWRIGHT_BROWSERS_PATH' not in env:
-        env['PLAYWRIGHT_BROWSERS_PATH'] = browsers_dir()  # the browser lives under the worker's home, which the child's own home is not
-    return env
-
-
-def run_child(job, on_result, wall_seconds, argv=None, heavy=True, label='', workdir=None):
-    """Run the browser child on ``job`` (see ``shot_worker``), hand each ``result`` to ``on_result``, and return ``''`` or why the child ended without
-    finishing. A wall-clock limit kills the whole process group; a pause, a stop or a low-memory kill reaches it through the heavy-job gate
-    (``ScanAborted`` / ``MemoryKill`` propagate)."""
-    from reNgine import resources
-    argv = argv or [sys.executable, SCRIPT]
-
-    def drive(proc, job_handle=None):
-        timer = threading.Timer(wall_seconds, lambda: resources.terminate_group(proc, grace=3))
-        timer.daemon = True
-        timer.start()
-        fatal, done = '', False
-        over = {'mb': 0}
-        stop_watch = threading.Event()
-        ceiling = max_rss_mb()
-
-        def watch():  # the browser and everything it started, however many sessions it used: a hostile page cannot eat the container
-            while not stop_watch.wait(2):
-                try:
-                    used = resources.tree_rss_mb(proc.pid)
-                except Exception:  # noqa: BLE001 - a failed measurement is not a reason to kill
-                    continue
-                if used > ceiling:
-                    over['mb'] = used
-                    resources.terminate_group(proc, grace=2)
-                    return
-        watcher = threading.Thread(target=watch, name='shot-rss', daemon=True)
-        watcher.start()
-        try:
-            proc.stdin.write(json.dumps(job, separators=(',', ':')) + '\n')
-            proc.stdin.flush()
-            proc.stdin.close()
-            for line in proc.stdout:
-                try:
-                    message = json.loads(line)
-                except ValueError:
-                    continue
-                op = message.get('op')
-                if op == 'result':
-                    on_result(message)
-                elif op == 'fatal':
-                    fatal = str(message.get('reason') or 'the browser failed')
-                elif op == 'done':
-                    done = True
-        except (BrokenPipeError, OSError, ValueError):
-            pass
-        finally:
-            timer.cancel()
-            stop_watch.set()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                resources.terminate_group(proc, grace=3)
-        if job_handle is not None:
-            job_handle.raise_if_killed()
-        if over['mb']:
-            return f'too_big:{over["mb"]}'
-        if fatal:
-            return fatal
-        if not done:
-            return f'the browser process ended before it finished (status {proc.returncode})'
-        return ''
-
-    def start():
-        identity = _unprivileged()
-        extra = {'user': identity[0], 'group': identity[1], 'extra_groups': []} if identity else {}
-        return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
-                                env=_child_env(workdir or tempfile.gettempdir()), start_new_session=True, **extra)
-    if not heavy:
-        return drive(start())
-    with resources.heavy_job(HEAVY_KIND, label=label or 'pages', wait_timeout=HEAVY_WAIT_SECONDS) as handle:
-        proc = start()
-        handle.attach(proc)
-        return drive(proc, handle)
-
-
 # ----------------------------------------------------------------------------- saving what was captured
-
 def media_root():
     return os.path.realpath(settings.MEDIA_ROOT)
 
@@ -921,47 +589,6 @@ def project_bytes(project_id):
     return (totals['now'] or 0) + (totals['before'] or 0)
 
 
-def _shrink(data):
-    """Re-encode a picture over the size cap as JPEG (quality 80, then 60), from its bytes. Returns ``(bytes, error)``."""
-    try:
-        from PIL import Image
-        with Image.open(io.BytesIO(data)) as image:
-            rgb = image.convert('RGB')
-        for quality in (80, 60):
-            out = io.BytesIO()
-            rgb.save(out, 'JPEG', quality=quality, optimize=True)
-            if out.tell() <= max_bytes():
-                return out.getvalue(), ''
-        return data, 'The picture is larger than the size allowed.'
-    except Exception as exc:  # noqa: BLE001 - a picture that cannot be shrunk is not stored
-        return data, f'The picture could not be reduced ({type(exc).__name__}).'
-
-
-def read_picture(workdir, name, limit):
-    """The bytes of the file ``name`` the browser wrote in ``workdir``, or None. Opened without following a link (``O_NOFOLLOW``), checked to be a
-    regular file on the descriptor itself, and read from it: the browser runs as another account and could swap the file for a link to anything
-    after a path check, so nothing here goes by the path twice."""
-    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
-    try:
-        dirfd = os.open(workdir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
-    except OSError:
-        return None
-    try:
-        fd = os.open(name, flags, dir_fd=dirfd)
-    except OSError:
-        return None
-    finally:
-        os.close(dirfd)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            return b'' if stat.S_ISREG(info.st_mode) else None
-        with os.fdopen(fd, 'rb', closefd=False) as handle:
-            return handle.read(limit + 1)
-    finally:
-        os.close(fd)
-
-
 def write_new(path, data):
     """Create ``path`` with the picture, mode 0644, failing if anything is there already (no link is followed, no mode is changed afterwards)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -970,33 +597,26 @@ def write_new(path, data):
         handle.write(data)
 
 
-def finish_image(row, result, workdir):
-    """Validate and store what the browser wrote for ``row`` (a file in ``workdir``). Returns ``(fields, outcome, reason)``: the model fields of a
-    good capture, or an outcome (blank, error) and why. The bytes are read once from the descriptor (see ``read_picture``) and the picture is
-    written to the media root as a new file of this process's own."""
+def finish_image(row, data):
+    """Store the picture a Sentinel took of ``row`` (``agentapi.web_screenshot_results`` already checked it is a PNG of a sane size). Returns
+    ``(fields, outcome, reason)``: the model fields of a good capture, or an outcome (blank, error) and why. Looked at once more here: a flat single
+    color is a blank page, whatever the scanner said, and a picture over this server's own size cap is refused. The file is a new one of this process's
+    own, at a path made from the row, never from anything the scanner sent."""
+    from agentapi import web_screenshot_results
     from cveFeed import shots
     from cveFeed.rdp_shot import is_meaningful
-    name = os.path.basename(result.get('path') or '')
-    data = read_picture(workdir, name, shots.MAX_SHOT_BYTES) if name else None
-    if data is None or not data:
-        return {}, 'error', 'The browser reported a picture that was not written.'
-    if len(data) > shots.MAX_SHOT_BYTES:
-        return {}, 'error', 'The picture is larger than the size allowed.'
+    if not data:
+        return {}, 'error', 'The scanner reported a picture that was not sent.'
+    if len(data) > min(shots.MAX_SHOT_BYTES, max_bytes()) or web_screenshot_results.png_problem(data):
+        return {}, 'error', 'The picture is larger than the size allowed.' if len(data) > max_bytes() else 'The scanner sent a picture that is not a usable PNG.'
     if not is_meaningful(data):
         return {}, BLANK, 'The page rendered blank (a single flat color).'
-    extension = '.png'
-    if len(data) > max_bytes():
-        data, error = _shrink(data)
-        if error:
-            return {}, 'error', error
-        extension = '.jpg'
     size = len(data)
     if project_bytes(row.project_id) + size > project_cap_bytes():
         _free_previous(row.project_id)
         if project_bytes(row.project_id) + size > project_cap_bytes():
             return {}, 'error', f'This project\'s screenshot storage ({project_cap_bytes() // (1024 * 1024)} MB) is full.'
     final, rel = new_paths(row)
-    final, rel = os.path.splitext(final)[0] + extension, os.path.splitext(rel)[0] + extension
     write_new(final, data)
     thumb = shots.thumbnail_path(final)
     return {'image_path': rel, 'thumb_path': os.path.relpath(thumb, media_root()) if thumb else '', 'image_hash': shots.dhash_file(final),
@@ -1015,15 +635,15 @@ def _same_host(final_url, host):
     return (urlsplit(final_url).hostname or '').lower().rstrip('.') == host
 
 
-def apply_result(row, result, now=None, workdir=''):
+def apply_result(row, result, now=None, image=b''):
     """Write one page's result onto its row. A failure keeps the previous picture and says what happened; a success keeps one earlier picture
-    (the one it replaces) for comparison and deletes older ones. Returns the outcome."""
+    (the one it replaces) for comparison and deletes older ones. ``image`` is the picture's bytes of a page the scanner photographed. Returns the outcome."""
     from cveFeed.models import HostScreenshot
     now = now or timezone.now()
     outcome, reason = result.get('outcome') or 'error', str(result.get('reason') or '')[:300]
     fields = {}
     if outcome == OK:
-        fields, outcome, reason = finish_image(row, result, workdir)
+        fields, outcome, reason = finish_image(row, image)
     update = {'outcome': outcome, 'reason': reason, 'attempted_at': now, 'queued_at': None, 'by_person': False}  # a person's request is used up by this attempt
     if outcome == OK:
         final = str(result.get('final_url') or '')[:2000]
@@ -1048,25 +668,10 @@ def apply_result(row, result, now=None, workdir=''):
 
 # ----------------------------------------------------------------------------- the drain
 
-Item = namedtuple('Item', 'row host scheme port url address')
+Item = namedtuple('Item', 'row host scheme port url')
 
 
-def _resolve(host, port, project_id, timeout=10):
-    """The address the browser is pinned to: every answer for the name is vetted (``pinned_transport.resolve`` refuses a prohibited one), IPv4 first.
-    Raises ``ValueError`` for a prohibited address, ``OSError`` when the name does not resolve or does not answer in time."""
-    from cveFeed import pinned_transport
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        answers = pool.submit(pinned_transport.resolve, host, port, project_id).result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
-        raise OSError('the name server did not answer in time') from None
-    finally:
-        pool.shutdown(wait=False)
-    ordered = sorted(answers, key=lambda item: item[0] != socket.AF_INET)
-    return ordered[0][1][0]
-
-
-def _precheck(row, ctx, resolve):
+def _precheck(row, ctx):
     """``None`` to go ahead, or ``(outcome, reason)`` / ``'gone'`` for a queued row that must not be captured now (re-read at the point of use)."""
     from cveFeed.exclusions import normalize
     from startScan.models import Subdomain
@@ -1089,17 +694,7 @@ def _precheck(row, ctx, resolve):
     from cveFeed.manual_only import only_manual_hosts
     if not row.by_person and row.host.strip().lower().rstrip('.') in only_manual_hosts(project_id, [row.host]):  # made manual only while the page waited
         return BLOCKED, 'Not captured: the target is set to manual only.'
-    try:
-        address = resolve(row.host, row.port, project_id)
-    except ValueError:
-        return BLOCKED, 'Blocked: the name resolves to an internal or reserved address, which this server never visits.'
-    except OSError as exc:
-        return 'unreachable', f'The name could not be resolved ({str(exc)[:100] or "no answer"}).'
-    return ('item', address)
-
-
-def _batches(rows, size=BATCH_PAGES):
-    return [rows[i:i + size] for i in range(0, len(rows), size)]
+    return None
 
 
 def _kill_switch():
@@ -1107,156 +702,101 @@ def _kill_switch():
     return resources.global_pause_requested(fail_closed=True)
 
 
-def process(rows, runner=None, resolve=None, summary=None, proxy_factory=None):
-    """Capture ``rows`` (queued HostScreenshot rows, any projects). Every page is re-checked first (still in the inventory, not excluded or
-    archived, inside the bug bounty scope, resolves only to addresses a scanner may visit), then captured by the browser child, and each result is
-    written as it arrives, so a kill part-way keeps what was done. The rows not reached stay queued."""
+def _count(summary, outcome):
+    summary['captured' if outcome == OK else 'blocked' if outcome == BLOCKED else 'failed'] += 1
+
+
+def _task_target(project_id, items):
+    """The target of one ``web_screenshot`` task: its pages (an id that is the row's own, never a name), the scope policy and the limits."""
+    from cveFeed import probe_scope
+    scope, open_web = probe_scope.for_screenshots(project_id, [item.host for item in items])
+    return {'pages': [{'id': str(item.row.pk), 'url': item.url} for item in items], 'scope': scope, 'open_web': open_web,
+            'timeout_seconds': nav_timeout_seconds(), 'max_bytes': max_bytes()}
+
+
+def _apply_task(items, result, summary):
+    """Write what a Sentinel reported for the pages of one task. A page it did not report on was not photographed: it says so on its row (and is
+    tried again after the retry window), never a picture and never a state of the page."""
     from cveFeed.models import HostScreenshot
+    sandbox = result.get('sandbox') or {}
+    if 'engaged' in sandbox:
+        record_sandbox(sandbox['engaged'], sandbox.get('reason', ''), sandbox.get('version', ''))
+    reported = {page['id']: page for page in result.get('pages') or []}
+    summary['dropped_requests'] = summary.get('dropped_requests', 0) + int(result.get('dropped_requests') or 0)
+    for item in items:
+        row = HostScreenshot.objects.filter(pk=item.row.pk).first()
+        if row is None:
+            continue
+        page = reported.get(str(item.row.pk))
+        if page is None:
+            if sandbox.get('engaged') is False:
+                reason = f"Not captured: the scanner's browser sandbox did not engage. {sandbox.get('reason') or ''}".strip()
+            else:
+                reason = 'The scanner reported nothing for this page.'
+            _count(summary, apply_result(row, {'outcome': 'unavailable', 'reason': reason[:300]}))
+            continue
+        try:
+            image = base64.b64decode(page['image'], validate=True) if page.get('image') else b''
+        except ValueError:
+            image = b''
+        _count(summary, apply_result(row, page, image=image))
+
+
+def process(rows, summary=None):
+    """Capture ``rows`` (queued HostScreenshot rows, any projects) through Sentinels. Every page is re-checked first (still in the inventory, not
+    excluded or archived, inside the bug bounty scope, not manual only), then sent in tasks of at most ``MAX_PAGES_PER_TASK`` pages of one project, and
+    each task's result is written as it arrives, so a kill part-way keeps what was done. A project with no scanner able to take the kind keeps its
+    pages queued (``ScannerUnavailable``): nothing is recorded for them. Returns the summary; ``summary['waiting']`` lists those projects."""
+    from agentapi import sentinel_dispatch
+    from cveFeed.models import HostScreenshot
+    from reNgine.resources import ScanAborted, ScannerUnavailable
     summary = summary if summary is not None else {}
     for key in ('captured', 'failed', 'blocked', 'dropped'):
         summary.setdefault(key, 0)
-    resolve = resolve or _resolve
-    ctx, runner = {}, runner or run_child
-    items = []
+    ctx, by_project = {}, {}
     for row in rows:
-        verdict = _precheck(row, ctx, resolve)
+        verdict = _precheck(row, ctx)
         if verdict == 'gone':
             HostScreenshot.objects.filter(pk=row.pk).delete()
             summary['dropped'] += 1
-        elif verdict[0] != 'item':
-            apply_result(row, {'outcome': verdict[0], 'reason': verdict[1]})
-            summary['blocked' if verdict[0] == BLOCKED else 'failed'] += 1
+        elif verdict is not None:
+            _count(summary, apply_result(row, {'outcome': verdict[0], 'reason': verdict[1]}))
         else:
-            items.append(Item(row, row.host, row.scheme, row.port, url_for(row.host, row.scheme, row.port), verdict[1]))
-    for batch in _batches(items):
+            by_project.setdefault(row.project_id, []).append(Item(row, row.host, row.scheme, row.port, url_for(row.host, row.scheme, row.port)))
+    for project_id, items in by_project.items():
         if _kill_switch():
+            summary['stopped'] = 'paused'
             return summary
-        _run_batch(batch, runner, summary, proxy_factory=proxy_factory, ctx=ctx)
+        project = sentinel_dispatch._project_of(project_id)
+        if project is None:
+            continue
+        chunks = [items[i:i + MAX_PAGES_PER_TASK] for i in range(0, len(items), MAX_PAGES_PER_TASK)]
+        try:
+            sentinel_dispatch.scanner_or_local(project, KIND)  # raises ScannerUnavailable when none is live: the kind has no local path at all
+            for index, result in sentinel_dispatch.dispatch_each(project, KIND, chunks, lambda chunk: _task_target(project_id, chunk), label_of=lambda chunk: chunk[0].host):
+                if result is not None:
+                    _apply_task(chunks[index], result, summary)
+        except ScannerUnavailable as exc:  # what a scanner did finish is written above; the rest stays queued
+            summary.setdefault('waiting', []).append(project_id)
+            summary['skipped'] = f'no scanner could take this work ({exc.kind})'
+        except ScanAborted as exc:
+            summary['stopped'] = type(exc).__name__  # paused or stopped: the rows stay queued
+            return summary
+        except Exception:  # noqa: BLE001 - an unexpected failure ends this project's pages for now, never the drain worker; they stay queued
+            logger.exception('screenshot task for project %s failed', project_id)
+            summary['error'] = 'a screenshot task failed'
     return summary
 
 
-def _run_batch(items, runner, summary, proxy_factory=None, ctx=None):
-    """One browser child over ``items`` (``Item`` tuples), every page through its own vetting proxy connection (``shot_proxy``), each result written as it
-    arrives. ``proxy_factory(admit, connect, secret)`` replaces the proxy in tests."""
-    import secrets
-    from reNgine import resources
-    from cveFeed import shot_proxy
+def queued_rows(limit, exclude_projects=()):
     from cveFeed.models import HostScreenshot
-    by_key, paths, guards, done, order = {}, {}, {}, set(), []
-    targets = []
-    workdir = make_workdir()
-    for index, item in enumerate(items):
-        key = str(index)
-        paths[key] = os.path.join(workdir, f'{key}.png')
-        by_key[key] = item
-        order.append(key)
-        loaded = (ctx or {}).get(item.row.project_id) or {}
-        # everything the guard needs from the database is read here, in this thread: the proxy's threads run no query of their own
-        guards[key] = Guard(item.row.project_id, item.host, unattended=not item.row.by_person, gate=loaded.get('gate'), excluded=loaded.get('excluded'),
-                            stack=stack_blocklist())
-        guards[key].warm()
-        targets.append({'key': key, 'url': item.url, 'out': paths[key]})
-
-    def admit(key, host, port):
-        guard = guards.get(key)
-        if not guard:
-            return None, 'unknown page'
-        try:
-            return guard.admit(host, port)
-        finally:
-            _close_thread_connections()
-
-    def on_result(message):
-        key = message.get('key')
-        item = by_key.get(key)
-        if item is None or key in done:
-            return
-        done.add(key)
-        message['path'] = paths[key]  # the file is the one this side named, whatever the child says
-        guard = guards[key]
-        if message.get('outcome') != OK and guard.relabel(message.get('outcome')):
-            message['outcome'], message['reason'] = BLOCKED, guard.blocked_reason()[:300]  # the page never loaded because a guard refused it
-        elif message.get('outcome') == OK:
-            summary['dropped_requests'] = summary.get('dropped_requests', 0) + len(guard.denied)
-        row = HostScreenshot.objects.filter(pk=item.row.pk).first()
-        if row is None:
-            return
-        outcome = apply_result(row, message, workdir=workdir)
-        summary['captured' if outcome == OK else 'blocked' if outcome == BLOCKED else 'failed'] += 1
-
-    secret = secrets.token_urlsafe(24)
-    proxy = (proxy_factory or shot_proxy.VettingProxy)(admit, connect, secret)
-    wall = len(items) * (nav_timeout_seconds() + 10) + 60
-    failure = ''
-    try:
-        with proxy:
-            job = {'targets': targets, 'proxy': {'server': proxy.server, 'password': secret},
-                   'settings': {'total_seconds': nav_timeout_seconds(), 'nav_timeout_ms': min(nav_timeout_seconds() - 3, 15) * 1000,
-                                'sandbox': sandbox_wanted()}}
-            failure = runner(job, on_result, wall, label=f'{len(items)} pages', workdir=workdir)
-    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:
-        summary['stopped'] = type(exc).__name__  # paused, stopped or short of memory: the rows stay queued
-    except Exception as exc:  # noqa: BLE001 - an unexpected failure ends the batch, not the drain worker
-        logger.exception('screenshot batch failed')
-        failure = f'{type(exc).__name__}'
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-    if failure.startswith('too_big:'):  # the page in flight held the browser over its memory ceiling: that page failed, the others are not blamed
-        in_flight = order[len(done)] if len(done) < len(order) else None
-        if in_flight is not None:
-            apply_result(by_key[in_flight].row, {'outcome': 'too_big', 'reason': f'The page needed more than {max_rss_mb()} MB of memory ({failure.split(":", 1)[1]} MB) and was stopped.'})
-            summary['failed'] += 1
-        failure = ''
-        summary['too_big'] = summary.get('too_big', 0) + 1
-    if not failure and done:
-        _note_error(None)  # the browser ran: whatever it last said is over
-        if sandbox_wanted():
-            record_sandbox(True)  # the child checks the sandbox before the first page
-    reason = f'The browser could not run: {failure}'
-    if failure.startswith(SANDBOX_PREFIX):  # the browser loaded nothing: its sandbox could not start or did not engage
-        record_sandbox(False, failure[len(SANDBOX_PREFIX):])
-        reason = f'Not captured: screenshots are off. {failure[len(SANDBOX_PREFIX):]}'
-    if failure:
-        summary['error'] = failure
-        _note_error(failure)
-        # nothing came back for the pages the browser never reached: say so on their rows, so they are not retried in a tight loop
-        for key in order:
-            if key not in done:
-                apply_result(by_key[key].row, {'outcome': 'unavailable', 'reason': reason[:300]})
-                summary['failed'] += 1
+    return list(HostScreenshot.objects.filter(outcome=QUEUED).exclude(project_id__in=list(exclude_projects)).order_by('-by_person', 'queued_at', 'pk')[:limit])
 
 
-def _close_thread_connections():
-    """Close the database connections the calling thread opened (the proxy's threads must not leave one each behind). A connection inside a transaction
-    (a test) is left alone."""
-    try:
-        from django.db import connections
-        for connection in connections.all():
-            if not connection.in_atomic_block:
-                connection.close()
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _note_error(text):
-    try:
-        from django.core.cache import cache
-        if text is None:
-            cache.delete('screenshots:last_browser_error')
-            return
-        cache.set('screenshots:last_browser_error', {'at': timezone.now().isoformat(), 'error': text[:300]}, 7 * 24 * 3600)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def queued_rows(limit):
-    from cveFeed.models import HostScreenshot
-    return list(HostScreenshot.objects.filter(outcome=QUEUED).order_by('-by_person', 'queued_at', 'pk')[:limit])
-
-
-def drain(runner=None, resolve=None, budget_seconds=DRAIN_SECONDS, now_fn=time.monotonic, batch=BATCH_PAGES, proxy_factory=None):
-    """Capture the queued pages, a batch at a time, until none are left or the budget is spent (then ask for another drain). One at a time: a
-    second call while one runs returns at once, and the running one picks up what was queued meanwhile."""
+def drain(budget_seconds=DRAIN_SECONDS, now_fn=time.monotonic, batch=BATCH_PAGES):
+    """Hand the queued pages to Sentinels, a batch at a time, until none are left or the budget is spent (then ask for another drain). One at a time: a
+    second call while one runs returns at once, and the running one picks up what was queued meanwhile. A project that has no scanner for the kind is
+    left alone for the rest of this drain and its pages stay queued."""
     from reNgine import resources
     summary = {'captured': 0, 'failed': 0, 'blocked': 0, 'dropped': 0}
     reason = unavailable_reason()
@@ -1274,7 +814,7 @@ def drain(runner=None, resolve=None, budget_seconds=DRAIN_SECONDS, now_fn=time.m
             if _kill_switch():
                 summary['skipped'] = 'scanning is paused'
                 break
-            rows = queued_rows(batch)
+            rows = queued_rows(batch, summary.get('waiting', ()))
             if not rows:
                 break
             if now_fn() - started > budget_seconds:
@@ -1282,14 +822,14 @@ def drain(runner=None, resolve=None, budget_seconds=DRAIN_SECONDS, now_fn=time.m
                 summary['continued'] = True
                 break
             before = (summary['captured'], summary['failed'], summary['blocked'], summary['dropped'])
-            process(rows, runner=runner, resolve=resolve, summary=summary, proxy_factory=proxy_factory)
-            if summary.get('stopped') or before == (summary['captured'], summary['failed'], summary['blocked'], summary['dropped']):
+            process(rows, summary=summary)
+            if summary.get('stopped') or before == (summary['captured'], summary['failed'], summary['blocked'], summary['dropped']) and not summary.get('waiting'):
                 break  # stopped, or a batch settled nothing: leave the rest for the next run rather than spin
     worked = summary['captured'] or summary['failed'] or summary['blocked'] or summary['dropped']
     if worked:
         if summary['captured'] or summary['failed'] or summary['blocked']:
             _log(summary)
-        if not (summary.get('stopped') or summary.get('skipped') or summary.get('continued')) and queued_rows(1):
+        if not (summary.get('stopped') or summary.get('skipped') or summary.get('continued')) and queued_rows(1, summary.get('waiting', ())):
             kick(delay=5)  # a page queued while this drain was finishing, after its last look: another drain takes it
     return summary
 
@@ -1341,12 +881,12 @@ def describe(row, host):
 
 
 FAILURE_TEXT = {'timeout': 'timed out', 'unreachable': 'could not be reached', 'tls_error': 'failed the TLS handshake', 'error': 'failed', 'blank': 'rendered blank',
-                'unavailable': 'could not run the browser', 'too_big': 'needed too much memory'}
+                'unavailable': 'could not be photographed by the scanner', 'too_big': 'needed too much memory'}
 
 
 def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=False):
     """The line the host page shows next to (or instead of) a screenshot, from what the attempts recorded. Empty when a current picture is shown
-    and nothing needs saying. ``legacy`` is True when an older discovery screenshot is shown because the browser has no picture of the host."""
+    and nothing needs saying. ``legacy`` is True when an older discovery screenshot is shown because no scanner has taken a picture of the host."""
     web = [r for r in rows if r.scheme != 'rdp']
     if primary(web) is not None:
         return ''
@@ -1358,8 +898,8 @@ def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=
         return 'An older screenshot from discovery is shown. The latest capture attempt: ' + _reasons(failed)
     if not web:
         if network:
-            return (f'No screenshot: this host is inside the internal network {network}. Only a Sentinel there scans it, and Sentinels do not '
-                    'take screenshots; this server never captures internal hosts.')
+            return (f'No screenshot: this host is inside the internal network {network}. Only a Sentinel there scans it, and screenshots of '
+                    'internal hosts are not taken yet; this server never captures internal hosts.')
         why = unavailable_reason()
         if why:
             return f'No screenshot: {why}'
@@ -1372,7 +912,7 @@ def note_for(rows, *, has_web_evidence, legacy=False, network=None, ports_known=
         why = unavailable_reason()
         if why:
             return f'No screenshot: {why}'
-        return 'Waiting for the screenshot worker: ' + ', '.join(f'{r.scheme}://{r.host}:{r.port}' for r in queued[:3]) + '.'
+        return 'Waiting for a scanner to take the screenshot (the pages stay queued until one can): ' + ', '.join(f'{r.scheme}://{r.host}:{r.port}' for r in queued[:3]) + '.'
     return 'No screenshot: ' + _reasons(failed)
 
 

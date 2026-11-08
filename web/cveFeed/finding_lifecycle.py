@@ -15,7 +15,7 @@ filed under a target, so a host covered by two targets of one project had each f
   (www to the apex) serves nothing of its own: a finding it shares with that host is the host's finding, and the alias's copy is closed
   with a note that names both (``ALIAS``, ``fold_aliases``). A finding only the alias has stays open. A name that is a CNAME has no mail
   of its own (its MX is its target's), so the email checks skip it (cveFeed.hygiene.email_domains).
-* **Fixed versions.** A later WPScan of the same host that reads a component at or past an advisory's fixed version closes that
+* **Fixed versions.** A later WordPress scan of the same host that reads a component at or past an advisory's fixed version closes that
   advisory's row as fixed, automatically, with the scan and the version it read (``close_fixed_wpscan_rows``).
 
 None of this touches a finding a person closed, set in progress or reopened by hand, and a closure the engine made itself is marked so
@@ -124,7 +124,7 @@ def seen_again(row):
     return changed
 
 
-# --------------------------------------------------------------------------------------------------- fixed versions (WPScan)
+# --------------------------------------------------------------------------------------------------- fixed versions (WordPress scan)
 
 _FIXED_IN = re.compile(r'\bFixed in ([0-9][0-9A-Za-z.\-]*?)\.(?:\s|$)')
 
@@ -141,7 +141,7 @@ def _version_key(value):
 
 
 def wpscan_versions(report):
-    """``{component label: version}`` for every component a WPScan report read a version of: the labels cveFeed.wpscan_scan files its rows
+    """``{component label: version}`` for every component a WordPress scan report read a version of: the labels cveFeed.wpscan_scan files its rows
     under (``WordPress``, ``WordPress plugin <slug>``, ``WordPress theme <slug>``)."""
     out = {}
     core = str(((report.get('version') or {}).get('number')) or '')
@@ -159,7 +159,7 @@ def wpscan_versions(report):
 
 
 def _row_version(name, component):
-    """The version a stored WPScan row's name gives for ``component`` ("WordPress 6.5.2: title", "WordPress 6.5.2 is outdated ..."), or ''."""
+    """The version a stored WordPress scan row's name gives for ``component`` ("WordPress 6.5.2: title", "WordPress 6.5.2 is outdated ..."), or ''."""
     if not name.startswith(component + ' '):
         return ''
     rest = name[len(component) + 1:]
@@ -168,7 +168,7 @@ def _row_version(name, component):
 
 
 def close_fixed_wpscan_rows(scan, sub, report, seen=None):
-    """Close as fixed the open WPScan rows of this host (every target and scan of the project) that the version this report read is not
+    """Close as fixed the open WordPress scan rows of this host (every target and scan of the project) that the version this report read is not
     affected by: an advisory whose stated fixed version is at or below it, and an "outdated" row once the component is no longer outdated.
     A row for an older version of a component that this report still names at its new version (the same advisory, still not fixed) is the
     same finding as the new row and is closed as its duplicate. A component the report has no version for proves nothing and is left alone,
@@ -181,9 +181,9 @@ def close_fixed_wpscan_rows(scan, sub, report, seen=None):
 
 
 def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True, judge_outdated=True):
-    """``close_fixed_wpscan_rows`` for ``host`` in ``domain``'s project, from a WPScan ``report`` (or one rebuilt from the versions WPScan
+    """``close_fixed_wpscan_rows`` for ``host`` in ``domain``'s project, from a WordPress scan ``report`` (or one rebuilt from the versions the scan
     last stored, ``stored_wpscan_report``). ``read_in`` says where the version was read, for the note. ``judge_outdated`` False leaves the
-    "outdated" rows alone (a rebuilt report does not know what WPScan called outdated). Returns ``{'closed', 'folded'}``; with ``apply``
+    "outdated" rows alone (a rebuilt report does not know what the scan called outdated). Returns ``{'closed', 'folded'}``; with ``apply``
     False nothing is written and the counts are what would be."""
     from startScan.models import Vulnerability
     versions = wpscan_versions(report)
@@ -226,7 +226,7 @@ def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True
                     folded.setdefault(newer, []).append(row.pk)
                 continue
             why = f'{component} {read} is at or past the fixed version {fixed.group(1)} (this finding was {component} {old})'
-        note = _note(f'{FIXED_VERSION} {why}: read by WPScan on {host}' + (f' {read_in}' if read_in else '') + '.')
+        note = _note(f'{FIXED_VERSION} {why}: read by the WordPress scan on {host}' + (f' {read_in}' if read_in else '') + '.')
         close.setdefault(note, []).append(row.pk)
     if apply:
         for note, ids in close.items():
@@ -235,12 +235,12 @@ def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True
         for keeper, ids in folded.items():
             Vulnerability._base_manager.filter(pk__in=ids, remediation_status='open', remediation_by__isnull=True).update(
                 open_status=False, remediation_note=duplicate_note(
-                    'scanner finding', keeper, 'the same WPScan advisory, read again at a newer version' + (f' {read_in}' if read_in else '')))
+                    'scanner finding', keeper, 'the same WordPress scan advisory, read again at a newer version' + (f' {read_in}' if read_in else '')))
     return {'closed': sum(len(ids) for ids in close.values()), 'folded': sum(len(ids) for ids in folded.values())}
 
 
 def stored_wpscan_report(project_id, host):
-    """A WPScan report rebuilt from the versions WPScan last stored for ``host`` (cveFeed.wpscan_scan.record_components): the core, plugin
+    """A WordPress scan report rebuilt from the versions the scan last stored for ``host`` (cveFeed.wpscan_scan.record_components): the core, plugin
     and theme versions it read, and when. ``(report, observed_at)``; the report is empty when nothing was stored."""
     from cveFeed.models import ProbeObservation
     report, when = {}, None
@@ -384,7 +384,7 @@ def dedupe_hygiene(project, apply=False):
     note naming it. Returns ``{'groups', 'closed', 'conflicts'}``; nothing is written unless ``apply``."""
     from cveFeed.models import HygieneFinding
     groups = {}
-    # the tailnet, testssl.sh, cloud storage and UDP checks file under a target of their own choosing (cveFeed.hygiene.store_findings)
+    # the tailnet, the TLS audit, cloud storage and UDP checks file under a target of their own choosing (cveFeed.hygiene.store_findings)
     for row in HygieneFinding.objects.filter(domain__project=project).exclude(check_name__regex=r'^(ts|tlsa|bkt|udp)_').order_by('id').only(
             'id', 'host', 'check_name', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'remediation_updated_at',
             'assignee', 'first_seen'):

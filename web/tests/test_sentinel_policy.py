@@ -11,9 +11,12 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from agentapi import agent_broker as broker
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
+from reNgine.resources import ScannerUnavailable
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from cveFeed import nuclei_scan
@@ -60,7 +63,7 @@ class LightNucleiPolicyTests(DispatchBase):
 
     def test_a_pass_with_no_severities_sends_the_local_default_not_an_empty_list(self):
         # An empty list makes the client run every severity, ``unknown`` included; the local run's default is info to critical.
-        self.assertEqual(nuclei_scan.SEVERITIES, 'info,low,medium,high,critical')
+        self.assertEqual(scan_flags.NUCLEI_SEVERITIES, 'info,low,medium,high,critical')
         target = self.dispatched('nuclei_targeted', tags=['wordpress'])
         self.assertEqual((target['tags'], target['severities']), (['wordpress'], ['info', 'low', 'medium', 'high', 'critical']))
         for severities in (None, []):
@@ -74,25 +77,13 @@ class LightNucleiPolicyTests(DispatchBase):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             for kind in ('nuclei_light', 'nuclei_targeted'):
                 target = self.dispatched(kind)
-                self.assertEqual(target['etags'], ['dos'], kind)  # nuclei_scan.BASE_FLAGS: the tags the local run never runs
+                self.assertEqual(target['etags'], ['dos'], kind)  # scan_flags.NUCLEI_EXCLUDED_TAGS: the tags no run ever runs
                 self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
 
     def test_a_policy_that_allows_every_template_is_said_so(self):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
             target = dispatch._nuclei_target('nuclei_targeted', ['www.example.test'], {})
         self.assertEqual(target['template_policy'], {'rev': nuclei_scan.ALL_TEMPLATES_REV, 'read_only': False, 'bundle_sha256': None})
-
-    def test_the_light_pass_falls_back_to_the_quick_local_pass_not_the_whole_library(self):
-        self.make_sentinel(['nuclei_light'])
-        seen = []
-
-        def local(path, **kwargs):
-            seen.append(kwargs)
-            return iter([])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local):
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=0.2)
-            list(stream(_targets_file('www.example.test')))  # nobody claims it: the stage runs locally
-        self.assertEqual(seen, [{'tech': True}])
 
     def test_the_internal_light_pass_is_the_quick_one_too(self):
         self.make_sentinel(['nuclei_light'])
@@ -155,6 +146,32 @@ class QueuedExpiryTests(SentinelBase):
         self.assertEqual((old.status, young.status), ('expired', 'queued'))
         self.assertIn('waited in the queue', old.error)
         self.assertIsNotNone(old.finished_at)
+
+    def test_a_sweep_that_expires_many_writes_one_summary_row_with_counts_by_kind(self):
+        from dashboard.models import AuditLog
+        for _ in range(30):
+            self.queue('nmap', age=timedelta(minutes=30))
+        for _ in range(5):
+            self.queue('http_probe', age=timedelta(minutes=30))
+        young = self.queue('nmap', age=timedelta(minutes=1))
+        self.assertEqual(sb.reap_expired(), 35)
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire').count(), 0)  # not one row per task
+        row = AuditLog.objects.get(action='sentinel.task.expire_sweep')
+        self.assertEqual(row.detail['count'], 35)
+        self.assertEqual(row.detail['by_kind'], {'nmap': 30, 'http_probe': 5})
+        self.assertEqual(row.detail['by_reason'], {'no Sentinel took the task while it waited in the queue': 35})
+        self.assertEqual(len(row.detail['task_ids']), sb.SWEEP_SAMPLE)  # a sample, never the whole backlog
+        self.assertEqual(SentinelTask.objects.filter(status='expired').count(), 35)
+        young.refresh_from_db()
+        self.assertEqual(young.status, 'queued')
+        self.assertEqual(sb.reap_expired(), 0)  # nothing left: no empty summary row
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire_sweep').count(), 1)
+
+    def test_a_dispatchers_own_expiry_still_audits_that_task(self):
+        from dashboard.models import AuditLog
+        task = self.queue()
+        sb.expire(task, 'the dispatch wait timed out')
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire', detail__task_id=task.pk).count(), 1)
 
     def test_the_budget_is_the_dispatchers_own_queue_budget_plus_a_grace(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_QUEUE_TIMEOUT': '1200'}):
@@ -220,6 +237,34 @@ class LeaseAndReportTests(SentinelBase):
         task.refresh_from_db()
         self.assertGreater(task.lease_expires_at, now)  # twenty hours into a thirty hour budget
 
+    def thorough(self, accepted_ago, **target):
+        _, out = register_sentinel(self.t['dana'], name='worker', capabilities=['wpscan_thorough'])
+        agent = Agent.objects.get(pk=out['id'])
+        now = timezone.now()
+        task = SentinelTask.objects.create(project=Project.objects.get(slug='sen-a'), kind='wpscan_thorough',
+                                           target={'url': 'https://example.com/', 'token': '', **target}, agent=agent, status='running',
+                                           accepted_at=now - accepted_ago, lease_expires_at=now + timedelta(minutes=1))
+        return agent, task, now
+
+    def test_a_thorough_wordpress_scan_runs_for_its_own_budget_and_no_longer(self):
+        agent, task, now = self.thorough(timedelta(hours=20), timeout_seconds=24 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertGreater(task.lease_expires_at, now)  # twenty hours into a day of budget: still alive
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=24 * 3600 + 600) + sb.RUN_GRACE)
+        agent, task, now = self.thorough(timedelta(hours=14), timeout_seconds=12 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertLess(task.lease_expires_at, now)  # past its twelve hours, the report grace and the run grace: left to expire
+        self.assertEqual(sb.reap_expired(), 1)
+
+    def test_a_thorough_wordpress_scan_without_a_limit_gets_the_kinds_ceiling_and_a_bogus_limit_is_held_to_the_contract(self):
+        from agentapi import sentinel_dispatch
+        _, task, _ = self.thorough(timedelta(hours=1))
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=sentinel_dispatch.COMPLETION_CEILING['wpscan_thorough']) + sb.RUN_GRACE)
+        _, task, _ = self.thorough(timedelta(hours=1), timeout_seconds=10 ** 9)
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=86400 + 600) + sb.RUN_GRACE)
+
     def test_a_report_sent_twice_is_answered_twice_and_stored_once(self):
         from tests.test_agentapi import call
         task = self.running(timedelta(minutes=1))
@@ -274,7 +319,7 @@ class CapacityQueueTests(DispatchBase):
     """S03-17: tasks already waiting are promised the free slots."""
 
     def sentinel(self, slots):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['nmap', 'openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=slots)
         return agent
 
@@ -309,14 +354,14 @@ class CapacityQueueTests(DispatchBase):
         SentinelTask.objects.filter(pk=orphan.pk).update(created_at=timezone.now() - timedelta(hours=2))
         self.assertEqual(sb.capacity_state(self.project, 'nmap')['state'], 'free')
 
-    def test_a_free_sentinel_that_never_claims_falls_back_after_the_claim_timeout_not_the_queue_budget(self):
+    def test_a_free_sentinel_that_never_claims_gives_up_after_the_claim_timeout_not_the_queue_budget(self):
         from tests.test_sentinel_capacity import Clock
         self.sentinel(1)
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, timeout=120)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # the work stays due; it is not run here
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, timeout=120)
         self.assertLess(clock.now - 1000, 30)  # its own queued task did not turn the wait into the 300 s queue wait
 
 
@@ -363,7 +408,7 @@ class ProjectRotationTests(TestCase):
         seen = []
         with mock.patch.object(coverage_topup, 'PROJECT_LIMIT', 2), mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
                 mock.patch('cveFeed.unresolved_archive.recheck', return_value={}), \
-                mock.patch('cveFeed.assessment_review.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
+                mock.patch('cveFeed.coverage_topup.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
                 mock.patch('cveFeed.host_assessment.active_count', return_value=0):
             for _ in range(4):
                 coverage_topup.top_up()
@@ -527,18 +572,3 @@ class OpenvasQueuedTaskTests(Fixture, TestCase):
         self.age(run, minutes=45)
         self.assertEqual(self.tick()['sentinel_status'], 'queued')
 
-    def test_a_local_run_gvmd_cannot_answer_for_is_failed_once_past_its_budget(self):
-        self.assertEqual(self.tick()['status'], 'running')
-        run = OpenvasRun.objects.get()
-        self.assertIsNone(run.sentinel_task_id)
-
-        def down():
-            raise ov.OpenvasError('gvmd could not be reached')
-        young = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual(young, {'error': 'gvmd could not be reached'})  # inside its budget it is left alone
-        self.assertEqual(OpenvasRun.objects.get().status, 'running')
-        OpenvasRun.objects.filter(pk=run.pk).update(started_at=timezone.now() - timedelta(hours=ov.budget_hours(2) + 1))
-        out = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual((out['run'], out['status']), (run.pk, 'failed'))
-        self.assertEqual(OpenvasRun.objects.get(pk=run.pk).status, 'failed')
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())

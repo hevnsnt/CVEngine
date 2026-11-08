@@ -1,0 +1,7 @@
+{
+  "domains": ["www.example.com", "mail.example.org"],
+  "pace": {"gap": 1.0, "host_gap": 2.0},
+  "max_requests": 600,
+  "scope": {"hosts": ["www.example.com", "mta-sts.www.example.com", "mail.example.org", "mta-sts.mail.example.org"], "domains": [], "excluded": [],
+            "excluded_trees": [], "private": false, "addresses": [], "blocked": []}
+}

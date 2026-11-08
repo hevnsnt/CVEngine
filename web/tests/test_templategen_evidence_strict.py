@@ -113,8 +113,7 @@ class LaterResultsTests(TemplateHitTests):
         outcome = [{'host': HOST, 'vulnerable': False, 'error': 'boom', 'output': ''}]
         with mock.patch('cveFeed.validation.resolve_template', return_value=('/templates/x.yaml', '')), \
                 mock.patch('cveFeed.validation.approved_template', return_value=(APACHE_TRAVERSAL, '')), \
-                mock.patch.object(templategen, '_run_template_with_retry', return_value=outcome), \
-                mock.patch('cveFeed.auth_nuclei.merge_template_outcomes', side_effect=lambda path, hosts, outcomes, project: outcomes), \
+                mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
                 mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
                 mock.patch('cveFeed.notify._send', return_value=True):
@@ -128,8 +127,7 @@ class LaterResultsTests(TemplateHitTests):
         outcome = [{'host': HOST, 'vulnerable': False, 'error': 'timeout', 'output': ''}]
         with mock.patch('cveFeed.validation.resolve_template', return_value=('/templates/x.yaml', '')), \
                 mock.patch('cveFeed.validation.approved_template', return_value=(APACHE_TRAVERSAL, '')), \
-                mock.patch.object(templategen, '_run_template_with_retry', return_value=outcome), \
-                mock.patch('cveFeed.auth_nuclei.merge_template_outcomes', side_effect=lambda path, hosts, outcomes, project: outcomes), \
+                mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
                 mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
                 mock.patch('cveFeed.notify._send', return_value=True):

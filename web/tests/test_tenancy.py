@@ -327,7 +327,7 @@ class MfaFlowTests(TestCase):
 		self.assertIn('id="acct-btn"', html)
 		sheet = html[html.index('id="acct-sheet"'):]
 		sheet = sheet[:sheet.index('</div>\n</div>')]
-		for item in ('My account', 'About', 'Sign out'):
+		for item in ('My account', 'Help', 'Sign out'):
 			self.assertIn(item, sheet)
 		self.assertNotIn('Administration', sheet)  # only for admins
 		more = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]

@@ -1,6 +1,6 @@
 """Screenshot diffing: did the front page of a host change visibly between two scans?
 
-Each screenshot gowitness takes is reduced to a 64-bit difference hash (dhash): the image is scaled to 9 by 8 grey pixels and
+Each screenshot taken is reduced to a 64-bit difference hash (dhash): the image is scaled to 9 by 8 grey pixels and
 every pixel is compared with its right neighbour. Two screenshots of the same page differ in a few bits; a page that was
 replaced differs in many. The hamming distance between two hashes is compared with a threshold. Pillow is optional at run
 time: without it ``dhash_file`` returns an empty hash and nothing is compared.
@@ -16,8 +16,8 @@ except ImportError:  # pragma: no cover - exercised by patching Image to None
 
 logger = logging.getLogger(__name__)
 
-CROP_TOP_RATIO = 0.0  # gowitness captures the page only; kept for tuning (a browser bar would be cropped here)
-MAX_HASH_PER_FLUSH = 100  # screenshots hashed per persist_screenshots call (bbot delivers them in small batches anyway)
+CROP_TOP_RATIO = 0.0  # a capture is the page only; kept for tuning (a browser bar would be cropped here)
+MAX_HASH_PER_FLUSH = 100  # screenshots hashed per persist_screenshot_blobs call (a discovery delivers them in small batches anyway)
 MAX_SHOT_DIFFS_PER_SCAN = 1000
 DEFAULT_THRESHOLD = 12  # bits of 64 (CVENGINE_SHOT_THRESHOLD)
 HASH_BITS = 64
@@ -35,7 +35,7 @@ def available():
     return Image is not None
 
 
-MAX_SHOT_BYTES = 8 * 1024 * 1024  # a screenshot is a few hundred KB; a bigger file is not one gowitness made
+MAX_SHOT_BYTES = 8 * 1024 * 1024  # a screenshot is a few hundred KB; a bigger file is not one a capture made
 MAX_SHOT_PIXELS = 50_000_000
 
 

@@ -16,12 +16,17 @@ SENTINEL_BOOTSTRAP_PATH = '/api/v1/sentinels/bootstrap'
 MFA_REQUIRED_MESSAGE = ('your organization requires multi-factor authentication: set up MFA '
                         'in the web app (My account, /cve/account/) before using the API')
 LAST_USED_RESOLUTION = timedelta(minutes=1)
-SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL = 'full', 'inventory', 'sentinel'
-TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL)
-USER_TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY)  # what a person may ask for; a sentinel token is only ever minted by an enrollment (sentinel_broker.bootstrap)
+SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL, SCOPE_REVIEWER = 'full', 'inventory', 'sentinel', 'reviewer'
+TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY, SCOPE_SENTINEL, SCOPE_REVIEWER)
+USER_TOKEN_SCOPES = (SCOPE_FULL, SCOPE_INVENTORY)  # what a person may ask for; a sentinel token is only ever minted by an enrollment (sentinel_broker.bootstrap), a reviewer token only by agentapi.builtin_reviewer
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/(?P<slug>[-\w]+)/inventory/?$')
-# The Sentinel loop and nothing else: register/identity/unregister, heartbeat, the template policy and its bundle, and lease/accept/report/release of its own tasks.
-SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|release))?)?/?$')
+# The Sentinel loop and nothing else: register/identity/unregister, heartbeat, the template policy and its bundle, and lease/accept/report/release of its own tasks
+# (with the partial results a streamed task posts while it runs)
+# (and ``secret``, the built-in scanner's single-use read of a stored credential: the route answers 403 to any other Sentinel itself, see sentinel_broker.read_secret).
+SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|partial|release|secret))?)?/?$')
+# The AI reviewer container (docs/AI-REVIEWER.md) and nothing else: its configuration, review packets and verdicts, the operations snapshot
+# and report, and the pipeline's AI jobs and their answers (cveFeed.ai_jobs). The routes themselves also refuse any other token and any session (agentapi.reviewer_api), so the two checks guard each other.
+REVIEWER_PATH = re.compile(r'^/api/v1/reviewer/(?:config|findings/next|findings/t\d{1,12}/verdict|ops/snapshot|ops/report|usage|jobs/next|jobs/\d{1,12}/result)/?$')
 DENIED_MESSAGE = ('this token is not allowed to do that (an inventory token can only post inventory reports to its own project, '
                   'a sentinel token can only call the sentinel endpoints)')
 
@@ -59,13 +64,15 @@ def authenticate(raw):
 def request_allowed(token, request):
     """Whether ``token`` may make this request. Only a ``full`` token may make any; an ``inventory`` token may only POST its own
     project's inventory reports; a ``sentinel`` token may only call the ``/api/v1/sentinel`` loop (never ``/mcp/``, never the rest of
-    the API, so a token taken from a Sentinel's host is not its administrator's token); a token of any other scope (a value this code
-    does not know) may make none, so a scope that is misspelt or added later is closed, never open. Enforced before any route or MCP
+    the API, so a token taken from a Sentinel's host is not its administrator's token); a ``reviewer`` token may only call the
+    ``/api/v1/reviewer/`` routes of the AI reviewer container; a token of any other scope (a value this code does not know) may make none, so a scope that is misspelt or added later is closed, never open. Enforced before any route or MCP
     tool runs, so no handler can forget it."""
     if token.scope == SCOPE_FULL:
         return True
     if token.scope == SCOPE_SENTINEL:
         return bool(SENTINEL_PATH.match(request.path))
+    if token.scope == SCOPE_REVIEWER:
+        return bool(REVIEWER_PATH.match(request.path))
     if token.scope != SCOPE_INVENTORY:
         return False
     match = INVENTORY_PATH.match(request.path)
