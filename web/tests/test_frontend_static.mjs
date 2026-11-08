@@ -94,6 +94,24 @@ test('dailyCounts follows the UTC display preference', () => {
   }
 });
 
+test('dailyCounts takes the server\'s exact per-day counts as they are, whatever their size', () => {
+  process.env.TZ = 'America/New_York';
+  withClock('2026-11-10T15:00:00Z', () => {
+    const points = charts.dailyCounts([], 4, [{date: '2026-11-10', n: 2032}, {date: '2026-11-08', n: 7}, {date: '2026-06-01', n: 99}]);
+    assert.deepEqual(points.map((p) => p.v), [0, 7, 0, 2032]);  // nothing is capped at a thousand, a day outside the window is not drawn
+  });
+});
+
+test('the Activity card, the Scans chart and the Changes chart are counted by the server, never from a page of a list', () => {
+  const dash = read('dashboard.js');
+  assert.match(dash, /activity-days\?days=90/);
+  assert.doesNotMatch(dash, /hottest of|New findings counts|Inventory changes counts/);
+  const app = read('app.js');
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 126, series: "scans"/);
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 60, series: "changes"/);
+  assert.doesNotMatch(app, /scans\?\$\{query\(\{ page_size: 200 \}\)\}`\)\s*\.then\(\(r\) => \{\s*const dates/);
+});
+
 test('request bodies and links the review found wrong stay fixed', () => {
   const app = read('app.js');
   assert.doesNotMatch(app, /note:\s*(?:d\.remediation|\(detail)/, 'a status change must not resend a stored note');
