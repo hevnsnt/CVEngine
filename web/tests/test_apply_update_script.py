@@ -44,7 +44,8 @@ case " $* " in
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
     if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
-    case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
+    case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac
+    if [ -f "$STUB_DIR/has_scanner" ]; then echo scanner; fi; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
   *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
@@ -1065,6 +1066,66 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.flag())
         self.assertFalse(self.flag('maintenance-failed'))
         self.assertEqual(self.phase_file().get('phase'), 'done')
+
+    def scanner_checkout(self):
+        """The host already has the built-in scanner's scripts (a release from 1.4 on); a further commit is what the update brings."""
+        self.publish_deploy_file()
+        other = self.tmp / 'other'
+        for name in ('scanner.sh', 'scanner_lock.py'):
+            shutil.copy(SCRIPTS / name, other / 'scripts' / name)
+        shutil.copy(SCRIPTS.parent / 'scanner.lock.json', other / 'scanner.lock.json')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the scanner scripts', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        self.git('pull', '--ff-only', cwd=self.work)
+        (self.stub / 'has_scanner').write_text('')
+        self.new = self.publish_deploy_file_again()
+
+    def test_the_scanner_image_is_fetched_once_with_the_site_up_before_the_page_and_before_the_merge(self):
+        """The pull (about 5 GB) changes nothing the running site reads: under the maintenance page it would only lengthen the outage."""
+        self.scanner_checkout()
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        pulls = [i for i, line in enumerate(lines) if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, lines)  # one fetch, not two
+        self.assertTrue(lines[pulls[0]].startswith('off '), lines[pulls[0]])  # the site was still up
+        first_on = next(i for i, line in enumerate(lines) if line.startswith('on '))
+        self.assertLess(pulls[0], first_on)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'on')  # the page is up before the merge
+        self.assertIn('the built-in scanner image', (self.work / '.git' / 'cvengine-update' / 'update.log').read_text())
+
+    def test_a_scanner_that_is_off_is_not_fetched_before_the_page(self):
+        self.scanner_checkout()
+        (self.work / '.env').write_text('CVENGINE_BUILTIN_SCANNER=0\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([line for line in self.flag_lines() if ' docker pull -q ' in line])
+
+    def test_a_host_script_without_the_early_fetch_still_fetches_before_the_page_goes_up(self):
+        """The first update that delivers this: the host's own apply-update.sh is older and sources the new update-deploy.sh, which owns the order then."""
+        work = self.tmp / 'old-host'
+        (work / 'scripts').mkdir(parents=True)
+        (work / 'config' / 'nginx' / 'state').mkdir(parents=True)
+        for name in ('update-deploy.sh', 'scanner.sh', 'scanner_lock.py'):
+            shutil.copy(SCRIPTS / name, work / 'scripts' / name)
+        shutil.copy(SCRIPTS.parent / 'scanner.lock.json', work / 'scanner.lock.json')
+        (self.stub / 'has_scanner').write_text('')
+        driver = (
+            'log() { echo "$*"; }; phase() { :; }; COMPOSE=(docker compose); STATE_HELPER=/bin/true; DEPLOY_STAGE=build\n'
+            '. scripts/update-deploy.sh\n'
+            'deploy_steps() { echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off) deploy_steps" >> "$STUB_DIR/flags.log"; deploy_scanner_fetch once; }\n'
+            'deploy_current\n')
+        result = subprocess.run(['bash', '-c', driver], cwd=work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        pulls = [line for line in lines if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, lines)
+        self.assertTrue(pulls[0].startswith('off '), pulls)
+        self.assertLess(lines.index(pulls[0]), lines.index('on deploy_steps'))
 
     def test_the_page_is_also_up_while_the_services_are_rebuilt_in_place(self):
         """The files were pulled by hand: the running containers already read them, so there is no merge to hang the page on."""
