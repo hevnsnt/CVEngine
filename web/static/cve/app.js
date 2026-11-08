@@ -1,6 +1,6 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
-import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
+import { areaChart, displayZone, heatmap } from "/staticfiles/cve/charts.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
 import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
@@ -2789,10 +2789,10 @@ const pages = {
     if (!ALL) bar.append(stopAll); // stopping scans is per project
     const rhythm = el("div", "chart-slot");
     mount.append(rhythm, bar);
-    api("GET", `${base}/scans?${query({ page_size: 200 })}`)
+    // counted by the server, exactly (the newest 200 scans are a page, not the 18 weeks the chart draws)
+    api("GET", `${base}/activity-days?${query({ days: 126, series: "scans", tz: displayZone() })}`)
       .then((r) => {
-        const dates = r.results.map((x) => x.started).filter(Boolean);
-        if (dates.length > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+        if (r.scans.total > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", perDay: r.scans.days }));
       })
       .catch(() => {});
     const list = createList({
@@ -4488,10 +4488,10 @@ pages.changes = function changes(mount) {
   );
   const trend = el("div", "chart-slot");
   mount.append(trend, tools, kinds.node);
-  api("GET", `${base}/changes?${query({ since: "30d", page_size: 200 })}`)
+  // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
+  api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      const dates = (r.results || []).map((c) => c.detected).filter(Boolean);
-      if (dates.length) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], dates, compare: false }));
+      if (r.changes.total) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false }));
     })
     .catch(() => {});
   const list = createList({

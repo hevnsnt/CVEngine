@@ -349,6 +349,7 @@ def stats_payload():
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
         'certs_total': TlsCertificate.objects.count(),
         'hygiene_open': counts.actionable_hygiene(HygieneFinding.objects.all()).count(),
+        'hygiene_top': counts.hygiene_top_checks(),  # the rows under that number: per check, over every finding, not a page of them
         'hosts': host_counts['total'],
         'hosts_live': host_counts['live'],
         **live_scan_counts(),

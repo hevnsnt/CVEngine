@@ -19,6 +19,7 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   Findings page, Scanner type, Actionable status, shows the same set.
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
+* **Hygiene, top checks**: the three checks with the most actionable hygiene findings of medium severity or worse, counted over every finding (``hygiene_top_checks``).
 * **Certs expiring**: certificates that expire within 30 days, including those already expired.
 * **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
   findings and open hygiene findings (``oldest_open``).
@@ -228,6 +229,22 @@ def actionable_hygiene(qs, severity=1):
     """Open hygiene findings of ``severity`` or worse (low by default) that are not closed (fixed, accepted risk, false positive): the Findings page's
     Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
     return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+
+
+HYGIENE_TOP_CHECKS = 3
+_HYGIENE_SEVERITY_NAMES = {4: 'critical', 3: 'high', 2: 'medium'}
+
+
+def hygiene_top_checks(limit=HYGIENE_TOP_CHECKS):
+    """``[{check, worst, n}]``: the ``limit`` checks with the most actionable hygiene findings of medium severity or worse (``actionable_hygiene``, the
+    Findings page's Actionable filter), worst severity first and then the most findings. One grouped query over every row: the dashboard's Hygiene tile
+    used to count these from the first 100 rows of each severity, so a check with 400 findings said 100."""
+    from django.db.models import Count, Max
+
+    from cveFeed.models import HygieneFinding
+    rows = (actionable_hygiene(HygieneFinding.objects.all(), severity=2).order_by().values('check_name')
+            .annotate(n=Count('id'), worst=Max('severity')).order_by('-worst', '-n', 'check_name')[:limit])
+    return [{'check': r['check_name'], 'worst': _HYGIENE_SEVERITY_NAMES.get(r['worst'], 'medium'), 'n': r['n']} for r in rows]
 
 
 def oldest_open(now=None):
