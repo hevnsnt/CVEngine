@@ -59,7 +59,7 @@ CRITICAL_CSS = (
     'padding-bottom:calc(var(--tab,60px) + env(safe-area-inset-bottom,0px))}'
     'html[data-theme="dark"] body{background:var(--bg,#0e0f11);color:var(--ink,#f2f2f4)}'
     '.skip{position:absolute;left:-999px;top:8px}.skip:focus{left:8px}'
-    'svg{flex:none}svg[viewBox="0 0 24 24"]{fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}'
+    'svg{flex:none}:where(svg[viewBox="0 0 24 24"]){fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}'
     '.rail{display:none}'
     '.tabbar{position:fixed;left:0;right:0;bottom:0;display:flex;height:var(--tab,60px)}.tabbar>*{flex:1}'
     '@media (min-width:1024px){body{padding-bottom:0}'
