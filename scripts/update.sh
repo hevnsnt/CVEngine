@@ -432,9 +432,9 @@ if (( check_only )); then
             elif [[ -n $fit_rule && -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$fit_file") ]]; then echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the update will write SCANNER_MEM_LIMIT=$fit_rule (hosts under 7 GB)"
             else echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the scanner keeps its default limit"; fi
         fi
-        fit_live=$(cvengine_fit_externals "${compose[@]}")
+        fit_live=$(CV_FIT_ASK=exec cvengine_fit_externals "${compose[@]}")
         if [[ -n $fit_live ]]; then echo "  Sentinels: $fit_live of your own live; scanners: $(cvengine_fit_plan_words "$(cvengine_fit_value CVENGINE_SENTINEL_PLAN "$fit_file" | grep -E '^(internal|both|external)$' || echo internal)")"
-        else echo "  Sentinels: the running server could not say how many of your own are live; nothing about the scanners will change"; fi
+        else echo "  Sentinels: the running server could not say how many of your own are live (an older version cannot; the update asks again with the new image); nothing is changed now"; fi
     fi
     if (( problems )); then echo "Result: fix the items above before updating."; exit 1; fi
     echo "Result: ready. Run scripts/update.sh${forward_args[*]:+ ${forward_args[*]}}"
@@ -500,14 +500,6 @@ if [[ -n $scans ]]; then
     fi
 fi
 
-# What fits this host, before anything is stopped (scripts/host-fit.sh, the rules the Update button's dialog and install.sh use too): an answer given with
-# --sentinels is applied; otherwise the host-size rule and the automatic default, which never removes a scanner and never asks.
-if [[ -f scripts/host-fit.sh ]]; then
-    # shellcheck source=host-fit.sh
-    . scripts/host-fit.sh
-    cvengine_fit_run "$sentinel_plan" "${compose[@]}"
-fi
-
 # Do the expensive, fallible build while the old workers are still processing work.
 # Only then pause dispatch and perform a bounded drain before migration/recreation.
 step 'Building application images while everything keeps running'
@@ -521,6 +513,14 @@ fi
 # never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
 if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
+fi
+# What fits this host, before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external): scripts/host-fit.sh,
+# the rules the Update button's dialog and install.sh use too. After the build because the count of Sentinels is read with the new image. An answer given
+# with --sentinels is applied; otherwise the host-size rule and the automatic default, which never removes a scanner and never asks.
+if [[ -f scripts/host-fit.sh ]]; then
+    # shellcheck source=host-fit.sh
+    . scripts/host-fit.sh
+    cvengine_fit_run "$sentinel_plan" "${compose[@]}"
 fi
 # The built-in scanner's pinned image (scanner.lock.json), pulled while everything keeps running. It never fails the update (scripts/scanner.sh).
 if [[ -f scripts/scanner.sh ]]; then

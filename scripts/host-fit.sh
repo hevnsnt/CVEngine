@@ -121,10 +121,19 @@ cvengine_fit_apply_plan() {  # PLAN ENVFILE
   return 0
 }
 
-cvengine_fit_externals() {  # COMPOSE...: how many Sentinels of the owner's own are live on the RUNNING server, or nothing when it cannot say
+cvengine_fit_externals() {  # COMPOSE...: how many Sentinels of the owner's own are live, or nothing when that cannot be read
+  # The count is read from the server's own database (manage.py external_sentinels: read only, the set the last-resort rule counts) by a one-off container of
+  # the freshly built web image, not by the running one: after the checkout moved forward the running container, still on the old image, cannot start the new
+  # code (it lacks what the new image carries), and a server from before 1.4 has no such command at all. CV_FIT_ASK=exec asks the running container instead
+  # (scripts/update.sh --check builds nothing).
   local out
-  [[ -n $("$@" ps -q --status running web 2>/dev/null) ]] || return 0
-  out=$("$@" exec -T web python3 manage.py external_sentinels 2>/dev/null) || return 0
+  [[ -n $("$@" ps -q --status running db 2>/dev/null) ]] || return 0
+  if [[ ${CV_FIT_ASK:-run} == exec ]]; then
+    [[ -n $("$@" ps -q --status running web 2>/dev/null) ]] || return 0
+    out=$("$@" exec -T web python3 manage.py external_sentinels 2>/dev/null) || return 0
+  else
+    out=$("$@" run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels 2>/dev/null) || return 0
+  fi
   out=$(grep -E '^EXTERNAL_SENTINELS_LIVE [0-9]+$' <<<"$out" | tail -n1 | cut -d' ' -f2) || out=''
   printf '%s' "$out"
 }
@@ -151,7 +160,7 @@ cvengine_fit_run() {  # PLAN COMPOSE...
   [[ -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$file")$(cvengine_fit_value CVENGINE_SENTINEL_PLAN "$file") ]] || return 0
   live=$(cvengine_fit_externals "$@")
   if [[ -z $live ]]; then
-    _cv_fit_say "Could not ask the running server how many Sentinels of your own are live (it may be an older version), so which scanners run is not changed."
+    _cv_fit_say "Could not read how many Sentinels of your own are live (the database was not reachable), so which scanners run is not changed."
     return 0
   fi
   if (( live >= 2 )); then

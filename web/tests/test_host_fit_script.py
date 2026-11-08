@@ -17,9 +17,10 @@ ROOT = SCRIPTS.parent
 
 WRAPPER = '''#!/usr/bin/env bash
 case " $* " in
-  *" exec -T web python3 manage.py external_sentinels "*)
+  *" ps -q --status running db "*) if [ -e "$STUB_DIR/db_down" ]; then exit 0; fi; echo dbid; exit 0;;
+  *" exec -T web python3 manage.py external_sentinels "*|*" run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels "*)
     echo "docker $*" >> "$STUB_DIR/calls"
-    if [ -e "$STUB_DIR/externals_unavailable" ]; then echo "Unknown command: 'external_sentinels'" >&2; exit 1; fi
+    if [ -e "$STUB_DIR/externals_unavailable" ]; then echo "ModuleNotFoundError: No module named 'cvengine_scanner'" >&2; exit 1; fi
     echo "EXTERNAL_SENTINELS_LIVE $(cat "$STUB_DIR/externals" 2>/dev/null || echo 0)"; exit 0;;
   *" inspect -f {{.HostConfig.Memory}} "*)
     id=${@: -1}; grep "^$id " "$STUB_DIR/limits" 2>/dev/null | cut -d' ' -f2-; exit 0;;
@@ -221,13 +222,23 @@ class ChoiceOfScannersTests(FitCase):
         before = self.env_text()
         result = self.update(16384)
         self.assertEqual(self.env_text(), before)
-        self.assertIn('Could not ask the running server how many Sentinels of your own are live', result.stdout)
+        self.assertIn('Could not read how many Sentinels of your own are live', result.stdout)
         self.assertIn('which scanners run is not changed', result.stdout)
 
-    def test_a_server_that_is_not_running_changes_nothing_and_says_so(self):
-        (self.stub / 'web_up').unlink()
+    def test_a_database_that_is_not_running_changes_nothing_and_says_so(self):
+        (self.stub / 'db_down').touch()
         result = self.update(16384)
         self.assertIn('which scanners run is not changed', result.stdout)
+
+    def test_the_count_is_read_by_a_one_off_container_of_the_new_image_after_the_build(self):
+        # the running container is still on the old image and cannot start the new code, so it is not the one asked
+        self.set_externals(2)
+        self.update(16384)
+        calls = self.calls()
+        ask = next(i for i, c in enumerate(calls) if 'external_sentinels' in c)
+        self.assertIn(' run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels', calls[ask])
+        self.assertGreater(ask, next(i for i, c in enumerate(calls) if ' build ' in c))
+        self.assertLess(ask, next(i for i, c in enumerate(calls) if 'cancel_consumer' in c))
 
     def test_the_updater_never_waits_for_an_answer(self):
         self.set_externals(2)
@@ -296,7 +307,7 @@ class InAppPathTests(unittest.TestCase):
         subprocess.run(['git', 'init', '-q'], cwd=self.tmp, check=True)
         self.stub = self.tmp / 'stub'
         self.stub.mkdir()
-        (self.stub / 'docker').write_text('#!/bin/sh\ncase "$*" in\n  *"ps -q --status running web"*) echo web;;\n  *external_sentinels*) echo "EXTERNAL_SENTINELS_LIVE ${LIVE:-2}";;\nesac\nexit 0\n')
+        (self.stub / 'docker').write_text('#!/bin/sh\ncase "$*" in\n  *"ps -q --status running"*) echo web;;\n  *external_sentinels*) echo "EXTERNAL_SENTINELS_LIVE ${LIVE:-2}";;\nesac\nexit 0\n')
         (self.stub / 'docker').chmod(0o755)
         self.env = {**os.environ, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'CVENGINE_HOST_MEM_MB': '4608'}
 
@@ -340,6 +351,7 @@ class InAppPathTests(unittest.TestCase):
 
     def test_the_deploy_script_calls_the_shared_function_before_the_scanner_is_fetched(self):
         text = (SCRIPTS / 'update-deploy.sh').read_text()
+        self.assertLess(text.index('build web celery celery-beat'), text.index('cvengine_fit_run "$fit_plan"'))
         self.assertLess(text.index('cvengine_fit_run "$fit_plan"'), text.index('cvengine_scanner_fetch'))
         self.assertLess(text.index('cvengine_scanner_start'), text.index('cvengine_fit_budget'))
         self.assertIn('sentinels-choice', text)
