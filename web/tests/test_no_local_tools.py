@@ -156,6 +156,7 @@ ALLOWED = {
         'cveFeed/secret_redaction.py',  # 1.3.2 secret masking (develop): names the tools whose output it masks, runs nothing
         'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/settings_api.py',  # the setting name of the model for the nuclei tag choice (nuclei_model) and its audit action: names the tool, runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
         'cveFeed/supplier_scan.py',
@@ -168,6 +169,7 @@ ALLOWED = {
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
+        'reNgine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
         'reNgine/ai_providers.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',

@@ -78,6 +78,18 @@ def snapshot(days=7):
         attempts=Count('id'), errors=Count('id', filter=Q(status='failed'))).order_by('day'))
     stages = list(qs.values('stage').annotate(attempts=Count('id'), errors=Count('id', filter=Q(status='failed')))
                   .order_by('-attempts')[:30])
+    # which model answered each job: per stage, the models that gave an answer (and the ones that did not), by the model the provider named
+    by_stage = {}
+    for row in qs.filter(stage__in=[st['stage'] for st in stages]).values('stage', 'model', 'actual_model').annotate(
+            attempts=Count('id'), successes=Count('id', filter=Q(status='succeeded'))):
+        name = row['actual_model'] or row['model'] or 'unknown model'
+        entry = by_stage.setdefault(row['stage'], {}).setdefault(name, {'model': name, 'attempts': 0, 'successes': 0})
+        entry['attempts'] += row['attempts']
+        entry['successes'] += row['successes']
+    for st in stages:
+        used = sorted(by_stage.get(st['stage'], {}).values(), key=lambda e: (-e['successes'], -e['attempts'], e['model']))
+        st['models'] = used
+        st['answered_by'] = [e['model'] for e in used if e['successes']]
     recent = [{'at': _iso(r.started_at), 'provider': r.provider, 'model': r.model,
                'actual_model': r.actual_model, 'stage': r.stage, 'status': r.status,
                'error_category': r.error_category, 'stop_reason': r.stop_reason,

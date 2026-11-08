@@ -33,8 +33,10 @@ SHAPES = {
 
 
 class FakeAnthropic:
-    def __init__(self, script):
-        self.script, self.requests = list(script), []
+    def __init__(self, script, models=None, echo_model=False):
+        """``models``: the ids ``GET /v1/models`` lists (None: the endpoint does not exist, as on a gateway without one). ``echo_model``: a
+        reply names the model the request asked for (the real API does), unless the scripted reply is one a test wrote with its own name."""
+        self.script, self.requests, self.models, self.echo_model = list(script), [], models, echo_model
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -42,7 +44,22 @@ class FakeAnthropic:
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
                 outer.requests.append(body)
                 reply = outer.script[min(len(outer.requests), len(outer.script)) - 1]
+                if outer.echo_model:
+                    reply = {**reply, 'model': body.get('model', reply.get('model'))}
                 data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if outer.models is None or not self.path.startswith('/v1/models'):
+                    self.send_response(404)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                data = json.dumps({'data': [{'id': m, 'created_at': '2026-0%d-01T00:00:00Z' % (n % 9 + 1), 'type': 'model'} for n, m in enumerate(outer.models)]}).encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(data)))

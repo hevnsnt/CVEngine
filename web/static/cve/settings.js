@@ -192,7 +192,7 @@ const sections = {
       anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
     // What is stored now, per job, so that a change of provider can be undone by choosing the old one again and a save can say what changed.
-    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "" };
+    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "", nuclei: s.nuclei_model || "" };
     let dirty = false;
     let refreshHints = () => {}; // set below, once the request settings exist
     let drawInForce = () => {};
@@ -215,6 +215,12 @@ const sections = {
     const opsPick = modelPicker({
       source, context, job: "reviewer", saved: savedModels.ops, onChange: () => markDirty(),
       sameLabel: (c) => sameLabelOf(c.provider, "ops", r.default_models), recommendFor: (_st, c) => (c.provider === "anthropic" ? r.default_models.ops : ""),
+    });
+    // The Nuclei job: empty is the default, the cheapest haiku the provider lists (the server finds it in the list), else the default model.
+    const nucleiPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.nuclei, onChange: () => markDirty(),
+      sameLabel: () => (source.state.nucleiDefault ? `Default: ${source.state.nucleiDefault}` : "Default: same as Everything else"),
+      recommendFor: (st) => st.nucleiDefault || "",
     });
     const advancedAddress = el("details", "ai-adv");
     advancedAddress.open = !!s.base_url;
@@ -242,6 +248,7 @@ const sections = {
       defaultPick.set(same ? savedModels.default : ""); // a model belongs to the provider it was chosen from
       reviewPick.set(same ? savedModels.review : "");
       opsPick.set(same ? savedModels.ops : "");
+      nucleiPick.set(same ? savedModels.nuclei : "");
       sync();
       drawInForce();
     });
@@ -364,7 +371,7 @@ const sections = {
         say(message, false); // beside the toast, which goes after 3.5 seconds
         throw new Error(message);
       }
-      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"]]) {
+      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"], [nucleiPick, "the Nuclei targeting model"]]) {
         if (pick.error) {
           pick.focus();
           say(`Fix ${name}: ${pick.error}`, false);
@@ -384,6 +391,7 @@ const sections = {
         plan_daily_per_project: planProject.value,
         provider: provider.value,
         model: defaultPick.value,
+        nuclei_model: nucleiPick.value,
         api_key: key.value,
         base_url: base.value,
         enabled: enabled.box.checked,
@@ -392,6 +400,7 @@ const sections = {
       });
       Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
       savedModels.default = s.model || "";
+      savedModels.nuclei = s.nuclei_model || "";
       key.value = "";
       key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
       let after;
@@ -406,6 +415,7 @@ const sections = {
       defaultPick.set(savedModels.default, { stored: true });
       reviewPick.set(savedModels.review, { stored: true });
       opsPick.set(savedModels.ops, { stored: true });
+      nucleiPick.set(savedModels.nuclei, { stored: true });
       reviewerP.draw(r);
       showVerified();
       refreshHints();
@@ -418,7 +428,8 @@ const sections = {
     const inForce = el("p", "ai-inforce", "", { role: "status", "aria-live": "polite" });
     drawInForce = () => {
       const named = s.model || (provider.value === s.provider && source.state.recommended ? `${source.state.recommended} (the newest cheapest)` : "the newest cheapest model");
-      inForce.textContent = `In force now: everything else uses ${named}${provider.value === s.provider ? "" : " once you save"}. ${r.models_in_force ? inForceText(r.models_in_force) : "The reviewer has no model until a connection is saved."}`;
+      const nuclei = s.nuclei_model || (provider.value === s.provider ? source.state.nucleiDefault || s.nuclei_model_in_force : "") || "the default model, once the list loads";
+      inForce.textContent = `In force now: everything else uses ${named}${provider.value === s.provider ? "" : " once you save"}. Nuclei targeting and tag selection uses ${nuclei}. ${r.models_in_force ? inForceText(r.models_in_force) : "The reviewer has no model until a connection is saved."}`;
     };
     source.subscribe(drawInForce);
     drawInForce();
@@ -437,6 +448,7 @@ const sections = {
     const jobsBody = el("tbody");
     jobsBody.append(
       jobRow("Everything else", "The default model. Triages every finding, confirms CVE matches, plans validation checks and Nuclei scans, and writes CVE guidance. It runs on every scan in many small requests, so this is where most of the spend goes: a cheap model is the right choice. The daily caps are under AI spend.", defaultPick),
+      jobRow("Nuclei targeting and tag selection", "Chooses which detection templates apply to the software found. A smaller, faster model works well here and avoids refusals.", nucleiPick),
       jobRow("Finding review", "The AI reviewer. Reads each open finding once, and again only when its host or evidence changes, up to the daily limit below. One larger request per finding, so a stronger model costs the most here.", reviewPick),
       jobRow("Operations check", "The AI reviewer. Looks over the work queue, the scanners and the errors a few times a day (four by default) and writes an alert for each problem. A handful of small requests a day, so the cost hardly matters.", opsPick),
     );
