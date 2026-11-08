@@ -118,6 +118,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **The per-CVE nuclei checks run again.** Since the AI reviewer phase 2 change `run_cve_tests` takes `ai`, not a provider, but the targeted pass still called it with `provider=`: every check raised `TypeError`, was caught as one CVE failing and recorded `failed` in the service ledger, so a CVE with a matching template was never tested. `run_cve_checks` now takes `ai` (a CVE without a safe template may queue a reviewer-container draft) and no provider object travels to it. A `failed` ledger row is not coverage (`ledger.fresh` counts only `done`), so those CVEs are checked at the next pass with no data fix. A test binds every call site to the real signature.
+
 - Non-admin users no longer see a "Connect your AI model" button that answered 403.
 - The Sentinel Provision form starts on the current project, not the first one in the list.
 - The dashboard Exposed hosts tile opens the list of exactly those hosts (`hosts/?exposed=1`).
