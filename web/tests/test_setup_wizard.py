@@ -115,6 +115,17 @@ class AccessTests(WizardBase):
         html = open(os.path.join(base, 'cveFeed', 'templates', 'cveFeed', 'welcome.html'), encoding='utf-8').read()
         self.assertIn('prefers-reduced-motion:reduce){.step{animation:none}.meter.indeterminate span{animation:none', html)
 
+    def test_the_scene_in_the_wizard_leaves_out_every_line_that_talks_about_scanning(self):
+        import json, os, re
+        text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'maintenance.html'), encoding='utf-8').read()
+        line = next(l for l in text.splitlines() if 'var EXCHANGES' in l)
+        exchanges = json.loads(line[line.index('['):line.rindex(']') + 1])
+        gate = re.search(r'return !/(.+?)/i\.test', text).group(1)  # the filter that runs when data-scene is set
+        kept = [x for e in exchanges if not re.search(gate, ' '.join(e), re.I) for x in e]
+        self.assertGreater(len(kept), 100)  # plenty of banter is left
+        self.assertEqual([x for x in kept if re.search(r'(?i)scan|discover|sentinel|\bhosts?\b|found|running|build|subdomain', x)], [])
+        self.assertIn('if (document.documentElement.hasAttribute("data-scene"))', text)
+
     def test_the_first_minute_sentence_and_the_password_card_say_what_is_true(self):
         import os
         text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'welcome.js'), encoding='utf-8').read()

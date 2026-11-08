@@ -415,7 +415,7 @@ const steps = {
     node.append(heading, status);
     // The scene is the maintenance page's own two engineers. It is fetched and given to the frame as its document (srcdoc) so that no framing header on the
     // static file (Django's X-Frame-Options, a proxy's) can blank it; ``data-scene`` is set here because a srcdoc page has no query string to read it from.
-    const frame = el('iframe', 'scene', null, { title: 'Two engineers at work', loading: 'eager' });
+    const frame = el('iframe', 'scene', null, { title: 'Two engineers at work', loading: 'eager', tabindex: '-1' }); // a picture: not a stop for the keyboard
     fetch(root.dataset.scene || '/staticfiles/cve/maintenance.html', { credentials: 'same-origin' }).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
       .then((html) => { frame.srcdoc = html.replace('<html', '<html data-scene="1"'); })
       .catch(() => { frame.remove(); });
