@@ -1398,6 +1398,20 @@ def scrub_values(task_id):
     return True
 
 
+# A task that expired because no Sentinel slot was free (or no Sentinel took it) is back-pressure, not a failure: its targets stay due and the next sweep asks again.
+# These are the first words of the ``error`` that ``sentinel_dispatch`` and ``reap_expired`` write for it. A task a Sentinel claimed and then never reported
+# ("the dispatch wait timed out", "the lease expired without a report") and a task that lost its last live Sentinel are NOT in this list: those are failures.
+WAITING_ERRORS = ('no Sentinel slot freed up in time', 'no Sentinel claimed the task in time', 'no Sentinel took the task while it waited in the queue')
+
+
+def waiting_q():
+    """A ``Q`` for the expired tasks that only waited for a Sentinel slot (see ``WAITING_ERRORS``)."""
+    q = Q(pk__in=[])
+    for prefix in WAITING_ERRORS:
+        q |= Q(error__startswith=prefix)
+    return Q(status='expired') & q
+
+
 def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
     caller left the targets due (no kind runs on this server), so this
