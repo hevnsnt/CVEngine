@@ -90,9 +90,9 @@ class LoadTests(TestCase):
         self.assertEqual(hosts, 2950)
         data, out, census, tick = self.measure()
         due_ssh = sum(e['kinds']['ssh_probe']['due'] for e in data['projects'].values())
-        due_secrets = sum(e['kinds']['secrets_scan']['due'] for e in data['projects'].values())
+        due_web = sum(e['kinds']['secrets_scan']['due'] for e in data['projects'].values())
         self.assertEqual(due_ssh, sum(-(-c // 3) for c in SHAPE))  # a third of the hosts have SSH open, none was ever inspected
-        self.assertEqual(due_secrets, hosts)
+        self.assertEqual(due_web, hosts)
         self.assertEqual(out['state'], 'queued')
         self.assertEqual(out['batches'], 12)  # the per-run ceiling: a backlog of thousands fills the queue over several runs
         self.assertLess(tick[0], TICK_SECONDS, f'a tick took {tick[0]:.2f} s')
@@ -102,7 +102,7 @@ class LoadTests(TestCase):
         for kind in ('ssh_probe', 'secrets_scan'):
             self.assertEqual(len({b.project_id for b in PlannerBatch.objects.filter(kind=kind)}), PlannerBatch.objects.filter(kind=kind).count(), kind)
         self.assertLessEqual(max(len(b.units) for b in PlannerBatch.objects.all()), 25)
-        print(f'\nplanner load: census {census[0]:.2f}s {census[1]} queries; tick {tick[0]:.3f}s {tick[1]} queries; due ssh {due_ssh}, secrets {due_secrets}')
+        print(f'\nplanner load: census {census[0]:.2f}s {census[1]} queries; tick {tick[0]:.3f}s {tick[1]} queries; due ssh {due_ssh}, web reads {due_web}')
 
     def test_the_queries_of_a_tick_do_not_grow_with_the_hosts(self):
         build((60,) * 15, self.now)
