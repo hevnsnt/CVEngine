@@ -4,6 +4,7 @@
 {% block content %}
 <div class="ai-usage-page">
   <h1>{% if ai_usage_connected %}AI Model Usage{% else %}Connect your model{% endif %}</h1>
+  <p class="ai-usage-links"><a class="btn ghost sm" href="{% url 'cve_settings' %}#ai">Adjust AI models and usage</a> <a class="btn ghost sm" href="{% url 'cve_agents' %}">Create an API key for MCP</a></p>
   {% if ai_usage_connected %}
   <p class="sub">Provider attempts, returned token counts and estimated costs update from recorded usage. Earlier attempts and provider billing are unavailable.</p>
   <div id="ai-usage" aria-live="polite"></div>

@@ -13,7 +13,7 @@ Nothing here changes a host. The scripts only read.
 
 ## Quick start
 
-1. Open **Hosts**, then **Host inventory** (or **Scanners**, then **Integrations**, then **Set up host reporting**). Pick the platform.
+1. Open **Hosts**, then **Host inventory** (or account menu, **API keys**, then **Set up host reporting**). Pick the platform.
 2. **Create a reporter token.** It belongs to one project and can only post that project's inventory reports (see [Safety](#safety)).
 3. Copy the command for the platform and run it on the machine (as root or Administrator for the fullest report). The dialog fills in your
    server address and the project. The command asks for the token (paste it when it asks): **no command contains the token**, so it never
@@ -114,7 +114,7 @@ contents other than the OS metadata above, user accounts, network shares, browse
   report for any machine that no other token already owns, so it can invent machines (they fill the small unmatched allowance, below), show an
   operating system and packages for a host nobody else reports for (which also raises findings on that host), and, if the project allows
   `create_hosts`, have its own claimed name or its own address added as a target (capped per day). It cannot take over a host that another
-  machine reports for, cannot update or close another token's machine, and cannot change any other project's data. Revoke it on **Scanners, Integrations**.
+  machine reports for, cannot update or close another token's machine, and cannot change any other project's data. Revoke it on **API keys** (account menu).
   A fleet that shares one token trusts every machine holding it with the machines that report by host name only (no machine id); machines that
   send a machine id are told apart by it.
 - **A machine belongs to the token that first reported it.** A report for a machine another live token owns is a `409`; an administrator deletes

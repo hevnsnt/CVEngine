@@ -1,27 +1,27 @@
 {% extends 'cveFeed/base.html' %}
-{% block title %}CVEngine · Integrations{% endblock %}
+{% block title %}CVEngine · API keys for MCP and agents{% endblock %}
 {% block content %}
 <div class="page-head"><div>
-<h1>Integrations</h1>
-<p class="sub">API tokens let scripts and AI agents act as you, with your projects and roles. Use them with the REST API at <code>/api/v1/</code> or the MCP server at <code>/mcp/</code>.</p>
+<h1>API keys for MCP and agents</h1>
+<p class="sub">An API key (a bearer token) lets a script or an AI agent act as you, with your projects and roles, on the REST API at <code>/api/v1/</code> or the MCP server at <code>/mcp/</code>. <a href="https://github.com/hevnsnt/CVEngine/blob/HEAD/docs/AGENT-API.md" rel="noopener" target="_blank">Read the agent API guide</a>. Keys for discovery providers such as Shodan are a different thing: they live in <a href="{% url 'cve_settings' %}#keys">Settings, Discovery API keys</a>.</p>
 </div></div>
 
 <div class="grid main" style="margin-top:0">
   <div>
     <form class="card" id="f" autocomplete="off">
       {% csrf_token %}
-      <h2 style="margin-bottom:12px">New token</h2>
+      <h2 style="margin-bottom:12px">New API key</h2>
       <div class="field"><label for="name">Name</label><input id="name" placeholder="remediation-agent" required></div>
       <div class="form-check field" style="display:flex;gap:8px;align-items:center">
         <input type="checkbox" id="ro" style="width:auto;min-height:0"><label for="ro" style="margin:0">Read only</label>
       </div>
-      <button class="btn" type="submit">Create token</button>
+      <button class="btn" type="submit">Create API key</button>
       <div id="secret" class="msg ok" style="display:none" role="status"></div>
     </form>
     <div class="card" style="margin-top:16px">
-      <h2 style="margin-bottom:8px">Your tokens</h2>
+      <h2 style="margin-bottom:8px">Your API keys</h2>
       <ul class="feed" id="list" style="max-height:none"></ul>
-      <p class="empty" id="none">No tokens yet.</p>
+      <p class="empty" id="none">No API keys yet.</p>
     </div>
     <div class="card" style="margin-top:16px">
       <h2 style="margin-bottom:8px">Your agents</h2>
@@ -43,6 +43,12 @@
     <button class="btn" type="button" id="inv-open">Set up host reporting</button>
   </div>
 </div>
+{% if is_admin %}
+<section class="card" id="agents-admin" style="margin-top:16px">
+  <h2 style="margin-bottom:8px">Agents in your organizations</h2>
+  <div id="agents-admin-body"></div>
+</section>
+{% endif %}
 {% endblock %}
 {% block scripts %}
 <script>
@@ -119,4 +125,8 @@
   loadAgents();
 })();
 </script>
+{% if is_admin %}<script type="module">
+import { agentsAdmin } from '/staticfiles/cve/agents-admin.js';
+agentsAdmin(document.getElementById('agents-admin-body')).catch(function (e) { document.getElementById('agents-admin-body').textContent = e.message; });
+</script>{% endif %}
 {% endblock %}
