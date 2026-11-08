@@ -5,7 +5,7 @@ import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.j
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
 import { dashboardNote } from "/staticfiles/cve/finding-groups-logic.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
-import { activityMatrix, dailyCounts, sparkline } from "/staticfiles/cve/charts.js";
+import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import { dialog } from "/staticfiles/cve/ui.js";
@@ -974,71 +974,56 @@ poll(pollFeed, 6000);
 })();
 
 // --- trends ---------------------------------------------------------------------------------------
-// Two charts under the counters (new findings per day, inventory changes per day) and a small trend line in the CVE matches and
-// scanner findings counters. They are built in the browser from the dates the API already returns, so they show what arrived
-// and when; an "exposed over time" and a "time to fix" line need history the server does not keep yet (requested).
-// The two lists behind the charts are up to 1,000 findings and 1,000 changes (about 0.9 MB of JSON), so nothing is asked for until the
-// Trends section is about to be seen: a dashboard that is read at the top never pays for them. The counters' small trend lines fill in
-// at the same moment.
+// One chart under the counters (new findings per day and inventory changes per day, 90 days) and a small trend line in the CVE matches and
+// scanner findings counters. The server counts them, exactly, with one grouped query per series (GET .../activity-days, cached like the counters),
+// so every number is the real count of the window and the answer is a few kilobytes however large the project is. Nothing is asked for until the
+// Trends section is about to be seen: a dashboard that is read at the top never pays for it.
 const loadTrends = async () => {
   if (!slug) return;
-  const TIERS = ["fire", "smoke", "ice"];
   const base = `/api/v1/projects/${encodeURIComponent(slug)}`;
-  const PAGES = 5;
-  // rows: what was fetched; total: what the project has (the findings list is hottest first, so a cut-off one is not the newest)
-  const collect = async (path) => {
-    const rows = [];
-    let total = 0;
-    for (let page = 1; page <= PAGES; page += 1) {
-      const sep = path.includes("?") ? "&" : "?";
-      const data = await get(`${base}/${path}${sep}page=${page}&page_size=200`);
-      const got = data.results || [];
-      rows.push(...got);
-      total = data.total ?? data.count ?? rows.length;
-      if (got.length < 200) break;
-    }
-    return { rows, total };
-  };
   try {
-    const [found, changed] = await Promise.all([collect("findings?status=all"), collect("changes?since=90d")]);
-    const findings = found.rows;
-    const changes = changed.rows;
-    const cutFindings = found.total > findings.length;
+    const data = await get(`${base}/activity-days?days=90&tz=${encodeURIComponent(displayZone())}`);
+    const found = data.findings;
+    const moved = data.changes;
     const section = $("trends");
-    if (!findings.length && !changes.length) return;
-    const tierOf = (f) => {
-      if (TIERS.includes(f.heat)) return f.heat;
-      const sev = String(f.severity || "").toLowerCase();
-      return sev === "critical" || sev === "high" ? "fire" : sev === "medium" ? "smoke" : "ice";
-    };
+    if (!found.total && !moved.total) return;
+    const lists = `/cve/${encodeURIComponent(slug)}`;
     section.append(
       activityMatrix({
         title: "Activity",
+        first: data.first,
+        last: data.last,
         rows: [
-          { key: "findings", label: "New findings", unit: "findings", tiered: true, items: findings.map((f) => ({ date: f.detected, tier: tierOf(f) })) },
-          { key: "changes", label: "Inventory changes", unit: "changes", items: changes.map((c) => ({ date: c.detected })) },
+          {
+            key: "findings", label: "New findings", unit: "findings", tiered: true, days: found.days,
+            explain: "Findings first seen in the last 90 days, all severities and statuses: CVE matches, scanner findings and configuration checks. The Findings page (Everything) lists them with older ones.",
+            href: `${lists}/vulns/?status=all`,
+          },
+          {
+            key: "changes", label: "Inventory changes", unit: "changes", days: moved.days,
+            explain: "Inventory changes (new or retired hosts, ports, versions, certificates) detected in the last 90 days. The Changes page lists exactly these.",
+            href: `${lists}/changes/?since=${encodeURIComponent(data.since)}`,
+          },
         ],
       }),
     );
-    // the list is ordered by heat, not by date: when it was cut, the counts are those of the hottest findings only, and say so
-    if (cutFindings) {
-      section.append(el("p", "note", `New findings counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings, so recent low-severity ones may be missing.`));
-    }
-    if (changed.total > changes.length) {
-      section.append(el("p", "note", `Inventory changes counts the newest ${changes.length.toLocaleString()} of ${changed.total.toLocaleString()} in the last 90 days.`));
-    }
     section.hidden = false;
-    const spark = (anchorId, dates, label) => {
+    const spark = (anchorId, type, label) => {
       const a = $(anchorId);
-      if (!a || !dates.length) return;
-      const values = dailyCounts(dates, 14).map((p) => p.v);
-      const svg = sparkline(values);
-      const sr = el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days${cutFindings ? " among the hottest findings" : ""}`);
-      if (cutFindings) a.title = `Counts the ${findings.length.toLocaleString()} hottest of ${found.total.toLocaleString()} findings`;
-      a.append(svg, sr);
+      if (!a) return;
+      const byDay = new Map(found.days.map((d) => [d.date, d[type] || 0]));
+      const end = new Date(`${data.last}T00:00:00`);
+      const values = [];
+      for (let i = 13; i >= 0; i -= 1) {
+        const d = new Date(end.getFullYear(), end.getMonth(), end.getDate() - i);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        values.push(byDay.get(key) || 0);
+      }
+      if (!values.some((v) => v)) return;
+      a.append(sparkline(values), el("span", "sr", `${label}: ${values.reduce((n, v) => n + v, 0)} new in the last 14 days`));
     };
-    spark("n-matches", findings.filter((f) => f.type === "cve").map((f) => f.detected), "CVE matches");
-    spark("n-findings", findings.filter((f) => f.type === "scanner").map((f) => f.detected), "Scanner findings");
+    spark("n-matches", "cve", "CVE matches");
+    spark("n-findings", "scanner", "Scanner findings");
   } catch (_) {
     /* trends are extra: leave the section hidden when the data does not come */
   }
