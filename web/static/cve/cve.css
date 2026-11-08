@@ -812,12 +812,71 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
 .hy-card h2{margin-bottom:4px}
 .acct-grid{display:grid;gap:14px;grid-template-columns:1fr}
 .acct-col{display:flex;flex-direction:column;gap:14px;min-width:0}
-.about-grid{display:grid;gap:14px;grid-template-columns:1fr;align-items:start}
-.about-grid h2{margin-bottom:10px}
-.about-grid .node-rows a,.about-grid .note a{color:var(--ink);text-decoration:underline;text-underline-offset:2px}
-.about-lead .logo{margin-bottom:10px}
-.about-tag{margin:0 0 12px;color:var(--ink-2)}
-.about-link{display:inline-flex;align-items:center;text-decoration:none;margin-top:12px}
+/* ---- About: product card, what runs where, the inventory tables. Every box has min-width:0 and text wraps, so nothing can push the page wider ---- */
+.about{min-width:0}
+.about [hidden]{display:none!important}
+.about-sec{margin-top:40px;min-width:0}
+.about-sec>h2{font-size:18px;margin-bottom:8px}
+.about-sec .count,.about-group .count{font:500 12px var(--mono);color:var(--muted);margin-left:4px;font-variant-numeric:tabular-nums}
+.about-intro{margin:0 0 16px;max-width:68ch;font-size:14px}
+.about-text{margin:0;max-width:68ch;font-size:14px;color:var(--ink-2);overflow-wrap:anywhere}
+.about a{color:var(--ink);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}
+.about-product{display:grid;gap:20px 40px;grid-template-columns:minmax(0,1fr);padding:20px}
+.about-product-head{min-width:0}
+.about-product .logo{display:block;margin-bottom:12px}
+.about-tag{font-size:18px;line-height:1.3;margin:0 0 8px}
+.about-lede{margin:0;max-width:56ch;color:var(--ink-2);font-size:14px}
+.about-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 20px;margin:0;font-size:14px;min-width:0}
+.about-facts>div{display:contents}
+.about-facts dt{color:var(--muted);padding:8px 0;border-top:1px solid var(--line)}
+.about-facts dd{margin:0;padding:8px 0;border-top:1px solid var(--line);overflow-wrap:anywhere;min-width:0}
+.about-where{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:1100px){.about-where{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.about-where .card{min-width:0;padding:20px}
+.about-where h3{font-size:15px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.about-where .note{margin:4px 0 12px}
+.about-where ul{margin:0 0 12px;padding-left:18px;font-size:13.5px;color:var(--ink-2)}
+.about-where li{margin:4px 0;overflow-wrap:anywhere}
+.about-where li:first-child{margin-top:0}
+.about-where code{font:500 12px var(--mono);overflow-wrap:anywhere}
+.about-where .card>.note:last-child{margin:auto 0 0}
+.about-where .card{display:flex;flex-direction:column}
+.about-filter{display:grid;gap:8px;max-width:420px;margin-bottom:16px}
+.about-filter label{font-size:13px;color:var(--ink-2)}
+.about-filter input{width:100%;min-height:40px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;font-size:14px}
+.about-filter .note{margin:0;min-height:20px}
+.about-group{border-top:1px solid var(--line);min-width:0}
+.about-group>summary{display:flex;align-items:center;gap:4px;min-height:48px;cursor:pointer;font-weight:600;font-size:15px;list-style:none}
+.about-group>summary::-webkit-details-marker{display:none}
+.about-group>summary::before{content:"";width:7px;height:7px;margin-right:12px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(-45deg);transition:transform .12s;flex:none}
+.about-group[open]>summary::before{transform:rotate(45deg)}
+.about-group-intro{margin:0 0 12px}
+.about-table-wrap{container-type:inline-size;min-width:0;margin-bottom:16px}
+.about-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px}
+.about-table caption{text-align:left;font-weight:600;font-size:15px;padding:12px 0 8px}
+.about-table caption .note{display:block;font-weight:400;margin-top:2px}
+.about-table th,.about-table td{padding:8px 12px 8px 0;text-align:left;vertical-align:top;border-top:1px solid var(--line);overflow-wrap:anywhere;word-break:normal;min-width:0}
+.about-table thead th{color:var(--muted);font-weight:500;font-size:12px;padding-top:4px;padding-bottom:8px;border-top:0}
+.about-table tbody th{font-weight:500}
+.about-table td.num{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.about-detail{display:block;margin-top:2px;font-size:12px;color:var(--muted)}
+.about-table td.none{color:var(--muted);font-family:var(--font)}
+.about-table .c-name{width:18%}.about-table .c-ver{width:14%}.about-table .c-lic{width:20%}.about-table .c-purpose{width:37%}.about-table .c-where{width:11%}
+.about-sources .c-sname{width:24%}.about-sources .c-spurpose{width:56%}.about-sources .c-sstatus{width:20%}
+@container (max-width:759px){
+  .about-table,.about-table tbody,.about-table tr,.about-table th,.about-table td{display:block;width:auto}
+  .about-table colgroup{display:none}
+  .about-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  .about-table caption{display:block}
+  .about-table tr{padding:8px 0;border-top:1px solid var(--line)}
+  .about-table th,.about-table td{border-top:0;padding:2px 0}
+  .about-table tbody th{font-size:14px;padding-bottom:4px}
+  .about-table td{display:grid;grid-template-columns:80px minmax(0,1fr);gap:0 12px}
+  .about-table td::before{content:attr(data-label);color:var(--muted);font-size:12px}
+  .about-table td .about-detail{grid-column:2}
+  .about-table td.num{font-size:12px}
+}
+.about-rengine{padding-top:24px;border-top:1px solid var(--line)}
 .two-step h3,.recovery h3,.card>h3{margin-bottom:4px}
 .two-step .note{margin-bottom:10px}
 .two-step-form{display:grid;gap:10px;margin-top:4px}
@@ -960,7 +1019,7 @@ pre.mono{margin:0 0 6px;padding:9px 11px;background:var(--ink);color:var(--mono-
   .strip{grid-template-columns:repeat(2,minmax(0,1fr))}
 }@media (min-width:720px){.strip{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (min-width:900px){
   .acct-grid{grid-template-columns:1fr 1fr;align-items:start}
-  .about-grid{grid-template-columns:1fr 1fr}
+  .about-product{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);align-items:center}
   .split{grid-template-columns:minmax(300px,380px) minmax(0,1fr)}
   .split-list{position:sticky;top:calc(var(--bar) + 16px);height:calc(100dvh - var(--bar) - 130px)}
   .host-rows{max-height:none;flex:1}

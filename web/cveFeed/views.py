@@ -677,9 +677,9 @@ def how_page(request):
 
 def about_page(request):
     from . import software
-    context = {'tool_groups': software.tools_by_group(), 'data_sources': software.DATA_SOURCES, 'ai_providers': software.AI_PROVIDERS,
-               'server_libraries': software.server_libraries(), 'sentinel_libraries': software.SENTINEL_LIBRARIES}
-    return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context})
+    groups = software.inventory()
+    context = {'inventory': groups, 'inventory_count': sum(g['count'] for g in groups), 'source_groups': software.source_groups()}
+    return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context, 'no_scanner_bar': True})  # reference text: no scanner status strip
 
 
 def admin_page(request):

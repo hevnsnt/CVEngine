@@ -17,9 +17,9 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 
 GROUPS = (
-    ('scanners', 'Scanners and tools', 'These run on the Sentinels, in the Sentinel image, never in the server image (except nuclei, whose template set the server keeps).'),
-    ('greenbone', 'OpenVAS add-on', 'Greenbone Community Edition, separate containers a Sentinel runs. Off until you turn it on.'),
-    ('platform', 'Platform', 'What the server and its containers run on.'),
+    ('scanners', 'Scanners and tools', 'These run on Sentinels, in the Sentinel image. The server image keeps only nuclei, to read and check templates'),
+    ('greenbone', 'OpenVAS add-on', 'Greenbone Community Edition, in separate containers a Sentinel runs. Off until you turn it on'),
+    ('platform', 'Platform', 'What the server and its containers run on'),
 )
 
 
@@ -65,8 +65,7 @@ TOOLS = [
          'Reads an SSH service\'s own handshake (banner, host keys, algorithms) and checks the host keys against the badkeys blocklist. Only that one host key '
          'check runs: it never submits a credential', pins=[(SENTINEL_DOCKERFILE, r'ARG SSHAMBLE_VERSION=([0-9.]+)')]),
     tool('badkeys-data', 'badkeys blocklist data', 'https://badkeys.info', 'scanners', '', 'Unknown (the badkeys software is MIT; no license for the data is stated)',
-         'Known-weak SSH host keys. The Sentinel refreshes it daily with `sshamble badkeys-update`; off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel',
-         optional='CVENGINE_BADKEYS_REFRESH=0 on the Sentinel'),
+         'Known-weak SSH host keys. The Sentinel refreshes it daily with `sshamble badkeys-update`; turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel'),
     tool('playwright', 'Playwright', GH + 'microsoft/playwright-python', 'scanners', '1.64.1', 'Apache-2.0',
          'Drives the headless Chromium that takes the screenshot of every web page of every host, in the Sentinel image',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^playwright==([0-9.]+)')]),
@@ -99,9 +98,10 @@ TOOLS = [
          'The PostgreSQL database of the OpenVAS add-on, with pg-gvm-migrator for upgrades', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
     tool('greenbone-redis', 'Redis (Greenbone redis-server image)', 'https://greenbone.github.io/docs/latest/', 'greenbone', 'stable (image pinned by digest)',
          'Unknown (the license of the Redis version Greenbone ships; not read from the image)', 'The scanner\'s cache', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
-    tool('greenbone-feed', 'Greenbone feed data (vulnerability-tests, notus-data, scap-data, cert-bund-data, dfn-cert-data, data-objects, report-formats, gpg-data)',
+    tool('greenbone-feed', 'Greenbone feed data',
          'https://greenbone.github.io/docs/latest/', 'greenbone', 'community (moving tag); gpg-data pinned by digest', 'Its own terms, printed by the data containers when they start',
-         'Vulnerability tests and advisory data, refreshed by the data containers', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
+         'Vulnerability tests and advisory data, refreshed by the data containers', optional='COMPOSE_PROFILES=openvas on a Sentinel',
+         notes='Data sets: vulnerability-tests, notus-data, scap-data, cert-bund-data, dfn-cert-data, data-objects, report-formats, gpg-data'),
     # -- Platform -----------------------------------------------------------------------------------------------------------------------------------
     tool('ubuntu', 'Ubuntu', 'https://ubuntu.com', 'platform', '26.04', 'Free software, each package under its own license', 'The base of the server and Sentinel images',
          where='both', pins=[('web/Dockerfile', r'(?m)^FROM ubuntu:([0-9.]+)$'), (SENTINEL_DOCKERFILE, r'(?m)^FROM ubuntu:([0-9.]+)@')]),
@@ -188,8 +188,24 @@ def tools_by_group():
             for key, title, intro in GROUPS]
 
 
+_SENTENCE_BREAK = re.compile(r'(?<=[a-z0-9\)`])\. (?=[A-Z])')
+
+
+def tidy(text):
+    """A short string without a trailing period."""
+    return (text or '').replace('`', '').strip().rstrip('.').strip()
+
+
+def split_purpose(text):
+    """``(first sentence, the rest)``: the table shows the first as the purpose and the rest, smaller, beneath it."""
+    parts = _SENTENCE_BREAK.split(tidy(text), maxsplit=1)
+    return parts[0], (tidy(parts[1]) if len(parts) > 1 else '')
+
+
 def source(name, url, purpose, optional='', terms='', used_by=''):
-    return {'name': name, 'url': url, 'purpose': purpose, 'optional': optional, 'terms': terms, 'used_by': used_by}
+    first, rest = split_purpose(purpose)
+    return {'name': name, 'url': url, 'purpose': first, 'detail': rest, 'optional': tidy(optional), 'terms': terms, 'used_by': used_by,
+            'status': 'Optional' if optional else 'Used by default'}
 
 
 # What the product contacts, with the code that does it (the paths are under web/ unless the Sentinel repository is named). ``optional`` is what you
@@ -210,7 +226,7 @@ DATA_SOURCES = [
     source('IANA RDAP bootstrap and the registries it names', 'https://data.iana.org/rdap/dns.json', 'Registry lookups for the dangling-domain and email hygiene checks', used_by='cveFeed/mailfail.py'),
     source('Internet Archive', 'https://web.archive.org', 'Saved URLs, as passive evidence of what a host once ran', used_by='cveFeed/archive_urls.py'),
     source('nuclei-templates releases', 'https://github.com/projectdiscovery/nuclei-templates/releases', 'The server\'s daily template refresh and the reviewer\'s check for a newer release', used_by='cveFeed/reviewer.py, the update_nuclei_templates task'),
-    source('badkeys blocklist', 'https://badkeys.info', 'Known-weak SSH host keys, downloaded by `sshamble badkeys-update` on the Sentinel, daily', 'CVENGINE_BADKEYS_REFRESH=0 on the Sentinel', used_by='cvENGINE-sentinel client/badkeys.py'),
+    source('badkeys blocklist', 'https://badkeys.info', 'Known-weak SSH host keys, downloaded by `sshamble badkeys-update` on the Sentinel, daily. Turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel', used_by='cvENGINE-sentinel client/badkeys.py'),
     source('Greenbone Community feed', 'https://greenbone.github.io/docs/latest/', 'Vulnerability tests and advisory data for the OpenVAS add-on, from registry.community.greenbone.net', 'the OpenVAS add-on', used_by='docker-compose.yml, the openvas-* data services'),
     source('GitHub', 'https://docs.github.com/rest', 'The in-app update check (the releases API)', used_by='cveFeed/updater.py'),
     source('bounty-targets-data', 'https://github.com/arkadiyt/bounty-targets-data', 'Public scope of bug bounty programs, read at run time (MIT)', used_by='cveFeed/bounty_data.py'),
@@ -230,3 +246,60 @@ AI_PROVIDERS = [
     source('Ollama, vLLM and LM Studio', 'https://github.com/ollama/ollama', 'Self-hosted servers cvENGINE calls over HTTP (Ollama MIT, vLLM Apache-2.0; no code of any of them is included)', 'a server you run', used_by='reNgine/ai_providers.py'),
     source('Model Context Protocol', 'https://modelcontextprotocol.io', 'How agents connect to cvENGINE', used_by='agentapi/mcp.py'),
 ]
+
+
+# ---- the inventory the About page shows: one flat row shape for every group --------------------------------------------------------------------------
+# Every row carries a name, url, version, license and purpose. Nothing is left blank: an unknown license reads "Not stated", a version nobody pins reads
+# "Not pinned" (tests/test_about_page.py fails on a row without them).
+
+WHERE_LABEL = {'sentinel': 'Sentinel', 'server': 'Server', 'both': 'Both'}
+NOT_STATED = 'Not stated'
+NOT_PINNED = 'Not pinned'
+
+# Front-end and report assets the server ships (no version is pinned for them).
+FRONTEND = [
+    ('Geist', GH + 'vercel/geist-font', 'Typeface of the web interface', 'SIL Open Font License 1.1'),
+    ('VivaGraphJS', GH + 'anvaka/VivaGraphJS', 'Draws the asset graph', 'BSD-3-Clause'),
+    ('qrcode-generator', GH + 'kazuhikoarase/qrcode-generator', 'QR codes for two-step sign-in', 'MIT'),
+    ('DejaVu Sans', 'https://dejavu-fonts.github.io', 'Typeface of the PDF reports', 'Bitstream Vera license with public-domain DejaVu changes'),
+]
+
+def split_license(text):
+    """``(license, note)``: "GPL-2.0 (a separate program, never linked)" shows GPL-2.0 with the parenthesis beneath it."""
+    text = tidy(text)
+    found = re.fullmatch(r'(.+?) \((.+)\)', text)
+    return (found.group(1), found.group(2)) if found else (text, '')
+
+
+def row(name, url, version, license, purpose, where, optional='', detail=''):
+    first, rest = split_purpose(purpose)
+    lic, lic_note = split_license(license)
+    return {'name': name, 'url': url, 'version': version or NOT_PINNED, 'pinned': bool(version), 'license': lic or NOT_STATED, 'license_note': lic_note,
+            'purpose': first or 'Not stated', 'detail': ' '.join(x for x in (rest, detail) if x), 'where': WHERE_LABEL.get(where, where), 'optional': tidy(optional)}
+
+
+def inventory():
+    """The software inventory in page order: ``[{'id', 'title', 'intro', 'rows': [row...]}]``. Every row has name, url, version, license and purpose."""
+    groups = []
+    for group in tools_by_group():
+        groups.append({'id': group['id'], 'title': group['title'], 'intro': group['intro'],
+                       'rows': [row(t['name'], t['url'], t['shown'], t['license'], t['purpose'], t['where'], t['optional'], t['notes']) for t in group['items']]})
+    groups.append({'id': 'frontend', 'title': 'Front end and reports', 'intro': 'Fonts and scripts the server ships',
+                   'rows': [row(n, u, '', lic, purpose, 'server') for n, u, purpose, lic in FRONTEND]})
+    pypi = 'https://pypi.org/project/'
+    groups.append({'id': 'libraries-server', 'title': 'Python libraries, server image', 'intro': 'Pinned in web/requirements.txt, each under its own license',
+                   'rows': [row(n, pypi + n + '/', v, lic, 'Python dependency of the server', 'server') for n, v, lic in server_libraries()]})
+    groups.append({'id': 'libraries-sentinel', 'title': 'Python libraries, Sentinel image', 'intro': 'Pinned in the Sentinel repository, each under its own license',
+                   'rows': [row(n, pypi + n + '/', v, lic, 'Python dependency of the Sentinel', 'sentinel') for n, v, lic in SENTINEL_LIBRARIES]})
+    for group in groups:
+        group['count'] = len(group['rows'])
+        if group['id'] == 'greenbone':  # the group heading already says the whole add-on is optional
+            for r in group['rows']:
+                r['optional'] = 'Optional'
+    return groups
+
+
+def source_groups():
+    """The data and service tables of the page: ``[(title, intro, [source...])]``."""
+    return [('Data and services', '', DATA_SOURCES),
+            ('AI and agents', 'Nothing calls a model until you set a provider up', AI_PROVIDERS)]

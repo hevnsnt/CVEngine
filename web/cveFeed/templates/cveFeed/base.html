@@ -165,7 +165,7 @@
 <script type="module" src="{% asset 'cve/sitewatch.js' %}"></script>
 {% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/updatebar.js' %}"></script>{% endif %}
 {% if request.user.is_superuser %}<script type="module" src="{% asset 'cve/alertbar.js' %}"></script>{% endif %}
-<script type="module" src="{% asset 'cve/scannerbar.js' %}"></script>
+{% if not no_scanner_bar %}<script type="module" src="{% asset 'cve/scannerbar.js' %}"></script>{% endif %}  {# About is reference text: scanner status lives on Scanners and Overview #}
 {% block scripts %}{% endblock %}
 </body>
 </html>
