@@ -42,3 +42,21 @@ class StatusStripTests(SimpleTestCase):
         for src in (STRIP, SCANNER, ALERTS):
             for banned in ('innerHTML', 'insertAdjacentHTML', 'outerHTML'):
                 self.assertNotIn(banned, src)
+
+
+class CoolingMessageInTheStripTests(SimpleTestCase):
+    """#512's 'Paused after repeated failures ... retries at HH:MM UTC' message must reach the one strip with the zone swap it had in the old bar."""
+
+    def test_the_paused_after_repeated_failures_sentence_is_a_strip_notice_with_its_retry_time_in_the_page_zone(self):
+        self.assertIn('text: coolingText(s)', SCANNER)
+        self.assertIn('kind: "cooling"', SCANNER)
+        self.assertIn('s.cooling_message', SCANNER)
+        self.assertIn('fmtTime', SCANNER)
+        self.assertIn('zoneLabel()', SCANNER)
+        self.assertIn('/ at \\d\\d:\\d\\d UTC/', SCANNER)
+        self.assertNotIn('Paused after repeated failures', SCANNER + STRIP)  # the wording lives on the server only
+
+    def test_a_cooling_notice_is_not_dismissible_and_has_its_own_style(self):
+        line = [l for l in SCANNER.splitlines() if 'kind: "cooling"' in l][0]
+        self.assertNotIn('dismissible', line)
+        self.assertIn('.scannerbar .sb-cooling{', CSS)
