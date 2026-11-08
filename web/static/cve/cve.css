@@ -2385,4 +2385,5 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (pointer:coarse){
   .about-table td a,.about-table th a,.about-text>a:only-child,.about-facts dd a,a.score-label,a.sd-url{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit);max-width:100%}
   a.sd-url{display:flex}
+  .find>a,.host-head a.badge{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
 }
