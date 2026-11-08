@@ -44,13 +44,13 @@
 {% if projects %}{{ projects|json_script:"switch-projects" }}{{ orgs|json_script:"switch-orgs" }}{% endif %}
 <div class="app">
 <aside class="rail" id="rail" aria-label="Primary">
-  <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+  <a class="brand" href="/cve/" aria-label="cvENGINE FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span> <small>FieldCraft Cyber</small></a>
   <nav class="rail-nav" aria-label="Sections">
     {% for e in nav.rail %}<a data-nav="{{ e.label }}" href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>
     {% endfor %}
   </nav>
   <details class="acct">
-    <summary aria-label="Account menu"><span class="avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+    <summary aria-label="{{ request.user.first_name|default:request.user.username }}, account menu"><span class="avatar" aria-hidden="true" data-initial="{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}"></span><span class="acct-name">{{ request.user.first_name|default:request.user.username }}</span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
     <div class="menu">
       <a data-nav="My account" href="{% url 'cve_account' %}"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg>My account</a>
       {% if is_admin %}<a data-nav="Administration" href="{% url 'cve_admin' %}"><svg viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
@@ -65,14 +65,14 @@
 
 <div class="stage">
 <header class="topbar">
-  <a class="brand compact" href="{% url 'cve_dashboard' %}" aria-label="CVEngine home"><span class="logo sm" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span></a>
+  <a class="brand compact" href="{% url 'cve_dashboard' %}" aria-label="cvENGINE home"><span class="logo sm" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span></a>
   <button class="jump" type="button" id="jump" aria-haspopup="dialog">
     <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
     <span class="jump-text"><span class="long">Jump to a page, project or action</span><span class="short">Jump to…</span></span>
     <kbd class="jump-key" aria-hidden="true">Ctrl K</kbd>
   </button>
   {% include "cveFeed/_switcher.html" with sfx="" place="top" %}
-  {% if slug %}<button class="btn sm add-btn" type="button" data-add-targets><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>Add targets</span></button>{% endif %}
+  {% if slug %}<button class="btn sm add-btn" type="button" data-add-targets aria-label="Add targets"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>Add targets</span></button>{% endif %}
 </header>
 {% if show_all_option %}
 <div class="scope-row">

@@ -580,6 +580,23 @@ const NO_TARGETS = {
   body: "A target is a domain, IP or range to watch. Paste a list, one per line; #Project headers sort them into projects. Discovery and scanning start on their own.",
 };
 
+// Phones: a list page's filters sit behind one button, so the list is the first thing on the screen. The button and the open/closed state are for the
+// narrow layout only (cve.css hides the button and shows every group at 640px and up). The groups are wrappers with no look of their own.
+function filtersToggle(side) {
+  const b = el("button", "filters-toggle btn sm ghost", "Filters", { type: "button", "aria-expanded": "false" });
+  b.onclick = () => {
+    const open = !side.classList.contains("filters-open");
+    side.classList.toggle("filters-open", open);
+    b.setAttribute("aria-expanded", String(open));
+    b.textContent = open ? "Hide filters" : "Filters";
+  };
+  return b;
+}
+function filtersGroup(nodes) {
+  const g = el("div", "filters-panel");
+  g.append(...nodes.filter(Boolean));
+  return g;
+}
 function searchBox(placeholder, onChange) {
   const input = el("input", "", null, {
     type: "search",
@@ -2148,7 +2165,9 @@ function findingPage(mount, cfg) {
   }
   if (bulk) metaTools.append(bulk.toggle);
   metaRow.append(el("span"), metaTools);
-  side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
+  const filtersRow = el("div", "filters-row");
+  filtersRow.append(filtersToggle(side));
+  side.append(filtersRow, filtersGroup(cfg.filters), metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
   const byId = new Map();
   let current = null;
   let token = 0;
@@ -2626,7 +2645,7 @@ const pages = {
           render: (t) => {
             const box = named(hostLink(t.name), t);
             // the edit sits with the name it labels (the actions column is already full)
-            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}` });
             edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
             edit.onclick = () => editLabel(t);
             box.append(el("br"), edit);
@@ -2888,7 +2907,7 @@ const pages = {
     sortBy.value = readParam("sort", "score", ["score", "name"]);
     const rows = el("div", "host-rows");
     const controls = el("div", "list-tools");
-    controls.append(q, sortBy);
+    controls.append(q, sortBy, filtersToggle(side));
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
@@ -3195,7 +3214,7 @@ const pages = {
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
+    side.append(filtersGroup([views.node, searches && searches.node]), controls, filtersGroup([heatChips, scopeChips]), metaRow, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
     let hostTab = new URLSearchParams(location.search).get("tab") || "overview"; // ?tab=web: a link from a score line opens that tab

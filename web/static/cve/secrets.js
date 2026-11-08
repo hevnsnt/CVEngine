@@ -8,8 +8,8 @@ const SEV_BADGE = { critical: "critical", high: "high", medium: "medium", low: "
 const CLASS_WORDS = { P: "Browser key", S: "Server secret", I: "Identifier" };
 function filterBar(onChange) {
   const tools = el("div", "tools");
-  const status = selectOf([["open", "Open"], ["quiet", "Quiet (public, accepted, revoked, false positive)"], ["all", "All"], ["live", "Live (validated)"]], "open");
-  const klass = selectOf([["", "Every class"], ["S", "Server secrets"], ["P", "Browser keys"], ["I", "Identifiers"]], "");
+  const status = selectOf([["open", "Open"], ["quiet", "Quiet (public, accepted, revoked, false positive)"], ["all", "All"], ["live", "Live (validated)"]], "open", "Show secrets that are");
+  const klass = selectOf([["", "Every class"], ["S", "Server secrets"], ["P", "Browser keys"], ["I", "Identifiers"]], "", "Class");
   const q = el("input", "", null, { type: "search", placeholder: "Provider, kind, host or mask", "aria-label": "Filter secrets" });
   [status, klass].forEach((s) => (s.onchange = onChange));
   q.oninput = () => {
