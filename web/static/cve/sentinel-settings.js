@@ -339,6 +339,16 @@ export function kindsPanel(kinds, onReset, onValidity = () => {}) {
 
 // Whether the running build is the newest the server saw (its cached look at the Sentinel repository's main branch, never made while a page is built),
 // and since when it has been running: "last updated". Nothing is drawn for what the server did not report.
+function checkedAgo(when, now = Date.now()) {
+  const minutes = Math.max(0, Math.round((now - when.getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} days ago`;
+}
+
 export function newestLine(d) {
   const v = d.version_state;
   const parts = [];
@@ -347,6 +357,10 @@ export function newestLine(d) {
     parts.push(
       `${typeof v.behind_by === "number" ? `${v.behind_by} commit${v.behind_by === 1 ? "" : "s"} behind` : "Behind"} the newest build (${v.latest || "unknown"})`,
     );
+  if (v && v.checked_at && parts.length) {
+    const checked = new Date(v.checked_at);
+    if (!Number.isNaN(checked.getTime())) parts.push(`checked ${checkedAgo(checked)}`);
+  }
   if (d.version_since) {
     const when = new Date(d.version_since);
     if (!Number.isNaN(when.getTime())) parts.push(`running since ${when.toLocaleString()}`);

@@ -157,7 +157,7 @@ the same pull, and only when the image is a new one, a wait for the scanner to f
 updater runs the one cron line in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update).
 
 The scanner's own self-update stays off, and its card on the Sentinels page has no **Update now** button: the host does the update, so there is one
-updater. "Behind" for the built-in scanner means "not the newest build of the Sentinel's main branch the server saw". Nobody re-pins a digest for a
+updater. "Behind" for the built-in scanner means "the newest build of the Sentinel's main branch the server saw is a descendant of the one that runs" (a build equal to or ahead of that head is current; a failed compare or a commit GitHub never saw is unknown, not behind). The verdict is cached per installed commit and branch, dropped when the scanner reports another version, redone by the background refresh when the head was checked before that, and shown with when the head was last checked. Nobody re-pins a digest for a
 Sentinel fix to reach an install. **To hold the scanner at one version,** set `CVENGINE_SCANNER_IMAGE` in `.env` to a digest or a tag; nothing here then
 pulls over it. `scanner.lock.json` is the known-good floor the release was tested with (its commit, the contract version it speaks, and the digest it was
 published as, for provenance); `python3 scripts/scanner_lock.py raise-floor --commit C --contract N` moves it up, which a release does when it needs a

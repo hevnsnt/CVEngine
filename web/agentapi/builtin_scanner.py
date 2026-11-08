@@ -179,5 +179,5 @@ def release(agent):
     found = sentinel_version.state(agent)
     return {'version': info.get('version'), 'contract_version': info.get('contract_version'), 'contract_state': sentinel_contract.state(info.get('contract_version')),
             'contract_note': sentinel_contract.note(info.get('contract_version')),
-            'newest': {'current': True, 'behind': False}.get(found['status']), 'newest_version': found['latest'], 'behind_by': found['behind_by'],
+            'newest': {'current': True, 'behind': False}.get(found['status']), 'newest_version': found['latest'], 'behind_by': found['behind_by'], 'newest_checked_at': found['checked_at'],
             'version_since': info.get('version_since')}

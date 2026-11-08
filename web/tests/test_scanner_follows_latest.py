@@ -81,19 +81,19 @@ class ReleaseTests(BuiltinVisibleBase):
     def test_the_status_says_which_build_runs_and_whether_it_is_the_newest_the_server_saw(self):
         agent = self.enroll()
         Agent.objects.filter(pk=agent.pk).update(info={'version': VERSION, 'contract_version': contract.version()})
-        cache.delete(sentinel_version.LATEST_KEY)
+        cache.delete(sentinel_version.latest_key())
         with mock.patch.object(sentinel_version, '_ask_for_refresh'):
             block = self.status(self.t_root)['scanning']['builtin_scanner']
         self.assertEqual((block['version'], block['newest']), (VERSION, None), 'unknown until the cached check has run')
-        cache.set(sentinel_version.LATEST_KEY, {'sha': VERSION + 'f' * 28, 'checked_at': timezone.now().isoformat(), 'error': ''}, 600)
+        cache.set(sentinel_version.latest_key(), {'sha': VERSION + 'f' * 28, 'checked_at': timezone.now().isoformat(), 'error': ''}, 600)
         block = self.status(self.t_root)['scanning']['builtin_scanner']
         self.assertEqual((block['newest'], block['newest_version'], block['contract_state']), (True, VERSION, 'current'))
-        cache.set(sentinel_version.LATEST_KEY, {'sha': '1' * 40, 'checked_at': timezone.now().isoformat(), 'error': ''}, 600)
-        cache.set(sentinel_version.BEHIND_KEY, {VERSION: 4}, 600)
+        cache.set(sentinel_version.latest_key(), {'sha': '1' * 40, 'checked_at': timezone.now().isoformat(), 'error': ''}, 600)
+        cache.set(sentinel_version.verdict_key(VERSION), {'head': '1' * 40, 'behind_by': 4, 'checked_at': timezone.now().isoformat()}, 600)
         block = self.status(self.t_root)['scanning']['builtin_scanner']
         self.assertEqual((block['newest'], block['newest_version'], block['behind_by']), (False, '1' * 12, 4))
-        self.addCleanup(cache.delete, sentinel_version.LATEST_KEY)
-        self.addCleanup(cache.delete, sentinel_version.BEHIND_KEY)
+        self.addCleanup(cache.delete, sentinel_version.latest_key())
+        self.addCleanup(cache.delete, sentinel_version.verdict_key(VERSION))
 
     def test_last_updated_is_when_the_version_changed_and_only_the_server_writes_it(self):
         agent = self.enroll()

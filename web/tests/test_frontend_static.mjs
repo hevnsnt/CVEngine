@@ -236,6 +236,8 @@ test('a card says whether the build is the newest the server saw, since when it 
   assert.match(sentinelText(newestLine({...base, version_state: {status: 'current'}, version_since: '2026-11-08T01:02:03Z'})), /The newest build the server saw, running since /);
   assert.match(sentinelText(newestLine({...base, version_state: {status: 'behind', behind_by: 4, latest: 'f00dfeed1234'}})), /4 commits behind the newest build \(f00dfeed1234\)/);
   assert.equal(newestLine({...base, version_state: {status: 'unknown'}}), null);
+  const checked = new Date(Date.now() - 12 * 60000).toISOString();
+  assert.match(sentinelText(newestLine({...base, version_state: {status: 'current', checked_at: checked}})), /The newest build the server saw, checked 12 minutes ago/);
   const old = versionBlock({...base, contract: {version: 1, state: 'unsupported', note: 'This scanner is older than this server needs, update it'}}, {onChange() {}});
   assert.match(sentinelText(old), /This scanner is older than this server needs, update it/);
   assert.equal(old.children.some((c) => c.cls === 'msg err ss-detail'), true);

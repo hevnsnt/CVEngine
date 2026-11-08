@@ -396,6 +396,8 @@ def record_info(agent, raw, now=None):
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone
         merged['version_since'] = (now or timezone.now()).isoformat()
+        from agentapi import sentinel_version
+        sentinel_version.version_changed((agent.info or {}).get('version'), info['version'])  # the old verdict goes at once; the new one is made in the background
     fields = {'info': merged}
     version_changed = 'version' in info and (agent.info or {}).get('version') not in (None, info['version'])
     failed = (info.get('update') or {}).get('status') == 'failed'
