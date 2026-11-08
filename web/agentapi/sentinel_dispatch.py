@@ -917,7 +917,7 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
 
 def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     """The parsed ``-sU`` host record for ``ip_address`` from a Sentinel's raw XML report. Raises ``ScannerUnavailable`` when no Sentinel can take
-    the work, or when its report names no host for the address (the address stays due). Unlike every other dispatched kind here, the result is raw
+    the work, or when its report is unusable for the address (``ScannerReportedNothing``, counted per day by the caller); a host that did not answer is a clean down record, an address nmap could not reach is ``UdpScanError``. Unlike every other dispatched kind here, the result is raw
     XML text, not pre-parsed JSON: UDP's own state vocabulary (``open|filtered``, extraports summarisation) and the NSE script output
     ``cveFeed.udp_scan.identify`` reads are read correctly only by the scanner library's ``parse_xml`` (hardened against a custom ENTITY declaration
     because it reads a Sentinel's report), so that is the one function that ever turns the XML into a record. Never chunked: one address per task."""
@@ -927,10 +927,8 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
     if result is None:
         raise ScannerUnavailable('nmap_udp', 'no scanner finished the work')
-    from cveFeed.port_inventory import parse_xml
-    host = next((h for h in parse_xml(result.get('xml') or '') if h.get('ip') == ip_address), None)
-    if host is None:
-        _no_local('nmap_udp', 'a Sentinel scanned the address but its report named no host for it')
+    from cveFeed.udp_scan import host_from_report
+    host = host_from_report(result.get('xml') or '', ip_address)  # the one reader: normalized address on both sides, a down host a clean record
     return host
 
 

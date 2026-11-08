@@ -51,6 +51,9 @@ STATUS_TTL = 30 * 24 * 3600
 RUN_BUDGET_SECONDS = 8 * 60  # a firing starts no new IP after this, so it ends before the next one
 MAX_ELIGIBLE = 5000  # in-scope addresses looked at per pick
 MAX_CHECKED = 50  # scope checks (they resolve names) per pick
+MAX_EMPTY_PER_DAY = 3  # times in 24 hours a scanner may return an unusable report for one address before it is asked again tomorrow
+EMPTY_TTL = 24 * 3600
+EMPTY_KEY = 'cvengine:udpscan:empty:'
 MAX_WAITING = 3  # addresses no scanner could take that end a firing: a scanner that is offline is offline for the rest too
 MAX_FINDING_HOSTS = 10  # names of one address that get its findings
 MAX_PORTS = 64
@@ -98,6 +101,7 @@ SEVERITY_WORDS = {INFO: 'info', LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRIT
 
 
 _last_status = {}
+_empty_local = {}
 
 
 class UdpScanError(RuntimeError):
@@ -213,6 +217,100 @@ def pick(skip=()):
     return None
 
 
+# ----------------------------------------------------------------------------- the address, and what a report says about it
+
+def normalize_address(value):
+    """One spelling of an IP address, for comparing the server's string with the one a scanner's report carries: nmap prints an IPv6 address
+    in its own compressed form (``2600:1900::1a0:0``), the database may hold ``2600:1900:0:0::1a0:0``, ``...::`` with a trailing ``::``,
+    upper case, ``[brackets]`` or a ``%zone``. IPv4 and anything that is not an address come back stripped and lower-cased."""
+    import ipaddress
+    text = str(value or '').strip().lower()
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1]
+    text = text.split('%', 1)[0]
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
+
+
+_HOSTS = re.compile(r'<hosts\b[^>]*>')
+_FINISHED = re.compile(r'<finished\b[^>]*\bexit="success"')
+
+
+def report_counts(xml_text):
+    """``(up, down, total)`` hosts nmap says it scanned, or None when the report has no ``finished ... exit="success"`` marker (cut short or
+    not nmap's)."""
+    xml_text = xml_text or ''
+    if not _FINISHED.search(xml_text):
+        return None
+    found = _HOSTS.search(xml_text)
+    if not found:
+        return None
+    try:
+        values = {k: int(re.search(rf'\b{k}="(\d+)"', found.group(0)).group(1)) for k in ('up', 'down', 'total')}
+    except (AttributeError, ValueError):
+        return None
+    return values['up'], values['down'], values['total']
+
+
+def host_from_report(xml_text, address):
+    """The parsed host record of ``address`` in a Sentinel's raw ``-sU`` XML. The one reader, used by ``agentapi.sentinel_dispatch.try_nmap_udp``.
+
+    - the host is in the report (compared by ``normalize_address`` on both sides): its record.
+    - nmap finished and counted the address as scanned but wrote no host element (a host that did not answer on its own link: nmap leaves
+      a down host out): a clean record, ``{'ip', 'status': 'down', 'ports': []}``, so the sweep completes with no open ports.
+    - nmap finished but scanned nothing (``total`` 0: no route to the address, e.g. a Sentinel with no IPv6, or a name it could not
+      resolve): ``UdpScanError``. Nothing was sent, so this is not a result and not a wait: the address is asked again tomorrow.
+    - an empty, cut short, or other-addresses-only report: ``ScannerReportedNothing`` (counted, see ``MAX_EMPTY_PER_DAY``).
+    """
+    from cveFeed.port_inventory import parse_xml
+    from reNgine.resources import ScannerReportedNothing
+    want = normalize_address(address)
+    hosts = parse_xml(xml_text or '')
+    host = next((h for h in hosts if normalize_address(h.get('ip')) == want), None)
+    if host is not None:
+        return host
+    counts = report_counts(xml_text)
+    if counts is None:
+        raise ScannerReportedNothing('nmap_udp', 'a Sentinel returned an empty or unfinished report for the address')
+    up, down, total = counts
+    if hosts:
+        named = ', '.join(sorted({str(h.get('ip')) for h in hosts})[:3])
+        raise ScannerReportedNothing('nmap_udp', f'a Sentinel\'s report named other addresses only ({named})')
+    if total == 0:
+        raise UdpScanError(f'nmap scanned no host for {address}: the Sentinel could not reach it (no route, for example no IPv6 connectivity)')
+    return {'ip': want, 'status': 'down', 'ports': [], 'extraports': [], 'scanned_udp': set()}
+
+
+def _empty_count(asset, now=None):
+    """Count one unusable report for ``asset`` today and return how many there have been in the last 24 hours (Redis, else this process)."""
+    key = EMPTY_KEY + asset
+    try:
+        client = _store()
+        if client is not None:
+            count = int(client.incr(key))
+            if count == 1:
+                client.expire(key, EMPTY_TTL)
+            return count
+    except Exception:  # noqa: BLE001 - a counter that cannot be read must not stop the sweep
+        logger.warning('could not count an empty UDP report', exc_info=True)
+    now = time.time() if now is None else now
+    stamps = [t for t in _empty_local.get(asset, []) if now - t < EMPTY_TTL] + [now]
+    _empty_local[asset] = stamps
+    return len(stamps)
+
+
+def _empty_reset(asset):
+    _empty_local.pop(asset, None)
+    try:
+        client = _store()
+        if client is not None:
+            client.delete(EMPTY_KEY + asset)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ----------------------------------------------------------------------------- reading the answer
 
 _SYSDESCR = (
@@ -271,6 +369,8 @@ def record_run(ip, host, now=None):
     numbers; ``changed`` are open ports that are new or whose product or version changed). A silent port gets a row only when it has
     none and the host answered something else (see the module note); an existing row is judged by the rules below."""
     from cveFeed import port_inventory
+    if host.get('status') == 'down' and not host.get('ports'):  # the address did not answer at all: a finished sweep with nothing to store
+        return {'open': [], 'closed': [], 'unanswered': [], 'changed': [], 'down': True}
     now = now or timezone.now()
     states, answered = classify(host)
     existing = {p.number: p for p in ip.ports.filter(protocol='udp')}
@@ -442,7 +542,7 @@ def scan_ip(ip, pipeline=None):
     """Scan one IpAddress on a scanner and record it. Returns the result dict (``ok`` False with an ``error`` when the scan failed).
     ``pipeline(domain_id, names)`` runs the re-test inline. Nothing runs on this server: with no scanner able to take it the address stays due."""
     from cveFeed import activity, fullscan, ledger
-    from reNgine.resources import MemoryBusy, ScanAborted, ScannerUnavailable
+    from reNgine.resources import MemoryBusy, ScanAborted, ScannerReportedNothing, ScannerUnavailable
     address, asset = ip.address, asset_of(ip)
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
@@ -457,6 +557,19 @@ def scan_ip(ip, pipeline=None):
             raise ScannerUnavailable('nmap_udp', 'the address is attached to no project a scanner could take it for')
         host = sentinel_dispatch.try_nmap_udp(project_obj, address)
         outcome = record_run(ip, host)
+    except ScannerReportedNothing as exc:  # a Sentinel finished but the report is unusable: asked again a few times a day, then tomorrow
+        count = _empty_count(asset)
+        if count >= MAX_EMPTY_PER_DAY:
+            logger.warning('background UDP scan of %s: a scanner returned an unusable report %d times today (%s); asking again tomorrow', address, count, exc.why)
+            ledger.record(FAILED_SERVICE, [asset])
+            activity.settle(running, 'failed', message=activity.diagnostic(
+                f'Background UDP scan of {address}', f'a scanner returned an unusable report {count} times today ({exc.why}); the address is asked again tomorrow',
+                'ScannerReportedNothing'))
+            return {'ip': address, 'ok': False, 'error': 'ScannerReportedNothing', 'parked': True}
+        logger.warning('background UDP scan of %s is waiting for a scanner: %s', address, exc)
+        activity.settle(running, 'done', message=f'Background UDP scan of {address} is waiting: a scanner returned an unusable report ({exc.why}); '
+                        f'asked again ({count} of {MAX_EMPTY_PER_DAY} today)')
+        return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'waiting': True}
     except ScannerUnavailable as exc:  # no scanner could take it and it never runs here: not the address's failure, and it stays due
         logger.warning('background UDP scan of %s is waiting for a scanner: %s', address, exc)
         activity.settle(running, 'done', message=f'Background UDP scan of {address} is waiting: no scanner could take this work ({exc.kind}); '
@@ -470,6 +583,10 @@ def scan_ip(ip, pipeline=None):
                                                                       type(exc).__name__))
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
     ledger.record(SERVICE, [asset])
+    _empty_reset(asset)
+    if outcome.get('down'):
+        activity.settle(running, 'done', message=f'Background UDP scan of {address}: the host did not answer, so no open UDP ports; asked again next week')
+        return {'ip': address, 'ok': True, **outcome, 'findings': 0}
     findings = store_findings(ip)
     activity.settle(running, 'done', message=(
         f'Background UDP scan of {address}: {len(outcome["open"])} port(s) answered'
