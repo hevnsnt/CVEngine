@@ -329,6 +329,6 @@ class AiRequestSettingsApiTests(TestCase):
 	def test_every_hint_is_a_sentence_for_a_category_the_provider_layer_raises(self):
 		from cveFeed.settings_api import AI_ERROR_HINTS
 		raised = {'provider_auth', 'provider_rate_limit', 'provider_timeout', 'provider_connect_timeout', 'provider_network', 'provider_http', 'provider_json', 'provider_shape',
-			'output_truncated', 'empty_response'}
+			'output_truncated', 'empty_response', 'refused'}
 		self.assertEqual(set(AI_ERROR_HINTS), raised)
 		self.assertEqual(ai.AIProviderError('x', category='provider_timeout').category, 'provider_timeout')
