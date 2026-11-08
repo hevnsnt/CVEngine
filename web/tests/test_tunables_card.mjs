@@ -74,7 +74,7 @@ await import('../static/cve/tunables-card.js');
 
 test('the generic cards register themselves, one per group of the registry, and draw their own title and intro', async () => {
   assert.deepEqual(maxxing.cards().map((c) => c.id), ['ai_spend', 'throughput', 'autotune_pace', 'retention', 'egress', 'heat']);
-  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace', 'Outbound connections', 'Heat policy']);
+  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace', 'Data retention', 'Outbound connections', 'Heat policy']);
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
   assert.match(host.textContent, /^AI spend/);
