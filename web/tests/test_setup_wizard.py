@@ -83,6 +83,28 @@ class AccessTests(WizardBase):
         self.assertEqual(post(self.c, 'finish').status_code, 200)
         self.assertEqual(self.c.get('/cve/').status_code, 200)
 
+    def test_a_finished_wizard_sends_the_page_to_the_dashboard_unless_asked_again(self):
+        self.assertEqual(self.c.get('/cve/welcome/').status_code, 200)  # not finished: the wizard
+        self.seed()
+        self.assertEqual(post(self.c, 'finish').status_code, 200)
+        response = self.c.get('/cve/welcome/')
+        self.assertEqual((response.status_code, response['Location']), (302, '/cve/'))
+        self.assertEqual(self.c.get('/cve/welcome/?again=1').status_code, 200)  # on purpose
+        self.assertEqual(self.c.get('/cve/api/welcome/state').json()['completed'], True)
+
+    def test_the_dashboards_connect_ai_link_opens_the_wizard_on_purpose(self):
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'cveFeed', 'templates', 'cveFeed', 'dashboard.html')
+        self.assertIn("{% url 'cve_welcome' %}?again=1", open(path, encoding='utf-8').read())
+
+    def test_the_first_minute_sentence_and_the_password_card_say_what_is_true(self):
+        import os
+        text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'welcome.js'), encoding='utf-8').read()
+        self.assertNotIn('with public data sources only', text)  # light checks of the found hosts follow within the minute
+        self.assertIn('then runs light checks on the hosts it finds', text)
+        self.assertNotIn("'Choose your own password'", text)  # the forced change at first sign-in already did that
+        self.assertIn('A generated password was already replaced when you first signed in', text)
+
     def test_an_install_that_already_has_targets_is_not_redirected(self):
         org = Org.objects.get(slug='default')
         project = Project.objects.create(name='Old', slug='old', org=org, insert_date=timezone.now())
@@ -574,7 +596,7 @@ class FinishTests(WizardBase):
     def test_a_finished_wizard_can_be_opened_again_without_losing_values(self):
         self.seed()
         post(self.c, 'finish')
-        self.assertEqual(self.c.get('/cve/welcome/').status_code, 200)
+        self.assertEqual(self.c.get('/cve/welcome/?again=1').status_code, 200)  # plain /cve/welcome/ now goes to the dashboard
         self.assertEqual(self.c.get('/cve/api/welcome/state').json()['seed']['domain'], 'seed.test')
 
     def test_no_secret_is_ever_in_the_stored_state(self):
