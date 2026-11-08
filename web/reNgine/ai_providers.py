@@ -18,6 +18,7 @@ from functools import wraps
 import requests
 
 from cveFeed.secret_redaction import redact_text
+from reNgine import ai_prompts
 from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
 	AIRuntime, clean_number, reasoning_plan, setting_applies)
 
@@ -1023,9 +1024,8 @@ TRIAGE_CAPS = {'reason': 300, 'impact': 600, 'severity_reason': 200, 'remediatio
 TRIAGE_FORBIDDEN_KEYS = {'host', 'hostname', 'domain', 'target', 'ip', 'url', 'request', 'response', 'body', 'headers', 'cookie', 'cookies',
 						 'curl_command', 'curl', 'sample', 'samples', 'secret', 'password', 'token', 'api_key', 'apikey', 'key', 'raw'}
 
-TRIAGE_SYSTEM_PROMPT = (
-	'You are a vulnerability analyst triaging one finding on one asset. The asset belongs to the operator who runs this '
-	'tool and the finding comes from their own scanners. Judge how likely the finding is real and what it means. Respond '
+TRIAGE_SYSTEM_PROMPT = ai_prompts.compose('finding_triage',
+	'Judge how likely the finding is real and what it means. Respond '
 	'with ONLY a JSON object with exactly these keys: '
 	'{"classification": "confirmed" | "likely" | "needs_validation" | "likely_false_positive" | "not_applicable", '
 	'"reason": "<one sentence, at most 300 characters>", '
@@ -1175,9 +1175,8 @@ LOCAL_CHECK_COMMAND_KEYS = {'os', 'command', 'look_for'}
 LOCAL_CHECK_CAPS = {'command': 200, 'look_for': 150, 'caveat': 300}
 LOCAL_CHECK_OS = ('linux', 'windows', 'any')
 MAX_LOCAL_CHECKS = 3
-LOCAL_CHECK_SYSTEM_PROMPT = (
-	'A system administrator has direct shell access to their own host and wants to check, locally, whether a specific '
-	'product named in a CVE advisory is installed, because it could not be confirmed from outside. Given the product '
+LOCAL_CHECK_SYSTEM_PROMPT = ai_prompts.compose('local_check_suggestion',
+	'Given the product '
 	'and vendor names from the advisory, suggest at most 3 short, read-only checks a person could run themselves: a '
 	'process or package name, an install or config path, a service name, an admin port, or a log file, for how that '
 	'product is typically installed on Linux and/or Windows. Prefer a short command over prose when you give one. Be '

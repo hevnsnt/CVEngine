@@ -8,6 +8,7 @@ answer and sends it back. The server decides what happens next; nothing here cha
   validates it with the same validators it used when it called the model itself."""
 import json
 import logging
+import time
 
 from cvengine_reviewer import guard, llm, prompts
 
@@ -16,6 +17,26 @@ logger = logging.getLogger(__name__)
 REVIEW_MAX_TOKENS = 4000   # thinking included; a verdict and an 800-character note need far less
 OPS_MAX_TOKENS = 4000
 NOTE_LIMIT = 1200
+
+
+def measured_call(server, stage, provider, *args, **kwargs):
+    """``llm.call`` for one of the container's own two jobs, and a report of it to the server (stage, outcome, counts, never text) so the usage
+    page names the job and counts its refusals. The report is best effort: a server that does not take it never changes the answer."""
+    started, report = time.monotonic(), {'stage': stage, 'provider': provider.get('provider'), 'model': provider.get('model')}
+    try:
+        text, usage, model = llm.call(provider, *args, **kwargs)
+    except llm.ModelError as exc:
+        report.update(status='failed', category=exc.category, stop_reason=getattr(exc, 'stop_reason', None))
+        raise
+    else:
+        report.update(status='succeeded', model=model, input_tokens=usage.get('input_tokens'), output_tokens=usage.get('output_tokens'))
+        return text, usage, model
+    finally:
+        report['duration_ms'] = int((time.monotonic() - started) * 1000)
+        try:
+            server.usage(report)
+        except Exception as exc:  # noqa: BLE001 - accounting must never change an answer
+            logger.info('%s: the call was not reported to the server (%s)', stage, type(exc).__name__)
 
 
 def review_message(packet):
@@ -29,8 +50,8 @@ def review_one(server, provider, packet):
     """Review one packet and send the verdict. Returns the server's answer, or None when the model failed (the packet's lease runs out
     and the server hands it out again later)."""
     try:
-        text, usage, model = llm.call(provider, prompts.REVIEW_SYSTEM, review_message(packet), prompts.REVIEW_SCHEMA, REVIEW_MAX_TOKENS,
-                                      effort='medium')
+        text, usage, model = measured_call(server, 'finding_review', provider, prompts.REVIEW_SYSTEM, review_message(packet), prompts.REVIEW_SCHEMA,
+                                           REVIEW_MAX_TOKENS, effort='medium')
         answer = guard.parse_reply(text, prompts.REVIEW_SCHEMA)
     except llm.ModelError as exc:
         logger.warning('review of %s: model call failed (%s)', packet.get('ref'), exc.category)
@@ -58,7 +79,8 @@ def run_ops(server, provider, release=None):
     snapshot = server.ops_snapshot(release)
     if all((c.get('state') == 'ok') for c in snapshot.get('checks') or []):
         return server.ops_report({'alerts': [], 'actions': [], 'model': '', 'templates_release': release})
-    text, _usage, model = llm.call(provider, prompts.OPS_SYSTEM, ops_message(snapshot), prompts.OPS_SCHEMA, OPS_MAX_TOKENS, effort='low')
+    text, _usage, model = measured_call(server, 'operations_check', provider, prompts.OPS_SYSTEM, ops_message(snapshot), prompts.OPS_SCHEMA,
+                                        OPS_MAX_TOKENS, effort='low')
     try:
         answer = guard.parse_reply(text, prompts.OPS_SCHEMA)
     except guard.ReplyError as exc:

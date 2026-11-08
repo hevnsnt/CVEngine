@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from cveFeed import detection
 from cveFeed.models import CVEDetection, CVEEntry
+from reNgine import ai_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -227,9 +228,8 @@ INTAKE_POLICY = (
     'person logged in to the host needs, and no remote checks. THEN write the guidance for people and the checks, as below. '
 )
 
-SYSTEM_PROMPT = (
-    'You write the detection record for ONE CVE: how to tell, from outside the host and from on the host, whether a product is '
-    'affected. ' + INTAKE_POLICY + 'Respond with ONLY a JSON object: {"scope": "...", "scope_reason": "...", '
+SYSTEM_PROMPT = ai_prompts.compose('cve_detection',
+    INTAKE_POLICY + 'Respond with ONLY a JSON object: {"scope": "...", "scope_reason": "...", '
     '"summary": "<what the flaw is and what an attacker gains, at most 400 characters>", '
     '"identify": "<how to tell the host runs the affected component and version, at most 320 characters>", '
     '"remote_checks": [...], "local_checks": [...], "prerequisites": ["<short condition>"], '

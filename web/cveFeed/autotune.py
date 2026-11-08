@@ -31,7 +31,7 @@ import time
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-from reNgine import resources
+from reNgine import ai_prompts, resources
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ RETENTION_DAYS = 90
 REVERT_HOLD_HOURS = 24          # after a person reverts a change, the tuner does not raise that setting for this long
 ADVISOR_STAGE = 'autotune_advisor'
 ADVISOR_SEED = 20261101
-ADVISOR_SYSTEM = (
-    'You advise the auto-tuner of a vulnerability scanner. Its policy is to aim high first: run as much as this machine sensibly carries, then '
+ADVISOR_SYSTEM = ai_prompts.compose('autotune_advisor',
+    'The auto-tuner\'s policy is to aim high first: run as much as this machine sensibly carries, then '
     'back off quickly on evidence of trouble, then probe upward slowly. You get measured numbers from the last hours and, for each setting it may '
     'change now, the number in effect, the target sized for this machine, and the lowest and highest number you may choose. Be ambitious: choose '
     'the highest allowed number unless the measurements show trouble (memory kills or little memory free, timeouts, the database near its '

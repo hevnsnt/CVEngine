@@ -20,14 +20,15 @@ import re
 from django.conf import settings
 from django.utils import timezone
 
+from reNgine import ai_prompts
+
 logger = logging.getLogger(__name__)
 
 SERVICE = 'rdp-shot'
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_HOSTS_PER_SCAN = 10  # a screenshot is comparatively expensive (a live RDP session plus an AI call); bound it per scan
 
-VISION_SYSTEM = ('You read unauthenticated screenshots of Windows Remote Desktop (RDP) login screens for a security '
-                  'scanner. Reply with exactly one line of JSON and nothing else.')
+VISION_SYSTEM = ai_prompts.compose('rdp_screenshot', 'Reply with exactly one line of JSON and nothing else.')
 VISION_PROMPT = (
     'This screenshot was captured before any credentials were sent, by a scanner that never attempted to sign in. Say '
     'whether the screen plainly shows an account already signed in or mid sign-in (not just a username field waiting to '

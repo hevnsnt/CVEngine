@@ -12,6 +12,7 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from reNgine import ai_prompts
 from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
@@ -438,7 +439,7 @@ def ai_test(request):
                                 base_url=cfg.base_url or None, runtime=runtime)
         from reNgine.ai_providers import usage_stage
         with usage_stage('connection_test'):
-            reply = provider.complete('Reply with the single word: ok', 'ping')
+            reply = provider.complete(ai_prompts.CONNECTION_TEST_SYSTEM, ai_prompts.CONNECTION_TEST_USER)
     except AIProviderError as exc:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
         cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
