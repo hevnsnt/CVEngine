@@ -45,6 +45,7 @@ refresh_upstream() {
 
 end=$((SECONDS + span))
 next_beat=0
+next_plan=0
 heartbeat() {
   if (( SECONDS >= next_beat )); then
     python3 scripts/update-state.py heartbeat >/dev/null 2>&1 || true
@@ -63,6 +64,12 @@ while :; do
   # gvmd's NVT cache found out of date by an import (web/.openvas-restart newer than its answer): restart gvmd, nothing else
   if [ -f web/.openvas-restart ] && [ ! -L web/.openvas-restart ] && [ web/.openvas-restart -nt web/.openvas-restarted ]; then
     setsid nohup scripts/openvas-sync.sh restart-gvmd >>"$STATE/openvas.log" 2>&1 </dev/null &
+  fi
+  # "Which scanners run" changed in Settings > Sentinels (web/.scanner-plan-wanted): carried out in the background, with a log of its own. It exits 3 while a
+  # scan is running (the server's processes are recreated to read the new setting) and is asked again at the next round.
+  if { [ -f web/.scanner-plan-wanted ] || [ -L web/.scanner-plan-wanted ]; } && (( SECONDS >= next_plan )); then
+    next_plan=$((SECONDS + 20))
+    setsid nohup scripts/apply-scanner-plan.sh >>"$STATE/scanner-plan.log" 2>&1 8>&- </dev/null &
   fi
   pause=2
   if [ -e web/.update-approved ] || [ -L web/.update-approved ]; then

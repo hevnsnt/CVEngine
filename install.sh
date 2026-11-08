@@ -15,6 +15,7 @@
 #   CVENGINE_INSTALL_PORTS="..."             # ports that must be free before the first start (default: the HTTPS and HTTP ports, 443 and 8082); the tests set it to ""
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
+. scripts/host-fit.sh  # the host-size rule for the built-in scanner's memory, shared with the updater (docs/DEPLOYMENT.md#memory)
 started=$SECONDS
 
 usage() {
@@ -94,10 +95,10 @@ case "$(uname -m)" in
   *) warn "architecture $(uname -m) is untested; the container images may not exist for it" ;;
 esac
 
-mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+mem_kb=$(cvengine_fit_mem_kb)
 if [ "${mem_kb:-0}" -gt 0 ]; then
   if [ "$mem_kb" -lt 3500000 ]; then warn "only $((mem_kb / 1024)) MB of memory: 8 GB or more is recommended, scans may be killed for lack of memory"
-  elif [ "$mem_kb" -lt 7000000 ]; then warn "$((mem_kb / 1024)) MB of memory: 8 GB is recommended with the built-in scanner; its container gets 1 GB here instead of 2 (SCANNER_MEM_LIMIT, docs/DEPLOYMENT.md)"
+  elif [ "$mem_kb" -lt 7000000 ]; then warn "$((mem_kb / 1024)) MB of memory: 8 GB is recommended with the built-in scanner; its container gets 1 GB here instead of 3 (SCANNER_MEM_LIMIT, docs/DEPLOYMENT.md)"
   else ok "$((mem_kb / 1024)) MB of memory"; fi
 fi
 
@@ -226,11 +227,10 @@ done
 # ---------------------------------------------------------------------------------------------------------------------------
 step "Preparing settings"
 CVENGINE_INSTALL_SENTINELS=$sentinels ./scripts/init-env.sh ${domain:+"$domain"} || die "Could not prepare .env"
-# A small host: the built-in scanner's container ceiling is 1 GB instead of 2 (an owner's own value is kept)
-if [ "${mem_kb:-0}" -gt 0 ] && [ "$mem_kb" -lt 7000000 ] && ! grep -qE '^SCANNER_MEM_LIMIT=' .env; then
-  printf 'SCANNER_MEM_LIMIT=1g\n' >> .env
-  ok "SCANNER_MEM_LIMIT=1g for this host's memory"
-fi
+# A small host: the built-in scanner's container ceiling is 1 GB instead of 3 (an owner's own value is kept). The rule is scripts/host-fit.sh's, the one
+# the updater applies too.
+log() { ok "$*"; }
+cvengine_fit_memory .env
 # A host port chosen for this run (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in the environment, for a machine where something else holds 443) is
 # written to .env: make, docker compose and the update watcher run later without this environment and would otherwise publish the defaults, move the
 # proxy back to 443 (or fail on it) and leave the address printed above wrong. Without a value given here, what .env already says stays.

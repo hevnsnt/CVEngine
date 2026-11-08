@@ -13,6 +13,7 @@
       <h2 style="margin-bottom:8px">Registered Sentinels</h2>
       <div id="live" aria-live="polite"></div>
     </div>
+    <div class="card" id="plan-card" hidden></div>
   </div>
   <div class="card">
     <h2 style="margin-bottom:8px">Provision a Sentinel</h2>
@@ -47,6 +48,10 @@
 {% endblock %}
 {% block scripts %}
 <script type="module" src="{% asset 'cve/sentinel-live.js' %}"></script>
+<script type="module">
+import { mountScannerPlan } from '{% asset 'cve/scanner-plan.js' %}';
+mountScannerPlan(document.getElementById('plan-card'));
+</script>
 <script>
 (function () {
   var csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;

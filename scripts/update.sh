@@ -6,7 +6,7 @@
 # application containers, and waits until the site, every worker queue and the scheduler answer.
 # It never stops host services, never replaces the database or Redis, and never deletes a volume.
 #
-# Usage: scripts/update.sh [--check] [--stop-scans] [--force] [--help]
+# Usage: scripts/update.sh [--check] [--stop-scans] [--force] [--sentinels internal|both|external] [--help]
 #   --check       Preflight only. Shows the Compose layout, port owners, database volumes, workers
 #                 and scans, and says whether an update can run now. Changes nothing.
 #   --stop-scans  Stop running and queued discovery scans cleanly instead of waiting for them,
@@ -16,6 +16,12 @@
 #                 worker that cannot be inspected or paused does not stop the update. Any other task
 #                 running at that moment is lost and runs again only when its schedule next fires. The
 #                 database, Redis and volumes are still never replaced, and a failed migration still stops.
+#
+#   --sentinels PLAN  Which scanners run, the three choices install.sh asks: internal (the built-in scanner only), both (your Sentinels and the built-in
+#                     scanner), external (your own Sentinels only: the built-in scanner is removed). The same as CVENGINE_INSTALL_SENTINELS=PLAN in the
+#                     environment. Without it nothing is asked and nothing waits: the host-size rule gives a host under 7 GB a 1g scanner limit when
+#                     SCANNER_MEM_LIMIT is not set, and a scanner is never removed without an answer (docs/UPGRADE.md, "From the command line").
+#                     The Update button in Settings > Updates asks the same question in a dialog and hands the answer to the updater.
 #
 # Settings, from the environment or the same keys in .env:
 #   CVENGINE_COMPOSE_FILES         Compose files, comma separated (default docker-compose.yml).
@@ -51,19 +57,25 @@ check_only=0
 after_fetch=0
 stop_scans=0
 force=0
-for arg in "$@"; do
+sentinel_plan=${CVENGINE_INSTALL_SENTINELS:-}
+while (( $# )); do
+    arg=$1; shift
     case $arg in
         --check) check_only=1 ;;
         --stop-scans) stop_scans=1 ;;
         --force) force=1; stop_scans=1 ;;
         --after-fetch) after_fetch=1 ;;
+        --sentinels) (( $# )) || { echo "--sentinels needs internal, both or external." >&2; exit 2; }; sentinel_plan=$1; shift ;;
+        --sentinels=*) sentinel_plan=${arg#--sentinels=} ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+case $sentinel_plan in ''|internal|both|external) ;; *) echo "--sentinels (CVENGINE_INSTALL_SENTINELS) must be internal, both or external, not '$sentinel_plan'." >&2; exit 2 ;; esac
 forward_args=()
 (( stop_scans )) && forward_args+=(--stop-scans)
 (( force )) && forward_args+=(--force)
+[[ -z $sentinel_plan ]] || forward_args+=(--sentinels "$sentinel_plan")
 
 from_commit=${CVENGINE_UPDATE_FROM:-unknown}
 from_sha=${CVENGINE_UPDATE_FROM_SHA:-}
@@ -410,6 +422,20 @@ if (( check_only )); then
         echo "  Scans:     $running running, $queued queued$( (( running + queued )) && { (( stop_scans )) && echo ' (they will be stopped and queued again)' || echo ' (the drain waits for running ones; --stop-scans stops and re-queues them)'; })"
     else echo "  Scans:     web is not running, so scans could not be counted"; fi
     [[ ! -s $requeue_file ]] || echo "  Pending:   $requeue_file holds scans to queue again after the next successful update"
+    if [[ -f scripts/host-fit.sh ]]; then
+        # shellcheck source=host-fit.sh
+        . scripts/host-fit.sh
+        fit_kb=$(cvengine_fit_mem_kb); fit_file=$(_cv_fit_env_file "${compose[@]}")
+        fit_own=$(cvengine_fit_value SCANNER_MEM_LIMIT "$fit_file"); fit_rule=$(cvengine_fit_scanner_limit "$fit_kb")
+        if (( fit_kb > 0 )); then
+            if [[ -n $fit_own ]]; then echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; SCANNER_MEM_LIMIT=$fit_own is yours and stays"
+            elif [[ -n $fit_rule && -z $(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$fit_file") ]]; then echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the update will write SCANNER_MEM_LIMIT=$fit_rule (hosts under 7 GB)"
+            else echo "  Memory:    $(cvengine_fit_gb "$fit_kb") host; the scanner keeps its default limit"; fi
+        fi
+        fit_live=$(CV_FIT_ASK=exec cvengine_fit_externals "${compose[@]}")
+        if [[ -n $fit_live ]]; then echo "  Sentinels: $fit_live of your own live; scanners: $(cvengine_fit_plan_words "$(cvengine_fit_value CVENGINE_SENTINEL_PLAN "$fit_file" | grep -E '^(internal|both|external)$' || echo internal)")"
+        else echo "  Sentinels: the running server could not say how many of your own are live (an older version cannot; the update asks again with the new image); nothing is changed now"; fi
+    fi
     if (( problems )); then echo "Result: fix the items above before updating."; exit 1; fi
     echo "Result: ready. Run scripts/update.sh${forward_args[*]:+ ${forward_args[*]}}"
     exit 0
@@ -487,6 +513,14 @@ fi
 # never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
 if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
+fi
+# What fits this host, before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external): scripts/host-fit.sh,
+# the rules the Update button's dialog and install.sh use too. After the build because the count of Sentinels is read with the new image. An answer given
+# with --sentinels is applied; otherwise the host-size rule and the automatic default, which never removes a scanner and never asks.
+if [[ -f scripts/host-fit.sh ]]; then
+    # shellcheck source=host-fit.sh
+    . scripts/host-fit.sh
+    cvengine_fit_run "$sentinel_plan" "${compose[@]}"
 fi
 # The built-in scanner's pinned image (scanner.lock.json), pulled while everything keeps running. It never fails the update (scripts/scanner.sh).
 if [[ -f scripts/scanner.sh ]]; then
@@ -878,6 +912,7 @@ while (( SECONDS < deadline )); do
             step 'Starting the built-in scanner'
             cvengine_scanner_start "${compose[@]}"
         fi
+        if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
         dispatch_paused=0
         requeued=''
         if [[ -s $requeue_file ]]; then

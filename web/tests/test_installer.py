@@ -32,7 +32,7 @@ class InstallScriptTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = self.tmp / 'repo'
         (self.repo / 'scripts').mkdir(parents=True)
-        for rel in ('install.sh', 'scripts/init-env.sh', '.env.example'):
+        for rel in ('install.sh', 'scripts/init-env.sh', 'scripts/host-fit.sh', '.env.example'):
             shutil.copy(ROOT / rel, self.repo / rel)
         self.stub = self.tmp / 'stub'
         self.stub.mkdir()

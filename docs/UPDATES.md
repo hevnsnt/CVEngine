@@ -163,6 +163,32 @@ pulls over it. `scanner.lock.json` is the known-good floor the release was teste
 published as, for provenance); `python3 scripts/scanner_lock.py raise-floor --commit C --contract N` moves it up, which a release does when it needs a
 newer Sentinel, and CI checks that the floor commit exists on the Sentinel's `main` and that the compose default is the moving tag.
 
+### Which scanners run, asked by the Update button
+
+The server works out three facts before the button starts anything: the host's memory, how many Sentinels of your own are live (the same set the last-resort rule uses: an active Sentinel heard from in the last three minutes, not the built-in scanner), and whether anybody already chose (`CVENGINE_BUILTIN_SCANNER` or `CVENGINE_SENTINEL_PLAN` in `.env`). When nobody chose and the host has under 7 GB or a Sentinel of yours is live, **Approve update** opens a dialog (*Which scanners should run?*) with the memory line, three radio choices and **Update now**. The answer travels with the approval in `web/.update-sentinels` (one word), is checked by the server (App Admin only, CSRF protected, audit logged as `update.approved` with the choice), and is read by `scripts/update-deploy.sh` before anything is stopped and applied with `scripts/host-fit.sh`, the same rules `install.sh` uses. The status line says what was decided (*scanners: Sentinels of your own only*, or *the built-in scanner is limited to 1g for this host's memory*).
+
+When there is no question, or it cannot be asked (an older server, automatic updates, `scripts/update.sh`), the updater applies the safe default and removes nothing; see below. At the end of every update the memory limits of the running containers are added up against the host, and a warning names the largest one and the setting to change when they pass 90 percent.
+
+**Settings > Sentinels** has the same three choices under **Which scanners run**. The page asks the host to apply it (`web/.scanner-plan-wanted`, picked up by the update watcher within seconds, `scripts/apply-scanner-plan.sh`): the choice is written, the server's processes are recreated once no scan is running, and the scanner container is removed or started. The page shows the result.
+
+### From the command line
+
+Almost everyone uses the buttons above. Everything they do can be done from a terminal, and an update run by hand, by cron or by systemd never asks a question and never waits for an answer.
+
+The three choices are keys in `.env` (the same ones `install.sh` writes):
+
+| Choice | `.env` |
+| --- | --- |
+| Use the built-in scanner only | nothing, or `CVENGINE_SENTINEL_PLAN=internal` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use both | `CVENGINE_SENTINEL_PLAN=both` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use my own Sentinels only | `CVENGINE_BUILTIN_SCANNER=0` and `CVENGINE_SENTINEL_PLAN=external`; the next update removes the `scanner` container |
+
+`SCANNER_MEM_LIMIT` is the built-in scanner's memory ceiling (`1g`, `2g`, ...). To answer the question in a script, pass it to the updater: `scripts/update.sh --sentinels external` (or `internal`, `both`), or set `CVENGINE_INSTALL_SENTINELS=external` in the environment. Either writes the keys above exactly as the dialog would, before anything is stopped. Anything else is refused before the update starts.
+
+**An update with no answer** (cron, `scripts/update.sh` with no flag, an automatic update, an update approved by a server too old to ask) applies the safe default: a host under 7 GB gets `SCANNER_MEM_LIMIT=1g` unless you set one, and a scanner is never removed. When it finds two or more Sentinels of your own live and nobody has chosen, it keeps the scanner, prints the finding and the exact flag (`scripts/update.sh --sentinels external`), and leaves a notice in `web/.update-notice.json` that Settings > Updates and Settings > Sentinels show until somebody chooses. The count of live Sentinels is read from the server's database by a one-off container of the new web image (the running container, still on the old image, cannot start the new code, and a 1.3 server has no such command). When it cannot be read (the database is not reachable), the updater prints that and changes nothing about which scanners run.
+
+Read the state from a terminal: `scripts/update.sh --check` prints the memory the updater sees, whether it will write `SCANNER_MEM_LIMIT`, and how many Sentinels of your own are live when the running server can say (it changes nothing); `grep -E '^(CVENGINE_BUILTIN_SCANNER|CVENGINE_SENTINEL_PLAN|SCANNER_MEM_LIMIT)=' .env` shows the choice; `docker compose run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels` prints `EXTERNAL_SENTINELS_LIVE n` (read only). The memory budget line (see [DEPLOYMENT.md](DEPLOYMENT.md#memory)) is in the update's output (`scripts/update.sh`) or in the update log under Settings > Updates (`.git/cvengine-update/update.log` on the host).
+
 ## Branches and releases
 
 - `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag, or running the Release workflow by hand, publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes (`.github/workflows/release.yml`). A patch such as `v1.0.1` keeps the notes of `v1.0` and adds its own short section at the end. The tag must match `web/.version`. A release that has to be made again, because a fix had to be in it, is re-run with the workflow's `recut` option: it deletes the version's release and tag and publishes again from the tip of `master`, so the tag and the downloads change. Use it only before the release has been relied on.

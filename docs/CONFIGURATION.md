@@ -387,9 +387,10 @@ Read by `install.sh`, the compose files and the scripts, not by the application.
 | --- | --- | --- |
 | `CVENGINE_HTTPS_PORT`, `CVENGINE_HTTP_PORT` | `443`, `8082` | The host ports the `proxy` service publishes. Move them when another program holds 443. |
 | `CVENGINE_INSTALL_PORTS` | the two ports above | Ports `install.sh` requires to be free before the first start; an empty value skips the check. |
-| `CVENGINE_INSTALL_SENTINELS` | unset | Set by `install.sh --sentinels=internal\|both\|external` or its one question: `internal` (the default) is the built-in scanner only, `both` adds external Sentinels you enrol later (it writes `CVENGINE_SENTINEL_PLAN=both`), `external` writes `CVENGINE_BUILTIN_SCANNER=0`. |
+| `CVENGINE_INSTALL_SENTINELS` | unset | Set by `install.sh --sentinels=internal\|both\|external` or its one question, and read by `scripts/update.sh` (`--sentinels` is the same): `internal` (the default) is the built-in scanner only, `both` adds external Sentinels you enrol later (it writes `CVENGINE_SENTINEL_PLAN=both`), `external` writes `CVENGINE_BUILTIN_SCANNER=0`. |
 | `CVENGINE_ENABLE_BUILTIN_SCANNER` | unset | `0` (what `install.sh --no-builtin-scanner` sets) makes `scripts/init-env.sh` write `CVENGINE_BUILTIN_SCANNER=0`. |
-| `CVENGINE_SENTINEL_PLAN` | unset | What `install.sh` reports as the choice (`both`, `internal`, `external`) on a re-run. |
+| `CVENGINE_HOST_MEM_MB` | unset | Replaces the host memory (MB) that `scripts/host-fit.sh` and the server read for the host-size rule and the Update dialog. Only the tests and rehearsals set it. |
+| `CVENGINE_SENTINEL_PLAN` | unset | Which scanners run: `internal`, `both` or `external`. Written by `install.sh`, by the Update dialog and by Settings > Sentinels; its presence means somebody chose, so nothing asks again. [Built-in scanner](BUILTIN-SCANNER.md#which-scanners-run) |
 | `CVENGINE_COMPOSE_PROJECT`, `CVENGINE_COMPOSE_FILES`, `CVENGINE_COMPOSE_ENV_FILE` | detected | Which Compose project, files and env file the scripts drive (`scripts/compose-layout.sh`). |
 | `CVENGINE_SCANNER_IMAGE`, `CVENGINE_SCANNER_ROLLBACK_IMAGE`, `CVENGINE_SCANNER_READY_SECONDS`, `SCANNER_MEM_LIMIT` | | The built-in scanner's image and memory: [Built-in scanner](#built-in-scanner). |
 | `CVENGINE_SCANNER_IP`, `CVENGINE_SCANNER_SUBNET`, `CVENGINE_SCANNER_GATEWAY`, `CVENGINE_SCANNER_PARENT` | required, `eth0` for the parent | Only with `docker-compose.macvlan.yml`: the address, subnet, gateway and host interface of the scanner's own address on the LAN. |

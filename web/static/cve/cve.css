@@ -2337,6 +2337,11 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .ai-savebar .msg{flex:1 1 100%;margin:0}
 
 @media (min-width:900px){.ai-savebar{position:sticky;bottom:0}}
+/* ---- which scanners run: the update dialog and the Sentinels page (static/cve/scanner-plan.js) ---- */
+.plan-choices{border:0;margin:var(--s-3) 0;padding:0}
+.plan-opt{display:flex;align-items:center;gap:var(--s-3);min-height:44px;padding:var(--s-1) 0;font-size:var(--fs-3);cursor:pointer}
+.plan-opt span{flex:1}
+
 
 /* ---- phones: the filters sit behind one button and the list comes first (static/cve/app.js filtersToggle / filtersGroup) ---- */
 .filters-row,.filters-toggle{display:none}

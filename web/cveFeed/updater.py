@@ -361,7 +361,7 @@ def sync_applied(row):
 
 
 def _remove_flag():
-    for name in ('.update-approved', '.update-branch'):
+    for name in ('.update-approved', '.update-branch', '.update-sentinels'):
         try:
             os.remove(_file(name))
         except OSError:
@@ -374,8 +374,15 @@ def local_commits(row):
     return host['ahead'] if host else 0
 
 
-def approve(row, user):
-    """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
+def approve(row, user, plan=None):
+    """Record the administrator's approval of the commit currently shown, and hand it to the host updater. ``plan`` (internal, both or external) is the
+    answer to the question the Update button asked about which scanners run (``cveFeed.scanner_plan``); it travels in ``.update-sentinels`` and the host applies
+    it with the update. Without one the host applies its automatic default and never removes a scanner."""
+    from cveFeed import scanner_plan
+    try:
+        wanted = scanner_plan.validate(plan) if plan not in (None, '') else None
+    except scanner_plan.PlanError as exc:
+        raise UpdateError(str(exc))
     if not SHA_RE.match(row.latest_sha or ''):
         raise UpdateError('there is no update to approve; run a check first')
     if not update_available(row, installed_sha()):
@@ -392,6 +399,10 @@ def approve(row, user):
     with open(branch_tmp, 'w') as f:
         f.write(row.branch + '\n')
     os.replace(branch_tmp, _file('.update-branch'))
+    if wanted:
+        scanner_plan.with_update(wanted)  # before the approval: the host reads it when it sees the approval
+    else:
+        scanner_plan.clear_pending()
     os.replace(tmp, _file('.update-approved'))
     row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, getattr(user, 'username', user), timezone.now()
     row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])

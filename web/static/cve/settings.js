@@ -1,6 +1,7 @@
 // Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
+import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
@@ -722,6 +723,7 @@ const sections = {
         }
         if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer", style: "display:block;margin:0 0 14px" }));
       }
+      if (s.scanner_notice) kids.push(el("p", "msg", `${s.scanner_notice.text} `, { style: "margin-top:10px", role: "status" }), el("a", "note", "Open Sentinels", { href: "/cve/sentinels/" }), document.createTextNode(" "));
       if (s.branch_warning) kids.push(el("p", "msg err", s.branch_warning, { style: "margin-top:10px" }));
       if (s.status === "approved") {
         kids.push(
@@ -731,6 +733,15 @@ const sections = {
       } else if (["available", "dismissed"].includes(s.status)) {
         kids.push(
           button("Approve update", async () => {
+            // the question worth asking first (which scanners run), asked by the server's facts; no question, no dialog: the button just updates
+            const fresh = await api("GET", "updates");
+            if (fresh.scanner_choice && fresh.scanner_choice.needs_choice) {
+              const plan = await askScannerPlan(fresh.scanner_choice);
+              if (!plan) return;
+              draw(await api("POST", "updates/approve", { sentinels: plan }));
+              toast("Approved");
+              return;
+            }
             const note = (s.branch_warning ? s.branch_warning + " " : "") + (hu.alive
               ? "Scans are paused, running ones finish, then the host rebuilds and restarts the services."
               : "The host updater is not reporting, so nothing will start until it is installed on the server (scripts/install-updater.sh).");

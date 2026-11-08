@@ -88,6 +88,17 @@ deploy_steps() {
   if grep -qx reviewer <<<"$listed"; then
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
+  # Which scanners run, decided before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external)
+  # (scripts/host-fit.sh, the rules scripts/update.sh and install.sh use too; after the build, because the count of Sentinels is read with the new image).
+  # The answer the Update button's dialog collected comes with the approval (web/.update-sentinels, read without following a link); without one (the button
+  # of an older server, a check that could not be made, automatic updates) the automatic default applies: the host-size rule, and a scanner is never removed.
+  local fit_plan=''
+  if [ -f scripts/host-fit.sh ]; then
+    . scripts/host-fit.sh
+    fit_plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || fit_plan=''
+    cvengine_fit_run "$fit_plan" "${compose[@]}" || true
+    [ -z "$cv_fit_short" ] || phase applying "build: $cv_fit_short"
+  fi
   # The built-in scanner's pinned image (scanner.lock.json): pulled now, before anything is stopped. It never fails the update (scripts/scanner.sh).
   if [ -f scripts/scanner.sh ]; then
     . scripts/scanner.sh
@@ -144,6 +155,7 @@ deploy_steps() {
     phase applying scanner
     cvengine_scanner_start "${compose[@]}"
   fi
+  if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
   prune_old_images
 }
 
