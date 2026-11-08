@@ -2338,8 +2338,8 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 
 @media (min-width:900px){.ai-savebar{position:sticky;bottom:0}}
 /* ---- which scanners run: the update dialog and the Sentinels page (static/cve/scanner-plan.js) ---- */
-.plan-choices{border:0;margin:12px 0;padding:0}
-.plan-opt{display:flex;align-items:center;gap:12px;min-height:44px;padding:6px 0;font-size:14px;cursor:pointer}
+.plan-choices{border:0;margin:var(--s-3) 0;padding:0}
+.plan-opt{display:flex;align-items:center;gap:var(--s-3);min-height:44px;padding:var(--s-1) 0;font-size:var(--fs-3);cursor:pointer}
 .plan-opt span{flex:1}
 
 
