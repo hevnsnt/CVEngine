@@ -4,7 +4,8 @@
 # Cron starts it every minute (scripts/install-updater.sh). Each start watches web/.update-approved for SECONDS (a little less than a
 # minute), so an approval is acted on within about two seconds: scans are paused, running ones drain, the files are updated and the
 # containers restart (all of that is scripts/apply-update.sh). It also tells the app it is alive every 15 seconds (web/.updater-heartbeat),
-# so Settings > Updates can say when nothing on the host is listening; the heartbeat goes on while an update runs, which takes minutes.
+# so Settings > Updates can say when nothing on the host is listening; the heartbeat goes on while an update runs, which takes minutes. It also acts on
+# web/.scanner-update-requested (the server asking for the built-in scanner's newest image) by running scripts/scanner-update.sh.
 # The web container has no Docker or git access on purpose; this script is the only thing that acts on the approval.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -63,6 +64,13 @@ while :; do
   # gvmd's NVT cache found out of date by an import (web/.openvas-restart newer than its answer): restart gvmd, nothing else
   if [ -f web/.openvas-restart ] && [ ! -L web/.openvas-restart ] && [ web/.openvas-restart -nt web/.openvas-restarted ]; then
     setsid nohup scripts/openvas-sync.sh restart-gvmd >>"$STATE/openvas.log" 2>&1 </dev/null &
+  fi
+  # the server asked for the built-in scanner's newest image (web/.scanner-update-requested, written by agentapi/sentinel_autoupdate.py when the scanner runs a
+  # build behind the newest published one): run the scanner update in the background. scripts/scanner-update.sh waits for the scanner to finish its tasks, keeps
+  # the new image only once it has checked in, puts the old one back otherwise, and takes its own lock. The answer marker is touched first, so one request runs once.
+  if [ -f web/.scanner-update-requested ] && [ ! -L web/.scanner-update-requested ] && [ web/.scanner-update-requested -nt web/.scanner-update-done ] && [ -f scripts/scanner-update.sh ]; then
+    : >web/.scanner-update-done 2>/dev/null || true
+    setsid nohup scripts/scanner-update.sh >>"$STATE/scanner-update.log" 2>&1 </dev/null &
   fi
   pause=2
   if [ -e web/.update-approved ] || [ -L web/.update-approved ]; then

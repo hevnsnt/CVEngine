@@ -39,6 +39,9 @@ services:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
       context: ./web
+      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
+        SENTINEL_REF: "${SENTINEL_REF:-main}"
+        SENTINEL_SHA: "${SENTINEL_SHA:-}"
     restart: always
     # An init process (tini) as PID 1 reaps the scanners' children and passes SIGTERM on to the entrypoint, which turns it into a warm shutdown of
     # the workers and exits when any one of them dies, so `restart: always` brings back all four. 60 s matches the update scripts' stop timeout.
@@ -121,6 +124,9 @@ services:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
       context: ./web
+      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
+        SENTINEL_REF: "${SENTINEL_REF:-main}"
+        SENTINEL_SHA: "${SENTINEL_SHA:-}"
     entrypoint: /usr/src/app/entrypoint.sh
     # GUNICORN_WORKERS is pinned below (not read from .env): the lockout counters are in the shared Redis cache, so two workers is safe,
     # and a stray value in .env cannot change it

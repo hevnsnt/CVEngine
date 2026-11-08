@@ -137,8 +137,8 @@ class SoftwareListTests(TestCase):
 	def _uncovered(self, dockerfile_key, text):
 		from cveFeed import software
 		covered = ' '.join(pattern for item in software.TOOLS for path, pattern in item['pins'] if path == dockerfile_key)
-		# checksums and the toolchain's per-architecture hashes are not tools of their own
-		return [name for name in self._args(text) if not re.search(r'_SHA256|^TZDATA_VERSION$|^PYSOCKS_VERSION$|^NUCLEI_TEMPLATES_SHA', name) and f'ARG {name}=' not in covered]
+		# checksums and the toolchain's per-architecture hashes are not tools of their own, and the SENTINEL_* build arguments say which Sentinel library to install (the About page names the commit it read)
+		return [name for name in self._args(text) if not re.search(r'_SHA256|^TZDATA_VERSION$|^PYSOCKS_VERSION$|^NUCLEI_TEMPLATES_SHA|^SENTINEL_(REPO|REF|SHA)$', name) and f'ARG {name}=' not in covered]
 
 	def test_a_tool_pinned_in_the_server_image_is_on_the_list(self):
 		self.assertEqual(self._uncovered('web/Dockerfile', (ROOT / 'web' / 'Dockerfile').read_text()), [])

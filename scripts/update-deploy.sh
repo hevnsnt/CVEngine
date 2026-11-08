@@ -82,6 +82,8 @@ deploy_steps() {
   if grep -qx proxy <<<"$listed"; then
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
+  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
+  export SENTINEL_SHA
   "${compose[@]}" build web celery celery-beat || return 1
   # The AI reviewer has its own small image (docs/AI-REVIEWER.md). A failed build never fails the update: scanning does not need it, and the
   # next update builds it again.

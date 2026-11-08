@@ -1038,6 +1038,8 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         reported = (agent.info or {}).get('contract_version')
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
         out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
+        from agentapi import sentinel_autoupdate
+        out['auto_update'] = sentinel_autoupdate.view(agent)  # running / newest / update requested / flagged, in plain words
         # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
         held = counts.get('_held_by_kind', {})
         limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)

@@ -168,13 +168,18 @@ def _limits(agent, entries):
 
 
 def instance_self_update():
-    """The instance-wide default for Sentinels' self-update: the administrators' choice (``SentinelDefaults``), else the instance's own update
-    choice (Automatic updates mean ``automatic``, anything else ``manual``)."""
-    from cveFeed import updater
-    chosen = SentinelDefaults.current().self_update
-    if chosen in SELF_UPDATE:
-        return chosen
-    return 'automatic' if updater.read_mode() == 'auto' else 'manual'
+    """The instance-wide default for Sentinels' self-update: the administrators' choice (``SentinelDefaults.self_update``), else ``automatic`` while
+    "Keep Sentinels on the newest version" is on (the default) and ``manual`` once an administrator turned it off. A Sentinel with a value of its own,
+    and a machine's own ceiling (``CVENGINE_SENTINEL_UPDATE``), still win over this."""
+    row = SentinelDefaults.current()
+    if row.self_update in SELF_UPDATE:
+        return row.self_update
+    return 'automatic' if row.keep_newest else 'manual'
+
+
+def keep_newest():
+    """Whether the instance keeps Sentinels on the newest version (Settings, Sentinels). On unless an administrator turned it off."""
+    return bool(SentinelDefaults.current().keep_newest)
 
 
 def explicit(agent):
@@ -414,8 +419,16 @@ def update_reply(agent):
     whether an administrator asked it to update now. ``mode`` is the same answer in the older vocabulary (``auto`` or ``manual``) for a client that
     predates ``setting``. Nothing changes a Sentinel's code unless ``setting`` is ``automatic``, or ``manual`` and ``requested``; ``off`` never."""
     setting = effective(agent, kinds=False)['self_update']
-    return {'setting': setting, 'mode': 'auto' if setting == 'automatic' else 'manual',
-            'requested': bool(agent.update_requested_at) and setting != 'off'}
+    out = {'setting': setting, 'mode': 'auto' if setting == 'automatic' else 'manual',
+           'requested': bool(agent.update_requested_at) and setting != 'off'}
+    if out['requested']:
+        # optional fields: the commit cvENGINE wants this Sentinel on and why ('newest': the instance keeps Sentinels on the newest version, 'admin': Update now).
+        # A client that does not know them ignores them; the contract version is unchanged. Only ever a build the Sentinel is behind (never a downgrade).
+        from agentapi import sentinel_autoupdate
+        held = sentinel_autoupdate.stored(agent)
+        if held.get('status') == 'requested' and held.get('target'):
+            out['target'], out['reason'] = held['target'], 'admin' if held.get('reason') == 'admin' else 'newest'
+    return out
 
 
 def updater_state(agent):
@@ -448,11 +461,13 @@ def request_update(agent, actor, now=None):
     now = now or timezone.now()
     agent.update_requested_at = now
     Agent.objects.filter(pk=agent.pk).update(update_requested_at=now)
+    from agentapi import sentinel_autoupdate
+    target = sentinel_autoupdate.admin_pressed(agent, now)  # clears a flag and the rate limit; names the newest commit when this Sentinel is behind
     audit.record_for_user(actor, 'agent.update_requested', agent.token.user, target=agent.name, agent_id=agent.pk,
-                          version=(agent.info or {}).get('version'))
+                          version=(agent.info or {}).get('version'), update_to=target)
 
 
-DEFAULT_KEYS = ('self_update', 'builtin_kinds', 'external_kinds')
+DEFAULT_KEYS = ('self_update', 'keep_newest', 'builtin_kinds', 'external_kinds')
 
 
 def get_defaults():
@@ -462,22 +477,24 @@ def get_defaults():
     ``builtin_kinds_is_shipped`` says), the second for every other Sentinel (empty: every declared kind is allowed)."""
     row = SentinelDefaults.current()
     kinds = policy_lib.defaults()
-    return {'self_update': row.self_update or None, 'effective_self_update': instance_self_update(), 'follows_instance': not row.self_update,
+    return {'self_update': row.self_update or None, 'keep_newest': bool(row.keep_newest), 'effective_self_update': instance_self_update(), 'follows_instance': not row.self_update,
             'builtin_kinds': kinds['builtin'], 'builtin_kinds_is_shipped': kinds['builtin_shipped'], 'external_kinds': kinds['external'],
             'changed_by': row.changed_by or None, 'changed_at': row.changed_at.isoformat() if row.changed_at else None}
 
 
 def set_defaults(actor, body):
     """App Admin only: any of ``{self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode, max_concurrent}}|null, external_kinds: {...}|null}``.
-    ``self_update`` ``null`` goes back to following the instance's own Automatic or Manual update choice. ``builtin_kinds`` / ``external_kinds`` replace the whole map
+    ``self_update`` ``null`` goes back to following ``keep_newest`` (a boolean, on by default: Sentinels are Automatic and cvENGINE asks them to update to the newest build). ``builtin_kinds`` / ``external_kinds`` replace the whole map
     (``{}``: no defaults); ``null`` for ``builtin_kinds`` restores the shipped default (OpenVAS denied on the built-in scanner), for ``external_kinds`` it is
     the same as ``{}``. They apply to every Sentinel of the class with no policy of its own for a kind."""
     if not actor.is_superuser:
         raise ApiError(403, 'the Sentinel defaults are changed by an App Admin')
     if not isinstance(body, dict) or not body or set(body) - set(DEFAULT_KEYS):
-        raise ApiError(400, f'send any of {", ".join(DEFAULT_KEYS)}: {{"self_update": "off" | "manual" | "automatic" | null, '
+        raise ApiError(400, f'send any of {", ".join(DEFAULT_KEYS)}: {{"self_update": "off" | "manual" | "automatic" | null, "keep_newest": true | false, '
                             '"builtin_kinds": {kind: {"mode", "max_concurrent"}} | null, "external_kinds": {kind: {"mode", "max_concurrent"}} | null}')
     value = body.get('self_update')
+    if 'keep_newest' in body and not isinstance(body['keep_newest'], bool):
+        raise ApiError(400, 'keep_newest must be true or false')
     if 'self_update' in body and value is not None and value not in SELF_UPDATE:
         raise ApiError(400, f'self_update must be one of {", ".join(SELF_UPDATE)}, or null')
     cleaned = {}
@@ -493,6 +510,8 @@ def set_defaults(actor, body):
     row = SentinelDefaults.current()
     if 'self_update' in body:
         row.self_update = value or ''
+    if 'keep_newest' in body:
+        row.keep_newest = body['keep_newest']
     if 'builtin_kinds' in cleaned:
         row.builtin_kinds = cleaned['builtin_kinds']  # None: the shipped default again
     if 'external_kinds' in cleaned:
@@ -501,5 +520,7 @@ def set_defaults(actor, body):
     row.save()
     after = get_defaults()
     extra = {key: {'before': before[key], 'after': after[key]} for key in ('builtin_kinds', 'external_kinds') if key in body}
+    if 'keep_newest' in body:
+        extra['keep_newest'] = {'before': before['keep_newest'], 'after': after['keep_newest']}
     audit.record(actor, 'sentinel.defaults', 'sentinel defaults', before=before['self_update'], after=after['self_update'], **extra)
     return after

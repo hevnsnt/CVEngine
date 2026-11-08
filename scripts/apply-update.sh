@@ -186,6 +186,8 @@ deploy_builtin() {
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
+  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
+  export SENTINEL_SHA
   "${compose[@]}" build web celery celery-beat || return 1
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"

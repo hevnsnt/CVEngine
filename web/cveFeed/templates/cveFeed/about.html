@@ -67,6 +67,7 @@
   <section class="about-sec" id="software" aria-labelledby="software-h">
     <h2 id="software-h">Software inventory <span class="count">{{ inventory_count }}</span></h2>
     <p class="note about-intro">Everything the server and Sentinel images are built from, with the version each one pins and its license.</p>
+    <p class="note about-intro" id="sentinel-contract-source">{{ sentinel_contract_line }}.</p>
     <div class="about-filter" id="about-filter" hidden>
       <label for="about-filter-input">Filter by name, license or purpose</label>
       <input type="search" id="about-filter-input" autocomplete="off" placeholder="nmap, MIT, TLS">

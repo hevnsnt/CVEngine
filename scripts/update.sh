@@ -482,6 +482,8 @@ step 'Building application images while everything keeps running'
 if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
     "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
 fi
+SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now: a moved main rebuilds that layer
+export SENTINEL_SHA
 "${compose[@]}" build web celery celery-beat
 # The AI reviewer has its own small image (docs/AI-REVIEWER.md); an install whose compose file has it builds it here too. A failed build
 # never fails the update: the reviewer is not needed for scanning, and the next update builds it again.

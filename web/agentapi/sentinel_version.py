@@ -9,6 +9,7 @@ while a list is being built, so a slow or unreachable GitHub costs a page nothin
 reported, the latest not checked yet, the check switched off or failing, or no verdict for exactly this installed commit). ``behind`` means the newest
 build the server saw is a descendant of the one the Sentinel runs; a build equal to or ahead of the cached head is ``current``, never ``behind``.
 """
+import json
 import logging
 import os
 import re
@@ -29,6 +30,8 @@ TTL = 24 * 3600  # the answer outlives a missed refresh; ``checked_at`` says how
 ASK_EVERY = 300  # a page that finds nothing cached asks for a refresh at most this often (seconds)
 HEX_RE = re.compile(r'^[0-9a-f]{7,40}$')
 MAX_VERSIONS = 20  # distinct reported versions compared per refresh
+CONTRACT_PATH = 'cvengine_scanner/contract/sentinel_contract.json'
+MAX_CONTRACT_BYTES = 4 * 1024 * 1024
 
 
 def enabled():
@@ -137,8 +140,31 @@ def refresh(get=requests.get, now=None):
         cache.set(verdict_key(version), {'head': found['sha'], 'behind_by': behind, 'checked_at': now.isoformat()}, TTL)
     out = {'sha': found['sha'], 'message': found['message'], 'url': found['url'], 'date': found['date'], 'error': '', 'checked_at': now.isoformat(),
            'repo': repo(), 'branch': branch()}
+    # the contract the newest build speaks (kept while the head has not moved): what cvENGINE checks before it asks a Sentinel to update to it
+    held = previous.get('contract') if previous.get('sha') == found['sha'] else None
+    out['contract'] = held or fetch_contract(found['sha'], get=get)
     cache.set(key, out, TTL)
     return out
+
+
+def fetch_contract(sha, get=None):
+    """``{version, min_supported}`` of the result contract the Sentinel repository holds at commit ``sha``, or ``None`` when it cannot be read (a failure
+    is never read as "fine": cvENGINE then does not ask any Sentinel to update to that build). One read per new head, not one per page."""
+    if not HEX_RE.match(sha or ''):
+        return None
+    headers = {**updater._headers(_token()), 'Accept': 'application/vnd.github.raw+json'}
+    get = get or requests.get  # looked up now, so a test that replaces requests.get is heard
+    try:
+        resp = get(f'{updater.API}/repos/{repo()}/contents/{CONTRACT_PATH}', params={'ref': sha}, headers=headers, timeout=20)
+        if resp.status_code != 200 or len(resp.content or b'') > MAX_CONTRACT_BYTES:
+            return None
+        doc = json.loads(resp.content)
+        version, minimum = doc.get('contract_version'), doc.get('min_supported_contract_version')
+    except Exception:  # noqa: BLE001 - a contract that cannot be read is never taken as fine; the caller asks nobody to update
+        return None
+    if not isinstance(version, int) or isinstance(version, bool) or not isinstance(minimum, int) or isinstance(minimum, bool):
+        return None
+    return {'version': version, 'min_supported': minimum}
 
 
 def _version_since(agent):
@@ -160,7 +186,7 @@ def state(agent, settings_value=None):
     """The version of ``agent`` against the latest Sentinel client. Reads the cache only."""
     version = str(((agent.info or {}).get('version')) or '').strip().lower()
     out = {'status': 'unknown', 'version': version or None, 'latest': None, 'latest_message': None, 'latest_url': None, 'latest_date': None,
-           'behind_by': None, 'checked_at': None, 'repo': repo(), 'detail': ''}
+           'behind_by': None, 'checked_at': None, 'repo': repo(), 'detail': '', 'latest_full': None, 'latest_contract': None}
     if not enabled():
         out['detail'] = 'the version check is switched off (CVENGINE_SENTINEL_VERSION_CHECK)'
         return out
@@ -169,6 +195,8 @@ def state(agent, settings_value=None):
         _ask_for_refresh()
         out['detail'] = 'the latest version has not been checked yet'
         return out
+    out['latest_full'] = latest.get('sha') or None  # the whole commit: what an update request names
+    out['latest_contract'] = latest.get('contract')
     out.update(latest=(latest.get('sha') or '')[:12] or None, latest_message=latest.get('message') or None, latest_url=latest.get('url') or None,
                latest_date=latest.get('date') or None, checked_at=latest.get('checked_at'))
     if not latest.get('sha'):

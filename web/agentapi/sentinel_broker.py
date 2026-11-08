@@ -40,6 +40,7 @@ from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_stream
+from agentapi import sentinel_autoupdate
 from agentapi import sentinel_version
 from agentapi import web_screenshot_results
 from agentapi import services as svc
@@ -141,6 +142,7 @@ def heartbeat(ctx, body=None):
         if info:
             sentinel_settings.record_info(agent, info)
             agent.refresh_from_db()
+        sentinel_autoupdate.consider(agent)  # keep Sentinels on the newest version: settles an open request, asks when the matrix says so (never raises)
         out['settings'] = sentinel_settings.reply(agent)  # what the Sentinel should run with: an edit made in cvENGINE reaches it within a heartbeat
         out['update'] = sentinel_settings.update_reply(agent)
     out['contract'] = sentinel_contract.reply()
@@ -2835,6 +2837,7 @@ def _live_overview(ctx):
     activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
+    keep_newest = sentinel_settings.keep_newest()
     decide = _deciders(ctx.user, agents)
     out = []
     for agent in agents:
@@ -2855,8 +2858,9 @@ def _live_overview(ctx):
             'contract_note': sentinel_contract.note((agent.info or {}).get('contract_version')), 'version_since': (agent.info or {}).get('version_since'),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
+            'auto_update': sentinel_autoupdate.view(agent, now, keep=keep_newest, instance_update=instance_update),  # "running abc1234, newest def5678, update requested 10:42"
             # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
-            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'))),
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('auto_update', {}).get('status'))),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
                         for t in mine],
             'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),

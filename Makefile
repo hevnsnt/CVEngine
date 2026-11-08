@@ -5,6 +5,7 @@
 
 # This for future release of Compose that will use Docker Buildkit, which is much efficient.
 COMPOSE_PREFIX_CMD := COMPOSE_DOCKER_CLI_BUILD=1
+SENTINEL_BUILD_ENV = SENTINEL_SHA=$$(./scripts/sentinel-ref.sh)# the newest Sentinel library, resolved when an image is built (docs/UPDATES.md)
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
 SERVICES          := db web proxy redis celery celery-beat reviewer
@@ -39,7 +40,7 @@ up: check-env		## Build and start all services.
 	@python3 scripts/update-state.py upstream || true
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
 	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
 	@# The built-in scanner (docs/BUILTIN-SCANNER.md) shares celery's network namespace too: the newest published image is fetched and it is recreated after celery
@@ -48,7 +49,7 @@ up: check-env		## Build and start all services.
 
 build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
 admin:		## Create the admin account; its password is generated and printed once (after make up).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin

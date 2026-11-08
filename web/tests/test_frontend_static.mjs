@@ -215,7 +215,7 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
-const {versionBlock, newestLine, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, newestLine, updateLine, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
@@ -241,6 +241,19 @@ test('a card says whether the build is the newest the server saw, since when it 
   const old = versionBlock({...base, contract: {version: 1, state: 'unsupported', note: 'This scanner is older than this server needs, update it'}}, {onChange() {}});
   assert.match(sentinelText(old), /This scanner is older than this server needs, update it/);
   assert.equal(old.children.some((c) => c.cls === 'msg err ss-detail'), true);
+});
+
+test('a card says what is running, what is newest and whether an update was asked for, in plain words', () => {
+  const base = {id: 7, name: 'edge-1', version: 'abc1234def56', update: {requested_at: null}, settings: {}};
+  const asked = new Date(2026, 10, 8, 10, 42).toISOString();
+  assert.match(sentinelText(updateLine({...base, auto_update: {code: 'requested', running: 'abc1234def56', newest: 'def5678abc12', requested_at: asked, flagged: false}})), /^running abc1234, newest def5678, update requested \d{1,2}:42/);
+  assert.match(sentinelText(updateLine({...base, update: {status: 'draining'}, auto_update: {code: 'requested', running: 'abc1234def56', newest: 'def5678abc12', requested_at: asked}})), /running abc1234, newest def5678, updating$/);
+  assert.match(sentinelText(updateLine({...base, auto_update: {code: 'current', running: 'abc1234def56', newest: 'abc1234def56'}})), /^running abc1234, newest abc1234, current$/);
+  const waiting = updateLine({...base, auto_update: {code: 'waiting_for_server', text: 'The newest Sentinel build is newer than this server, waiting for the server update', running: 'abc1234def56', newest: 'def5678abc12'}});
+  assert.match(sentinelText(waiting), /newer than this server, waiting for the server update/);
+  const flagged = updateLine({...base, auto_update: {code: 'flagged', flagged: true, text: 'Did not report a newer version within 90 minutes of the request, so cvENGINE stopped asking. Press Update now to try again', running: 'abc1234def56', newest: 'def5678abc12'}});
+  assert.equal(flagged.cls, 'msg err ss-detail');
+  assert.equal(updateLine(base), null);
 });
 
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
