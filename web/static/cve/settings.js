@@ -1,6 +1,7 @@
 // Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
+import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
@@ -509,36 +510,7 @@ const sections = {
     sync();
     loader.ask(true); // the page opens with its lists filled: nothing to press
     const seedState = await api("GET", "cve_seed");
-    const seedNote = el("p", "note", "");
-    const showSeed = (st) => {
-      const b = st.built;
-      seedNote.textContent = st.building
-        ? "Building the seed: this takes a few minutes. Refresh to see it."
-        : b
-          ? `Last build ${new Date(b.generated_at).toLocaleString()}: ${b.count.toLocaleString()} CVEs (fire ${b.tiers.fire.toLocaleString()}, smoke ${b.tiers.smoke.toLocaleString()}, ice ${b.tiers.ice.toLocaleString()}), ${b.with_detection.toLocaleString()} with guidance, ${Math.round(b.bytes / 1048576)} MB.`
-          : "No seed has been built on this server yet.";
-    };
-    showSeed(seedState);
-    const seedLinks = el("div", "tools");
-    if (seedState.file) {
-      seedLinks.append(
-        el("a", "btn ghost sm", "Download the seed", { href: "/cve/api/settings/cve_seed/download/seed" }),
-        el("a", "btn ghost sm", "Download its manifest", { href: "/cve/api/settings/cve_seed/download/manifest" }),
-      );
-    }
-    m.append(
-      el("div", "", null, { style: "height:16px" }),
-      card(
-        "CVE catalog seed",
-        el("p", "note", "A new install loads this file on first start, so it begins with every CVE and its guidance instead of rebuilding them one by one. Build it here once the guidance is written, then attach both files to the cve-seed release on GitHub (scripts/publish-cve-seed.sh does it from a machine with gh)."),
-        seedNote,
-        button("Build the seed", async () => {
-          showSeed(await api("POST", "cve_seed/build").then(() => ({ building: true })));
-          toast("Building the seed");
-        }),
-        seedLinks,
-      ),
-    );
+    m.append(el("div", "", null, { style: "height:16px" }), seedCard({ el, api, toast, card, csrf, apiBase: API, initial: seedState }));
     const seedParts = [m.children[m.children.length - 2], m.lastChild]; // the seed build is not a setting: it goes below the settings, before the Save bar
     m.append(
       el("div", "", null, { style: "height:16px" }),

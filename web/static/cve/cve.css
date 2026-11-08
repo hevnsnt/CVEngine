@@ -2387,3 +2387,12 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   a.sd-url{display:flex}
   .find>a,.host-head a.badge{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
 }
+
+/* CVE catalog seed card (Settings, AI model) */
+.seed-card h3{font:var(--fw-semi) var(--fs-3) var(--font);margin:var(--s-5) 0 var(--s-2)}
+.seed-card .seed-status{margin:var(--s-3) 0 0;min-height:20px}
+.seed-stats{display:grid;grid-template-columns:max-content 1fr;gap:var(--s-1) var(--s-4);margin:var(--s-2) 0 var(--s-3);font-size:var(--fs-3)}
+.seed-stats dt{color:var(--muted)}.seed-stats dd{margin:0;overflow-wrap:anywhere}.seed-stats .mono{font-family:var(--mono);font-size:var(--fs-2)}
+.seed-withheld{margin:0 0 var(--s-3);padding-left:var(--s-5);font-size:var(--fs-3)}.seed-withheld li{margin:2px 0}
+.seed-card input[type=file]{padding:var(--s-2) var(--s-3)}
+@media (max-width:480px){.seed-stats{grid-template-columns:1fr}.seed-card .tools .btn,.seed-card>.btn{width:100%}}

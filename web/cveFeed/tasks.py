@@ -2039,28 +2039,19 @@ def author_cve_detections():
     return out
 
 
-@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue")
-def build_cve_seed():
-    """Write the whole catalog with its shared detection records to the exports folder (Settings > CVE seed), ready to publish."""
-    import os
-    from django.core.cache import cache
-    from cveFeed import activity, detection_author, seed
-    from cveFeed.settings_api import SEED_BUILDING, SEED_NAME, seed_dir
-    handle = activity.log('inventory', 'Building the CVE seed', status='running')
-    try:
-        while detection_author.author_rules(batch=5000):
-            pass
-        detection_author.refresh_rules(batch=5000)
-        detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
-        os.makedirs(seed_dir(), exist_ok=True)
-        manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
-        activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")
-        return {k: manifest[k] for k in ('count', 'with_detection', 'bytes')}
-    except Exception:
-        activity.settle(handle, 'failed', message='Building the CVE seed failed; see the worker log')
-        raise
-    finally:
-        cache.delete(SEED_BUILDING)
+@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def build_cve_seed(user_id=None):
+    """Settings > CVE catalog seed > Create seed file: write the whole catalog with its shared detection records to the private seed folder,
+    scrubbed of anything of this instance (cveFeed.seed_scrub). The page polls the progress this records (cveFeed.seed_admin)."""
+    from cveFeed import seed_admin
+    return {"count": seed_admin.run_export(user_id)}
+
+
+@app.task(name="import_cve_seed_file", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def import_cve_seed_file(path, user_id=None, verified=False):
+    """Settings > CVE catalog seed > Import a seed file: the upload an App Admin made, checked and imported like the command line does."""
+    from cveFeed import seed_admin
+    return {"created": seed_admin.run_import(path, user_id, verified)}
 
 
 @app.task(name="write_cve_guidance_now", bind=False, queue="cve_feed_queue")

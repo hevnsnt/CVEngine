@@ -5,7 +5,7 @@ from cveFeed import detection_author, seed
 
 class Command(BaseCommand):
     help = ('Write this instance\'s whole CVE catalog, with the shared detection records, as a seed file other installs import on first '
-            'start. Writes <out> and <out>.manifest.json (count, size, sha256). Publish both as release assets named cve-seed.jsonl.gz '
+            'start. Writes <out> and <out>.manifest.json (count, size, sha256, what the scrub dropped). Nothing of this instance is written: manual detection records, and any record that names its organizations, projects, hosts or addresses or holds a secret, stay out. Publish both as release assets named cve-seed.jsonl.gz '
             'and cve-seed.jsonl.gz.manifest.json (scripts/publish-cve-seed.sh).')
 
     def add_arguments(self, parser):
@@ -27,3 +27,7 @@ class Command(BaseCommand):
         self.stdout.write(f"{options['out']}: {manifest['count']} CVEs (fire {manifest['tiers']['fire']}, smoke {manifest['tiers']['smoke']}, "
                           f"ice {manifest['tiers']['ice']}), {manifest['with_detection']} with a detection record, "
                           f"{manifest['bytes'] // (1 << 20)} MB, sha256 {manifest['sha256']}")
+        dropped = manifest['dropped']
+        self.stdout.write(f"withheld: {manifest['manual_withheld']} manual detection record(s); the scrub dropped {dropped['records']} CVE record(s) and "
+                          f"{dropped['detections']} detection record(s) that named this instance or looked like a secret "
+                          f"({', '.join(f'{k} {v}' for k, v in sorted(dropped['reasons'].items())) or 'none'})")
