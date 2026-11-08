@@ -1,6 +1,6 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
-import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
+import { areaChart, displayZone, heatmap } from "/staticfiles/cve/charts.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
 import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
@@ -22,7 +22,7 @@ import {
   watchWide,
   whatIs,
 } from "/staticfiles/cve/ui.js";
-import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
+import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pageAnchor, pageUrl } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
@@ -905,7 +905,8 @@ function routeLine(r) {
   line.append(badge(authLabel(r.auth_state), AUTH_BADGE[r.auth_state] || ""));
   if (r.zombie_since) line.append(badge("zombie", "smoke"));
   else if (r.retired_at) line.append(badge("retired", "queued"));
-  line.append(el("span", "mono", r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
+  const page = { url: r.url, host: r.host, path: r.path };  // the page itself, on the scanned host: its path is the link
+  line.append(pageAnchor(page, r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
   const types = Object.keys(r.sensitive || {});
   if (types.some((t) => SENSITIVE_GROUP.credentials.includes(t))) line.append(badge("credentials", "fire"));
   if (types.some((t) => SENSITIVE_GROUP.pii.includes(t))) line.append(badge("PII", "smoke"));
@@ -915,7 +916,10 @@ function routeLine(r) {
   if (types.length) {
     // counts and a masked sample only: the API never returns the values
     const first = r.sensitive[types[0]];
-    line.append(el("span", "note", `GET ${r.path} → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`));
+    // the path is a link to the page; the masked sample stays text after it and is never part of an address
+    const note = el("span", "note");
+    note.append("GET ", pageAnchor(page, r.path, "host-link"), ` → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`);
+    line.append(note);
   }
   return line;
 }
@@ -1289,7 +1293,15 @@ function screenshotsSection(h, project, isCurrent) {
         alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
       });
       img.onerror = () => img.remove();
-      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      const own = `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}`;
+      const caption = el("figcaption", "note");
+      // the page's own address is the link (a page on the scanned host); the rest of the caption is text
+      caption.append(pageAnchor({ scheme: r.scheme, host: h.host, port: r.port, path: "/" }, `${r.scheme}://${h.host}:${r.port}`, "host-link"));
+      const rest = [r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean);
+      if (r.final_url && r.final_url.replace(/\/$/, "") !== own) {
+        caption.append(" · ended at ", pageUrl({ url: r.final_url }) ? pageAnchor({ url: r.final_url }, r.final_url, "host-link") : r.final_url);
+      }
+      if (rest.length) caption.append(` · ${rest.join(" · ")}`);
       figure.append(img, caption);
       if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
       if (r.has_previous) {
@@ -2949,11 +2961,11 @@ const pages = {
     metaRow.append(countLine, tools);
     const lh = listHead({ page: "scans", lead: [], panelNodes: [status.node], meta: metaRow });
     root.append(lh.head);
-    api("GET", `${base}/scans?${query({ page_size: 200 })}`)
+    // counted by the server, exactly (the newest 200 scans are a page, not the 18 weeks the chart draws)
+    api("GET", `${base}/activity-days?${query({ days: 126, series: "scans", tz: displayZone() })}`)
       .then((r) => {
-        const dates = r.results.map((x) => x.started).filter(Boolean);
-        if (dates.length > 1) {
-          rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+        if (r.scans.total > 1) {
+          rhythm.append(heatmap({ title: "Scan activity", unit: "scans", perDay: r.scans.days }));
           activity.hidden = false;
         }
       })
@@ -4659,10 +4671,10 @@ pages.changes = function changes(mount) {
   );
   const trend = el("div", "chart-slot");
   mount.append(trend, tools, kinds.node);
-  api("GET", `${base}/changes?${query({ since: "30d", page_size: 200 })}`)
+  // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
+  api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      const dates = (r.results || []).map((c) => c.detected).filter(Boolean);
-      if (dates.length) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], dates, compare: false }));
+      if (r.changes.total) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false }));
     })
     .catch(() => {});
   const list = createList({
@@ -4803,7 +4815,7 @@ pages.scan = async function scanDetail(mount) {
       label: "Endpoints",
       open: (m) =>
         listTab(m, "endpoints", "Search URLs", [
-          { label: "URL", render: (r) => r.url },
+          { label: "URL", render: (r) => pageAnchor({ url: r.url }, r.url, "host-link") },
           { label: "HTTP", cls: "num", render: (r) => r.http_status || "-" },
           { label: "Title", render: (r) => r.title || "-" },
           { label: "Type", render: (r) => r.content_type || "-" },
@@ -4871,7 +4883,7 @@ pages.scan = async function scanDetail(mount) {
           { label: "Finding", render: (v) => v.name },
           { label: "Host", render: (v) => hostLink(v.host) },
           { label: "CVE", render: (v) => (v.cves.length ? joinNodes(v.cves.map((c) => cveLink(slug, c, v.cve_matches && v.cve_matches[c], v.host))) : "-") },
-          { label: "URL", render: (v) => v.url || "-" },
+          { label: "URL", render: (v) => (v.url ? pageAnchor({ url: v.url }, v.url, "host-link") : "-") },
         ],
         (v) => v.severity,
       ),

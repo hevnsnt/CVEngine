@@ -2940,6 +2940,38 @@ def list_changes(ctx, slug, params):
     return paginate(qs.order_by('-detected_at', '-id'), params, _tagged(_change, lambda c: c.project) if everywhere else _change)
 
 
+def activity_days(ctx, slug, params):
+    """The dashboard's Activity card: exact per-day counts of new findings (by heat tier and type) and inventory changes for the last ``days``
+    (default 90, at most 366) calendar days in ``tz`` (an IANA name, default UTC; ``series`` picks findings, changes and scans, default the first two): one grouped query per series, over the same scoped querysets
+    the Findings (``status=all``) and Changes lists use (``cveFeed.activity_days``). Shared through the snapshot cache like the other dashboard
+    cards, so a poll or a second viewer of the same scope costs no query."""
+    from cveFeed import activity_days as ad
+    from cveFeed import snapshot_cache
+    from cveFeed.models import AssetChange
+    project, _ = get_project(ctx, slug)
+    try:
+        days = min(ad.MAX_DAYS, max(1, int(params.get('days', ad.DEFAULT_DAYS))))
+    except (TypeError, ValueError, OverflowError):
+        raise ApiError(400, 'days must be an integer')
+    zone = ad.zone_of(params.get('tz'))
+    first, last, _start, _end = ad.window(days, zone)
+    wanted = tuple(sorted({x.strip() for x in str(params.get('series') or 'findings,changes').split(',') if x.strip()}))
+    if not wanted or any(x not in ('findings', 'changes', 'scans') for x in wanted):
+        raise ApiError(400, 'series must be a list of findings, changes and scans')
+
+    def compute():
+        from startScan.models import ScanHistory
+        return ad.build(_finding_sources(project, {'status': 'all'}) if 'findings' in wanted else None,
+                        _scoped(AssetChange.objects.all(), project, 'project') if 'changes' in wanted else None, days, str(zone),
+                        scans_qs=_scoped(ScanHistory.objects.all(), project, 'domain__project') if 'scans' in wanted else None)
+    ids = sorted(project.ids) if _is_all(project) else [project.pk]
+    scope = snapshot_cache.scope_hash('activity-days', ids, str(zone), days, wanted, last.isoformat())  # a new local day is a new key
+    return snapshot_cache.snapshot('activity-days', scope, compute, ACTIVITY_DAYS_FRESH_SECONDS)['payload']
+
+
+ACTIVITY_DAYS_FRESH_SECONDS = 30  # a count of days, not a live number: one build serves every viewer of the scope for this long (a closed finding drops it at once, as for the other cards)
+
+
 MAX_STATS_HISTORY_DAYS = 365
 
 

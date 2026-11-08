@@ -52,14 +52,11 @@
   .extra h3 .st.done{color:var(--ok-ink)}
   .meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:0 0 8px}
   .meter span{display:block;height:100%;width:0;background:var(--brand);transition:width .6s ease}
-  .steps-list{list-style:none;margin:0 0 14px;padding:0;display:grid;gap:8px}
-  .steps-list li{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;font-size:14.5px}
-  .steps-list .g{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line-2);font:700 11px var(--mono);color:var(--muted)}
-  .steps-list li.ok .g{background:var(--ok);border-color:var(--ok);color:#fff}
-  .steps-list li.run .g{border-color:var(--brand);color:var(--brand)}
-  .steps-list small{display:block;color:var(--muted);font-size:13px}
+  .meter.indeterminate span{width:36%;transition:none;animation:meter-slide 1.6s ease-in-out infinite alternate}
+  @keyframes meter-slide{from{margin-left:0}to{margin-left:64%}}
+  @media (prefers-reduced-motion:reduce){.step{animation:none}.meter.indeterminate span{animation:none;width:100%;opacity:.5}}
+  #build-heading:focus{outline:none}#build-heading:focus-visible{outline:2px solid var(--ink);outline-offset:4px}
   .scene{width:100%;height:340px;border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);margin:0 0 14px}
-  .recent{font:12.5px var(--mono);color:var(--muted);margin:6px 0 0;word-break:break-all}
   .foot-skip{margin-top:22px;text-align:center;font-size:13px}
   .stepname{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 6px}
   .live-hint{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted);margin-top:14px}

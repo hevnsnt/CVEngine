@@ -368,6 +368,18 @@ export function newestLine(d) {
   return parts.length ? el("p", "note ss-detail", parts.join(", ")) : null;
 }
 
+// Why a kind is not being taken, as the Sentinel itself reports it: a heavy kind waiting for memory (what it needs, what is free, which tasks hold the rest), and
+// a task the server took back that is still stopping. Nothing is drawn when nothing waits.
+const minutesOrSeconds = (s) => (s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`);
+export function waitingLines(d) {
+  const rows = Array.isArray(d.waiting) ? d.waiting : [];
+  return rows.map((w) => {
+    if (w.stopping) return el("p", "note ss-detail", `Task ${w.task} (${w.kind}) was taken back by the server and is still stopping, ${minutesOrSeconds(w.seconds)} later. It is killed and its slot freed shortly.`);
+    const holders = (w.held_by || []).map((h) => `task ${h.task} ${h.kind} (${h.mb} MB, ${minutesOrSeconds(h.seconds)})`).join(", ");
+    return el("p", "msg err ss-detail", `${w.kind} waiting ${minutesOrSeconds(w.seconds)}: needs ${w.need_mb} MB, ${w.free_mb} MB free of ${w.budget_mb} MB${holders ? `, held by ${holders}` : ""}.`);
+  });
+}
+
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
 // when it does not report these keys.
 // ``builtin`` (the install's own scanner) has no "Update now": it never updates itself, so the button would promise what cannot happen.
@@ -398,6 +410,7 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (newest) box.append(newest);
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
+  box.append(...waitingLines(d));
   const sub =
     u.status === "failed"
       ? u.detail
