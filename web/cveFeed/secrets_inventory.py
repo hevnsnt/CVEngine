@@ -278,19 +278,22 @@ def rescore(row):
 # ----------------------------------------------------------------------------- scoring
 
 def host_secrets(project_id, hosts):
-    """``{host: [{severity, klass, path, label}]}``: the counting secrets each host serves now (occurrences not retired, of rows whose status counts),
+    """``{host: [{id, severity, klass, path, url, line, masked, basis, label}]}``: the counting secrets each host serves now (occurrences not retired, of rows whose status counts),
     and ``{host}`` of the hosts the inventory covers at all (any status), whose route samples then no longer score credentials."""
     from cveFeed.models import SecretOccurrence
     out, covered = {}, set()
     rows = (SecretOccurrence.objects.filter(project_id=project_id, host__in=hosts, retired_at__isnull=True)
-            .values('host', 'url', 'finding__severity', 'finding__klass', 'finding__status', 'finding__provider', 'finding__kind'))
+            .values('host', 'url', 'line', 'finding_id', 'finding__severity', 'finding__klass', 'finding__status', 'finding__provider', 'finding__kind',
+                    'finding__masked', 'finding__severity_basis')
+            .order_by('finding__severity', '-finding_id', 'id'))  # a stable order: the worst secret of equal rank is the same one on every pass
     for r in rows:
         covered.add(r['host'])
         if not catalog.counts(r['finding__status']):
             continue
         out.setdefault(r['host'], []).append({'severity': r['finding__severity'], 'klass': r['finding__klass'],
-                                              'path': urlsplit(r['url']).path or '/',
-                                              'label': f'{r["finding__provider"]} {r["finding__kind"]}'.strip()})
+                                              'path': urlsplit(r['url']).path or '/', 'id': r['finding_id'], 'url': r['url'], 'line': r['line'],
+                                              'masked': r['finding__masked'], 'basis': r['finding__severity_basis'],
+                                              'label': catalog.Kind(r['finding__provider'], r['finding__kind'], r['finding__klass'], '').label})
     return out, covered
 
 

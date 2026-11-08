@@ -198,4 +198,7 @@ export async function secretsPage(mount, { slug, all, canWrite }) {
   }
   settings();
   load();
+  // /secrets/?open=ID (a link from a host's score line) opens that secret
+  const wanted = new URLSearchParams(location.search).get("open");
+  if (wanted && /^\d+$/.test(wanted)) detail(slug, Number(wanted), canWrite && !all, load);
 }

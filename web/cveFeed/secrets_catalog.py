@@ -52,7 +52,10 @@ class Kind:
 
     @property
     def label(self):
-        return f'{self.provider} {self.kind.replace("-", " ")}'.strip() if self.provider else self.kind.replace('-', ' ')
+        words = self.kind.replace('-', ' ')
+        if self.provider and not words.lower().startswith(self.provider.lower()):
+            return f'{self.provider} {words}'
+        return (self.provider + words[len(self.provider):]) if self.provider else words  # ``rapidapi-access-token`` of RapidAPI names its provider already: said once
 
 
 _ROTATE = 'Rotate the credential at the provider, remove it from what the site serves, and check the provider\'s logs for use you do not recognise.'

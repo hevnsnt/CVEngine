@@ -500,6 +500,14 @@ When the inventory has the secret, `scoring` reads the worst open `SecretFinding
   - filters on status, class and provider;
   - a detail drawer with occurrences, severity basis, remediation and the status workflow with notes;
   - the host page gets a "Secrets" chip.
+- **Why a host scores (every number opens its evidence).** `cveFeed.scoring.score_host` stores every contributor of a score as
+  `{label, points, kind, text, ref}`, so the lines are the score (a sum over 100 is shown as 100 and says so). `label` is the short name, `text` one plain
+  sentence (what it is, where, why it scores), `ref` the evidence the line stands on: a CVE match, a scanner or hygiene finding, a secret
+  (`/secrets/?open=<id>`), or a tab of the host page (`/hosts/?host=<name>&tab=web`). `static/cve/score-detail-logic.js` turns a `ref` into the link. The
+  Attack surface tile opens a dialog with every line on a click (the hover card lists all of them too); the host page lists the same lines under "Why
+  the score is N". A line stored before the sentences existed shows its label and points and gets its sentence at the next rescore.
+  A score line for a secret says the masked value (`…dea4`), the URL and line, the class in words and the severity basis (why it is rated so, for
+  example "uncatalogued: treated as a server secret of medium severity until a person reviews it"); the value is never part of it.
 - **REST.**
   - `GET projects/<slug>/secrets` (filters as above, paged);
   - `GET projects/<slug>/secrets/<id>`;

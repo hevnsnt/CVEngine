@@ -30,6 +30,9 @@ RECENT_DAYS = 7
 MAX_RESCORE_HOSTS = 20000  # hosts one daily pass rescores per project
 CVE_POINTS = {'fire': 40, 'smoke': 20, 'ice': 5}
 CVE_CAP, AI_BONUS = 50, 10
+HEAT_WORDS = {'fire': 'it is exploited in the wild (or has a public exploit) and the flaw is confirmed on this host.',
+              'smoke': 'it is exploited in the wild (or has a public exploit), but only the software version says the host has it.',
+              'ice': 'it is not known to be exploited and has no public exploit.'}
 VERSION_UNKNOWN_CAP = 2  # the most a host's score takes from CVE matches that have no affected version range (review, not exposure)
 FINDING_POINTS = {4: 25, 3: 25, 2: 10, 1: 3}
 FINDING_HEAT_POINTS = {'fire': 25, 'smoke': 10, 'ice': 3}  # a finding that names CVEs, under the KEV heat policy: by its heat, not its severity
@@ -48,8 +51,12 @@ def _unknown_line(unknown):
     if points <= 0:
         return []
     ids = ', '.join(sorted(c.get('id', '') for c in unknown)[:3])
-    return [{'label': f'{len(unknown)} CVE match{"es" if len(unknown) != 1 else ""} with unknown affected versions, to review ({ids})',
-             'points': points}]
+    many = len(unknown) != 1
+    return [{'label': f'{len(unknown)} CVE match{"es" if many else ""} with unknown affected versions, to review ({ids})',
+             'points': points, 'kind': 'cve_unknown', 'ref': {'type': 'matches'},
+             'text': (f'{len(unknown)} CVE{"s" if many else ""} name software this host runs but publish no affected version range, so '
+                      f'{"they" if many else "it"} cannot be confirmed or ruled out. Each adds 1 point (at most {VERSION_UNKNOWN_CAP}) until someone reviews '
+                      f'{"them" if many else "it"}.')}]
 
 
 def _cve_lines(cves):
@@ -61,9 +68,14 @@ def _cve_lines(cves):
     usable.sort(key=lambda c: (-rank[c['temp']], c.get('id', '')))
     worst = usable[0]
     points = CVE_POINTS[worst['temp']]
-    lines = [{'label': f'{worst["temp"].capitalize()} CVE match {worst.get("id", "")}'.strip(), 'points': points}]
+    lines = [{'label': f'{worst["temp"].capitalize()} CVE match {worst.get("id", "")}'.strip(), 'points': points, 'kind': 'cve',
+              'ref': {'type': 'match', 'id': worst['match_id']} if worst.get('match_id') else {'type': 'matches'},
+              'text': (f'{worst.get("id") or "A CVE"} matches software on this host and is rated {worst["temp"]}: {HEAT_WORDS[worst["temp"]]} '
+                       f'Only the worst match counts ({points} points)' + (f', and {len(usable) - 1} other match{"es" if len(usable) > 2 else ""} score nothing more.'
+                                                                             if len(usable) > 1 else '.'))}]
     if worst['temp'] == 'fire' and any(c['temp'] == 'fire' and c.get('ai_verdict') == 'affected' for c in usable):
-        lines.append({'label': 'AI confirmed the host is affected by a fire CVE', 'points': AI_BONUS})
+        lines.append({'label': 'AI confirmed the host is affected by a fire CVE', 'points': AI_BONUS, 'kind': 'ai', 'ref': lines[0]['ref'],
+                      'text': 'The AI reviewed a fire CVE match and judged this host affected, which adds 10 points.'})
     return _capped(lines + _unknown_line(unknown), CVE_CAP)
 
 
@@ -73,7 +85,7 @@ def _capped(lines, cap):
     for line in lines:
         points = min(line['points'], left)
         if points > 0:
-            out.append({'label': line['label'], 'points': points})
+            out.append({**line, 'points': points})
             left -= points
     return out
 
@@ -83,11 +95,14 @@ def _route_line(routes):
     for route in routes:
         path, state = route.get('path') or '/', route.get('auth_state')
         if state == 'open' and ADMIN_PATH.search(path):
-            line = {'label': f'Admin route {path} is open', 'points': 15}
+            line = {'label': f'Admin route {path} is open', 'points': 15, 'kind': 'route', 'ref': {'type': 'host_tab', 'tab': 'web'},
+                    'text': f'{path} looks like an administration or API path and answered without asking for a login. Scored once, for the worst route (15 points).'}
         elif state == 'open' and path == '/':
-            line = {'label': 'Front page is open', 'points': 5}
+            line = {'label': 'Front page is open', 'points': 5, 'kind': 'route', 'ref': {'type': 'host_tab', 'tab': 'web'},
+                    'text': 'The front page answers without a login, so the host serves content to anyone (5 points).'}
         elif state == 'login':
-            line = {'label': f'Login page {path}', 'points': 5}
+            line = {'label': f'Login page {path}', 'points': 5, 'kind': 'route', 'ref': {'type': 'host_tab', 'tab': 'web'},
+                    'text': f'{path} is a login page reachable from the internet: an entry point to guess or attack (5 points).'}
         else:
             continue
         if best is None or line['points'] > best['points']:
@@ -97,6 +112,7 @@ def _route_line(routes):
 
 SECRET_POINTS = {4: 25, 3: 25, 2: 10, 1: 5, 0: 5}  # by the inventory row's severity (cveFeed.secrets_catalog.severity)
 SECRET_WORDS = {'S': 'Server credential', 'P': 'Browser key', 'I': 'Token or identifier'}
+SEVERITY_WORDS = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low', 0: 'info'}
 
 
 def _route_points(route, covered):
@@ -107,6 +123,23 @@ def _route_points(route, covered):
     return sensitive.sensitive_score({k: v for k, v in route['sensitive'].items() if k not in sensitive.CREDENTIAL_TYPES})
 
 
+CLASS_SENTENCE = {'S': 'a server credential: it lets whoever reads it act as its owner, and it is not meant to leave the server',
+                  'P': 'a browser key: it is meant to sit in a page, and what protects it is the restriction set at its provider',
+                  'I': 'a token or identifier: it names an account or session and may grant access on its own'}
+
+
+def _secret_text(top, path, points):
+    """The plain sentence of a secret's score line: what it is, where, why it scores."""
+    what = top.get('label') or SECRET_WORDS.get(top.get('klass'), 'secret')
+    where = top.get('url') or path
+    line = f' (line {top["line"]})' if top.get('line') else ''
+    mask = f' ending {top["masked"]}' if top.get('masked') else ''
+    basis = (top.get('basis') or '').strip().rstrip('.')
+    return (f'{what[:1].upper() + what[1:]}{mask} was found at {where}{line}. It is {CLASS_SENTENCE.get(top.get("klass"), "a secret")}. '
+            + (f'Why {SEVERITY_WORDS.get(top.get("severity"), "unrated")}: {basis}. ' if basis else '')
+            + f'Only the worst secret on a host counts ({points} points).')
+
+
 def _sensitive_line(routes, secrets=(), covered=False):
     """The worst of: the routes' sensitive data, and (for a host the inventory covers) its worst counting secret. ``secrets`` [{severity, klass,
     path}] from ``secrets_inventory.host_secrets``."""
@@ -115,11 +148,18 @@ def _sensitive_line(routes, secrets=(), covered=False):
     points = _route_points(worst, covered) if worst else 0
     if points > 0:
         what = {25: 'Credentials served', 15: 'Personal data served'}.get(points, 'Contact details or internal identifiers served')
-        lines.append({'label': f'{what} on {worst.get("path") or "/"}', 'points': min(points, SENSITIVE_CAP)})
+        path = worst.get('path') or '/'
+        shown = min(points, SENSITIVE_CAP)
+        lines.append({'label': f'{what} on {path}', 'points': shown, 'kind': 'route_sensitive', 'ref': {'type': 'host_tab', 'tab': 'web'},
+                      'text': (f'The page {path} returned {what[:1].lower() + what[1:-7]} when the route check read it, without a login. '
+                               f'Only the worst route counts ({shown} points); the Web tab shows the route and what it matched.')})
     if secrets:
         top = max(secrets, key=lambda s: (SECRET_POINTS.get(s.get('severity'), 0), s.get('klass') == 'S', s.get('severity') or 0))
-        lines.append({'label': f'{SECRET_WORDS.get(top.get("klass"), "Secret")} served on {top.get("path") or "/"}',
-                      'points': min(SECRET_POINTS.get(top.get('severity'), 0), SENSITIVE_CAP)})
+        shown = min(SECRET_POINTS.get(top.get('severity'), 0), SENSITIVE_CAP)
+        path = top.get('path') or '/'
+        lines.append({'label': f'{SECRET_WORDS.get(top.get("klass"), "Secret")} served on {path}', 'points': shown, 'kind': 'secret',
+                      'ref': {'type': 'secret', 'id': top['id']} if top.get('id') else {'type': 'host_tab', 'tab': 'web'},
+                      'text': _secret_text(top, path, shown)})
     return [max(lines, key=lambda line: line['points'])] if lines else []
 
 
@@ -128,20 +168,27 @@ def _hygiene_lines(issues):
     if not issues:
         return []
     worst = issues[0]
+    ref = {'type': 'hygiene', 'id': worst['id']} if worst.get('id') else {'type': 'hygiene_list'}
     lines = [{'label': f'{FINDING_NAMES[worst["severity"]]} hygiene issue {worst.get("title") or ""}'.strip(),
-              'points': HYGIENE_POINTS[worst['severity']]}]
+              'points': HYGIENE_POINTS[worst['severity']], 'kind': 'hygiene', 'ref': ref,
+              'text': (f'A {FINDING_NAMES[worst["severity"]].lower()} configuration problem on this host: {worst.get("title") or "a hygiene check failed"}. '
+                       f'The worst open issue sets {HYGIENE_POINTS[worst["severity"]]} points.')}]
     more = len([i for i in issues[1:] if i['severity'] >= 2])
     if more:
-        lines.append({'label': f'{more} more hygiene issue{"s" if more != 1 else ""} (medium or worse)', 'points': more * HYGIENE_EXTRA})
+        lines.append({'label': f'{more} more hygiene issue{"s" if more != 1 else ""} (medium or worse)', 'points': more * HYGIENE_EXTRA,
+                      'kind': 'hygiene_more', 'ref': {'type': 'hygiene_list'},
+                      'text': f'{more} further open issue{"s" if more != 1 else ""} of medium severity or worse; each adds {HYGIENE_EXTRA} points (the hygiene part of a score stops at {HYGIENE_CAP}).'})
     return _capped(lines, HYGIENE_CAP)
 
 
 def score_host(inputs):
-    """``(score, detail)`` for one host. ``inputs``: ``cves`` [{id, temp, ai_verdict, version_unknown}] (matches the AI has not ruled out),
-    ``findings`` [{severity, name}] (open), ``hygiene`` [{severity, title}] (open hygiene findings of the host), ``routes`` [{path, auth_state, sensitive_score, sensitive}], ``secrets`` [{severity, klass, path}] (counting inventory secrets the host
+    """``(score, detail)`` for one host. ``inputs``: ``cves`` [{id, match_id, temp, ai_verdict, version_unknown}] (matches the AI has not ruled out),
+    ``findings`` [{id, severity, name}] (open), ``hygiene`` [{id, severity, title}] (open hygiene findings of the host), ``routes`` [{path, auth_state, sensitive_score, sensitive}], ``secrets`` [{id, severity, klass, path, url, line, masked, label, basis}] (counting inventory secrets the host
     serves) and ``secrets_covered`` (the inventory covers the host, so route credential samples do not score), ``public_ip`` bool,
     ``recent`` [change kinds in the last 7 days], ``zombie_host`` and ``zombie_route`` bools. ``detail`` is the ordered list of
-    ``{'label', 'points'}`` that add up to the score (at most 100)."""
+    ``{'label', 'points', 'kind', 'text', 'ref'}`` that add up to the score (at most 100): ``label`` is the short name, ``text`` the plain
+    sentence (what, where, why it scores), ``ref`` what evidence the line links to (``{'type': 'match'|'vulnerability'|'hygiene'|'secret', 'id'}``,
+    or a host tab or list: ``web/static/cve/score-detail-logic.js`` turns it into a link). Every line is listed, so the lines are the score."""
     detail = _cve_lines(inputs.get('cves') or [])
     findings = [f for f in inputs.get('findings') or [] if f.get('severity') in FINDING_POINTS]
 
@@ -152,21 +199,34 @@ def score_host(inputs):
         detail.append({'label': f'{FINDING_NAMES[worst["severity"]]} finding {worst.get("name") or ""}'.strip()
                        + ((f' ({worst["heat"]}: held until a validation confirms it)' if worst.get('held') else
                            f' ({worst["heat"]}: its CVE rated by the heat policy)') if worst.get('heat') in FINDING_HEAT_POINTS else ''),
-                       'points': points(worst)})
+                       'points': points(worst), 'kind': 'finding',
+                       'ref': {'type': 'vulnerability', 'id': worst['id']} if worst.get('id') else {'type': 'host_tab', 'tab': 'findings'},
+                       'text': (f'The scanner reported "{worst.get("name") or "a finding"}" ({FINDING_NAMES[worst["severity"]].lower()}) and it is still open. '
+                                + ('A validation has not confirmed it yet, so it scores by its heat. ' if worst.get('held') else
+                                   'It names a CVE, so it scores by that CVE\'s heat. ' if worst.get('heat') in FINDING_HEAT_POINTS else '')
+                                + f'Only the worst open finding counts ({points(worst)} points).')})
     detail += _hygiene_lines(inputs.get('hygiene') or [])
     routes = inputs.get('routes') or []
     detail += _capped(_route_line(routes), ROUTE_CAP)
     detail += _sensitive_line(routes, inputs.get('secrets') or (), bool(inputs.get('secrets_covered')))
     if inputs.get('public_ip'):
-        detail.append({'label': 'Public IP observed in inventory (service reachability unverified)', 'points': EXPOSURE_POINTS})
+        detail.append({'label': 'Public IP observed in inventory (service reachability unverified)', 'points': EXPOSURE_POINTS, 'kind': 'exposure',
+                       'ref': {'type': 'host_tab', 'tab': 'services'},
+                       'text': 'The host has a public IP address in the inventory, so it is reachable from the internet in principle (10 points). No one has checked that a service answers.'})
     recent = set(inputs.get('recent') or [])
-    detail += _capped([{'label': 'New this week', 'points': 10}] if recent & set(RECENT_NEW_KINDS) else
-                      [{'label': 'Exposure changed this week', 'points': 5}] if recent & set(RECENT_CHANGE_KINDS) else [], RECENCY_CAP)
+    detail += _capped([{'label': 'New this week', 'points': 10, 'kind': 'recent', 'ref': {'type': 'host_tab', 'tab': 'changes'},
+                        'text': 'The host appeared (or came back) in the last 7 days. New hosts score higher until they have been looked at (10 points).'}]
+                      if recent & set(RECENT_NEW_KINDS) else
+                      [{'label': 'Exposure changed this week', 'points': 5, 'kind': 'recent', 'ref': {'type': 'host_tab', 'tab': 'changes'},
+                        'text': 'A port opened or a service version changed in the last 7 days (5 points). History lists the change.'}]
+                      if recent & set(RECENT_CHANGE_KINDS) else [], RECENCY_CAP)
     zombies = []
     if inputs.get('zombie_host'):
-        zombies.append({'label': 'Zombie host: DNS is gone but it still answers', 'points': 15})
+        zombies.append({'label': 'Zombie host: DNS is gone but it still answers', 'points': 15, 'kind': 'zombie', 'ref': {'type': 'host_tab', 'tab': 'changes'},
+                        'text': 'The name no longer resolves in DNS but the host still answers on its old address: forgotten infrastructure (15 points).'})
     if inputs.get('zombie_route'):
-        zombies.append({'label': 'Zombie route: a retired path answers again', 'points': 5})
+        zombies.append({'label': 'Zombie route: a retired path answers again', 'points': 5, 'kind': 'zombie', 'ref': {'type': 'host_tab', 'tab': 'web'},
+                        'text': 'A path that had been retired answers again (5 points). The Web tab lists the route.'})
     detail += _capped(zombies, ZOMBIE_CAP)
     return min(100, sum(line['points'] for line in detail)), detail
 
@@ -188,7 +248,7 @@ def _cve_inputs(sub):
         if not match_is_live(m):  # ruled out, or closed: fixed, accepted risk or false positive
             continue
         # the heat the host card shows (threat.match_heat: the heat policy)
-        out.append({'id': m.cve_entry.cve_id, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
+        out.append({'id': m.cve_entry.cve_id, 'match_id': m.pk, 'temp': match_heat(m), 'ai_verdict': m.ai_verdict, 'version_unknown': version_unknown(m)})
     return out
 
 
@@ -205,7 +265,7 @@ def _finding_input(v, hot):
     finding that names CVEs, under either a finding a cap holds lower: a template match no validation reproduced, a triage still pending or
     needing validation, a validation that came back clean; ``threat.finding_heat``)."""
     from cveFeed.threat import SEVERITY_HEAT, finding_cve_names, finding_heat
-    out = {'severity': v.severity, 'name': v.name}
+    out = {'id': v.pk, 'severity': v.severity, 'name': v.name}
     named = hot is not None and bool(finding_cve_names(v))
     heat = finding_heat(v, hot_names=hot if hot is not None else set())
     if heat and (named or heat != SEVERITY_HEAT.get(v.severity)):
@@ -263,7 +323,7 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
         subs = {s.name.lower(): s for s in newest}
         routes, recent, zombies, hygiene = {}, {}, {}, {}
         for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
-                  .exclude(remediation_status__in=CLOSED).values('host', 'severity', 'title')):
+                  .exclude(remediation_status__in=CLOSED).values('id', 'host', 'severity', 'title')):
             hygiene.setdefault(h['host'].lower(), []).append(h)
         for r in RouteAuth.objects.filter(project_id=project_id, host__in=chunk).values('host', 'path', 'auth_state', 'sensitive_score', 'sensitive',
                                                                                          'zombie_since'):
