@@ -134,6 +134,17 @@ def shared_lookups():
         _local.cache = None
 
 
+def shared(key, compute):
+    """``compute()``, and inside ``shared_lookups`` only the first time for ``key``: a fact about a user or an install that every Sentinel's rights ask for again
+    (is the user's two-step sign-in pending: three queries) is read once for the page, not once per Sentinel."""
+    memo = getattr(_local, 'cache', None)
+    if memo is None:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return memo[key]
+
+
 def defaults():
     """``{'builtin': {kind: entry}, 'external': {kind: entry}, 'builtin_shipped': bool, 'by': str, 'at': iso|None}`` from the one defaults row (one query, or
     none inside ``shared_lookups``)."""

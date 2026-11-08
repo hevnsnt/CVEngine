@@ -413,8 +413,9 @@ class Eff:
             return 'its user is disabled'
         if token.read_only:
             return 'its token is read only'
+        from agentapi import sentinel_policy
         from tenancy.middleware import TenancyMiddleware
-        if TenancyMiddleware.must_enrol_mfa(user):
+        if sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
             return 'its user has to set up two-step sign-in first'
         return ''
 

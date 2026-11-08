@@ -21,8 +21,21 @@ from cvengine_scanner import contract as _library
 PATH = _library.PATH  # the file inside the installed library (read-only: it is the library's, not this repo's)
 
 
+_cached = {'stamp': None, 'doc': None}
+
+
 def load():
-    return _library.load()
+    """The contract document. Read and parsed once per version of the file (its size and modification time are checked, a ``stat`` call), not once per call: the
+    contract is asked about for every Sentinel's rights (``can_run``, 8 kinds each), every heartbeat and every result, and parsing the 60 KB file each time was
+    45% of the Sentinels page and most of a heartbeat. The document is shared: read it, never change it."""
+    try:
+        info = PATH.stat()
+        stamp = (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return _library.load()
+    if _cached['stamp'] != stamp or _cached['doc'] is None:
+        _cached['doc'], _cached['stamp'] = _library.load(), stamp
+    return _cached['doc']
 
 
 KINDS = tuple(load()['kind_since'])  # every task kind, in the order the file lists them
