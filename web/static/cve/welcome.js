@@ -1,6 +1,6 @@
 // First-run setup: the way a new install is set up (the installer only prints this page's address).
 // Step 1 asks only what a discovery needs (organization, project, ONE seed domain) and starts it in the background; steps 2 to 4 are answered
-// while it runs; step 5 shows it building, then opens the dashboard with the findings. Everything is saved on the server step by step, so the
+// while it runs; step 5 ("Getting everything ready") appears only while no host has been found yet and lasts at most a minute; with a host already found the dashboard opens straight away. Everything is saved on the server step by step, so the
 // page resumes where you left it from any browser, and what you typed is kept in this tab until it is saved.
 import { readyToFetch } from '/staticfiles/cve/ai-models-logic.js';
 import { autoLoad, connectionStatus, modelPicker, newSource } from '/staticfiles/cve/ai-models.js';
@@ -12,7 +12,7 @@ const dots = document.getElementById('dots');
 const discBar = document.getElementById('disc');
 const discText = document.getElementById('disc-text');
 const STEPS = ['seed', 'plan', 'scanners', 'extras', 'build'];
-const TITLES = ['Start discovering', 'How you scan', 'What runs', 'Optional extras', 'Building'];
+const TITLES = ['Start discovering', 'How you scan', 'What runs', 'Optional extras', 'Getting ready'];
 const NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter' };
 
 const el = (tag, cls, text, attrs = {}) => {
@@ -62,11 +62,24 @@ function drawDots() {
   STEPS.forEach((_, i) => dots.append(el('i', i <= index ? 'on' : '')));
 }
 
-function show(i) {
+// The last screen only covers a first minute with nothing to show. Ask the server first: with a host already found (or no discovery coming) it is never drawn.
+const toDashboard = async (follow) => {
+  stop();
+  try { const r = await welcome('POST', 'finish'); follow = follow || r.follow; } catch (_) { /* the dashboard opens regardless */ }
+  window.location.href = follow ? `/cve/?follow=${follow}` : '/cve/';
+};
+let gate = null; // what the server said when the last screen was asked for: kept for the screen itself
+async function show(i) {
   stop();
   index = i;
   drawDots();
   stepBox.textContent = '';
+  if (STEPS[i] === 'build') {
+    discBar.classList.remove('on'); discText.textContent = ''; // nothing of the strip's old words stays in the page
+    try { gate = await welcome('GET', 'progress?build=1'); } catch (_) { gate = null; } // cannot ask: show it, it ends on its own timer
+    if (index !== i) return;
+    if (gate && !gate.build.show) { toDashboard(gate.discovery_scan); return; }
+  }
   const node = el('div', 'step');
   stepBox.append(node);
   node.append(el('p', 'stepname', `Step ${i + 1} of ${STEPS.length}: ${TITLES[i]}`));
@@ -402,62 +415,45 @@ const steps = {
   },
 
   build(node) {
-    discBar.classList.remove('on');  // the building screen shows the same live counts itself
-    node.append(el('h1', '', 'Building your workspace'),
-      el('p', 'lead', 'The first discovery is running. This is what is really happening, so you can see it is not just a spinner.'));
+    // Nothing here says what is going on underneath: no scanning, no counts, no names. It is a calm wait of about a minute that ends the moment a
+    // host exists (or when the time is up), whatever the server is doing.
+    const heading = el('h1', '', 'Getting everything ready', { tabindex: '-1', id: 'build-heading' });
+    const status = el('p', 'lead', '', { id: 'build-status', role: 'status', 'aria-live': 'polite' });
+    node.append(heading, status);
     // The scene is the maintenance page's own two engineers. It is fetched and given to the frame as its document (srcdoc) so that no framing header on the
     // static file (Django's X-Frame-Options, a proxy's) can blank it; ``data-scene`` is set here because a srcdoc page has no query string to read it from.
-    const frame = el('iframe', 'scene', null, { title: 'Two engineers at work', loading: 'eager' });
+    const frame = el('iframe', 'scene', null, { title: 'Two engineers at work', loading: 'eager', tabindex: '-1' }); // a picture: not a stop for the keyboard
     fetch(root.dataset.scene || '/staticfiles/cve/maintenance.html', { credentials: 'same-origin' }).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
       .then((html) => { frame.srcdoc = html.replace('<html', '<html data-scene="1"'); })
       .catch(() => { frame.remove(); });
-    const lines = ['Sentinel ready', 'Discovery running', 'Hosts found'].map((t) => {
-      const li = el('li'); const g = el('span', 'g', ''); const c = el('div'); const b = el('span', '', t); const sm = el('small', '', '');
-      c.append(b, sm); li.append(g, c); return { li, g, sm, b };
-    });
-    const list = el('ul', 'steps-list', null, { id: 'build-steps' }); lines.forEach((l) => list.append(l.li));
-    const recent = el('p', 'recent', '');
-    const wait = el('p', 'note', '', { id: 'build-wait' });
-    const meter = el('span', ''); const track = el('div', 'meter', null, { role: 'progressbar', 'aria-label': 'Time given to discovery' }); track.append(meter);
+    const meter = el('span', ''); const track = el('div', 'meter indeterminate', null, { role: 'progressbar', 'aria-label': 'Getting ready' }); track.append(meter); // no value: it is a wait, not a percentage
     const actions = el('div', 'actions'); actions.append(el('span', 'grow'));
-    const skip = el('button', 'btn ghost', 'Skip: open the dashboard now', { type: 'button', id: 'build-skip' });
+    const skip = el('button', 'btn ghost', 'Open the dashboard now', { type: 'button', id: 'build-skip' });
     actions.append(skip);
-    node.append(frame, list, recent, track, wait, actions);
+    node.append(frame, track, actions);
     let leaving = false;
-    const leave = async (follow) => {
-      if (leaving) return; leaving = true; stop();
-      try { const r = await welcome('POST', 'finish'); follow = follow || r.follow; } catch (_) { /* the dashboard opens regardless */ }
-      window.location.href = follow ? `/cve/?follow=${follow}` : '/cve/';
+    const leave = (follow) => {
+      if (leaving) return; leaving = true; clearTimeout(cap);
+      status.textContent = 'Opening your dashboard';
+      try { frame.contentWindow.postMessage({ state: 'Opening your dashboard' }, '*'); } catch (_) { /* not loaded yet */ }
+      toDashboard(follow);
     };
-    skip.onclick = () => leave();
     const say = (text) => { try { frame.contentWindow.postMessage({ state: text }, '*')  /* status words only; a srcdoc frame can have an opaque origin */; } catch (_) { /* not loaded yet */ } };
-    frame.addEventListener('load', () => say('Starting up.'));
-    const set = (l, mode, sub) => { l.li.className = mode; l.g.textContent = mode === 'ok' ? '\u2713' : mode === 'run' ? '\u2026' : ''; l.sm.textContent = sub || ''; };
-    let landing = false;
+    frame.addEventListener('load', () => say('Getting ready.'));
+    skip.onclick = () => leave();
+    // The hard stop: the time the server allows, less what has passed already (a reload does not restart it), whether or not a poll ever answers.
+    const total = gate && gate.build ? gate.build.seconds : 60;
+    const left = Math.max(0, total - (gate && gate.build ? gate.build.elapsed : 0));
+    const cap = setTimeout(() => leave(gate && gate.discovery_scan), left * 1000);
     const poll = async () => {
       let r;
-      try { r = await welcome('GET', 'progress'); } catch (err) { say(err.message); return; }
-      const s = r.sentinel, d = r.discovery;
-      set(lines[0], s.live ? 'ok' : 'run', s.live ? `${s.live} connected: ${[s.builtin ? 'the built-in scanner' : '', s.external ? `${s.external} external` : ''].filter(Boolean).join(' and ')}` : s.builtin_state.text);
-      if (d) {
-        set(lines[1], d.state === 'done' || d.state === 'ended' ? 'ok' : 'run', d.text);
-        set(lines[2], d.hosts ? 'ok' : 'run', `${d.hosts} subdomain${d.hosts === 1 ? '' : 's'} found so far`);
-        recent.textContent = d.recent.length ? `Latest: ${d.recent.join(', ')}` : '';
-      } else { set(lines[1], '', 'No discovery was started (the first step was skipped).'); set(lines[2], '', ''); }
-      const w = r.dwell;
-      if (w.ready && !landing) {
-        landing = true;
-        say(d && d.hosts ? `${d.hosts} hosts found. Opening your dashboard.` : 'Opening your dashboard. Discovery carries on in the background.');
-        setTimeout(() => leave(d && d.scan_id), 2500);
-      } else if (!w.ready) {
-        say(d ? d.text : w.reason);
-      }
-      const left = Math.max(0, (w.min_seconds || 0) - (w.elapsed || 0));
-      wait.textContent = w.ready ? '' : `Giving discovery up to ${left} more second${left === 1 ? '' : 's'} so the dashboard opens with findings in it. ${w.reason}`;
-      meter.style.width = `${Math.min(100, Math.round(((w.elapsed || 0) / Math.max(1, w.min_seconds || 1)) * 100))}%`;
-      meter.parentElement.hidden = w.ready;
+      try { r = await welcome('GET', 'progress?build=1'); } catch (_) { return; }
+      gate = r;
+      if (!r.build.show) leave(r.discovery_scan); // the first host exists (or the time is up)
     };
-    poll(); timer = setInterval(poll, 2500);
+    requestAnimationFrame(() => { status.textContent = 'This takes about a minute.'; }); // inserted after the region exists, so it is announced
+    heading.focus({ preventScroll: true });
+    timer = setInterval(poll, 2000);
   },
 };
 

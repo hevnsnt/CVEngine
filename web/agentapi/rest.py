@@ -306,6 +306,8 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_hygiene(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/changes', 'What changed in the inventory: new/retired hosts, ports opened/closed, version, technology, certificate and auth changes (?since=7d, kind=, host=)',
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/activity-days', 'Exact per-day counts for the dashboard Activity card: new findings (status=all rules of the findings list) by heat tier and type, and inventory changes, for the last days (default 90, at most 366) in tz (IANA name, default UTC); series=findings,changes,scans picks which (scans: started per day, for the Scans page); totals are the sum of the days shown',
+     lambda r, c, slug, **k: svc.activity_days(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
      lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=)',

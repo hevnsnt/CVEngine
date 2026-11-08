@@ -2395,3 +2395,9 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .enroll-missing{margin:var(--s-2) 0 0}
 .enroll-missing[hidden],#enroll-out[hidden],#enroll-project-field[hidden],#enroll-org-field[hidden]{display:none}
 .btn[aria-disabled="true"]{cursor:not-allowed}
+
+/* current page in the account control: a utility page (Administration, Settings, Help, My account) highlights the account, not a rail entry */
+.acct summary[aria-current="page"],.menu a[aria-current="page"]{background:var(--sunk);box-shadow:inset 3px 0 0 var(--brand)}
+.menu a[aria-current="page"]{color:var(--ink)}
+.sheet-list a[aria-current="page"],.sheet-grid a[aria-current="page"]{color:var(--ink);box-shadow:inset 3px 0 0 var(--brand)}
+@media (pointer:coarse){.rail-nav a,.menu a,.menu button,.sheet-grid a{min-height:var(--hit)}}
