@@ -46,7 +46,7 @@ class WizardError(Exception):
 
 # (family id, title, what it does, kinds). A kind in no family is not asked about and keeps whatever the capability policy says (the default: on).
 FAMILIES = (
-    ('discovery', 'Finding hosts', 'Subdomains, addresses and certificates: how cvENGINE learns what you own. Always on.',
+    ('discovery', 'Names and addresses', 'Names, addresses and certificates: how cvENGINE learns what you own. The basics are always on.',
      ('bbot_discovery', 'discover', 'dns_resolve', 'alive_check', 'identity_check', 'dangling_dns_check')),
     ('web', 'Websites', 'Web fingerprints, hidden routes, virtual hosts, cloud storage and supplier checks.',
      ('http_probe', 'waf', 'vhost_probe', 'subdir_probe', 'route_probe', 'route_probe_signed', 'page_read', 'path_probe', 'bucket_check', 'supplier_check')),
@@ -66,8 +66,11 @@ LOCKED_ON = ('bbot_discovery', 'discover')  # without them nothing is ever found
 HEAVY = ('nmap_full', 'nmap_udp', 'nuclei_deep', 'wpscan_thorough', 'web_screenshot', 'rdp_shot')  # off by default on a small machine
 SMALL_MEMORY_GB = 6  # the one threshold: a machine with less memory than this (or one whose memory cannot be read) is a small host
 HEAVY_OFF_REASON = 'heavy: off by default on this machine; turn on if you have the capacity'
-OPENVAS_COST = ('OpenVAS is a second, much heavier scanner: it needs about 4 GB of memory, 2 CPUs and 60 GB of disk on the machine that runs it, '
+OPENVAS_COST = ('OpenVAS is a much heavier extra check: it needs about 4 GB of memory, 2 CPUs and 60 GB of disk on the machine that runs it, '
                 'and its first feed download takes hours. It is off unless you turn it on.')
+# What the wizard calls a kind when the shared name would say "scan" (the shared names stay as they are everywhere else).
+WIZARD_LABELS = {'path_probe': 'path checks', 'secrets_scan': 'secret checks', 'wpscan': 'standard WordPress checks', 'wpscan_thorough': 'thorough WordPress checks', 'discover': 'built-in name lookups',
+                 'bbot_discovery': 'public name sources'}
 
 
 def family_kinds():
@@ -103,7 +106,7 @@ def families_payload(off, default_off=()):
     from agentapi.sentinel_policy import label
     off, default_off = set(off), set(default_off)
     return [{'id': fid, 'title': title, 'about': about,
-             'kinds': [{'kind': k, 'label': label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY,
+             'kinds': [{'kind': k, 'label': WIZARD_LABELS.get(k) or label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY,
                         'off_reason': HEAVY_OFF_REASON if k in HEAVY and k in default_off else ''} for k in kinds]}
             for fid, title, about, kinds in FAMILIES]
 
