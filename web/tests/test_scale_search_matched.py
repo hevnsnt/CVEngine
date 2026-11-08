@@ -57,11 +57,16 @@ class MatchedReasonsTests(TestCase):
             self.assertNotIn('seen in web archive: php (1 URLs)', row['matched'])
 
     def test_the_cost_does_not_grow_with_the_rows_of_the_page(self):
+        # Both readings are of a warm cache: the first search of each state fills it and is thrown away. The version that read the first
+        # state warm and the second straight after cache.clear() compared a warm page with a partly cold one, and the few queries a cold
+        # cache costs (settings, tunables) made them differ by chance, which failed CI now and then. What must hold is that 20 more rows
+        # add no queries.
         self.search('nginx')
         _, base = self.search('nginx')
         for i in range(self.HOSTS, self.HOSTS + 20):
             self.add(i)
         cache.clear()
+        self.search('nginx')
         data, more = self.search('nginx')
         self.assertEqual(data['count'], self.HOSTS + 20)
         self.assertEqual(base, more)
