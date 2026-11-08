@@ -1,4 +1,4 @@
-"""The shell's navigation: six rail entries, and a tab strip inside the page for the pages that share one entry.
+"""The shell's navigation: eight rail entries, and a tab strip inside the page for the pages that share one entry.
 
 Every page keeps its own address; this module only decides which entry a page belongs to and which sibling pages to offer.
 Nothing here grants access: each page and API still enforce their own role checks. What it does is keep the links a person
@@ -16,7 +16,20 @@ GROUP_OF = {
     'bounty': 'bounty',
 }
 
-SECTION_ICON = {'overview': 'pulse', 'findings': 'bug', 'assets': 'server', 'scans': 'radar', 'scanners': 'bot', 'bounty': 'flag'}
+# The rail entry that is highlighted for a page. It differs from GROUP_OF only for the two pages that have an entry of their own
+# (Hygiene, Suppliers): there the page's own entry wins and its parent entry (Findings, Assets) is NOT highlighted, so one entry
+# is current at a time. The tab strip still comes from GROUP_OF, so the page keeps its sibling tabs.
+OWN_ENTRY = {'hygiene': 'hygiene', 'suppliers': 'suppliers'}
+
+# Pages that belong to the person, not to the work: no rail entry is current on them (by design), the account control is, and so is
+# the one item of the account menu that opens the page.
+UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Settings', 'about': 'Help', 'setup': 'Connect AI model',
+           'welcome': ''}
+
+SECTION_ICON = {'overview': 'pulse', 'findings': 'bug', 'hygiene': 'shield', 'assets': 'server', 'suppliers': 'building', 'scans': 'radar',
+                'scanners': 'bot', 'bounty': 'flag'}
+SECTION_LABEL = {'overview': 'Overview', 'findings': 'Findings', 'hygiene': 'Hygiene', 'assets': 'Assets', 'suppliers': 'Suppliers',
+                 'scans': 'Scans', 'scanners': 'Scanners', 'bounty': 'Bug bounty'}
 
 
 def _section(slug, name):
@@ -48,23 +61,26 @@ def _tabs(group, slug, sentinels_enabled):
 
 
 def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False):
-    """``{'rail': [...], 'tabs': [...], 'group': str, 'index': [...], 'more': [...]}`` for the shell.
+    """``{'rail': [...], 'tabs': [...], 'group': str (the tab strip's family), 'current': str (the one current rail entry or ''),
+    'utility': the account-menu label for a utility page or None, 'index': [...], 'more': [...]}`` for the shell.
 
     rail: the entries of the left rail (and the phone's tab bar); tabs: the sibling pages of the current entry; index: every page the
     caller can reach, for the jump palette (it reads them from the page, so the six rail entries do not shrink what Ctrl K finds).
     """
     group = GROUP_OF.get(active, '')
+    current = OWN_ENTRY.get(active, group)  # the one rail entry that is current ('' on a utility page)
     bounty_href = reverse('cve_bounty') + (f'?project={slug}' if slug and not all_projects else '')
     entries = [('overview', 'Overview', reverse('cve_dashboard'))]
     if slug:
-        entries += [('findings', 'Findings', _section(slug, 'vulns')), ('assets', 'Assets', _section(slug, 'hosts')),
+        entries += [('findings', 'Findings', _section(slug, 'vulns')), ('hygiene', 'Hygiene', _section(slug, 'hygiene')),
+                    ('assets', 'Assets', _section(slug, 'hosts')), ('suppliers', 'Suppliers', _section(slug, 'suppliers')),
                     ('scans', 'Scans', _section(slug, 'scans'))]
     else:
         entries.append(('assets', 'Assets', reverse('cve_graph')))
     entries.append(('scanners', 'Scanners', reverse('cve_scanners')))
     if bounty_enabled:
         entries.append(('bounty', 'Bug bounty', bounty_href))
-    rail = [{'key': k, 'label': label, 'href': href, 'icon': SECTION_ICON[k], 'current': k == group} for k, label, href in entries]
+    rail = [{'key': k, 'label': label, 'href': href, 'icon': SECTION_ICON[k], 'current': k == current} for k, label, href in entries]
     tabs = [{'key': k, 'label': label, 'href': href, 'current': k == active} for k, label, href in _tabs(group, slug, sentinels_enabled)]
     # one entry for the page strip is not a strip
     if len(tabs) < 2:
@@ -79,4 +95,4 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
                 index.append({'label': full, 'href': href})
     primary = {e['href'] for e in rail}
     more = [i for i in index if i['href'] not in primary]  # the phone's More sheet: everything the tab bar and the rail entries do not already open
-    return {'rail': rail, 'tabs': tabs, 'group': group, 'index': index, 'more': more, 'bounty_href': bounty_href}
+    return {'rail': rail, 'tabs': tabs, 'group': group, 'group_label': SECTION_LABEL.get(group, ''), 'current': current, 'utility': UTILITY.get(active), 'index': index, 'more': more, 'bounty_href': bounty_href}

@@ -88,3 +88,72 @@ test('"Needs validation" on a match presses Validate now; on any other finding i
   assert.equal(v.attrs.href, '/cve/p/vulns/#vulnerability-9');
   assert.ok(m.className.includes('needs-validation'));
 });
+
+// --- the page a route, a screenshot, a finding or a secret was seen on -------------------------------------------------------------------------
+test('pageUrl: a stored http or https address is used as it is', () => {
+  assert.equal(links.pageUrl({url: 'https://www.example.com/admin/'}), 'https://www.example.com/admin/');
+  assert.equal(links.pageUrl({url: 'http://www.example.com:8080/x'}), 'http://www.example.com:8080/x');
+  assert.equal(links.pageUrl({url: 'https://u:p@www.example.com/x#frag'}), 'https://www.example.com/x');  // no login, no fragment in the address
+});
+
+test('pageUrl: scheme, host and port come from the route when there is no address, and the default port is left out', () => {
+  assert.equal(links.pageUrl({host: 'www.example.com', path: '/a'}), 'https://www.example.com/a');
+  assert.equal(links.pageUrl({scheme: 'http', host: 'www.example.com', path: '/a'}), 'http://www.example.com/a');
+  assert.equal(links.pageUrl({scheme: 'https', host: 'www.example.com', port: 443, path: '/'}), 'https://www.example.com/');
+  assert.equal(links.pageUrl({scheme: 'http', host: 'www.example.com', port: 80, path: '/'}), 'http://www.example.com/');
+  assert.equal(links.pageUrl({scheme: 'https', host: 'www.example.com', port: 8443, path: '/'}), 'https://www.example.com:8443/');
+  assert.equal(links.pageUrl({scheme: 'http', host: '192.0.2.7', port: 8080, path: '/x'}), 'http://192.0.2.7:8080/x');
+  assert.equal(links.pageUrl({host: 'www.example.com'}), 'https://www.example.com/');
+  assert.equal(links.pageUrl({host: 'www.example.com', path: 'no-slash'}), 'https://www.example.com/no-slash');
+});
+
+test('pageUrl: unsafe characters in a path are encoded and cannot add a query, a fragment, another host or a scheme', () => {
+  const href = (path) => links.pageUrl({host: 'www.example.com', path});
+  assert.equal(href('/a b/"c"<d>'), 'https://www.example.com/a%20b/%22c%22%3Cd%3E');
+  assert.equal(href('/x?y=1#z'), 'https://www.example.com/x%3Fy=1%23z');
+  assert.equal(href('//evil.test/x'), 'https://www.example.com//evil.test/x');
+  assert.equal(href('/\u00e9'), 'https://www.example.com/%C3%A9');
+  assert.equal(href('/%41'), 'https://www.example.com/%41');
+  for (const path of ['/a b', '/x?y#z', '//evil.test', '/\\evil.test', '/<script>alert(1)</script>']) {
+    const u = new URL(href(path));
+    assert.equal(u.host, 'www.example.com');
+    assert.equal(u.search, '');
+    assert.equal(u.hash, '');
+    assert.equal(u.protocol, 'https:');
+  }
+});
+
+test('pageUrl: only http and https, and only a real host name or address', () => {
+  for (const url of ['javascript:alert(1)', 'data:text/html,x', 'ftp://www.example.com/', 'file:///etc/passwd', 'www.example.com/x', '', null, undefined]) assert.equal(links.pageUrl({url}), null, String(url));
+  for (const scheme of ['javascript', 'ftp', 'data']) assert.equal(links.pageUrl({scheme, host: 'www.example.com'}), null, scheme);
+  for (const host of ['', 'a b.test', 'evil.test/x', 'user@evil.test', 'evil.test:80', 'ex"ample.test', '<x>', null, undefined]) assert.equal(links.pageUrl({host, path: '/'}), null, String(host));
+  for (const port of [0, 65536, -1, 'x', 1.5]) assert.equal(links.pageUrl({host: 'www.example.com', port, path: '/'}), null, String(port));
+});
+
+test('pageAnchor: a link that opens the live page in a new tab with no opener, and plain text when there is no address', () => {
+  const a = links.pageAnchor({url: 'https://www.example.com/admin'}, '/admin');
+  assert.equal(a.tag, 'a');
+  assert.equal(a.attrs.href, 'https://www.example.com/admin');
+  assert.equal(a.attrs.target, '_blank');
+  assert.equal(a.attrs.rel, 'noopener noreferrer');
+  assert.equal(a.title, 'Opens the live page on the scanned host');
+  assert.equal(a.textContent, '/admin');
+  assert.match(a.className, /host-link/);  // the existing link style, so focus and target rules of the stack apply without a new rule
+  const none = links.pageAnchor({host: 'a b', path: '/x'}, '/x');
+  assert.equal(none.tag, 'span');
+  assert.equal(none.attrs.href, undefined);
+  assert.equal(none.textContent, '/x');
+});
+
+test('the route row and the lists that name a page use the page link, and the masked sample never reaches an address', () => {
+  const app = readFileSync(new URL('../static/cve/app.js', import.meta.url), 'utf8');
+  const route = app.slice(app.indexOf('function routeLine(r)'), app.indexOf('function shotPair('));
+  assert.match(route, /pageAnchor\(page, r\.path\)/);  // the path on the row
+  assert.match(route, /pageAnchor\(page, r\.path, "host-link"\)/);  // and the path in the PII note
+  assert.doesNotMatch(route, /sample[^;]*(pageAnchor|pageUrl|href)/);  // the sample is text after the link
+  assert.match(app, /pageAnchor\(\{ url: r\.url \}, r\.url/);  // Endpoints
+  assert.match(app, /pageAnchor\(\{ url: v\.url \}, v\.url/);  // scan findings
+  assert.match(app, /pageAnchor\(\{ scheme: r\.scheme, host: h\.host, port: r\.port/);  // screenshot caption
+  const secrets = readFileSync(new URL('../static/cve/secrets.js', import.meta.url), 'utf8');
+  assert.match(secrets, /pageAnchor\(\{ url: where\.url \}/);  // Found at
+});

@@ -2396,3 +2396,8 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .seed-withheld{margin:0 0 var(--s-3);padding-left:var(--s-5);font-size:var(--fs-3)}.seed-withheld li{margin:2px 0}
 .seed-card input[type=file]{padding:var(--s-2) var(--s-3)}
 @media (max-width:480px){.seed-stats{grid-template-columns:1fr}.seed-card .tools .btn,.seed-card>.btn{width:100%}}
+/* current page in the account control: a utility page (Administration, Settings, Help, My account) highlights the account, not a rail entry */
+.acct summary[aria-current="page"],.menu a[aria-current="page"]{background:var(--sunk);box-shadow:inset 3px 0 0 var(--brand)}
+.menu a[aria-current="page"]{color:var(--ink)}
+.sheet-list a[aria-current="page"],.sheet-grid a[aria-current="page"]{color:var(--ink);box-shadow:inset 3px 0 0 var(--brand)}
+@media (pointer:coarse){.rail-nav a,.menu a,.menu button,.sheet-grid a{min-height:var(--hit)}}

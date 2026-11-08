@@ -94,6 +94,24 @@ test('dailyCounts follows the UTC display preference', () => {
   }
 });
 
+test('dailyCounts takes the server\'s exact per-day counts as they are, whatever their size', () => {
+  process.env.TZ = 'America/New_York';
+  withClock('2026-11-10T15:00:00Z', () => {
+    const points = charts.dailyCounts([], 4, [{date: '2026-11-10', n: 2032}, {date: '2026-11-08', n: 7}, {date: '2026-06-01', n: 99}]);
+    assert.deepEqual(points.map((p) => p.v), [0, 7, 0, 2032]);  // nothing is capped at a thousand, a day outside the window is not drawn
+  });
+});
+
+test('the Activity card, the Scans chart and the Changes chart are counted by the server, never from a page of a list', () => {
+  const dash = read('dashboard.js');
+  assert.match(dash, /activity-days\?days=90/);
+  assert.doesNotMatch(dash, /hottest of|New findings counts|Inventory changes counts/);
+  const app = read('app.js');
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 126, series: "scans"/);
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 60, series: "changes"/);
+  assert.doesNotMatch(app, /scans\?\$\{query\(\{ page_size: 200 \}\)\}`\)\s*\.then\(\(r\) => \{\s*const dates/);
+});
+
 test('request bodies and links the review found wrong stay fixed', () => {
   const app = read('app.js');
   assert.doesNotMatch(app, /note:\s*(?:d\.remediation|\(detail)/, 'a status change must not resend a stored note');
@@ -215,7 +233,7 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
-const {versionBlock, newestLine, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, newestLine, waitingLines, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
@@ -241,6 +259,20 @@ test('a card says whether the build is the newest the server saw, since when it 
   const old = versionBlock({...base, contract: {version: 1, state: 'unsupported', note: 'This scanner is older than this server needs, update it'}}, {onChange() {}});
   assert.match(sentinelText(old), /This scanner is older than this server needs, update it/);
   assert.equal(old.children.some((c) => c.cls === 'msg err ss-detail'), true);
+});
+
+test('a card says which kind waits for memory and what holds it, and a task that is still stopping', () => {
+  const base = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.deepEqual(waitingLines({...base, waiting: []}), []);
+  assert.deepEqual(waitingLines(base), []);
+  const lines = waitingLines({...base, waiting: [
+    {kind: 'web_screenshot', need_mb: 400, free_mb: 140, budget_mb: 1540, seconds: 840, held_by: [{task: 3534, kind: 'naabu', mb: 80, seconds: 1800}]},
+    {kind: 'naabu', task: 3534, seconds: 45, stopping: true},
+  ]});
+  assert.equal(lines.length, 2);
+  assert.equal(sentinelText(lines[0]), 'web_screenshot waiting 14 min: needs 400 MB, 140 MB free of 1540 MB, held by task 3534 naabu (80 MB, 30 min).');
+  assert.match(sentinelText(lines[1]), /Task 3534 \(naabu\) was taken back by the server and is still stopping, 45 s later/);
+  assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /web_screenshot waiting 5 s: needs 400 MB/);
 });
 
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
