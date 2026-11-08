@@ -330,3 +330,45 @@ class UpdaterStateTests(Base):
         self.assertEqual(len(agent.info['updater']['detail']), 300)
         self.assertTrue(agent.info['updater']['detail'].startswith('okxxx'))  # the control character is dropped
         self.assertNotIn('install_command', agent.info['updater'])  # whatever else a Sentinel sends is dropped; the command is the server\'s
+
+
+class WaitingReportTests(Base):
+    """What a Sentinel says it holds back for lack of memory shows on its detail, clipped and typed, and an empty report clears it."""
+
+    def detail(self, agent):
+        status, out = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
+        self.assertEqual(status, 200, out)
+        return out
+
+    def waiting(self, rows):
+        return self.beat_info({'version': 'abc1234', 'waiting': rows})
+
+    def beat_info(self, info):
+        return call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat', {'info': info})
+
+    def test_a_waiting_kind_and_a_stopping_task_are_shown_and_an_empty_list_clears_them(self):
+        agent, _ = self.sentinel()
+        self.assertEqual(self.detail(agent)['waiting'], [])
+        rows = [{'kind': 'web_screenshot', 'need_mb': 400, 'free_mb': 140, 'budget_mb': 1540, 'seconds': 840,
+                 'held_by': [{'task': 3534, 'kind': 'naabu', 'mb': 80, 'seconds': 1800}]},
+                {'kind': 'naabu', 'task': 3534, 'seconds': 45, 'stopping': True}]
+        self.assertEqual(self.waiting(rows)[0], 200)
+        out = self.detail(agent)['waiting']
+        self.assertEqual(out[0]['kind'], 'web_screenshot')
+        self.assertEqual((out[0]['need_mb'], out[0]['free_mb'], out[0]['held_by'][0]['task']), (400, 140, 3534))
+        self.assertEqual(out[1], {'kind': 'naabu', 'seconds': 45, 'stopping': True, 'task': 3534})
+        self.assertEqual(self.waiting([])[0], 200)
+        self.assertEqual(self.detail(agent)['waiting'], [])
+
+    def test_the_report_is_clipped_and_a_bad_shape_is_refused(self):
+        agent, _ = self.sentinel()
+        rows = [{'kind': 'x' * 100 + '\n', 'need_mb': -5, 'free_mb': 'lots', 'budget_mb': True, 'seconds': 1.5,
+                 'held_by': [{'task': 1, 'kind': 'k', 'mb': 1, 'seconds': 1}] * 9}] * 9
+        self.assertEqual(self.waiting(rows)[0], 200)
+        out = self.detail(agent)['waiting']
+        self.assertEqual(len(out), 6)
+        self.assertEqual(len(out[0]['kind']), 40)
+        self.assertEqual((out[0]['need_mb'], out[0]['free_mb'], out[0]['budget_mb'], out[0]['seconds']), (0, 0, 0, 0))
+        self.assertEqual(len(out[0]['held_by']), 3)
+        for bad in ('web_screenshot', {'kind': 'a'}, [1], [{'kind': 1}], [{'kind': 'a'}] * 21):
+            self.assertEqual(self.waiting(bad)[0], 400, bad)

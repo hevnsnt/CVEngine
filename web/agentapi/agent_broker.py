@@ -1040,6 +1040,7 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
         from agentapi import sentinel_autoupdate
         out['auto_update'] = sentinel_autoupdate.view(agent)  # running / newest / update requested / flagged, in plain words
+        out['waiting'] = (agent.info or {}).get('waiting') or []  # kinds it holds back for lack of memory (and the tasks holding it), tasks still stopping: why a kind is not being taken
         # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
         held = counts.get('_held_by_kind', {})
         limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)
