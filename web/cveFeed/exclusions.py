@@ -178,7 +178,7 @@ def _names_resolving_into(project_id, networks):
     return {n.strip().lower().rstrip('.') for n in names}
 
 
-def address_refusals(project_id, values, resolved=None):
+def address_refusals(project_id, values, resolved=None, networks=None):
     """``{value: Refusal}`` for each of ``values`` (addresses, ``host:port``, URLs, host names) that must not be worked on for this project: THE rule of the
     do-not-scan list, for one value or a whole task (the lookups are batched, not per name). A value inside a listed network is refused, and so is a name
     with a stored address inside one, or one that ``resolved`` (``{name: [addresses]}``, what a task resolved the name to itself) places inside one.
@@ -187,7 +187,7 @@ def address_refusals(project_id, values, resolved=None):
     if not project_id or not values:
         return {}
     try:
-        networks = address_networks(project_id)
+        networks = address_networks(project_id) if networks is None else networks  # ``networks``: a caller that already read the list for this project
     except Exception:  # noqa: BLE001 - fail closed: never let work through on a list that was not read
         logger.warning('could not read the do-not-scan address list for project %s', project_id, exc_info=True)
         return {v: Refusal(UNREADABLE, unreadable=True) for v in values}

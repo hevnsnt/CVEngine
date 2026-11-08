@@ -904,6 +904,7 @@ const hostOverview = (h) => {
   const rows = [];
   if (h.alias) rows.push({ label: "Alias", value: h.alias });
   if (h.note) rows.push({ label: "Note", value: h.note });
+  if (h.scan_blocked) rows.push({ label: "Not scanned", value: h.scan_blocked });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
