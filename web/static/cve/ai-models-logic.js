@@ -125,7 +125,7 @@ export function createModelSource({ fetcher, delay = 500, setTimer = setTimeout,
   let timer = null;
   let controller = null;
   let serial = 0;
-  let state = { phase: "idle", models: [], recommended: "", error: "", params: null };
+  let state = { phase: "idle", models: [], recommended: "", nucleiDefault: "", error: "", params: null };
   const emit = (patch) => {
     state = { ...state, ...patch };
     listeners.forEach((fn) => fn(state));
@@ -137,21 +137,21 @@ export function createModelSource({ fetcher, delay = 500, setTimer = setTimeout,
     const mine = serial;
     if (!force && cache.has(key)) {
       const hit = cache.get(key);
-      emit({ phase: "ready", models: hit.models, recommended: hit.recommended, error: "", params, key });
+      emit({ phase: "ready", models: hit.models, recommended: hit.recommended, nucleiDefault: hit.nucleiDefault, error: "", params, key });
       return state;
     }
     controller = makeController();
     const same = state.key === key; // a refresh of the list on screen keeps it; another provider or address starts empty
-    emit({ phase: "loading", error: "", params, key, models: same ? state.models : [], recommended: same ? state.recommended : "" });
+    emit({ phase: "loading", error: "", params, key, models: same ? state.models : [], recommended: same ? state.recommended : "", nucleiDefault: same ? state.nucleiDefault : "" });
     try {
       const r = await fetcher({ ...params, refresh: force || undefined }, controller.signal);
       if (mine !== serial) return state; // a newer request replaced this one
-      const hit = { models: r.models || [], recommended: r.recommended || "" };
+      const hit = { models: r.models || [], recommended: r.recommended || "", nucleiDefault: r.nuclei_default || "" };
       cache.set(key, hit);
       emit({ phase: "ready", ...hit, error: "", key });
     } catch (err) {
       if (mine !== serial || (err && err.name === "AbortError")) return state;
-      emit({ phase: "failed", models: [], recommended: "", error: err && err.message ? err.message : "it did not answer", key });
+      emit({ phase: "failed", models: [], recommended: "", nucleiDefault: "", error: err && err.message ? err.message : "it did not answer", key });
     }
     return state;
   };
@@ -174,7 +174,7 @@ export function createModelSource({ fetcher, delay = 500, setTimer = setTimeout,
       clearTimer(timer);
       if (controller) controller.abort();
       serial += 1;
-      emit({ phase: "idle", models: [], recommended: "", error: "", ...patch });
+      emit({ phase: "idle", models: [], recommended: "", nucleiDefault: "", error: "", ...patch });
     },
     subscribe(fn) {
       listeners.add(fn);

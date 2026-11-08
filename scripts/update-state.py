@@ -192,6 +192,12 @@ def main():
                 destination.flush()
                 os.fsync(destination.fileno())
             os.unlink('.update-requeue.json', dir_fd=web_fd)
+        elif action == 'disk':
+            # `disk FREE_MB NEED_MB`: how much room Docker's directory has and what the next update needs (scripts/update-disk.sh), for the Update screen
+            free, need = int(sys.argv[2]), int(sys.argv[3])
+            if not (0 <= free < 10**9 and 0 <= need < 10**9):
+                raise ValueError('invalid disk figures')
+            publish(web_fd, '.update-disk.json', [json.dumps({'free_mb': free, 'need_mb': need, 'at': time.time()}).encode('ascii') + b'\n'])
         elif action == 'approval':
             with os.fdopen(regular_fd('.update-approved', dir_fd=web_fd), 'rb') as source:
                 value = source.read(256).strip()

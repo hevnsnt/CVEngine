@@ -123,12 +123,34 @@ def _remember_failure(key, category, stop_reason):
 	return window
 
 
+RETRY_CATEGORIES = ('refused', 'empty_response')  # the answers a smaller model may give where the configured one gave none
+
+
+def _complete(stage, provider, system, user):
+	"""One request on the model this job uses (``reNgine.ai_nuclei_model``: the owner's choice, else the cheapest haiku the provider lists, else
+	the model of everything else). When it ends in a refusal or an empty reply and the haiku default is a different model, ONE retry on that
+	model; both calls are rows of the usage table under ``stage``. Never more than one retry; a second failure is raised as it is."""
+	from reNgine.ai_nuclei_model import plan
+	from reNgine.ai_providers import AIProviderError, complete_with_headroom, usage_stage
+	main, retry = plan(provider)
+	try:
+		with usage_stage(stage):
+			return complete_with_headroom(main, system, user, allow_retry=_ai_room)
+	except AIProviderError as error:
+		if retry is None or error.category not in RETRY_CATEGORIES or not _ai_room():
+			raise
+		what = 'refused by' if error.category == 'refused' else 'empty response from'
+		logger.info('%s %s, retried on %s', what, main.model, retry.model)
+	with usage_stage(stage):
+		return complete_with_headroom(retry, system, user, allow_retry=_ai_room)
+
+
 def _ask(stage, provider, system, user, notes=None):
 	"""The model's reply for one request, or None when there is none, and then why is in ``notes`` (a list the caller reads) as one plain
 	sentence. None for: today's cap reached, the same request failed a moment ago (it is not sent again inside its window), the model
 	answered with no text (after one retry with a larger reply limit when it was cut off), or any provider failure. One log line per failure,
 	with the stop reason and the token counts; never a traceback, and never an exception: a scan is not held up by this."""
-	from reNgine.ai_providers import AIProviderError, complete_with_headroom, plain_failure, usage_stage
+	from reNgine.ai_providers import AIProviderError, plain_failure
 	notes = notes if notes is not None else []
 	key = _digest(stage, provider, system, user)
 	recent = _recent_failure(key)
@@ -140,8 +162,7 @@ def _ask(stage, provider, system, user, notes=None):
 		notes.append('The day\'s limit on AI calls for choosing nuclei tags is reached (CVENGINE_NUCLEI_AI_MAX_PER_DAY)')
 		return None
 	try:
-		with usage_stage(stage):
-			return complete_with_headroom(provider, system, user, allow_retry=_ai_room)
+		return _complete(stage, provider, system, user)
 	except AIProviderError as error:
 		usage = error.usage or {}
 		window = _remember_failure(key, error.category, error.stop_reason)

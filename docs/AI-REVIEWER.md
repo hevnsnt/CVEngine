@@ -234,7 +234,7 @@ the numbers behind that state, and the actions it allows:
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. An admin can dismiss an alert, and it stays dismissed until the problem changes.
 
-The operations job then gives the model the checks. The model writes a diagnosis and next steps for each alert, and may ask for actions. The
+The operations job then gives the model the checks. The model writes a diagnosis and next steps for each alert, and may ask for actions. A diagnosis (or a finding note) that is filler, such as "Placeholder", "TBD", "<diagnosis>" or fewer than three words, is dropped by the container and again by the server (`cveFeed/filler.py`): the alert then shows no reviewer line, never the filler, and a row stored earlier with filler is not shown. The
 server runs an action only when the check offered it at that moment, and no more often than its own minimum interval. To know whether a newer
 nuclei-templates release exists, the reviewer container reads the newest release tag from GitHub's API itself, at a fixed URL. The model is not
 involved in that request.
@@ -248,6 +248,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Row | Setting | Used for | What it costs in practice |
 | --- | --- | --- | --- |
 | **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
+| **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). These calls are made by the server, not by the reviewer container. | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
 | **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
 | **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
 
@@ -283,3 +284,12 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 - Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, nuclei targeting, and the
   connection test and model list of Settings > AI model. Then the server makes no model call at all.
+
+### The Nuclei model and its safety net
+
+Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuclei tag questions with the stop reason `refusal` or with nothing, while `claude-haiku-5-5` answers them. The row **Nuclei targeting and tag selection** therefore has its own model:
+
+- **Default (empty).** The cheapest model of the provider whose id contains `haiku` and that the provider lists as available, found in the provider's model list each time it is read (cached for ten minutes), never a name written into the code or stored by an upgrade. Where the list has no haiku, or cannot be read, the model of **Everything else**. The drop-down names it ("Default: claude-haiku-5-5", or "Default: same as Everything else" when no haiku is listed).
+- **Your choice.** A model you pick is kept, and the save refuses a model the provider does not list. Changing the provider clears it (a model belongs to the provider it was chosen from). **Everything else** is never changed by this row. An existing install has no stored value and gets the default through code; there is no data migration.
+- **Safety net.** When a call on the Nuclei jobs ends in a refusal or an empty reply and the haiku default is a different model from the one used, the same request is retried **once** on the haiku default. Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the log gets one line: `refused by <model>, retried on <model>` (`empty response from ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
+

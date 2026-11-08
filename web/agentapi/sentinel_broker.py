@@ -364,9 +364,14 @@ def _env_int(name, default):
         return default
 
 
+# A failure the scanned host caused, not the Sentinel: a task that failed with one of these says nothing about whether the Sentinel can do the kind, so it
+# neither adds to a streak nor breaks one. (A Sentinel that has the nmap_full tarpit handling reports such a host as a result; this is for one that does not.)
+TARGET_CAUSED_ERRORS = ('bytes of output; the run was stopped',)
+
+
 def failing_kinds(agent, now=None):
     """``{kind: {'failures': n, 'since': when, 'retry_at': when}}`` for the kinds this Sentinel has failed ``FAIL_STREAK`` times running, the
-    latest inside the cool-off. Such a kind is not offered to it (``effective_capabilities``): a Sentinel whose nuclei is killed, whose OpenVAS
+    latest inside the cool-off. A failure the scanned host caused (``TARGET_CAUSED_ERRORS``: it wrote more output than a Sentinel holds) is not counted. Such a kind is not offered to it (``effective_capabilities``): a Sentinel whose nuclei is killed, whose OpenVAS
     socket is gone or whose tool is missing would otherwise be handed the same work again and again, each failing and then running on this server
     after the round trip. Work of that kind goes straight to this server (``capacity_state`` finds no Sentinel) until the cool-off ends; then the
     next task of the kind is the one more try, and a success clears the streak while a failure withholds it for another cool-off. Needs no state of
@@ -378,9 +383,11 @@ def failing_kinds(agent, now=None):
     now = now or timezone.now()
     window = timedelta(minutes=cooldown)
     recent = list(SentinelTask.objects.filter(agent=agent, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
-                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at')[:200])
+                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at', 'error')[:200])
     by_kind = {}
-    for kind, status, finished in recent:
+    for kind, status, finished, error in recent:
+        if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
+            continue
         by_kind.setdefault(kind, []).append((status, finished))
     out = {}
     for kind, rows in by_kind.items():

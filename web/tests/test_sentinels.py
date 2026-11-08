@@ -136,7 +136,7 @@ class EnrollmentTests(SentinelBase):
     def test_format_blob_packages_the_same_payload_and_still_bootstraps(self):
         # The provisioning blob (the Sentinels page's Provision button, and CVENGINE_SENTINEL_BLOB): generate_enrollment's
         # own contract is unchanged, ?format=blob only adds one opaque {blob} string alongside it.
-        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         self.assertIn('blob', out)
         self.assertIn('enrollment_token', out)  # the plain fields are still there: this is presentation, not a new contract
@@ -215,12 +215,12 @@ class OrgAndInstanceEnrollmentTests(SentinelBase):
         self.assertEqual(status, 403)
 
     def test_org_and_instance_blob_formats_round_trip(self):
-        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll?format=blob')
+        status, out = call(self.t['dana'], 'POST', '/api/v1/orgs/one/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         decoded = sentinels.decode_enrollment_blob(out['blob'])
         self.assertEqual(decoded['scope'], 'org')
         self.assertEqual(decoded['org'], 'one')
-        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll?format=blob')
+        status, out = call(self.t['root'], 'POST', '/api/v1/sentinels/enroll?format=blob&network=external&profile=full')
         self.assertEqual(status, 201)
         decoded = sentinels.decode_enrollment_blob(out['blob'])
         self.assertEqual(decoded['scope'], 'instance')
@@ -635,9 +635,14 @@ class McpToolTests(SentinelBase):
         self.assertEqual(status, 201, out)
         self.assertEqual((out['setup']['network'], out['setup']['profile']), ('internal', 'light'))
         before = SentinelEnrollment.objects.count()
-        for query in ('network=lan', 'profile=huge'):
+        for query in ('network=lan&profile=light', 'network=external&profile=huge', 'profile=light', 'network=external', 'network=&profile=light', 'network=external&profile=', ''):
             status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&{query}')
-            self.assertEqual(status, 400, out)
+            self.assertEqual(status, 400, (query, out))
+            self.assertIn('required' if 'lan' not in query and 'huge' not in query else 'must be one of', out.get('error', ''), query)
+        for path in ('/api/v1/orgs/one/sentinels/enroll', '/api/v1/sentinels/enroll'):
+            for query in ('', 'network=external', 'profile=light'):
+                status, out = call(self.t['root'], 'POST', f'{path}?format=blob&{query}')
+                self.assertEqual(status, 400, (path, query, out))
         self.assertEqual(SentinelEnrollment.objects.count(), before)
 
     def test_enrollment_and_list_tasks_tools_over_mcp(self):
@@ -1084,7 +1089,7 @@ class ProvisionPickerTests(SentinelBase):
 
     def test_an_org_admin_picks_from_their_own_organizations_only(self):
         html = self.page(self.dana)
-        self.assertIn('<select id="enroll-org"><option value="one">One</option></select>', html)
+        self.assertIn('<option value="" selected disabled>Choose an organization</option><option value="one">One</option></select>', html)
         self.assertNotIn('value="two"', html)
         self.assertNotIn('value="instance"', html)
 

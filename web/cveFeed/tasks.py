@@ -986,6 +986,7 @@ def validate_match_on_demand(request_id):
                   'check_notes': plan_notes, 'classification': row.classification or None,
                   'ai_status': row.status, 'validation_status': row.validation_status,
                   'assessment_status': 'unsupported_external' if no_check and not candidate else 'checked' if checks else 'inconclusive'}
+        from cveFeed import hot_validation
         from cveFeed.hot_validation import retry_after
         broken = bool(check_result.get('failed') or check_result.get('blocked') or ai_state == 'failed')
         capped_only = bool(check_result.get('capped')) and not broken
@@ -1036,8 +1037,9 @@ def validate_match_on_demand(request_id):
                 triage.track(triage.with_cves([match]))
             except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
                 logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
-        activity.settle(progress, 'failed' if status == 'failed' else 'done',
-                        f'Validation request #{job.pk} {status} for {cve_id}'
+        really = bool(check_result.get('failed')) or ai_state == 'failed'
+        activity.settle(progress, hot_validation.line_status(status == 'failed', really),
+                        f'Validation request #{job.pk} {hot_validation.outcome_words(status == "failed", really, capped_only)} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
                         + f'; AI review {ai_state}', check_state=result['check_state'], ai_state=ai_state)
         return result
@@ -1321,8 +1323,9 @@ def automatic_validate_finding(job_id):
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
             status=status, result=result, finished_at=timezone.now(),
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
-        activity.settle(progress, 'failed' if failed else 'done',
-                        f'Automatic validation #{job.pk} {status}: checks {check_state}; ' +
+        outcome = hot_validation.outcome_words(failed, bool(checks.get('failed')) or ai_state == 'failed', capped_only)
+        activity.settle(progress, hot_validation.line_status(failed, bool(checks.get('failed')) or ai_state == 'failed'),
+                        f'Automatic validation #{job.pk} {outcome}: checks {check_state}; ' +
                         ('no AI model is connected, so no AI review' if not ai_connected and ai_state == 'unavailable' else f'AI {ai_state}'),
                         check_state=check_state, ai_state=ai_state)
         return result
@@ -2039,28 +2042,19 @@ def author_cve_detections():
     return out
 
 
-@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue")
-def build_cve_seed():
-    """Write the whole catalog with its shared detection records to the exports folder (Settings > CVE seed), ready to publish."""
-    import os
-    from django.core.cache import cache
-    from cveFeed import activity, detection_author, seed
-    from cveFeed.settings_api import SEED_BUILDING, SEED_NAME, seed_dir
-    handle = activity.log('inventory', 'Building the CVE seed', status='running')
-    try:
-        while detection_author.author_rules(batch=5000):
-            pass
-        detection_author.refresh_rules(batch=5000)
-        detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
-        os.makedirs(seed_dir(), exist_ok=True)
-        manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
-        activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")
-        return {k: manifest[k] for k in ('count', 'with_detection', 'bytes')}
-    except Exception:
-        activity.settle(handle, 'failed', message='Building the CVE seed failed; see the worker log')
-        raise
-    finally:
-        cache.delete(SEED_BUILDING)
+@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def build_cve_seed(user_id=None):
+    """Settings > CVE catalog seed > Create seed file: write the whole catalog with its shared detection records to the private seed folder,
+    scrubbed of anything of this instance (cveFeed.seed_scrub). The page polls the progress this records (cveFeed.seed_admin)."""
+    from cveFeed import seed_admin
+    return {"count": seed_admin.run_export(user_id)}
+
+
+@app.task(name="import_cve_seed_file", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def import_cve_seed_file(path, user_id=None, verified=False):
+    """Settings > CVE catalog seed > Import a seed file: the upload an App Admin made, checked and imported like the command line does."""
+    from cveFeed import seed_admin
+    return {"created": seed_admin.run_import(path, user_id, verified)}
 
 
 @app.task(name="write_cve_guidance_now", bind=False, queue="cve_feed_queue")

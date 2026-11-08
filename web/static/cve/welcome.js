@@ -1,6 +1,6 @@
 // First-run setup: the way a new install is set up (the installer only prints this page's address).
-// Step 1 asks only what a discovery needs (organization, project, ONE seed domain) and starts it in the background; steps 2 to 4 are answered
-// while it runs; step 5 ("Getting everything ready") appears only while no host has been found yet and lasts at most a minute; with a host already found the dashboard opens straight away. Everything is saved on the server step by step, so the
+// Step 1 asks only what the set-up needs (organization, project, ONE seed domain) and starts the work in the background; steps 2 to 4 are answered
+// while it runs. Nothing on steps 1 to 4 says what that work is (no scanning, discovery, counts or Sentinels): the strip only says the workspace is being set up. Step 5 ("Getting everything ready") appears only while no host has been found yet and lasts at most a minute; with a host already found the dashboard opens straight away. Everything is saved on the server step by step, so the
 // page resumes where you left it from any browser, and what you typed is kept in this tab until it is saved.
 import { readyToFetch } from '/staticfiles/cve/ai-models-logic.js';
 import { autoLoad, connectionStatus, modelPicker, newSource } from '/staticfiles/cve/ai-models.js';
@@ -9,10 +9,9 @@ const root = document.getElementById('wizard');
 const csrf = root.querySelector('[name=csrfmiddlewaretoken]').value;
 const stepBox = document.getElementById('step');
 const dots = document.getElementById('dots');
-const discBar = document.getElementById('disc');
-const discText = document.getElementById('disc-text');
+const strip = document.getElementById('disc');
 const STEPS = ['seed', 'plan', 'scanners', 'extras', 'build'];
-const TITLES = ['Start discovering', 'How you scan', 'What runs', 'Optional extras', 'Getting ready'];
+const TITLES = ['Your organization', 'Where it runs', 'What runs', 'Optional extras', 'Getting ready'];
 const NAMES = { anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter' };
 
 const el = (tag, cls, text, attrs = {}) => {
@@ -75,13 +74,14 @@ async function show(i) {
   drawDots();
   stepBox.textContent = '';
   if (STEPS[i] === 'build') {
-    discBar.classList.remove('on'); discText.textContent = ''; // nothing of the strip's old words stays in the page
+    strip.classList.remove('on'); // the strip belongs to steps 2 to 4 only
     try { gate = await welcome('GET', 'progress?build=1'); } catch (_) { gate = null; } // cannot ask: show it, it ends on its own timer
     if (index !== i) return;
     if (gate && !gate.build.show) { toDashboard(gate.discovery_scan); return; }
   }
   const node = el('div', 'step');
   stepBox.append(node);
+  strip.classList.toggle('on', i >= 1 && i <= 3);
   node.append(el('p', 'stepname', `Step ${i + 1} of ${STEPS.length}: ${TITLES[i]}`));
   steps[STEPS[i]](node);
   window.scrollTo(0, 0);
@@ -117,22 +117,17 @@ function form(node, { title, lead, body, primary, onSubmit, skip, canBack = true
   return f;
 }
 
-// --- the discovery strip: shown from step 2 on, so it is clear the first discovery is already running --------------------------------
-let builtinNote = null; // the plan step's line about the built-in scanner: kept current by the same poll
+// --- the strip: shown on steps 2 to 4 with one fixed, quiet line ("Setting up your workspace"); the page never reads or shows what the server reports --------
+// The poll stays because the server does its housekeeping on it (it readies the built-in scanner and restarts a start that found none live); the answer is not shown.
 async function pollStrip() {
-  try {
-    const r = await welcome('GET', 'progress');
-    const live = r.sentinel && r.sentinel.builtin_state;
-    if (live && builtinNote && builtinNote.isConnected) builtinNote.textContent = live.text; // "starting" must not stay once it has enrolled
-    if (r.discovery) { discBar.classList.add('on'); discText.textContent = r.discovery.text; }
-  } catch (_) { /* the next poll tries again */ }
+  try { await welcome('GET', 'progress'); } catch (_) { /* the next poll tries again */ }
 }
 
 // --- external Sentinels: the real enrollment, inside the wizard ---------------------------------------------------------------------
 function sentinelPanel() {
   const panel = el('div', 'panel');
-  panel.append(el('h3', '', 'Connect an external Sentinel'),
-    el('p', 'note', 'A Sentinel is a small scanner you run on another machine with Docker. This makes a one-time install command for it. It is a secret that works once and expires in 30 minutes: it is shown here only.', { style: 'margin:0 0 10px' }));
+  panel.append(el('h3', '', 'Connect another machine'),
+    el('p', 'note', 'This makes a one-time install command to run on that machine, which needs Docker. It is a secret that works once and expires in 30 minutes: it is shown here only.', { style: 'margin:0 0 10px' }));
   const out = el('div'); const status = el('div', 'note', '', { 'aria-live': 'polite', style: 'margin-top:10px' });
   const msg = el('div', 'msg err', '', { role: 'alert', style: 'display:none' });
   const make = el('button', 'btn sm', 'Create the install command', { type: 'button' });
@@ -141,7 +136,7 @@ function sentinelPanel() {
     try {
       const r = await welcome('POST', 'provision', { profile: 'light' });
       out.textContent = '';
-      const area = el('textarea', 'cmd', null, { readonly: '', 'aria-label': 'Sentinel install command', spellcheck: 'false' }); area.value = r.command;
+      const area = el('textarea', 'cmd', null, { readonly: '', 'aria-label': 'Install command', spellcheck: 'false' }); area.value = r.command;
       const copy = el('button', 'btn ghost sm', 'Copy', { type: 'button', style: 'margin-top:8px' });
       copy.onclick = async () => { try { await navigator.clipboard.writeText(r.command); copy.textContent = 'Copied'; } catch (_) { area.select(); } };
       out.append(el('p', 'note', `Run this on the machine (needs Docker and outbound HTTPS to this server). Expires ${new Date(r.expires_at).toLocaleTimeString()}.`, { style: 'margin:0 0 6px' }), area, copy);
@@ -154,7 +149,7 @@ function sentinelPanel() {
     try {
       const s = await welcome('GET', 'state'); state = s;
       const lines = s.enrollments.map((e) => e.agent
-        ? `Sentinel "${e.agent.name}": ${e.agent.live ? 'connected and live' : e.agent.status === 'active' ? 'connected, waiting for its first heartbeat' : e.agent.status}`
+        ? `Machine "${e.agent.name}": ${e.agent.live ? 'connected and live' : e.agent.status === 'active' ? 'connected, waiting for its first heartbeat' : e.agent.status}`
         : e.expired ? 'An install command expired before it was used.' : 'Waiting for the command to run on your machine...');
       status.textContent = lines.length ? lines.join(' \u00b7 ') : '';
     } catch (_) { /* the next poll tries again */ }
@@ -174,14 +169,14 @@ const steps = {
     const authWrap = el('label', 'check', null, { for: 'authorized' });
     authWrap.append(auth, document.createTextNode('I am authorized to test this domain.'));
     const hint = el('div', 'live-hint');
-    hint.append(el('span', 'live', 'live'), document.createTextNode('Discovery starts the moment you continue. In the first minute it asks public data sources about the domain, then runs light checks on the hosts it finds (for example whether a web page answers and which ports are open). It keeps running while you answer the next questions.'));
+    hint.append(document.createTextNode('We will set things up while you answer a few questions.'));
     form(node, {
-      title: 'Let us start finding your hosts',
-      lead: 'Name your organization and first project, and give one domain you own. We begin discovering it right away.',
+      title: 'Let us get you set up',
+      lead: 'Name your organization and first project, and give one domain you own.',
       body: [field('Organization', org, 'The top level: your projects and teammates live inside it.'),
-        field('Project', project, 'Holds your targets, scans and findings. Examples: Production, Client A, Lab.'),
-        field('Seed domain', domain, 'One domain. Subdomains are found for you; more targets can be added later.'), authWrap, hint],
-      primary: state.seed.domain ? 'Save and continue' : 'Start discovering', canBack: false,
+        field('Project', project, 'Holds your targets and everything learned about them. Examples: Production, Client A, Lab.'),
+        field('Seed domain', domain, 'One domain. More can be added later.'), authWrap, hint],
+      primary: 'Continue', canBack: false,
       onSubmit: async () => {
         if (!auth.checked) throw new Error('Please confirm you are authorized to test this domain.');
         state = await welcome('POST', 'seed', { org: org.value, project: project.value, domain: domain.value, authorized: true });
@@ -193,12 +188,12 @@ const steps = {
   plan(node) {
     const builtin = state.builtin;
     const options = [
-      ['internal', 'The built-in scanner only', 'Scans run on this server, by the scanner that came with it. The simplest start; nothing else to install.'],
-      ['both', 'The built-in scanner plus external Sentinels', 'You also connect scanners on other machines or networks. They take the work first; the built-in scanner stays as the last resort for anything none of them can take.'],
-      ['external', 'External Sentinels only', 'Scans run only on Sentinels you install on other machines. The built-in scanner is turned off for scans once setup is finished (it still completes your first discovery).'],
+      ['internal', 'The built-in scanner only', 'Everything runs on this server. The simplest start; nothing else to install.'],
+      ['both', 'The built-in scanner plus external scanners', 'You also connect scanners on other machines or networks. They take the work first; the built-in scanner covers anything they cannot.'],
+      ['external', 'External scanners only', 'Work runs only on scanners you install on other machines. The built-in scanner is turned off once setup is finished.'],
     ];
     let chosen = state.plan;
-    const box = el('div', 'choice', null, { role: 'radiogroup', 'aria-label': 'How will you scan?' });
+    const box = el('div', 'choice', null, { role: 'radiogroup', 'aria-label': 'Where it runs' });
     const external = el('div');
     const draw = () => { external.textContent = ''; if (chosen !== 'internal') external.append(sentinelPanel()); };
     options.forEach(([id, title, about]) => {
@@ -210,14 +205,12 @@ const steps = {
       const c = el('div'); c.append(el('b', '', title), el('span', '', blocked ? `${about} Not available: the built-in scanner is switched off on this install.` : about));
       label.append(radio, c); box.append(label);
     });
-    const status = el('p', 'note', builtin.text, { style: 'margin:-6px 0 16px', 'aria-live': 'polite' });
-    builtinNote = status;
     draw();
     form(node, {
-      title: 'How will you scan?', lead: 'Pick where your scans run. You can change this later in Sentinels.',
-      body: [box, status, external], primary: 'Continue',
+      title: 'Where should it run?', lead: 'Pick where the work happens. You can change this later.',
+      body: [box, external], primary: 'Continue',
       onSubmit: async () => { state = await welcome('POST', 'plan', { plan: chosen }); next(); },
-      skip: { label: 'Skip: keep the built-in scanner', onClick: async () => { state = await welcome('POST', 'skip', { step: 'plan' }); next(); } },
+      skip: { label: 'Skip: use the default', onClick: async () => { state = await welcome('POST', 'skip', { step: 'plan' }); next(); } },
     });
     pollStrip(); timer = setInterval(pollStrip, 5000);
   },
@@ -259,28 +252,28 @@ const steps = {
       syncMaster();
       card.append(head, el('p', '', f.about), ul); list.append(card);
     });
-    list.append(el('p', 'note', 'Some address must never be touched? List it (or its network) under Administration, Organizations, "Addresses we must never scan". Nothing is scanned there, and nothing is scanned at a host name that resolves to it, whichever scanners are on.', { style: 'margin:12px 0' }));
+    list.append(el('p', 'note', 'An address that must never be touched? You can list it (or its network) later under Administration, Organizations. Nothing is done at it, or at a host name that resolves to it.', { style: 'margin:12px 0' }));
     // OpenVAS is its own group, off unless asked for, with its real cost and where it runs.
     const ov = state.openvas;
     const vas = el('div', 'fam vas');
     const vasOn = el('input', '', null, { type: 'checkbox', 'aria-label': 'Turn OpenVAS on', id: 'vas-on' }); vasOn.checked = ov.enabled;
-    const vh = el('header'); vh.append(vasOn, el('b', '', 'OpenVAS (a second scanner, off by default)'));
+    const vh = el('header'); vh.append(vasOn, el('b', '', 'OpenVAS (an extra check, off by default)'));
     const where = el('div', 'choice', null, { style: 'margin:8px 0 0' });
     const allowed = state.plan === 'internal' ? ['internal'] : state.plan === 'external' ? ['external'] : ['internal', 'external', 'both'];
-    const WHERE = { internal: 'On the built-in scanner', external: 'On an external Sentinel', both: 'On both' };
+    const WHERE = { internal: 'On this server', external: 'On an external machine', both: 'On both' };
     let wsel = allowed.includes(ov.where) ? ov.where : allowed[0];
     allowed.forEach((w) => {
       const l = el('label'); const r = el('input', '', null, { type: 'radio', name: 'vwhere', value: w }); r.checked = wsel === w;
       r.addEventListener('change', () => { wsel = w; });
       const c = el('div'); c.append(el('b', '', WHERE[w]));
-      if (w !== 'internal') c.append(el('span', '', 'The Sentinel must run the Full profile, which carries the Greenbone stack.'));
+      if (w !== 'internal') c.append(el('span', '', 'The external machine must run the Full profile, which carries the Greenbone stack.'));
       l.append(r, c); where.append(l);
     });
     const sync = () => { where.style.display = vasOn.checked ? '' : 'none'; };
     vasOn.addEventListener('change', sync); sync();
     vas.append(vh, el('p', '', ov.cost), where); list.append(vas);
     form(node, {
-      title: 'What should run?', lead: 'Scanner types are grouped by what they find. Anything you leave off never runs, on the built-in scanner or on external Sentinels.',
+      title: 'What should run?', lead: 'Checks are grouped by what they look at. Anything you leave off never runs, here or on an external machine.',
       body: [list], primary: 'Continue',
       onSubmit: async () => {
         const kinds = {}; Object.entries(boxes).forEach(([k, cb]) => { if (!cb.disabled) kinds[k] = cb.checked; });
@@ -293,7 +286,7 @@ const steps = {
   },
 
   extras(node) {
-    node.append(el('h1', '', 'Optional extras'), el('p', 'lead', 'Each one is optional and can be done later in Settings. Discovery keeps running meanwhile.'));
+    node.append(el('h1', '', 'Optional extras'), el('p', 'lead', 'Almost there. Each one is optional and can be done later in Settings.'));
     const done = (name) => (state.extras || {})[name];
     const mark = async (name, how) => { state = await welcome('POST', 'extra', { name, how }); render(); };
     const card = (name, title, about, bodyNodes, onSave, saveLabel = 'Save') => {
@@ -376,7 +369,7 @@ const steps = {
       const svc = el('select'); svc.append(Object.assign(el('option'), { value: 'slack', textContent: 'Slack' }), Object.assign(el('option'), { value: 'discord', textContent: 'Discord' }));
       const url = el('input', '', null, { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: state.notify.slack || state.notify.discord ? 'A webhook is already saved. Paste a new one to replace it.' : 'https://hooks.slack.com/services/...' });
       const nb = el('div'); nb.append(field('Where', svc), field('Webhook address', url, 'Stored encrypted and never shown again. Telegram and more are in Settings > Notifications.'));
-      holder.append(card('notify', 'Notifications', 'Get told about new findings and finished scans in Slack or Discord.', [nb], async () => {
+      holder.append(card('notify', 'Notifications', 'Get told about new findings in Slack or Discord.', [nb], async () => {
         if (!url.value.trim()) throw new Error('Paste a webhook address, or choose "Skip".');
         state = await welcome('POST', 'notify', { service: svc.value, url: url.value }); url.value = ''; render();
       }));
@@ -396,7 +389,7 @@ const steps = {
       const nw = el('input', '', null, { type: 'password', autocomplete: 'new-password' });
       const again = el('input', '', null, { type: 'password', autocomplete: 'new-password' });
       const pb = el('div'); pb.append(field('Current password', cur), field('New password', nw, 'At least 12 characters is a good length.'), field('New password again', again));
-      holder.append(card('password', 'Change your password again (optional)', 'A generated password was already replaced when you first signed in. Use this only if you want a different one now. The built-in scanner keeps working while you do.', [pb], async () => {
+      holder.append(card('password', 'Change your password again (optional)', 'A generated password was already replaced when you first signed in. Use this only if you want a different one now.', [pb], async () => {
         if (!cur.value || !nw.value) throw new Error('Enter your current and a new password, or choose "Skip".');
         if (nw.value !== again.value) throw new Error('The two new passwords differ.');
         state = await welcome('POST', 'password', { current: cur.value, new: nw.value });

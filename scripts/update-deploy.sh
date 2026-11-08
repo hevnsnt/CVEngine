@@ -82,12 +82,19 @@ deploy_steps() {
   if grep -qx proxy <<<"$listed"; then
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
-  "${compose[@]}" build web celery celery-beat || return 1
+  build_free_memory
+  if ! "${compose[@]}" build web celery celery-beat; then
+    build_restore_memory
+    DEPLOY_WHY="The new version could not be built (see the update log). Nothing was changed: the version that was running is still running."
+    log "$DEPLOY_WHY"
+    return 1
+  fi
   # The AI reviewer has its own small image (docs/AI-REVIEWER.md). A failed build never fails the update: scanning does not need it, and the
   # next update builds it again.
   if grep -qx reviewer <<<"$listed"; then
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
+  build_restore_memory
   # Which scanners run, decided before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external)
   # (scripts/host-fit.sh, the rules scripts/update.sh and install.sh use too; after the build, because the count of Sentinels is read with the new image).
   # The answer the Update button's dialog collected comes with the approval (web/.update-sentinels, read without following a link); without one (the button
@@ -199,18 +206,62 @@ verify_serving() {
 }
 
 # An update builds a new image of a few gigabytes on top of the one it replaces, and a build that runs out of space fails half way, after the
-# files were merged and scanning was paused. Look first: too little room is a plain message and a retry, not a half-applied update. The amount
-# is CVENGINE_UPDATE_MIN_FREE_MB (default 6144). If Docker's directory cannot be found or measured the check says nothing.
+# files were merged and scanning was paused. Look first: too little room is a plain sentence and a retry, not a half-applied update. The estimate and
+# the rule are in scripts/update-disk.sh (the first 1.3 to 1.4 update needs about 14 GB: the scanner image alone is 5.1 GB). Below it the updater first
+# removes what is safe to remove (untagged images, the build cache; never a tagged image or a volume) and measures again. If Docker's directory cannot
+# be measured the check says nothing. DEPLOY_WHY is the sentence the Update screen shows when the update ends here.
+DEPLOY_WHY=${DEPLOY_WHY:-}
 check_disk() {
-  local need=${CVENGINE_UPDATE_MIN_FREE_MB:-6144} root free
-  root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null) || root=''
-  [ -n "$root" ] && [ -d "$root" ] || root=/var/lib/docker
-  free=$(df -Pm "$root" 2>/dev/null | awk 'NR == 2 {print $4}')
-  [[ $free =~ ^[0-9]+$ ]] || return 0
-  if (( free < need )); then
-    log "only ${free} MB are free where Docker keeps its images ($root); an update needs about ${need} MB for the new image. Free space (docker image prune -a, docker builder prune), then approve again"
-    return 1
+  local plan=''
+  if [ ! -f scripts/update-disk.sh ]; then return 0; fi
+  . scripts/update-disk.sh
+  plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || plan=''
+  cvengine_disk_check "$plan" && return 0
+  DEPLOY_WHY=$cv_disk_sentence
+  log "$cv_disk_sentence (nothing was stopped or changed)"
+  return 1
+}
+
+# The cold build of the server image needs about 2 GiB (a 1 GiB cap fails in the nuclei compile). On a host under 7 GB (the rule of scripts/host-fit.sh) the
+# heavy containers that can come back safely are stopped for the build and started again right after it, with or without a build that worked: the
+# built-in scanner and the celery workers (their memory stays resident after the scans drain, and the build then competes with it, swaps or is killed).
+# Never db, redis, web or proxy: the site keeps answering, and beat is small. CVENGINE_UPDATE_STOP_CELERY=0 (environment or .env) turns it off.
+BUILD_STOPPED=()
+build_free_memory() {
+  local compose=("${COMPOSE[@]}") kb off running svc
+  BUILD_STOPPED=()
+  [ -f scripts/host-fit.sh ] || return 0
+  . scripts/host-fit.sh
+  off=$(cvengine_fit_value CVENGINE_UPDATE_STOP_CELERY .env)
+  [ "$off" != 0 ] || return 0
+  kb=$(cvengine_fit_mem_kb)
+  (( kb > 0 && kb < cv_fit_small_kb )) || return 0
+  running=$("${compose[@]}" ps --status running --services 2>/dev/null) || running=''
+  for svc in scanner celery; do  # the scanner first: it shares celery's network
+    grep -qx "$svc" <<<"$running" && BUILD_STOPPED+=("$svc")
+  done
+  [ "${#BUILD_STOPPED[@]}" -gt 0 ] || return 0
+  log "this host has $(cvengine_fit_gb "$kb") of memory and the build needs about 2 GB: stopping ${BUILD_STOPPED[*]} for the build; they start again right after it (the site stays up)"
+  phase applying "build: ${BUILD_STOPPED[*]} stopped for the build"
+  "${compose[@]}" stop -t 30 "${BUILD_STOPPED[@]}" >/dev/null 2>&1 || log "could not stop ${BUILD_STOPPED[*]} cleanly; the build goes on"
+}
+
+build_restore_memory() {  # always, build worked or not: nothing stays stopped
+  local compose=("${COMPOSE[@]}") svc ordered=() ok=1 listed=''
+  [ "${#BUILD_STOPPED[@]}" -gt 0 ] || return 0
+  for svc in celery scanner; do  # celery first: the scanner joins its network
+    for s in "${BUILD_STOPPED[@]}"; do [ "$s" = "$svc" ] && ordered+=("$svc"); done
+  done
+  for svc in "${ordered[@]}"; do
+    "${compose[@]}" start "$svc" >/dev/null 2>&1 || { ok=0; log "could not start $svc again after the build (docker compose start $svc)"; }
+  done
+  # the Tailscale sidecar shares celery's network namespace by container id: it follows celery's restart
+  if listed=$("${compose[@]}" config --services 2>/dev/null) && grep -qx tailscale <<<"$listed" && grep -qx celery <<<"${ordered[*]}"; then
+    "${compose[@]}" restart tailscale >/dev/null 2>&1 || true
   fi
+  [ "$ok" = 1 ] && log "${ordered[*]} started again after the build"
+  BUILD_STOPPED=()
+  return 0
 }
 
 # The image this update replaced is untagged now and nothing uses it; every update used to leave one behind (a few gigabytes each) until the disk filled.

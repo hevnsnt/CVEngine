@@ -126,13 +126,80 @@ class AccessTests(WizardBase):
         self.assertEqual([x for x in kept if re.search(r'(?i)scan|discover|sentinel|\bhosts?\b|found|running|build|subdomain', x)], [])
         self.assertIn('if (document.documentElement.hasAttribute("data-scene"))', text)
 
-    def test_the_first_minute_sentence_and_the_password_card_say_what_is_true(self):
+    def test_the_first_step_is_calm_and_the_password_card_says_what_is_true(self):
         import os
         text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'welcome.js'), encoding='utf-8').read()
-        self.assertNotIn('with public data sources only', text)  # light checks of the found hosts follow within the minute
-        self.assertIn('then runs light checks on the hosts it finds', text)
+        for said in ('We will set things up while you answer a few questions.', "primary: 'Continue'", 'Almost there.', 'Where should it run?'):
+            self.assertIn(said, text)
+        for gone in ('Discovery starts the moment you continue', 'Start discovering', 'Let us start finding your hosts', "el('span', 'live', 'live')", 'Save and continue',
+                     'Discovery keeps running meanwhile', 'it still completes your first discovery', 'How will you scan?', 'Connect an external Sentinel',
+                     'discText', 'builtinNote'):
+            self.assertNotIn(gone, text)
         self.assertNotIn("'Choose your own password'", text)  # the forced change at first sign-in already did that
         self.assertIn('A generated password was already replaced when you first signed in', text)
+
+    # The words steps 1 to 4 and the strip may never show (the owner, 11/8: "you give away the magic trick by telling them that we are already scanning").
+    # Substring matches on purpose, so "wpscan", "rescanned" and "Sentinels" are caught as well as the plain words.
+    CALM_FORBIDDEN = r'(?i)scan|discover|finding hosts|queued|found|sentinel'
+    CALM_FORBIDDEN_EXCEPT_SCANNER = r'(?i)scan(?!ner)|discover|finding hosts|queued|found|sentinel'
+
+    @staticmethod
+    def _strings(js):
+        """Every string a piece of welcome.js can put on the page, without comments and without the quoted API paths and step keys (which are not shown)."""
+        import re
+        js = re.sub(r'(?m)(^|\s)//.*$', '', js)
+        js = re.sub(r'/\*.*?\*/', '', js, flags=re.S)
+        js = re.sub(r"welcome\('(?:GET|POST)', '[^']*'", 'welcome(', js)
+        js = re.sub(r"step: '[^']*'", 'step: _', js)
+        js = re.sub(r"\{ step: [^}]*\}", '{}', js)
+        return [m[0] or m[1] or m[2] for m in re.findall(r"'((?:[^'\\\n]|\\.)*)'|\"((?:[^\"\\\n]|\\.)*)\"|`((?:[^`\\]|\\.)*)`", js)]
+
+    def test_steps_one_to_four_and_the_strip_never_say_scanning_discovery_queued_found_or_sentinel(self):
+        """Forbidden in the visible text and the aria-live text of steps 1 to 4 and of the progress strip: scan (scans, scanning, scanned, wpscan...),
+        discover (discovery, discovering...), "finding hosts", queued, found, Sentinel (any case).  The word "scanner"/"scanners" is allowed in exactly one
+        place: the three option cards of the plan step (step 2, "Where should it run?"): their titles, their one-sentence descriptions and the "Not available"
+        sentence added to a blocked card.  Everywhere else, including the other parts of the plan step, "scanner" is forbidden too."""
+        import os, re
+        base = os.path.join(os.path.dirname(__file__), '..')
+        js = open(os.path.join(base, 'static', 'cve', 'welcome.js'), encoding='utf-8').read()
+        html = open(os.path.join(base, 'cveFeed', 'templates', 'cveFeed', 'welcome.html'), encoding='utf-8').read()
+        helper = js[js.index('function sentinelPanel()'):js.index('const steps = {')]  # the plan step's connect panel and its status lines (aria-live)
+        seed, rest = js[js.index('  seed(node) {'):js.index('  plan(node) {')], js[js.index('  plan(node) {'):js.index('  build(node) {')]
+        plan, rest = rest[:rest.index('  scanners(node) {')], rest[rest.index('  scanners(node) {'):]
+        scanners, extras = rest[:rest.index('  extras(node) {')], rest[rest.index('  extras(node) {'):]
+        # the plan step's option cards are the only place a scanner may be named; cut them out and check them on their own
+        options = plan[plan.index('const options = ['):plan.index('];', plan.index('const options = [')) + 2]
+        blocked_card = re.search(r"`\$\{about\} Not available[^`]*`", plan)
+        blocked = blocked_card.group(0)
+        plan_rest = plan.replace(options, '').replace(blocked, '')
+        tabs = js[js.index('const TITLES'):js.index('const NAMES')]
+        checked = {'step 1': seed, 'step 2 (outside the option cards)': plan_rest + helper, 'step 3': scanners, 'step 4': extras, 'step titles': tabs}
+        for name, source in checked.items():
+            for s in self._strings(source):
+                self.assertIsNone(re.search(self.CALM_FORBIDDEN, s), f'{name}: {s!r}')
+        option_texts = self._strings(options) + [blocked]
+        self.assertGreaterEqual(len(option_texts), 7)
+        for s in option_texts:
+            self.assertIsNone(re.search(self.CALM_FORBIDDEN_EXCEPT_SCANNER, s), f'plan option card: {s!r}')
+        self.assertEqual(sum('scanner' in s.lower() for s in option_texts), 6)  # 3 titles + 3 descriptions say it; nothing else does
+        # the strip (the template's text, the only aria-live text outside the steps)
+        strip = re.search(r'<div class="disc"[^>]*>(.*?)</div>', html, re.S).group(0)
+        self.assertEqual(re.sub(r'<[^>]+>', '', strip), 'Setting up your workspace')
+        self.assertIn('aria-live="polite"', strip)
+        self.assertIsNone(re.search(self.CALM_FORBIDDEN, re.sub(r'<[^>]+>', ' ', strip)))
+        self.assertIsNone(re.search(r'\.discovery\b(?!_)', js))  # the page never reads the server's account of the work (only the id to follow)
+
+    def test_the_kind_choices_of_step_three_use_calm_words_too(self):
+        """The text the server hands step 3 (family titles, what each does, every kind's label, the cost of OpenVAS) is held to the same words."""
+        import re
+        self.seed()
+        state = self.c.get('/cve/api/welcome/state').json()
+        texts = [state['openvas']['cost']]
+        for family in state['families']:
+            texts += [family['title'], family['about']] + [k['label'] for k in family['kinds']]
+        self.assertGreater(len(texts), 30)
+        for text in texts:
+            self.assertIsNone(re.search(self.CALM_FORBIDDEN, text), text)
 
     def test_an_install_that_already_has_targets_is_not_redirected(self):
         org = Org.objects.get(slug='default')
@@ -325,7 +392,8 @@ class SeedTests(WizardBase):
         self.assertEqual(out['sentinel']['builtin_state']['text'], 'The built-in scanner is ready.')
         js = (setup_flow.__file__.rsplit('/cveFeed/', 1)[0] + '/static/cve/welcome.js')
         text = open(js, encoding='utf-8').read()
-        self.assertIn('builtinNote.textContent = live.text', text)  # the plan step's line is rewritten by the poll, so "starting" never outlives the enrolment
+        self.assertIn("await welcome('GET', 'progress')", text)  # the page still polls (the server readies the built-in scanner and restarts a start on it) ...
+        self.assertNotIn('builtin_state', text)  # ... but shows nothing of the answer
 
 
 class PlanAndKindsTests(WizardBase):

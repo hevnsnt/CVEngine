@@ -2,6 +2,7 @@
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask } from "/staticfiles/cve/ui.js";
 import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
+import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
@@ -191,7 +192,7 @@ const sections = {
       anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
     // What is stored now, per job, so that a change of provider can be undone by choosing the old one again and a save can say what changed.
-    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "" };
+    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "", nuclei: s.nuclei_model || "" };
     let dirty = false;
     let refreshHints = () => {}; // set below, once the request settings exist
     let drawInForce = () => {};
@@ -214,6 +215,12 @@ const sections = {
     const opsPick = modelPicker({
       source, context, job: "reviewer", saved: savedModels.ops, onChange: () => markDirty(),
       sameLabel: (c) => sameLabelOf(c.provider, "ops", r.default_models), recommendFor: (_st, c) => (c.provider === "anthropic" ? r.default_models.ops : ""),
+    });
+    // The Nuclei job: empty is the default, the cheapest haiku the provider lists (the server finds it in the list), else the default model.
+    const nucleiPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.nuclei, onChange: () => markDirty(),
+      sameLabel: () => (source.state.nucleiDefault ? `Default: ${source.state.nucleiDefault}` : "Default: same as Everything else"),
+      recommendFor: (st) => st.nucleiDefault || "",
     });
     const advancedAddress = el("details", "ai-adv");
     advancedAddress.open = !!s.base_url;
@@ -241,6 +248,7 @@ const sections = {
       defaultPick.set(same ? savedModels.default : ""); // a model belongs to the provider it was chosen from
       reviewPick.set(same ? savedModels.review : "");
       opsPick.set(same ? savedModels.ops : "");
+      nucleiPick.set(same ? savedModels.nuclei : "");
       sync();
       drawInForce();
     });
@@ -363,7 +371,7 @@ const sections = {
         say(message, false); // beside the toast, which goes after 3.5 seconds
         throw new Error(message);
       }
-      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"]]) {
+      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"], [nucleiPick, "the Nuclei targeting model"]]) {
         if (pick.error) {
           pick.focus();
           say(`Fix ${name}: ${pick.error}`, false);
@@ -383,6 +391,7 @@ const sections = {
         plan_daily_per_project: planProject.value,
         provider: provider.value,
         model: defaultPick.value,
+        nuclei_model: nucleiPick.value,
         api_key: key.value,
         base_url: base.value,
         enabled: enabled.box.checked,
@@ -391,6 +400,7 @@ const sections = {
       });
       Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
       savedModels.default = s.model || "";
+      savedModels.nuclei = s.nuclei_model || "";
       key.value = "";
       key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
       let after;
@@ -405,6 +415,7 @@ const sections = {
       defaultPick.set(savedModels.default, { stored: true });
       reviewPick.set(savedModels.review, { stored: true });
       opsPick.set(savedModels.ops, { stored: true });
+      nucleiPick.set(savedModels.nuclei, { stored: true });
       reviewerP.draw(r);
       showVerified();
       refreshHints();
@@ -417,7 +428,8 @@ const sections = {
     const inForce = el("p", "ai-inforce", "", { role: "status", "aria-live": "polite" });
     drawInForce = () => {
       const named = s.model || (provider.value === s.provider && source.state.recommended ? `${source.state.recommended} (the newest cheapest)` : "the newest cheapest model");
-      inForce.textContent = `In force now: everything else uses ${named}${provider.value === s.provider ? "" : " once you save"}. ${r.models_in_force ? inForceText(r.models_in_force) : "The reviewer has no model until a connection is saved."}`;
+      const nuclei = s.nuclei_model || (provider.value === s.provider ? source.state.nucleiDefault || s.nuclei_model_in_force : "") || "the default model, once the list loads";
+      inForce.textContent = `In force now: everything else uses ${named}${provider.value === s.provider ? "" : " once you save"}. Nuclei targeting and tag selection uses ${nuclei}. ${r.models_in_force ? inForceText(r.models_in_force) : "The reviewer has no model until a connection is saved."}`;
     };
     source.subscribe(drawInForce);
     drawInForce();
@@ -436,6 +448,7 @@ const sections = {
     const jobsBody = el("tbody");
     jobsBody.append(
       jobRow("Everything else", "The default model. Triages every finding, confirms CVE matches, plans validation checks and Nuclei scans, and writes CVE guidance. It runs on every scan in many small requests, so this is where most of the spend goes: a cheap model is the right choice. The daily caps are under AI spend.", defaultPick),
+      jobRow("Nuclei targeting and tag selection", "Chooses which detection templates apply to the software found. A smaller, faster model works well here and avoids refusals.", nucleiPick),
       jobRow("Finding review", "The AI reviewer. Reads each open finding once, and again only when its host or evidence changes, up to the daily limit below. One larger request per finding, so a stronger model costs the most here.", reviewPick),
       jobRow("Operations check", "The AI reviewer. Looks over the work queue, the scanners and the errors a few times a day (four by default) and writes an alert for each problem. A handful of small requests a day, so the cost hardly matters.", opsPick),
     );
@@ -510,36 +523,7 @@ const sections = {
     sync();
     loader.ask(true); // the page opens with its lists filled: nothing to press
     const seedState = await api("GET", "cve_seed");
-    const seedNote = el("p", "note", "");
-    const showSeed = (st) => {
-      const b = st.built;
-      seedNote.textContent = st.building
-        ? "Building the seed: this takes a few minutes. Refresh to see it."
-        : b
-          ? `Last build ${new Date(b.generated_at).toLocaleString()}: ${b.count.toLocaleString()} CVEs (fire ${b.tiers.fire.toLocaleString()}, smoke ${b.tiers.smoke.toLocaleString()}, ice ${b.tiers.ice.toLocaleString()}), ${b.with_detection.toLocaleString()} with guidance, ${Math.round(b.bytes / 1048576)} MB.`
-          : "No seed has been built on this server yet.";
-    };
-    showSeed(seedState);
-    const seedLinks = el("div", "tools");
-    if (seedState.file) {
-      seedLinks.append(
-        el("a", "btn ghost sm", "Download the seed", { href: "/cve/api/settings/cve_seed/download/seed" }),
-        el("a", "btn ghost sm", "Download its manifest", { href: "/cve/api/settings/cve_seed/download/manifest" }),
-      );
-    }
-    m.append(
-      el("div", "", null, { style: "height:16px" }),
-      card(
-        "CVE catalog seed",
-        el("p", "note", "A new install loads this file on first start, so it begins with every CVE and its guidance instead of rebuilding them one by one. Build it here once the guidance is written, then attach both files to the cve-seed release on GitHub (scripts/publish-cve-seed.sh does it from a machine with gh)."),
-        seedNote,
-        button("Build the seed", async () => {
-          showSeed(await api("POST", "cve_seed/build").then(() => ({ building: true })));
-          toast("Building the seed");
-        }),
-        seedLinks,
-      ),
-    );
+    m.append(el("div", "", null, { style: "height:16px" }), seedCard({ el, api, toast, card, csrf, apiBase: API, initial: seedState }));
     const seedParts = [m.children[m.children.length - 2], m.lastChild]; // the seed build is not a setting: it goes below the settings, before the Save bar
     m.append(
       el("div", "", null, { style: "height:16px" }),
@@ -731,8 +715,9 @@ const sections = {
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
-        kids.push(
-          button("Approve update", async () => {
+        // Not enough disk for this update (measured by the host): say so in plain words and keep the button off, with the reason on it
+        if (s.disk && s.disk.short) kids.push(el("p", "msg err", s.disk.text, { id: "update-disk-short", role: "alert" }));
+        const approveButton = button("Approve update", async () => {
             // the question worth asking first (which scanners run), asked by the server's facts; no question, no dialog: the button just updates
             const fresh = await api("GET", "updates");
             if (fresh.scanner_choice && fresh.scanner_choice.needs_choice) {
@@ -748,8 +733,13 @@ const sections = {
             if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");
-          }),
-        );
+        });
+        if (s.disk && s.disk.short) {
+          approveButton.disabled = true;
+          approveButton.title = s.disk.text;
+          approveButton.setAttribute("aria-describedby", "update-disk-short");
+        }
+        kids.push(approveButton);
         if (s.status === "available")
           kids.push(document.createTextNode(" "), button("Dismiss", async () => { draw(await api("POST", "updates/dismiss")); }, "btn ghost"));
       }

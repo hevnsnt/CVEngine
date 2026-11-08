@@ -177,12 +177,26 @@ class DashboardFixesTests(TestCase):
 	def test_the_exposed_tile_opens_the_exposed_list(self):
 		self.assertContains(client_for(self.root).get('/cve/?project=alpha&skip=1'), 'href="/cve/alpha/hosts/?exposed=1"')
 
-	def test_provision_defaults_to_the_current_project(self):
-		html = client_for(self.root).get('/cve/sentinels/').content.decode()
-		self.assertRegex(html, r'id="enroll-project" data-current="[-\w]*"')
+	def test_provision_preselects_nothing_and_starts_disabled(self):
 		client = client_for(self.root)
-		client.get('/cve/alpha/hosts/')  # the session remembers the project being worked in
-		self.assertIn('data-current="alpha"', client.get('/cve/sentinels/').content.decode())
+		client.get('/cve/alpha/hosts/')  # the session remembers the project being worked in: it must not become a default
+		for url in ('/cve/sentinels/', '/cve/sentinels/?project=alpha'):
+			html = client.get(url).content.decode()
+			form = html[html.index('id="enroll-scope"') - 8:html.index('id="enroll-out"')]
+			self.assertNotIn('data-current', html)
+			selects = re.findall(r'<select id="(enroll-[a-z]+)"[^>]*>(.*?)</select>', form, re.S)
+			self.assertEqual([n for n, _ in selects], ['enroll-scope', 'enroll-project', 'enroll-org', 'enroll-network', 'enroll-profile'])
+			placeholders = {'enroll-scope': 'Choose a scope', 'enroll-project': 'Choose a project', 'enroll-org': 'Choose an organization',
+							'enroll-network': 'Choose where it runs', 'enroll-profile': 'Choose a size'}
+			for name, inner in selects:
+				selected = re.findall(r'<option[^>]*\bselected\b[^>]*>([^<]*)</option>', inner)
+				self.assertEqual(selected, [placeholders[name]], name)
+				self.assertRegex(inner, r'<option value="" selected disabled>')
+			button = re.search(r'<button[^>]*id="enroll-go"[^>]*>', html).group(0)
+			self.assertIn(' disabled', button)
+			self.assertIn('aria-disabled="true"', button)
+			self.assertContains(client.get(url), 'Choose a scope to continue.')
+			self.assertNotIn('style="display:none"', form)
 
 
 class ShellRequestTests(TestCase):

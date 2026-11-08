@@ -11,7 +11,7 @@ import re
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
 from reNgine import ai_prompts
 from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
@@ -120,6 +120,19 @@ def _env_in_force():
     return {name: os.environ.get(env_name, '').strip() for name, env_name in SETTING_ENV.items() if os.environ.get(env_name, '').strip()}
 
 
+def _nuclei_in_force(cfg):
+    """The model the Nuclei tag choice uses now, from what is known without asking the provider (the page asks for the list itself): a
+    chosen model, else the cheapest haiku of a list read in the last ten minutes, else '' (the page says the default is found when it loads)."""
+    if (cfg.nuclei_model or '').strip():
+        return cfg.nuclei_model.strip()
+    from reNgine import ai_nuclei_model
+    from reNgine.ai_providers import get_provider
+    try:
+        return ai_nuclei_model.haiku_default(get_provider(cfg.provider, api_key=cfg.api_key or 'x', base_url=cfg.base_url or None), fetch=False) or ''
+    except Exception:  # noqa: BLE001 - a stored provider this version does not know
+        return ''
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
@@ -129,7 +142,8 @@ def ai_get(request):
            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
-           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
+           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS, 'nuclei_model': cfg.nuclei_model,
+           'nuclei_model_in_force': _nuclei_in_force(cfg),
            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
     # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
     # `provider_defaults` and `effective`, which says where each value in force comes from).
@@ -173,6 +187,30 @@ def _ai_runtime_values(data):
     return out
 
 
+def _nuclei_model_value(raw, cfg, old_connection, old_value):
+    """The validated model for the Nuclei tag choice: '' (the default) or a model the provider lists. Checked against the provider's list
+    only when it changes, so saving the rest of the page never fails because the provider is slow."""
+    if raw is None:
+        raw = ''
+    if not isinstance(raw, str):
+        raise SettingsError(400, 'nuclei_model must be a model name, or empty for the default')
+    value = raw.strip()
+    if value == (old_value or '') and (cfg.provider, cfg.base_url) == (old_connection[0], old_connection[2]):
+        return value
+    if not value:
+        return ''
+    if not MODEL_NAME.match(value):
+        raise SettingsError(400, 'a model name is letters, digits and . _ : / @ + - (at most 100), or empty for the default')
+    key = cfg.api_key if (cfg.api_key != old_connection[3] or same_service(old_connection[0], old_connection[2], cfg.provider, cfg.base_url)) else ''  # a stored key goes only where it was saved for
+    try:
+        listed = _models_hit(cfg.provider, (cfg.base_url or '').strip(), key or '')['models']
+    except SettingsError as exc:
+        raise SettingsError(400, f'could not check the Nuclei model against the provider\'s list: {exc}')
+    if value not in {m['id'] for m in listed}:
+        raise SettingsError(400, 'the Nuclei model must be one the provider lists: choose it from the list')
+    return value
+
+
 def ai_put(request):
     from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
@@ -191,6 +229,11 @@ def ai_put(request):
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
+    old_nuclei = cfg.nuclei_model
+    if 'nuclei_model' in data:
+        cfg.nuclei_model = _nuclei_model_value(data['nuclei_model'], cfg, old_connection, old_nuclei)
+    elif (cfg.provider, cfg.base_url) != (old_connection[0], old_connection[2]):
+        cfg.nuclei_model = ''  # a model belongs to the provider it was chosen from
     old_runtime = {name: getattr(cfg, name) for name in AI_RUNTIME_FIELDS}
     runtime_changes = _ai_runtime_values(data)  # validated before anything is stored
     for name, value in runtime_changes.items():
@@ -222,56 +265,121 @@ def ai_put(request):
     changed = [name for name in AI_RUNTIME_FIELDS if getattr(cfg, name) != old_runtime[name]]
     connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
                   ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
+    nuclei = ['nuclei_model'] if cfg.nuclei_model != old_nuclei else []
+    if nuclei:
+        audit(request.user, 'ai.nuclei_model', cfg.provider, changed=nuclei, nuclei_model=cfg.nuclei_model or 'default')  # a model name, never a key
     if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
         audit(request.user, 'ai.settings', cfg.provider, changed=connection + changed, **{name: getattr(cfg, name) for name in changed})
     return ai_get(request)
 
 
-# --- the CVE catalog seed (build here, publish as the cve-seed release) --------------------------
+# --- the CVE catalog seed (create, download, import: cveFeed.seed_admin) --------------------------
 
-SEED_NAME = 'cve-seed.jsonl.gz'
-SEED_BUILDING = 'cvengine:cve-seed-building'
+SEED_NAME = seed_admin.SEED_NAME
+SEED_BUILDING = seed_admin.LOCK
 
 
 def seed_dir():
-    import os
-    from django.conf import settings
-    return os.path.join(getattr(settings, 'RENGINE_HOME', '/usr/src/app'), 'exports')
+    return seed_admin.seed_dir()
 
 
 def cve_seed_get(request):
-    """What the last build holds (count, tiers, how many carry a detection record, size, sha256) and whether one is running."""
-    import os
-    from django.core.cache import cache
-    path = os.path.join(seed_dir(), SEED_NAME)
-    manifest = None
-    try:
-        with open(path + '.manifest.json', encoding='utf-8') as f:
-            manifest = json.load(f)
-    except (OSError, ValueError):
-        pass
-    return {'built': manifest, 'building': bool(cache.get(SEED_BUILDING)), 'file': SEED_NAME if manifest and os.path.exists(path) else None}
+    """What the seed on disk holds (count, tiers, size, sha256, what the scrub dropped), when it is removed, and the running job's progress."""
+    return seed_admin.status()
 
 
 def cve_seed_build(request):
-    from django.core.cache import cache
     from cveFeed.admin_api import audit
     from cveFeed.tasks import build_cve_seed
-    if not cache.add(SEED_BUILDING, 1, 3600):
-        raise SettingsError(409, 'a seed is already being built')
-    build_cve_seed.delay()
+    if not seed_admin.begin('export', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    try:
+        build_cve_seed.delay(request.user.pk)
+    except Exception:
+        seed_admin.finish(error='the job could not be queued')
+        raise
     audit(request.user, 'cve_seed.build', SEED_NAME)
-    return {'building': True}
+    return seed_admin.status()
 
 
 def cve_seed_download(request, which):
+    """The seed or its manifest as an attachment, streamed from the private folder. App Admin only (checked by ``dispatch``), GET only,
+    a fixed file name (nothing in the request picks a path), and every download is audit-logged."""
     import os
-    path = os.path.join(seed_dir(), SEED_NAME)
-    path = path + '.manifest.json' if which == 'manifest' else path
-    if not os.path.isfile(path):
-        raise Http404('no seed has been built yet')
-    return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path),
-                        content_type='application/json' if which == 'manifest' else 'application/gzip')
+    from cveFeed.admin_api import audit
+    manifest, _ = seed_admin.built()
+    if manifest is None:
+        raise Http404('no seed has been created yet, or it was removed after 24 hours')
+    path = seed_admin.manifest_path() if which == 'manifest' else seed_admin.seed_path()
+    handle = open(path, 'rb')
+    response = FileResponse(handle, as_attachment=True, filename=os.path.basename(path),
+                            content_type='application/json' if which == 'manifest' else 'application/gzip')
+    response['Cache-Control'] = 'no-store'
+    response['X-Content-Type-Options'] = 'nosniff'
+    audit(request.user, 'cve_seed.download', os.path.basename(path), file=which, bytes=os.path.getsize(path), sha256=manifest.get('sha256'))
+    return response
+
+
+def cve_seed_import(request):
+    """Load a seed file uploaded by an App Admin. The file is the request body itself (``Content-Type: application/octet-stream``), read in
+    blocks straight to the private folder and never held in memory or parsed as a form: Django's CSRF check would otherwise parse a
+    multipart upload before this code could cap it. ``X-Seed-Manifest`` optionally carries the manifest's format, count, bytes and sha256
+    as JSON; with it the file is checked (size, sha256, count) before anything is imported. A worker then imports it with the same validation
+    as the command line (``seed.import_seed``)."""
+    import os
+    from cveFeed import seed
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import import_cve_seed_file
+    try:
+        declared = int(request.META.get('CONTENT_LENGTH') or 0)
+    except ValueError:
+        declared = 0
+    if declared > seed_admin.MAX_UPLOAD:
+        raise SettingsError(413, 'the file is larger than the %d MB limit' % (seed_admin.MAX_UPLOAD >> 20))
+    if request.content_type != 'application/octet-stream' or declared <= 0:
+        raise SettingsError(400, 'choose a seed file (cve-seed.jsonl.gz)')
+    manifest = None
+    raw_manifest = request.META.get('HTTP_X_SEED_MANIFEST')
+    if raw_manifest:
+        try:
+            manifest = json.loads(raw_manifest) if len(raw_manifest) <= 4096 else None
+        except ValueError:
+            manifest = None
+        if not isinstance(manifest, dict):
+            raise SettingsError(400, 'the seed manifest is missing or not understood')
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', request.META.get('HTTP_X_SEED_NAME', '') or 'seed')[:120]
+    if not seed_admin.begin('import', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    path = None
+    try:
+        path = seed_admin.save_stream(request, seed_admin.MAX_UPLOAD, 'incoming-seed')
+        with open(path, 'rb') as f:
+            if f.read(2) != b'\x1f\x8b':
+                raise ValueError('that is not a gzip file; choose cve-seed.jsonl.gz')
+        if manifest is not None:
+            seed.verify_seed(path, manifest)
+        else:
+            for _ in seed.iter_lines(path):  # the first line must be a seed manifest (format 1); nothing else is read yet
+                break
+    except (ValueError, OSError, EOFError) as exc:
+        seed_admin.finish(error=str(exc)[:300])
+        if path:
+            seed_admin._remove(path)
+        raise SettingsError(400, str(exc)[:300] or 'that file could not be read')
+    except BaseException:
+        seed_admin.finish(error='the upload failed')
+        if path:
+            seed_admin._remove(path)
+        raise
+    verified = manifest is not None
+    audit(request.user, 'cve_seed.import', name, bytes=os.path.getsize(path), verified=verified)
+    try:
+        import_cve_seed_file.delay(path, request.user.pk, verified)
+    except Exception:
+        seed_admin._remove(path)
+        seed_admin.finish(error='the job could not be queued')
+        raise
+    return seed_admin.status()
 
 
 def scan_policy_get(request):
@@ -338,28 +446,12 @@ def _clean_models(listed):
     return out
 
 
-def ai_models(request):
-    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
-    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
-    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
-    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+def _models_hit(provider, base_url, key, refresh=False):
+    """The provider's model list as ``ai_models`` answers it (cached per provider, address and key hash): ``{models, recommended,
+    nuclei_default}``. Raises SettingsError(400) with the plain reason when the list cannot be read."""
     from django.core.cache import cache
-    from reNgine.ai_providers import DEFAULT_MODELS, SELECTABLE, SERVER_URL_PROVIDERS, AIProviderError, get_provider, pick_cheapest_newest
-    data = _body(request)
-    cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    provider = data.get('provider') or cfg.provider
-    if provider not in DEFAULT_MODELS:
-        raise SettingsError(400, 'unknown provider')
-    base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
-    if base_url and not re.match(r'^https?://', base_url, re.I):
-        raise SettingsError(400, 'the server URL must start with http:// or https://')
-    if base_url and ai_url_blocked(base_url):
-        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
-    if provider in SERVER_URL_PROVIDERS and not base_url:
-        raise SettingsError(400, 'enter the address of the server first')
-    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
+    from reNgine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
     cache_key = _models_cache_key(provider, base_url, key)
-    refresh = data.get('refresh') is True
     hit = None
     if not refresh:
         try:
@@ -371,7 +463,10 @@ def ai_models(request):
             raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
             listed = _clean_models(raw)
             recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
-            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else ''}
+            from reNgine import ai_nuclei_model
+            haiku = ai_nuclei_model.remember(provider, base_url, raw)
+            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
+                   'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
             ttl = MODELS_CACHE_SECONDS
         except AIProviderError as exc:
             words = MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''))
@@ -388,7 +483,30 @@ def ai_models(request):
             pass
     if 'error' in hit:
         raise SettingsError(400, hit['error'])
-    return {'models': hit['models'], 'recommended': hit['recommended']}
+    return hit
+
+
+def ai_models(request):
+    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
+    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
+    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
+    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+    from reNgine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
+    data = _body(request)
+    cfg = AIProviderSettings.objects.first() or AIProviderSettings()
+    provider = data.get('provider') or cfg.provider
+    if provider not in DEFAULT_MODELS:
+        raise SettingsError(400, 'unknown provider')
+    base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and not re.match(r'^https?://', base_url, re.I):
+        raise SettingsError(400, 'the server URL must start with http:// or https://')
+    if base_url and ai_url_blocked(base_url):
+        raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
+    if provider in SERVER_URL_PROVIDERS and not base_url:
+        raise SettingsError(400, 'enter the address of the server first')
+    key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
+    hit = _models_hit(provider, base_url, key, refresh=data.get('refresh') is True)
+    return {'models': hit['models'], 'recommended': hit['recommended'], 'nuclei_default': hit.get('nuclei_default', '')}
 
 
 AI_ERROR_HINTS = {
@@ -1123,6 +1241,7 @@ ROUTES = [
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'cve_guidance/run', lambda r, **k: cve_guidance_run(r)),
     ('GET', r'cve_seed', lambda r, **k: cve_seed_get(r)), ('POST', r'cve_seed/build', lambda r, **k: cve_seed_build(r)),
+    ('POST', r'cve_seed/import', lambda r, **k: cve_seed_import(r)),
     ('GET', r'cve_seed/download/(?P<which>seed|manifest)', lambda r, which, **k: cve_seed_download(r, which)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),

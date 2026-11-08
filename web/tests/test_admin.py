@@ -95,6 +95,17 @@ class AdminMatrixTests(TestCase):
 		cache.clear()
 		return api(client_for(self.root), 'GET', 'health')
 
+	def confirmed_health(self):
+		"""The answer once the workers have been looked at twice in a row (a worker missing from both is reported; one missing from one is not): the
+		probe runs in full, without the waits between its pings."""
+		from django.core.cache import cache
+		from cveFeed import admin_api
+		cache.clear()
+		with mock.patch.object(admin_api, '_pause'), mock.patch.object(admin_api.probe_cache, 'cached_probe',
+				side_effect=lambda key, compute, **kw: (compute(), 0)):
+			api(client_for(self.root), 'GET', 'health')
+			return api(client_for(self.root), 'GET', 'health')
+
 	def test_scheduler_health_tells_a_running_beat_from_a_silent_or_unknown_one(self):
 		import time
 		inspector = mock.Mock(active_queues=mock.Mock(return_value={}), active=mock.Mock(return_value={}))
@@ -118,7 +129,7 @@ class AdminMatrixTests(TestCase):
 			'validation_priority_worker@local': [{'name': 'validation_priority_queue'}]}
 		inspector.active.return_value = {'cve_feed_worker@local': [{'args': 'sk-ant-secret-marker'}]}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			status, data = self.health()
+			status, data = self.confirmed_health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['workers_state'], 'degraded')
 		self.assertIn('Missing or unconfirmed', data['worker_note'])
@@ -137,7 +148,7 @@ class AdminMatrixTests(TestCase):
 			self.assertNotIn('broker down', str(unknown))
 		inspector.active_queues.return_value = None
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			unknown = self.health()[1]
+			unknown = self.confirmed_health()[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
 			self.assertIn('No worker replied', unknown['worker_note'])
 
@@ -148,11 +159,11 @@ class AdminMatrixTests(TestCase):
 			'classic_worker@local': [{'name': 'celery'}]}  # replied, but not consuming api_queue
 		inspector.active.return_value = {}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			data = self.health()[1]
+			data = self.confirmed_health()[1]
 		replies = {w['worker']: w['reply'] for w in data['workers']}
 		self.assertEqual(replies, {'discovery_worker': 'no_reply_within_5s', 'cve_feed_worker': 'consuming',
 								   'validation_priority_worker': 'no_reply_within_5s', 'classic_worker': 'replied_without_queue'})
-		self.assertIn('Did not reply within 5 seconds: discovery_worker, validation_priority_worker.', data['worker_note'])
+		self.assertIn('No reply from: discovery_worker, validation_priority_worker.', data['worker_note'])
 		self.assertIn('Replied without its queue: classic_worker.', data['worker_note'])
 
 	def test_worker_inspection_accepts_celery_at_worker_names(self):

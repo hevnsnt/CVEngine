@@ -45,6 +45,14 @@ refresh_upstream() {
 
 end=$((SECONDS + span))
 next_beat=0
+next_disk=0
+# How much disk Docker's directory has against what an update needs, for the Update screen (it cannot ask Docker itself): once a minute, never longer than 30 seconds
+disk_report() {
+  if (( SECONDS >= next_disk )) && [ -f scripts/update-disk.sh ]; then
+    next_disk=$((SECONDS + 60))
+    ( . scripts/update-disk.sh; cvengine_disk_report ) >/dev/null 2>&1 8>&- </dev/null &  # not holding the watcher's lock, not delaying its heartbeat
+  fi
+}
 next_plan=0
 heartbeat() {
   if (( SECONDS >= next_beat )); then
@@ -54,6 +62,7 @@ heartbeat() {
 }
 while :; do
   heartbeat
+  disk_report
   refresh_upstream
   # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
   # several GB neither delays an update nor stops the heartbeat. The script takes its own lock. Its output goes to a host-private log (it

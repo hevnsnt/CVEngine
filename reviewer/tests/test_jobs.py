@@ -85,6 +85,27 @@ class RunJobTests(unittest.TestCase):
         self.assertEqual(server.posted[0][1]['error'], 'malformed_job')
 
 
+class OpsFillerTests(unittest.TestCase):
+    PROVIDER = {'provider': 'vllm', 'model': 'm', 'base_url': 'http://192.0.2.10:8000/v1'}
+
+    def test_a_placeholder_diagnosis_is_never_sent_to_the_server(self):
+        class Server:
+            sent = None
+
+            def ops_snapshot(self, release):
+                return {'checks': [{'code': 'system', 'state': 'problem', 'title': 't', 'detail': 'd', 'facts': {}}]}
+
+            def ops_report(self, body):
+                self.sent = body
+                return {}
+        reply = ('{"alerts": [{"code": "system", "severity": "warning", "diagnosis": "Placeholder"},'
+                 ' {"code": "sentinel_errors", "severity": "info", "diagnosis": "Give the Sentinel more memory, then check docker stats."}], "actions": []}')
+        server = Server()
+        with mock.patch.object(llm, 'call', return_value=(reply, {}, 'm')):
+            jobs.run_ops(server, self.PROVIDER)
+        self.assertEqual([a['code'] for a in server.sent['alerts']], ['sentinel_errors'])
+
+
 class LoopTests(unittest.TestCase):
     CONFIG = {'enabled': False, 'jobs_enabled': True, 'jobs': {'provider': 'vllm'}, 'job_workers': 2}
 
