@@ -160,9 +160,13 @@ text it needs and a test fails when the copies differ):
    configuration. It claims no authorisation the product cannot know about.
 2. **A task line for the job.** For the finding review and for triage it is: review this finding and validate that it is correct; if it is a false
    positive, close it with a strong justification (name the specific evidence you read and why it does not support the finding); if the evidence
-   is not enough to decide, say so and leave the finding open. For the nuclei jobs it is the true task: choose which detection template tags
-   apply to the software found, so that only the relevant defensive checks run.
+   is not enough to decide, say so and leave the finding open. The two nuclei jobs have neither the preamble nor a task line (see below).
 3. **The job's own rules and output format**, as before.
+
+**The nuclei jobs are not framed.** `nuclei_tag_selection` and `nuclei_targeting` send exactly the prompt text they sent before this change. Measured on
+the real provider (5 repeats per job and model), the shared framing made Sonnet refuse `nuclei_targeting` 5 of 5 times (the old text: 2 of 5) and
+`nuclei_tag_selection` 5 of 5 (the old text: 0 of 5); every other framed job answered 5 of 5 on Sonnet. Their wording stays as it was until the owner decides on
+a new one, measured first (`PROBE_VARIANTS` of the probe script). `reNgine/ai_prompts.py` lists them as `UNFRAMED` with the reason, and a test pins their text.
 
 The fencing is not part of the framing and did not change: host-controlled names are cleaned strictly, untrusted data sits between random-nonce
 markers, and the rules that call it data stay in each prompt.
@@ -174,8 +178,8 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 
 | Usage stage | Before | After |
 | --- | --- | --- |
-| `nuclei_tag_selection` | 834 | 1231 |
-| `nuclei_targeting` (two allowed tags; the real list adds its length) | 493 | 896 |
+| `nuclei_tag_selection` (unframed) | 834 | 834 |
+| `nuclei_targeting` (unframed; two allowed tags, the real list adds its length) | 493 | 493 |
 | `finding_triage`, `finding_triage_repair` | 4034 | 4598 |
 | `finding_review` (container) | 3097 | 3654 |
 | `validation_plan` | 2238 | 2826 |
