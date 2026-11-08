@@ -14,9 +14,10 @@
 # puts the previous version back, whose deploy removes it; a retry after the migration sets it again). A host that was stopped mid-update can leave
 # the flag behind; `rm config/nginx/state/maintenance*` (or the next update, or make up) clears it.
 MAINTENANCE_FLAG=config/nginx/state/maintenance
-maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && rm -f "$MAINTENANCE_FLAG-failed" && : >"$MAINTENANCE_FLAG" 2>/dev/null || log "could not set the maintenance flag; visitors may see an error page while the update runs"; }
+# folder and files readable by everyone: the proxy checks them as an unprivileged user, whatever umask this script runs under
+maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && chmod 755 "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && rm -f "$MAINTENANCE_FLAG-failed" && : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG" 2>/dev/null || log "could not set the maintenance flag; visitors may see an error page while the update runs"; }
 maintenance_off() { rm -f "$MAINTENANCE_FLAG" "$MAINTENANCE_FLAG-failed" 2>/dev/null || true; }
-maintenance_failed() { : >"$MAINTENANCE_FLAG" 2>/dev/null || true; : >"$MAINTENANCE_FLAG-failed" 2>/dev/null || true; }
+maintenance_failed() { : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG" 2>/dev/null; : >"$MAINTENANCE_FLAG-failed" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG-failed" 2>/dev/null; true; }
 
 deploy_current() {
   local status=0

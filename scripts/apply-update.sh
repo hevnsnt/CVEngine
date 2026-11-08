@@ -118,11 +118,14 @@ log_once() {
 # flag that cannot be written stops the update before anything changes (a page that cannot be shown is not a safe window to change files in).
 CV_MAINT_DIR=config/nginx/state
 CV_MAINT_OPEN=0
+# The proxy reads these as the unprivileged user inside its container, so the folder and the files must be readable by everyone whatever the
+# umask of the cron job or the shell that started the updater (a 0750 folder made `-f` false for nginx and the page never showed).
+cv_maint_flag() { : >"$CV_MAINT_DIR/$1" 2>/dev/null && chmod 644 "$CV_MAINT_DIR/$1" 2>/dev/null; }
 cv_maint_on() {
-  mkdir -p "$CV_MAINT_DIR" 2>/dev/null && rm -f "$CV_MAINT_DIR/maintenance-failed" && : >"$CV_MAINT_DIR/maintenance" 2>/dev/null || return 1
+  mkdir -p "$CV_MAINT_DIR" 2>/dev/null && chmod 755 "$CV_MAINT_DIR" 2>/dev/null && rm -f "$CV_MAINT_DIR/maintenance-failed" && cv_maint_flag maintenance || return 1
   CV_MAINT_OPEN=1
 }
-cv_maint_failed() { mkdir -p "$CV_MAINT_DIR" 2>/dev/null; : >"$CV_MAINT_DIR/maintenance" 2>/dev/null || true; : >"$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; CV_MAINT_OPEN=0; }
+cv_maint_failed() { mkdir -p "$CV_MAINT_DIR" 2>/dev/null; chmod 755 "$CV_MAINT_DIR" 2>/dev/null || true; cv_maint_flag maintenance || true; cv_maint_flag maintenance-failed || true; CV_MAINT_OPEN=0; }
 cv_maint_off() { rm -f "$CV_MAINT_DIR/maintenance" "$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; CV_MAINT_OPEN=0; }
 export UPDATE_OWNS_MAINTENANCE=1  # scripts/update-deploy.sh then leaves the flag to this script (an older copy of this script does not say so, and the deploy sets and clears it itself)
 

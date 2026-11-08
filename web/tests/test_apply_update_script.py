@@ -1032,6 +1032,16 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'on')
         self.assertEqual((self.stub / 'stopped_at_merge').read_text().strip(), '1')  # the workers read ./web too: stopped before it changed
 
+    def test_the_flag_is_readable_by_the_proxy_whatever_the_umask_of_the_updater(self):
+        """nginx checks the flag as an unprivileged user in its container: a 0750 folder or a 0640 file made `-f` false and no page showed."""
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'stat -c %a config/nginx/state > "$STUB_DIR/dir_mode"; stat -c %a config/nginx/state/maintenance > "$STUB_DIR/flag_mode"')
+        self.approve()
+        result = subprocess.run(['bash', '-c', 'umask 077; exec bash scripts/apply-update.sh'], cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.stub / 'dir_mode').read_text().strip(), '755')
+        self.assertEqual((self.stub / 'flag_mode').read_text().strip(), '644')
+
     def test_the_maintenance_page_is_up_before_the_checkout_switches_branch(self):
         self.hook('post-checkout', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" >> "$STUB_DIR/flag_at_checkout"')
         tip = self.develop_ahead()
