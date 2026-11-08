@@ -217,3 +217,26 @@ class ActivityDaysTests(TestCase):
         with CaptureQueriesContext(connection) as only_scans:
             self.get('activity-days?series=scans')
         self.assertEqual(len([q for q in only_scans.captured_queries if 'GROUP BY' in q['sql']]), 1)
+
+
+class HygieneTopChecksTests(TestCase):
+    """The dashboard's Hygiene tile listed its top checks from the first 100 rows of each severity: a check with 400 findings said 100."""
+
+    def test_the_top_checks_count_every_actionable_finding(self):
+        from cveFeed import counts
+        org = Org.objects.create(name='H', slug='ht-org')
+        project = Project.objects.create(name='H', slug='ht-p', insert_date=NOW, org=org)
+        domain = Domain.objects.create(name='ht.example', project=project, insert_date=NOW)
+        make = lambda check, n, severity, **kw: HygieneFinding.objects.bulk_create(
+            [HygieneFinding(domain=domain, host=f'{check}-{i}.ht.example', check_name=check, severity=severity, title='t', status='open', **kw) for i in range(n)])
+        make('tls_expired', 400, 3)
+        make('dmarc_none', 250, 2)
+        make('spf_soft', 7, 2)
+        make('mta_sts_missing', 90, 1)             # low: not in the top, only in the open number
+        make('tls_legacy', 30, 3, remediation_status='accepted_risk')  # closed: in neither number
+        top = counts.hygiene_top_checks()
+        self.assertEqual([(t['check'], t['worst'], t['n']) for t in top], [('tls_expired', 'high', 400), ('dmarc_none', 'medium', 250), ('spf_soft', 'medium', 7)])
+        views.clear_stats_cache()
+        stats = views.stats_payload()
+        self.assertEqual(stats['hygiene_top'], top)
+        self.assertEqual(stats['hygiene_open'], 400 + 250 + 7 + 90)

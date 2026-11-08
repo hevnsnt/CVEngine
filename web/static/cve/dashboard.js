@@ -105,7 +105,6 @@ function setNum(id, value) {
 // (expired certificates, no DMARC) and not only how many. Reads the worst three severities; a group counts what those pages hold.
 const HY_AREA = { tls_expired: "Expired certificates", tls_expiring: "Certificates expiring", tls_legacy: "Old TLS versions", tls_weak: "Weak TLS" };
 const HY_PREFIX = { spf: "SPF", dkim: "DKIM", dmarc: "DMARC", caa: "CAA", mx: "Mail exchangers", mta_sts: "MTA-STS", smtp_tlsrpt: "TLS reporting", dane: "DANE", tls: "TLS" };
-const HY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 const hyName = (check) => {
   if (HY_AREA[check]) return HY_AREA[check];
   const word = check.replace(/_/g, " ");
@@ -163,21 +162,14 @@ async function paintCoverage() {
   }
 }
 let hygieneSig = null;
-async function paintHygiene(open) {
+async function paintHygiene(open, topChecks) {
   const box = $("hy-top");
-  if (!box || open === hygieneSig) return;
-  hygieneSig = open;
+  const sig = JSON.stringify([open, topChecks]);
+  if (!box || sig === hygieneSig) return;
+  hygieneSig = sig;
   try {
-    const path = `/api/v1/projects/${encodeURIComponent(slug || "_all")}/hygiene`;
-    const pages = await Promise.all(["critical", "high", "medium"].map((sev) => get(`${path}?severity=${sev}&page_size=100`).catch(() => ({ results: [] }))));
-    const groups = new Map();
-    pages.flatMap((p) => p.results || []).forEach((f) => {
-      const g = groups.get(f.check) || { check: f.check, worst: f.severity, n: 0 };
-      g.n += 1;
-      if ((HY_RANK[f.severity] || 0) > (HY_RANK[g.worst] || 0)) g.worst = f.severity;
-      groups.set(f.check, g);
-    });
-    const top = [...groups.values()].sort((a, b) => (HY_RANK[b.worst] || 0) - (HY_RANK[a.worst] || 0) || b.n - a.n).slice(0, 3);
+    // counted by the server over every actionable finding (stats.hygiene_top), never from a page of the list
+    const top = (topChecks || []).map((g) => ({ check: g.check, worst: g.worst, n: g.n }));
     box.textContent = "";
     top.forEach((g) => {
       const li = el("li", `sev-${g.worst}`);
@@ -259,7 +251,7 @@ async function pollStats() {
       certNote.textContent = s.certs_total ? `of ${s.certs_total}` : "";
       certNote.title = s.certs_total ? `${s.certs_total} certificates tracked` : "";
     }
-    paintHygiene(s.hygiene_open);
+    paintHygiene(s.hygiene_open, s.hygiene_top);
     const stuck = $("n-queue");
     if (stuck) {
       // the activity feed also shows scans that run under a finished scan record (weekly deep Nuclei, host rescans): those are work, so not stuck
