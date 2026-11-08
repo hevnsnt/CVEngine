@@ -82,7 +82,7 @@ Things to know when a CDN is in front:
 
 - Only port 443 is needed from Cloudflare. Consider restricting the firewall to [Cloudflare's address ranges](https://www.cloudflare.com/ips/).
 - The bundled proxy overwrites `X-Forwarded-For` with the address it sees connecting, which is Cloudflare's edge. The **IP allowlist** and the abuse guard therefore see Cloudflare's addresses, not your users'. Do not rely on the allowlist for access control behind a CDN; use Cloudflare Access or firewall rules instead.
-- Static files are versioned by content and sent with `Cache-Control: no-cache`, so Cloudflare cannot serve one release's stylesheet with another release's pages. You do not need to purge the cache after an update.
+- Static files are versioned by content (`?v=<hash>` on every stylesheet and script). A versioned URL is sent with `Cache-Control: public, max-age=31536000, immutable`, so Cloudflare and browsers keep it for a year; an update changes the URL of every file that changed, so Cloudflare cannot serve one release's stylesheet with another release's pages. Any other `/staticfiles/` URL (the fonts) is sent with `no-cache`. You do not need to purge the cache after an update. If your own proxy or CDN rewrites `Cache-Control` or strips the query string from `/staticfiles/` URLs, keep the query string in the cache key, or a new release can be served an old file.
 - A scan of your own CDN-fronted name finds the CDN, not your server.
 
 ### C. Your own reverse proxy

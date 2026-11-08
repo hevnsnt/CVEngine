@@ -18,7 +18,7 @@ The interface is server-rendered page shells plus plain ES modules that fill the
 - **Mobile**: 16px gutters, 44px touch targets, stacked-card tables, visible focus rings, and reduced-motion support.
 - **Safe by construction**: DOM is built with `textContent` (the only `innerHTML` uses are the QR image on My account and fixed icons in the row menu and the Add targets dialog), and destructive actions use an in-page confirmation.
 
-Static files are content-versioned and nginx sends `Cache-Control: no-cache` for `/staticfiles/`, so a CDN cannot serve one release's stylesheet with the next release's pages.
+Every stylesheet and script URL carries a hash of the file's content (`?v=`, including the import map the ES modules use). nginx sends `Cache-Control: public, max-age=31536000, immutable` for a URL with a well-formed `?v=` hash and `no-cache` for any other `/staticfiles/` URL (the fonts, which the stylesheet names), so a browser or CDN never asks again for a file it holds, and never serves one release's stylesheet with the next release's pages: a changed file has a new URL. Pages also inline a small critical style (`critical_style` in `cveFeed/templatetags/assets.py`, before the stylesheet link) and every inline icon has `width` and `height`, so a stylesheet that arrives late cannot show a giant glyph or a jumping layout.
 
 ## Pages
 

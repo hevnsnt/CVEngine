@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased (1.4)
 
+### Fixed
+
+- **Pages no longer flash unstyled content with a giant black glyph while the stylesheet loads.** Every inline icon now has `width` and `height`, the pages inline a small critical style (the icon stroke/size, background and text colour, the skip link, the rail width) before the stylesheet, and nginx serves hash-versioned `/staticfiles/` URLs with `Cache-Control: public, max-age=31536000, immutable` (any other URL keeps `no-cache`), so a second navigation fetches no stylesheet or script from the network.
+
 ### Added
 
 - **The About page lists everything the install is built from, and the documentation says what 1.4 does.** The page now renders from one list (`web/cveFeed/software.py`): every scanner and tool of the server and Sentinel images with its pinned version and license (including sshamble, Kingfisher, Playwright's Chromium, bbot, wafw00f, the badkeys blocklist and the Greenbone parts), the platform software, the Python libraries, and each third-party data source and AI provider, with whether it is optional. `tests/test_about_page.py` fails when a tool pinned in `web/Dockerfile` or in the Sentinel's Dockerfile (read at the commit `web/requirements.txt` pins; CI fetches it) is missing from the page or shown at another version. THIRD-PARTY.md gains sshamble (BSD-2-Clause), the badkeys data, the Sentinel libraries and the platform licenses, and no longer says node2shell is vendored in the server. `tests/test_docs_accuracy.py` holds the docs to the code: all 36 kinds of the contract in SENTINELS.md and AGENT-API.md, every `CVENGINE_*` variable the code or compose reads named in a document, no stale "runs locally" claims, and every relative link and anchor. The docs were swept for 1.4: README, ARCHITECTURE, SENTINELS, BUILTIN-SCANNER, AGENT-API, PIPELINE (an SSH inspection section), CONFIGURATION (the missing variables, the installer and compose variables, and the variables 1.4 ignores), DEPLOYMENT, FRONTEND (the six-entry rail), OPENVAS, TAILSCALE, COMPARISON, and UPGRADE.md gains an "Upgrading to 1.4" section.
