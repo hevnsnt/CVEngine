@@ -146,7 +146,15 @@ def _refusals(project_id, values, resolved=None, unknown=()):
 
 
 def _project_id(project):
-    return getattr(project, 'pk', project)
+    """The integer id of ``project`` (an object or an id), or None when it is not one: no project row can exist for it, so no list can."""
+    value = getattr(project, 'pk', None)
+    if value is None:
+        value = getattr(project, 'id', project)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return int(value) if isinstance(value, str) and value.isdigit() else None
 
 
 def task_refusals(project, kind, target, host='', ips=None, resolved=None, wait_for_unknown=True):
@@ -195,7 +203,7 @@ def result_addresses(result):
                 if key in RESULT_KEYS:
                     out.extend(s for s in _strings(item) if _is_address_like(s))
                 if key == 'ports' and isinstance(item, dict):
-                    out.extend(k for k in item if isinstance(k, str) and _is_address_like(k))  # nmap / naabu: {address: [ports]}
+                    out.extend(k for k in item if isinstance(k, str) and _is_address_like(k))  # a port scan result: {address: [ports]}
                 walk(item, depth + 1)
         elif isinstance(value, (list, tuple)):
             for item in value:
