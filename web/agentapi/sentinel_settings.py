@@ -327,7 +327,7 @@ FEATURES = ('secret_read', 'vantage')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), and for the built-in scanner image ``builtin`` and its ``features``. Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -383,6 +383,36 @@ def clean_info(raw):
         if reason is not None and not isinstance(reason, str):
             raise ApiError(400, 'openvas.reason must be text')
         out['openvas'] = {'ready': gvm['ready'], 'reason': ''.join(c for c in (reason or '') if c.isprintable())[:200]}
+    waiting = raw.get('waiting')
+    if waiting is not None:
+        out['waiting'] = clean_waiting(waiting)
+    return out
+
+
+def _count(value, high=10 ** 7):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= high else 0
+
+
+def clean_waiting(raw):
+    """``info.waiting``: the heavy kinds a Sentinel holds back for lack of memory (``{kind, need_mb, free_mb, budget_mb, seconds, held_by: [{task, kind, mb,
+    seconds}]}``) and the tasks it was told to stop that are still stopping (``{kind, task, seconds, stopping: true}``), so the Sentinels page can say why a kind
+    is not being taken. At most six entries and three holders each, text clipped, numbers whole; an empty list says nothing waits now."""
+    if not isinstance(raw, list) or len(raw) > 20:
+        raise ApiError(400, 'waiting must be a list of at most 20 entries')
+    out = []
+    for item in raw[:6]:
+        if not isinstance(item, dict) or not isinstance(item.get('kind'), str):
+            raise ApiError(400, 'each waiting entry must be an object with a kind')
+        row = {'kind': ''.join(c for c in item['kind'] if c.isprintable())[:40], 'seconds': _count(item.get('seconds'), 10 ** 9)}
+        if item.get('stopping') is True:
+            row.update(stopping=True, task=_count(item.get('task'), 2 ** 62))
+        else:
+            row.update(need_mb=_count(item.get('need_mb')), free_mb=_count(item.get('free_mb')), budget_mb=_count(item.get('budget_mb')), held_by=[])
+            for holder in (item.get('held_by') if isinstance(item.get('held_by'), list) else [])[:3]:
+                if isinstance(holder, dict) and isinstance(holder.get('kind'), str):
+                    row['held_by'].append({'task': _count(holder.get('task'), 2 ** 62), 'kind': ''.join(c for c in holder['kind'] if c.isprintable())[:40],
+                                           'mb': _count(holder.get('mb')), 'seconds': _count(holder.get('seconds'), 10 ** 9)})
+        out.append(row)
     return out
 
 
