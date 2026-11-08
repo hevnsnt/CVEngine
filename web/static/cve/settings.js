@@ -326,7 +326,7 @@ const sections = {
     const guideNote = el("p", "note", gp
       ? `${gp.cves.toLocaleString()} CVEs: guidance written by rules for ${gp.rules.toLocaleString()}, by the model for ${gp.ai.toLocaleString()}, by a person for ${gp.manual.toLocaleString()}. ${gp.local_only.toLocaleString()} are only usable from the host itself and never matched. ${gp.ai_pending.toLocaleString()} still wait for the model${gp.days_left ? `: about ${gp.days_left.toLocaleString()} day${gp.days_left === 1 ? "" : "s"} at ${gp.daily_budget.toLocaleString()} a day` : ""}. The model handled ${gp.ai_last_day.toLocaleString()} in the last day.`
       : "CVE guidance progress is not available yet.");
-    const guideNow = text("200", { type: "number", min: "1", max: "5000" });
+    const guideNow = text("200", { type: "number", min: "1", max: "5000", "aria-label": "How many CVEs to write guidance for now" });
     const guideRun = button("Write now", async () => {
       const r = await api("POST", "cve_guidance/run", { count: guideNow.value });
       guideNote.textContent = `Queued: the model writes guidance for the next ${r.queued} CVEs. Progress shows here after a refresh.`;
@@ -1486,8 +1486,9 @@ const sections = {
 // Thirteen tabs never fit on one line, so they are grouped: a column beside the panel on a wide screen, wrapped rows on a narrow one.
 const view = root.querySelector("#view");
 view.classList.add("set-layout");
+// A navigation list, not a tablist: the groups hold a collapsible heading button and a link next to the section buttons, which a tablist may not own.
+// The open section is marked with aria-current.
 const tabs = el("nav", "set-nav", null, {
-  role: "tablist",
   "aria-label": "Settings",
 });
 const panel = el("div", "set-panel");
@@ -1547,7 +1548,7 @@ async function open(name, card = "") {
     .querySelectorAll("button[data-tab]")
     .forEach((b) =>
       b.setAttribute(
-        "aria-selected",
+        "aria-current",
         String(b.dataset.tab === name && (!b.dataset.card || b.dataset.card === (card || b.dataset.card))),
       ),
     );
@@ -1562,7 +1563,7 @@ async function open(name, card = "") {
   }
 }
 const tabButton = (name) => {
-  const b = el("button", "btn ghost sm", labels[name], { role: "tab", "data-tab": name, "aria-selected": "false" });
+  const b = el("button", "btn ghost sm", labels[name], { "data-tab": name, "aria-current": "false" });
   b.type = "button";
   b.onclick = () => open(name);
   return b;
@@ -1576,10 +1577,9 @@ const cmGroup = el("div", "set-group", null, { role: "presentation" });
 cmToggle.onclick = () => setCmOpen(cmItems.hidden);
 cards().forEach((entry) => {
   const b = el("button", "btn ghost sm", entry.title, {
-    role: "tab",
     "data-tab": SECTION_ID,
     "data-card": entry.id,
-    "aria-selected": "false",
+    "aria-current": "false",
   });
   b.type = "button";
   b.onclick = () => open(SECTION_ID, entry.id);
