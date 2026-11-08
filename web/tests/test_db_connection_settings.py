@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 class ConnectionReuseTests(SimpleTestCase):
     def test_the_default_is_a_connection_per_request_so_workers_and_tests_are_unchanged(self):
         self.assertEqual(settings.DATABASES['default']['CONN_MAX_AGE'], 0)
-        self.assertTrue(settings.DATABASES['default']['CONN_HEALTH_CHECKS'])
+        self.assertFalse(settings.DATABASES['default']['CONN_HEALTH_CHECKS'])
 
     def test_only_the_web_service_sets_it(self):
         compose = (ROOT / 'docker-compose.yml').read_text()

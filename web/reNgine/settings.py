@@ -114,7 +114,7 @@ DATABASES = {
         # closed one per request). The web container sets this to 60 (docker-compose.yml): its 2 x 8 threads then hold at most 16 connections. Left at 0 for the
         # Celery workers, whose gevent greenlets would each keep one.
         'CONN_MAX_AGE': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0),
-        'CONN_HEALTH_CHECKS': True,
+        'CONN_HEALTH_CHECKS': env.int('CVENGINE_DB_CONN_MAX_AGE', default=0) > 0,  # a ping before reuse; with 0 (workers, tests) it would only add a statement
         # 'OPTIONS':{
         #     'sslmode':'verify-full',
         #     'sslrootcert': os.path.join(BASE_DIR, 'ca-certificate.crt')
