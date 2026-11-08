@@ -18,6 +18,7 @@ from functools import wraps
 import requests
 
 from cveFeed.secret_redaction import redact_text
+from reNgine import ai_prompts
 from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
 	AIRuntime, clean_number, reasoning_plan, setting_applies)
 
@@ -192,6 +193,23 @@ def _record_completion(provider, status, category, started, duration_ms, stop_re
 		logger.debug('AI usage metadata could not be stored', exc_info=False)
 
 
+_UNNAMED_SEEN = set()
+
+
+def _note_unnamed_stage():
+	"""A model call made outside ``usage_stage`` is recorded as ``unspecified``, which hides what the call was. Say where it came from, once per
+	place: file names and line numbers of the calling frames only, never any text of the request."""
+	try:
+		import traceback
+		frames = [f'{os.path.basename(f.filename)}:{f.lineno}' for f in traceback.extract_stack(limit=8)[:-2] if 'ai_providers' not in f.filename]
+		where = ' < '.join(reversed(frames[-4:]))
+		if where not in _UNNAMED_SEEN and len(_UNNAMED_SEEN) < 50:
+			_UNNAMED_SEEN.add(where)
+			logging.getLogger('reNgine.ai_usage_stage').warning('AI call with no usage stage (recorded as "unspecified"), called from %s: wrap it in usage_stage() and name the job in reNgine/ai_prompts.py', where)
+	except Exception:  # noqa: BLE001 - diagnostics never change a call
+		pass
+
+
 def tracked_completion(fn):
 	"""Wraps complete() and complete_vision(): same usage accounting either way, and the one place every prompt and every reply passes, so
 	the last line of defence against a secret reaching the provider or being stored from its answer sits here: the user message is masked
@@ -203,6 +221,8 @@ def tracked_completion(fn):
 			args = (args[0], redact_text(args[1]), *args[2:])
 		elif 'user' in kwargs:
 			kwargs['user'] = redact_text(kwargs['user'])
+		if _usage_stage.get() == 'unspecified':
+			_note_unnamed_stage()
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
 		self._last_usage, self._last_actual_model, self._last_stop_reason = None, '', ''
@@ -1023,9 +1043,8 @@ TRIAGE_CAPS = {'reason': 300, 'impact': 600, 'severity_reason': 200, 'remediatio
 TRIAGE_FORBIDDEN_KEYS = {'host', 'hostname', 'domain', 'target', 'ip', 'url', 'request', 'response', 'body', 'headers', 'cookie', 'cookies',
 						 'curl_command', 'curl', 'sample', 'samples', 'secret', 'password', 'token', 'api_key', 'apikey', 'key', 'raw'}
 
-TRIAGE_SYSTEM_PROMPT = (
-	'You are a vulnerability analyst triaging one finding on one asset. The asset belongs to the operator who runs this '
-	'tool and the finding comes from their own scanners. Judge how likely the finding is real and what it means. Respond '
+TRIAGE_SYSTEM_PROMPT = ai_prompts.compose('finding_triage',
+	'Judge how likely the finding is real and what it means. Respond '
 	'with ONLY a JSON object with exactly these keys: '
 	'{"classification": "confirmed" | "likely" | "needs_validation" | "likely_false_positive" | "not_applicable", '
 	'"reason": "<one sentence, at most 300 characters>", '
@@ -1175,9 +1194,8 @@ LOCAL_CHECK_COMMAND_KEYS = {'os', 'command', 'look_for'}
 LOCAL_CHECK_CAPS = {'command': 200, 'look_for': 150, 'caveat': 300}
 LOCAL_CHECK_OS = ('linux', 'windows', 'any')
 MAX_LOCAL_CHECKS = 3
-LOCAL_CHECK_SYSTEM_PROMPT = (
-	'A system administrator has direct shell access to their own host and wants to check, locally, whether a specific '
-	'product named in a CVE advisory is installed, because it could not be confirmed from outside. Given the product '
+LOCAL_CHECK_SYSTEM_PROMPT = ai_prompts.compose('local_check_suggestion',
+	'Given the product '
 	'and vendor names from the advisory, suggest at most 3 short, read-only checks a person could run themselves: a '
 	'process or package name, an install or config path, a service name, an admin port, or a log file, for how that '
 	'product is typically installed on Linux and/or Windows. Prefer a short command over prose when you give one. Be '

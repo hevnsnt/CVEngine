@@ -88,6 +88,9 @@ class Server:
             raise ServerError('a job with a malformed id')
         return self._request('POST', f'jobs/{job_id}/result', body=body)
 
+    def usage(self, body):
+        return self._request('POST', 'usage', body=body)
+
     def ops_snapshot(self, release=None):
         query = {'templates_release': release['tag'], 'templates_published_at': release.get('published_at', '')} if release else None
         return self._request('GET', 'ops/snapshot', query=query)

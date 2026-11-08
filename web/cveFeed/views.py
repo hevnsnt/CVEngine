@@ -1276,6 +1276,7 @@ def api_onboarding_save(request):
     """Verify the key against the provider the user chose (or its unambiguous prefix names) with a live call, then save + enable it. A key
     whose vendor is not certain is never tried anywhere: the user is asked to pick the provider."""
     from dashboard.models import AIProviderSettings
+    from reNgine import ai_prompts
     from reNgine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
 
     body = _json_body(request)
@@ -1301,7 +1302,7 @@ def api_onboarding_save(request):
             if needs_model:
                 provider.list_models()  # OpenRouter/Ollama/vLLM/LM Studio: prove the connection, the user picks the model in Settings
             else:
-                provider.complete('Reply with the single word: ok', 'ping')
+                provider.complete(ai_prompts.CONNECTION_TEST_SYSTEM, ai_prompts.CONNECTION_TEST_USER)
     except AIProviderError as exc:
         logger.warning('AI provider connection test failed for %s: %s', provider_name, re.sub(r'//[^/@\s]+@', '//[redacted]@', str(exc)))  # never log URL credentials
         return JsonResponse({'ok': False, 'provider': provider_name, 'error': 'The connection test failed. Check the address, key and model; the details are in the server log.'}, status=400)

@@ -120,6 +120,7 @@ These routes serve the AI reviewer container ([AI-REVIEWER.md](AI-REVIEWER.md)) 
 | GET | `/api/v1/reviewer/ops/snapshot` | The operations checks. |
 | POST | `/api/v1/reviewer/ops/report` | The operations job's diagnoses, added to the admin alerts, and the actions it asks for. The server runs only the actions a current check offers. |
 | GET | `/api/v1/reviewer/jobs/next` | Up to `?limit=` (at most 20) of the pipeline's queued AI jobs (triage and local-check suggestions), each leased with a fresh lease token: the stage's system prompt, its parts (trusted text, and data the container fences), the schema and request options. None while no AI provider is configured, `CVENGINE_REVIEWER=0` or scanning is paused. |
+| POST | `/api/v1/reviewer/usage` | One report of a model call the container made for its own two jobs (`finding_review`, `operations_check`): stage, provider, model, status, failure category, stop reason, token counts, duration. Recorded as AI usage under that stage, so the usage page names the job and counts its refusals. Counts and outcome only, never text. |
 | POST | `/api/v1/reviewer/jobs/{id}/result` | The answer to one job (`text`) or its failure (`error`, a category), with the lease token and the token counts of each call. 409 when the lease is not the job's current one. The server checks the answer with the stage's own validator and applies it in the background. |
 
 ## Host inventory

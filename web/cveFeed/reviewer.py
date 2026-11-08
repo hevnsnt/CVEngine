@@ -667,6 +667,43 @@ def _run_action(name):
         tasks.update_nuclei_templates.apply_async()
 
 
+# The reviewer container's own two jobs call the model themselves, so it tells the server about each call (this route) and the usage page
+# names them: a refused review is then a number, not a log line in the container. Counts and outcome only, never text.
+USAGE_STAGES = ('finding_review', 'operations_check')
+_USAGE_CATEGORIES = {'auth': 'provider_auth', 'rate_limit': 'provider_rate_limit', 'http': 'provider_http', 'network': 'provider_network',
+                     'shape': 'provider_shape', 'truncated': 'output_truncated', 'refused': 'refused', 'model': 'provider_error'}
+
+
+def record_usage(body, now=None):
+    """Take one call report from the container: ``{stage, provider, model, status, category, stop_reason, input_tokens, output_tokens,
+    duration_ms}``. One AIUsage row. Raises VerdictError for a stage that is not one of the container's own two jobs."""
+    import re
+    from cveFeed import ai_jobs
+    from cveFeed.models import AIUsage
+    if not isinstance(body, dict) or body.get('stage') not in USAGE_STAGES:
+        raise VerdictError('stage must be one of ' + ', '.join(USAGE_STAGES))
+    status = 'succeeded' if body.get('status') == 'succeeded' else 'failed'
+    category = '' if status == 'succeeded' else str(body.get('category') or '')
+    category = _USAGE_CATEGORIES.get(category, category)
+    if status == 'failed' and category not in ai_jobs.CATEGORIES:
+        category = 'unexpected_error'
+    model = str(body.get('model') or '')
+    stop = str(body.get('stop_reason') or '')
+
+    def count(name, ceiling=10_000_000):
+        try:
+            value = int(body.get(name))
+        except (TypeError, ValueError):
+            return None
+        return value if 0 <= value <= ceiling else None
+    now = now or timezone.now()
+    AIUsage.objects.create(
+        provider=re.sub(r'[^a-z0-9_-]', '', str(body.get('provider') or '').lower())[:32], model=model[:200] if ai_jobs.MODEL_NAME.match(model) else '',
+        stage=body['stage'], status=status, error_category=category, stop_reason=stop[:24] if re.fullmatch(r'[a-z_]{1,24}', stop) else '',
+        input_tokens=count('input_tokens'), output_tokens=count('output_tokens'), duration_ms=count('duration_ms', 24 * 3600 * 1000), started_at=now)
+    return {'recorded': True}
+
+
 def apply_ops_report(body, now=None):
     """Take the operations job's report: ``{alerts: [{code, severity, diagnosis}], actions: [names], model, templates_release}``. The
     checks are computed again here; a diagnosis is kept only for a check that is not ``ok``, and an action runs only when that check offers

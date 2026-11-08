@@ -500,6 +500,8 @@ ROUTES = [
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
     ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
      lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
+    ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
+     lambda r, c, **k: reviewer_api.usage(r, c, _body(r))),
     ('GET', r'reviewer/jobs/next', 'AI reviewer token only (docs/AI-REVIEWER.md): up to ?limit= (at most 20) of the pipeline\'s queued AI jobs (triage and the other stages), each leased to the container with a fresh lease token: {jobs: [{id, kind, stage, attempt, lease, system, parts: [{text} | {fence, data}], schema, options, image?}]}; none while no provider is configured, CVENGINE_REVIEWER=0 or scanning is paused',
      lambda r, c, **k: reviewer_api.next_jobs(r, c)),
     ('POST', r'reviewer/jobs/(?P<job_id>\d{1,12})/result', 'AI reviewer token only: the answer to one leased job {lease, text | error (a failure category), provider, model, calls: [{status, category, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms, model, actual_model}]}; answers {accepted: true} (the server checks and applies it in the background), 409 when the lease is not the job\'s current one',
