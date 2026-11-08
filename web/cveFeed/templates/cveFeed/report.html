@@ -148,15 +148,15 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <h2>{% if r.host %}Host{% else %}Hosts{% endif %}</h2>
   <p class="small mute">{% if r.host %}The host, its exposed services and why it has its score.{% else %}Highest score first. Score is 0 to 100 and adds up the reasons shown in the host&rsquo;s detail in cvENGINE. {% if r.caps.hosts_omitted %}Showing the top {{ r.scope.hosts_listed }} of {{ r.scope.hosts_total }} hosts; the report limit is {{ r.caps.hosts }}.{% else %}All {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} are listed.{% endif %}{% endif %}</p>
   {% if r.hosts %}
-  <table class="grid">
+  <!--cv:begin--><table class="grid">
     <thead><tr><th>Host</th><th>Heat</th><th class="num">Score</th><th class="num">Findings</th><th>Exposure (open ports)</th><th>Owner</th></tr></thead>
-    <tbody>{% for h in r.hosts %}
+    <tbody>{% for h in r.hosts %}<!--cv:row-->
       <tr><td>{{ h.host }}{% if h.alias %}<br><span class="mute small">{{ h.alias }}</span>{% endif %}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
         <td><span class="chip c-{{ h.heat }}">{{ h.heat }}</span></td><td class="num">{{ h.score }}</td><td class="num">{{ h.findings }}</td>
         <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}<br><span class="mute small">{{ h.addresses }} address{{ h.addresses|pluralize:"es" }}</span></td>
         <td>{{ h.owner|default:"-" }}{% if h.criticality and h.criticality != 'unknown' %}<br><span class="mute small">{{ h.criticality }} criticality</span>{% endif %}</td></tr>{% endfor %}
-    </tbody>
-  </table>
+<!--cv:end-->    </tbody>
+  </table><!--cv:finish-->
   {% else %}<p class="mute">No hosts in the current inventory.</p>{% endif %}
   {% if r.host and r.hosts %}{% with h=r.hosts.0 %}
     {% if h.aliases %}<p class="small" style="margin-top:8pt">Also answers to: {{ h.aliases|join:", " }}</p>{% endif %}
@@ -173,7 +173,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <h2>Findings</h2>
   <p class="small mute">CVE matches and scanner findings, hottest first.
     {% if r.caps.findings_omitted %}Showing the {{ r.findings|length }} hottest of {{ r.summary.findings }}; the report limit is {{ r.caps.findings }}. The rest are in cvENGINE{% if not r.host %}; a report for one host lists everything on it{% endif %}.{% endif %}</p>
-  {% for f in r.findings %}
+  <!--cv:begin-->{% for f in r.findings %}<!--cv:row-->
   <div class="finding f-{{ f.heat }}">
     <h3>{{ f.title }}</h3>
     <div class="meta"><span class="chip c-{{ f.heat }}">{{ f.heat }}</span> <span class="chip c-{{ f.severity }}">{{ f.severity }}</span>
@@ -201,7 +201,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <div class="track"><dl class="kv"><dt>Status</dt><dd><b>{{ f.tracking.status }}</b>{% if f.tracking.changed %} (changed {{ f.tracking.changed }}{% if f.tracking.changed_by %} by {{ f.tracking.changed_by }}{% endif %}){% endif %}</dd>
       <dt>Assignee</dt><dd>{{ f.tracking.assignee|default:"unassigned" }}</dd>{% if f.tracking.note %}<dt>{% if f.tracking.closed %}Why it was closed{% else %}Notes{% endif %}</dt><dd class="pre">{{ f.tracking.note }}</dd>{% endif %}</dl></div>
   </div>
-  {% empty %}<p class="mute">No findings to list.</p>{% endfor %}
+  {% empty %}<p class="mute">No findings to list.</p>{% endfor %}<!--cv:end--><!--cv:finish-->
 </section>
 
 <section class="page">
