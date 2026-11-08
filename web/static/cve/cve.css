@@ -2414,7 +2414,7 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .split>.split-list>.host-rows .host-row:not(:has(>.hr-top))>.host-why{display:none}
 .split>.split-list>.host-rows .host-row .host-meta{flex-wrap:nowrap;overflow:hidden;min-height:24px;line-height:20px;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - var(--s-5)),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - var(--s-5)),transparent)}
 .split>.split-list>.host-rows .host-row .host-meta>*{flex:none}
-.split>.split-list>.host-rows .host-row .host-meta>.host-why{flex:0 1 auto;min-width:8ch;max-width:60%;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-line-clamp:unset}
+.split>.split-list>.host-rows .host-row .host-meta>.host-why{flex:0 1 auto;min-width:min(28ch,72%);max-width:72%;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-line-clamp:unset}
 
 /* the table lists: the head is sticky under the top bar, the table header under the head, the rows are the page's scroll */
 .table-page{display:flex;flex-direction:column;min-width:0}
