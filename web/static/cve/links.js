@@ -40,7 +40,7 @@ export const cveAnchor = (project, cveId, matchId, host) =>
 // never the masked sample of a route (counts and samples are text beside the link, not part of it). Unsafe characters in a path are percent-encoded by the
 // URL parser, so a path cannot add a query, a fragment or another host.
 export const PAGE_LINK_TITLE = "Opens the live page on the scanned host";
-const HOSTNAME = /^(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9_])?\.?)+$|^\[[0-9A-Fa-f:.]+\]$/;
+const HOSTNAME = /^(?:[A-Za-z0-9_.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])$/;  // flat (no nested repeat); the URL parser judges the rest
 const webUrl = (u) => (u.protocol === "http:" || u.protocol === "https:") && u.hostname ? u : null;
 const bare = (u) => {
   u.username = "";
