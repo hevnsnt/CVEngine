@@ -795,7 +795,7 @@ a.why-more{color:var(--ink)}
 /* ---- host master/detail ---- */
 .split{display:grid;gap:var(--s-4);grid-template-columns:1fr;align-items:start}
 .split-list{padding:var(--s-3);display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
-.split-list>input,.split-list>.filters-panel>input{min-height:40px;font-size:var(--fs-4)}
+.split-list>input{min-height:40px;font-size:var(--fs-4)}
 .host-rows{display:flex;flex-direction:column;gap:var(--s-1);overflow:auto;scrollbar-width:thin;max-height:70dvh}
 .host-row{all:unset;box-sizing:border-box;display:flex;flex-direction:column;flex:none;gap:var(--s-1);min-height:var(--row-h);padding:var(--s-2) var(--s-3) var(--s-2) var(--s-5);border-radius:var(--r);cursor:pointer;border:1px solid transparent;position:relative;overflow:hidden}
 /* Hosts list: every row is the same height whatever it holds (the name is one line, the chips one line); other lists keep the same minimum and grow with their notes */
@@ -881,6 +881,36 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
 .about-filter label{font-size:13px;color:var(--ink-2)}
 .about-filter input{width:100%;min-height:40px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;font-size:14px}
 .about-filter .note{margin:0;min-height:20px}
+/* ---- split lists (Findings, CVE matches, Hosts): the rows own the column. The head (search line, Filters button, count, tools) stays in view; the other
+   filters open as a panel OVER the rows (static/cve/app.js listHead). At 900px and up the column is the one scroll container, the full height under the
+   top bar; below that the page scrolls. Selectors carry .split> so they hold over the base rules above without editing them. ---- */
+.split>.split-list>.list-head{position:sticky;top:calc(-1*var(--s-3));z-index:6;display:flex;flex-direction:column;gap:var(--s-1);margin:calc(-1*var(--s-3)) calc(-1*var(--s-3)) 0;padding:var(--s-2) var(--s-3) var(--s-1);background:var(--surface);border-bottom:1px solid var(--line);border-radius:var(--r) var(--r) 0 0}
+.list-head .list-bar{display:flex;gap:var(--s-2);min-width:0}
+.list-head .list-bar>input{flex:1;min-width:0;height:36px;min-height:36px;padding-top:0;padding-bottom:0;font-size:var(--fs-4)}
+.list-head .list-meta{flex-wrap:wrap;justify-content:flex-start;gap:var(--s-1) var(--s-2);min-height:0}
+.list-head .list-meta .list-count{margin:0 auto 0 0;white-space:nowrap}
+.list-head .list-meta .meta-tools{margin-left:auto}
+.list-head .filters-btn{flex:none;min-height:36px;padding:0 var(--s-3)}
+.list-head .active-chips{display:contents}
+.list-head .active-chips[hidden]{display:none}
+.list-head .chip-x{display:inline-flex;align-items:center;gap:var(--s-2);min-height:28px;max-width:100%;padding:0 var(--s-2) 0 var(--s-3);border:1px solid var(--line-2);border-radius:999px;background:var(--sunk);color:var(--ink);font:var(--fw-semi) var(--fs-2) var(--font);cursor:pointer}
+.list-head .chip-x span{font-size:var(--fs-4);line-height:1;color:var(--muted)}
+.list-head .filters-pop{position:absolute;left:0;right:0;top:100%;z-index:7;display:flex;flex-direction:column;gap:var(--s-3);margin:0 var(--s-3);padding:var(--s-3);max-height:calc(100dvh - var(--bar) - 170px);overflow-y:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:var(--pop)}
+.list-head .filters-pop[hidden]{display:none}
+.split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}
+.split>.split-list>.host-rows .host-row{scroll-margin-top:calc(var(--head-h,130px) + var(--s-2))}
+.split>.split-list>.more-row{margin:0;padding:2px 0 var(--s-2)}
+.split>.split-list .more-done{margin:0;text-align:center}
+.split>.split-list .host-row .host-why{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}  /* a description is one line in the list; the pane has all of it */
+@media (min-width:900px){
+  /* the page's own title, tabs and summary move to the right column, above the detail pane: the list starts right under the top bar */
+  .wrap:has(#view>.split:not(.gallery)){display:grid;grid-template-columns:minmax(320px,min(440px,40%)) minmax(0,1fr);column-gap:var(--s-4);align-items:start;padding-top:var(--s-2)}
+  .wrap:has(#view>.split:not(.gallery))>*,.wrap:has(#view>.split:not(.gallery)) #view>*,.wrap:has(#view>.split:not(.gallery)) .split-pane{grid-column:2}
+  .wrap:has(#view>.split:not(.gallery))>:has(>#view),.wrap:has(#view>.split:not(.gallery)) #view,.wrap:has(#view>.split:not(.gallery)) #view>.split{display:contents}
+  .wrap:has(#view>.split:not(.gallery)) .split>.split-list{grid-column:1;grid-row:1/span 6}
+  .split>.split-list{overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;top:calc(var(--bar) + var(--s-1));height:var(--fit,calc(100dvh - var(--bar) - var(--s-2)))}
+}
+@media (pointer:coarse){.list-head .chip-x,.list-head .filters-btn,.list-head .list-bar>input{min-height:var(--hit);height:auto;min-width:var(--hit)}}
 .about-group{border-top:1px solid var(--line);min-width:0}
 .about-group>summary{display:flex;align-items:center;gap:4px;min-height:48px;cursor:pointer;font-weight:600;font-size:15px;list-style:none}
 .about-group>summary::-webkit-details-marker{display:none}
@@ -2343,20 +2373,6 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .plan-opt span{flex:1}
 
 
-/* ---- phones: the filters sit behind one button and the list comes first (static/cve/app.js filtersToggle / filtersGroup) ---- */
-.filters-row,.filters-toggle{display:none}
-.filters-panel{display:contents}
-@media (max-width:639px){
-  .filters-row{display:flex}
-  .filters-toggle{display:inline-flex}
-  .split-list:not(.filters-open) .filters-panel{display:none}
-  .split-list.filters-open .filters-panel{display:flex;flex-direction:column;gap:var(--s-3)}
-  .list-tools{grid-template-columns:minmax(0,1fr) auto}
-  .list-tools>select{grid-column:1/-1}
-  .split-list:not(.filters-open) .list-tools>select{display:none}
-  .split-list:not(.filters-open) .list-meta .meta-tools{display:none}
-}
-
 /* ---- a finger: every control is at least 44px in both directions on a touch screen. The size is the control's own (min-height, padding), or a
    ::after that reaches past it, so nothing shifts; links inside a sentence keep the sentence's line height. ---- */
 @media (pointer:coarse){
@@ -2393,8 +2409,145 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .find>a,.host-head a.badge{display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
 }
 
+/* ---- the rest of the lists (Secrets, CVE matches, Third parties, Scans, Findings): the rows come first ----
+   Same head as Findings and Hosts (app.js listHead), the intro behind "What is this", a row of two lines, and on a phone one line of title,
+   the project in the top bar and the status strip as one line. Added after the rules above so nothing there is edited. ---- */
+
+/* a Findings or CVE match row: the title, then one line that opens with the host and carries the badges; the pane and the tooltip hold the rest */
+.split>.split-list>.host-rows .host-row:not(:has(>.hr-top)){min-height:var(--row-h);justify-content:center;gap:var(--s-1);padding-top:var(--s-2);padding-bottom:var(--s-2)}
+.split>.split-list>.host-rows .host-row:not(:has(>.hr-top)) .cve-id{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:20px}
+.split>.split-list>.host-rows .host-row:not(:has(>.hr-top))>.host-why{display:none}
+.split>.split-list>.host-rows .host-row .host-meta{flex-wrap:nowrap;overflow:hidden;min-height:24px;line-height:20px;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - var(--s-5)),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - var(--s-5)),transparent)}
+.split>.split-list>.host-rows .host-row .host-meta>*{flex:none}
+.split>.split-list>.host-rows .host-row .host-meta>.host-why{flex:0 1 auto;min-width:min(28ch,72%);max-width:72%;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;-webkit-line-clamp:unset}
+
+/* the table lists: the head is sticky under the top bar, the table header under the head, the rows are the page's scroll */
+.table-page{display:flex;flex-direction:column;min-width:0}
+.table-page>.list-head{position:sticky;top:calc(var(--bar) + env(safe-area-inset-top,0px));z-index:6;display:flex;flex-direction:column;gap:var(--s-1);padding:var(--s-2) 0 var(--s-1);background:var(--bg);border-bottom:1px solid var(--line)}
+.table-page>.list-head .list-meta{display:flex;align-items:center;min-width:0}
+.table-page>.list-head .meta-tools{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
+.table-page>.list-head .filters-pop{left:0;right:auto;width:min(560px,100%);margin:0}
+.table-page .picker{position:relative;gap:var(--s-1);margin:0;padding-top:var(--s-4)}
+.table-page .picker::before{content:attr(aria-label);position:absolute;top:0;left:1px;font:var(--fw-semi) var(--fs-1)/1.2 var(--font);text-transform:none;letter-spacing:0;color:var(--muted)}
+.table-page .table-wrap{overflow:visible;border-top-width:0;border-radius:0 0 var(--r-l) var(--r-l)}
+.table-page .table th{top:calc(var(--bar) + env(safe-area-inset-top,0px) + var(--head-h,48px));z-index:2;padding:var(--s-2);font-size:var(--fs-2)}
+.table-page .table td{padding:var(--s-2);font-size:var(--fs-2)}
+.table-page .table a{padding:var(--s-1) 0}
+.table-page .table td.clip{max-width:clamp(12ch,12vw,28ch);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.table-page .more-row{margin:var(--s-3) 0}
+/* a table wider than its box scrolls sideways (ui.js watchWide sets .scrolls); one that fits keeps overflow visible so its header can stay in view */
+.table-page .table-wrap.scrolls{overflow-x:auto}
+.what-is{position:relative;display:inline-block}
+.what-is>summary{display:inline-flex;align-items:center;gap:var(--s-1);min-height:36px;padding:0 var(--s-3);border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:var(--fw-semi) var(--fs-2) var(--font);cursor:pointer;list-style:none;white-space:nowrap}
+.what-is>summary::-webkit-details-marker{display:none}
+.what-is[open]>summary{background:var(--sunk)}
+.what-is>summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.what-body{position:absolute;right:0;top:calc(100% + var(--s-1));z-index:7;width:min(440px,calc(100vw - 2*var(--gutter)));padding:var(--s-3);background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:var(--pop);text-align:left}
+.what-body .card{border:0;padding:0;box-shadow:none}
+.what-body p{margin:0 0 var(--s-2)}
+.what-body p:last-child{margin-bottom:0}
+.what-body .chart-slot{min-width:min(420px,calc(100vw - 4*var(--gutter)))}
+.table-page .supplier-list{gap:0}
+.table-page .supplier{padding:var(--s-2) 0;border-top:1px solid var(--line)}
+.table-page .supplier-head{flex-wrap:nowrap;margin:0;min-height:var(--s-11)}
+.table-page .supplier-head h3{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.table-page .supplier-head>.note,.table-page .supplier-head>.badge{white-space:nowrap}
+.table-page .supplier-actions{flex:none;flex-wrap:nowrap}
+.supplier-body{padding:var(--s-2) 0}
+.supplier-body[hidden]{display:none}
+
+@media (min-width:900px){
+  /* a table list's title and tabs share one line, so the head and the first row are the first thing under the top bar */
+  .wrap:has(#view>.table-page){display:flex;flex-wrap:wrap;align-items:center;column-gap:var(--s-4);padding-top:var(--s-3)}
+  .wrap:has(#view>.table-page)>*{flex:none;margin-top:0;margin-bottom:0}
+  .wrap:has(#view>.table-page)>:has(>#view){flex:1 0 100%;min-width:0}
+  .wrap:has(#view>.table-page) .page-head>div{display:flex;align-items:baseline;gap:var(--s-3)}
+  .wrap:has(#view>.table-page) .page-head h1{font-size:var(--fs-6);line-height:32px;margin:0}
+  .wrap:has(#view>.table-page) .page-head .sub{margin:0}
+  .wrap:has(#view>.table-page) .pagetabs{margin-bottom:0}
+  .table-page>.list-head{flex-direction:row;flex-wrap:wrap;align-items:center;column-gap:var(--s-3)}
+  .table-page>.list-head .list-bar{flex:0 1 480px}
+  .table-page>.list-head .list-meta{flex:1 1 280px}
+}
+
+/* phones and tablets (under 900px) */
+@media (max-width:999px){
+  /* the project card becomes the first thing in the top bar */
+  .scope-row{position:sticky;top:0;z-index:21;height:0;margin:calc(-1*(var(--bar) + env(safe-area-inset-top,0px))) 0 calc(var(--bar) + env(safe-area-inset-top,0px));padding:0;pointer-events:none}
+  .scope-row .scope{pointer-events:auto;position:absolute;left:max(var(--gutter),env(safe-area-inset-left,0px));top:calc(8px + env(safe-area-inset-top,0px));width:132px;min-height:40px;height:40px;padding:0 var(--s-2) 0 var(--s-3);gap:var(--s-1)}
+  .scope-row .scope-k{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .scope-row .scope-v{font-size:var(--fs-3)}
+  .scope-row .scope-go{font-size:0;min-height:0;padding:0;background:none}
+  .stage:has(>.scope-row) .topbar{padding-left:calc(max(var(--gutter),env(safe-area-inset-left,0px)) + 132px + var(--s-3))}
+  .stage:has(>.scope-row) .topbar .brand.compact{display:none}
+}
+@media (max-width:899px){
+  .sb-strip{cursor:pointer}
+  .wrap:has(#view>.split,#view>.table-page){padding-top:var(--s-2)}
+  .wrap:has(#view>.split,#view>.table-page) .pagetabs{margin-bottom:var(--s-1)}
+  .wrap:has(#view>.split,#view>.table-page) .page-head{margin-bottom:var(--s-1)}
+  .wrap:has(#view>.split,#view>.table-page) .page-head>div{display:flex;align-items:baseline;gap:var(--s-2);min-width:0}
+  .wrap:has(#view>.split,#view>.table-page) .page-head h1{font-size:var(--fs-5);line-height:28px;margin:0;flex:none}
+  .wrap:has(#view>.split,#view>.table-page) .page-head .sub{margin:0;font-size:var(--fs-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Findings: the summary is one line that scrolls sideways, "What does Actionable mean?" sits beside it */
+  #view:has(>.split){display:flex;flex-wrap:wrap;align-items:center;column-gap:var(--s-2)}
+  #view:has(>.split)>.note{flex:1 1 0;min-width:0;margin:0;white-space:nowrap;overflow-x:auto;scrollbar-width:none;line-height:28px}
+  #view:has(>.split)>.note::-webkit-scrollbar{display:none}
+  #view:has(>.split)>.how-filter{flex:none;margin:0}
+  #view:has(>.split)>.split{flex:1 0 100%;margin-top:var(--s-1)}
+  .table-page>.list-head{margin:0 calc(-1*var(--gutter));padding-left:var(--gutter);padding-right:var(--gutter)}
+  .table-page>.list-head .list-bar>input{flex:1;min-width:0;height:36px;min-height:36px;font-size:var(--fs-4)}
+  .table-page>.list-head .filters-btn{flex:none;min-height:36px;padding:0 var(--s-3)}
+  .table-page>.list-head .filters-pop{left:var(--gutter);right:var(--gutter);width:auto}
+}
+@media (max-width:639px){
+  /* a table row is a compact card: its fields run on and wrap instead of one line each */
+  .table-page .table tr{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-1) var(--s-3);margin-bottom:var(--s-2);padding:var(--s-2) var(--s-3)}
+  .table-page .table td{display:inline-flex;flex:0 1 auto;justify-content:flex-start;gap:var(--s-1);padding:0;border:0;text-align:left;font-size:var(--fs-2);min-height:20px}
+  .table-page .table td+td{border-top:0}
+  .table-page .table td::before{font-size:var(--fs-1)}
+  .table-page .table td[data-label="Severity"]::before,.table-page .table td[data-label="Secret"]::before,.table-page .table td[data-label="Found at"]::before,.table-page .table td[data-label="#"]::before,.table-page .table td[data-label="Target"]::before,.table-page .table td[data-label="Status"]::before,.table-page .table td[data-label="Provider"]::before,.table-page .table td[data-label="Kind"]::before{display:none}
+  .table-page .table td.clip{max-width:none}
+  .table-page .table td[data-label="Found at"]{flex-basis:100%}
+  .table-page .table td[data-label=""]{margin-left:auto}
+  .table-page .supplier-head{flex-wrap:wrap;gap:var(--s-1) var(--s-2)}
+  .table-page .supplier-actions{flex:1 0 100%;margin-left:0;flex-wrap:wrap}
+}
+@media (max-width:639px){
+  /* the count and the tools share a line (the older phone rule gave the tools a line of their own) */
+  .list-head .list-meta .meta-tools{width:auto;margin-left:auto;justify-content:flex-end}
+  /* the tabs say which page this is, so on a phone the title is read aloud and not drawn, and the rows start higher */
+  .wrap:has(#view>.split,#view>.table-page) .page-head{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  /* scans: number, target and status on one line, the numbers under it, the findings and Stop last */
+  #section[data-kind="scans"] .table-page .table tr{padding:var(--s-1) var(--s-3) var(--s-2) var(--s-4);gap:var(--s-1) var(--s-3);grid-template-columns:auto minmax(0,1fr) auto}
+  #section[data-kind="scans"] .table-page .table td[data-label="#"]{grid-row:1;grid-column:1}
+  #section[data-kind="scans"] .table-page .table td[data-label="Target"]{grid-row:1;grid-column:2;font-size:var(--fs-3)}
+  #section[data-kind="scans"] .table-page .table td[data-label="Hosts"]{grid-row:2;grid-column:1}
+  #section[data-kind="scans"] .table-page .table td[data-label="Started"]{grid-row:2;grid-column:2}
+  #section[data-kind="scans"] .table-page .table td[data-label="Duration"]{grid-row:2;grid-column:3}
+  #section[data-kind="scans"] .table-page .table td[data-label="Findings"]{grid-row:3;grid-column:1/3}
+  #section[data-kind="scans"] .table-page .table td[data-label=""]{grid-row:3;grid-column:3;grid-row-end:auto}
+}
+@media (max-width:899px){
+  /* a split list's count line is one line that scrolls sideways when the chips and tools do not fit, so the rows do not move down */
+  .split>.split-list>.list-head .list-meta{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .split>.split-list>.list-head .list-meta::-webkit-scrollbar{display:none}
+  .split>.split-list>.list-head .list-meta>*,.split>.split-list>.list-head .active-chips>*{flex:none}
+  .split>.split-list>.list-head .list-meta .meta-tools{display:flex;flex-wrap:nowrap}
+  .split>.split-list>.list-head .active-chips{display:contents}
+}
+.secrets-top{display:inline-block}
+@media (max-width:899px){
+  /* on a phone a panel from the count line spans the screen under the head, like the Filters panel */
+  .table-page .what-is{position:static}
+  .table-page .what-body{left:var(--gutter);right:var(--gutter);top:100%;width:auto;max-height:calc(100dvh - var(--bar) - 140px);overflow-y:auto}
+}
 /* current page in the account control: a utility page (Administration, Settings, Help, My account) highlights the account, not a rail entry */
 .acct summary[aria-current="page"],.menu a[aria-current="page"]{background:var(--sunk);box-shadow:inset 3px 0 0 var(--brand)}
 .menu a[aria-current="page"]{color:var(--ink)}
 .sheet-list a[aria-current="page"],.sheet-grid a[aria-current="page"]{color:var(--ink);box-shadow:inset 3px 0 0 var(--brand)}
 @media (pointer:coarse){.rail-nav a,.menu a,.menu button,.sheet-grid a{min-height:var(--hit)}}
+@media (pointer:coarse){
+  /* a place's link keeps its 44px hit area (the ::after above) without making the card's line 44px tall */
+  .table-page .table td.clip a:not(.btn){min-height:24px}
+}

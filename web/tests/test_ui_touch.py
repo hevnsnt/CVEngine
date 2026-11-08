@@ -38,17 +38,15 @@ class TouchTests(SimpleTestCase):
         block = coarse_block()
         self.assertIn('li>a.cve-id,li .meta>a.hit,.table td a:not(.btn){display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}', block)
 
-    def test_filters_are_one_button_on_a_phone_and_untouched_on_a_wide_screen(self):
-        self.assertIn('.filters-row,.filters-toggle{display:none}', CSS)
-        self.assertIn('.filters-panel{display:contents}', CSS)
-        phone = CSS[CSS.index('/* ---- phones: the filters sit behind one button'):]
-        self.assertIn('@media (max-width:639px){', phone)
-        self.assertIn('.split-list:not(.filters-open) .filters-panel{display:none}', phone)
-        self.assertEqual(len(re.findall(r'function filtersToggle\(', APP)), 1)
-        self.assertIn('"aria-expanded"', APP[APP.index('function filtersToggle('):APP.index('function filtersGroup(')])
+    def test_filters_are_one_button_at_every_width_and_the_list_comes_right_after(self):
+        # (was: one button on a phone only; the head of the split lists, PR "list viewport", does it at every width: static/cve/app.js listHead)
+        head = APP[APP.index('function listHead('):APP.index('function revealPane(')]
+        self.assertEqual(len(re.findall(r'function listHead\(', APP)), 1)
+        self.assertIn('"aria-expanded": "false", "aria-controls": id', head)
+        self.assertIn('pop.hidden = true;', head)
+        self.assertIn('side.append(lh.head, bulk.bar, rows, gallery);', APP)
+        self.assertIn('side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);', APP)
+        self.assertIn('.list-head .filters-pop{position:absolute;', CSS)
 
-    def test_the_hosts_list_and_the_findings_lists_use_it_and_the_list_comes_right_after(self):
-        self.assertIn('side.append(filtersGroup([views.node, searches && searches.node]), controls, filtersGroup([heatChips, scopeChips]), metaRow, bulk.bar, rows, gallery);', APP)
-        self.assertIn('controls.append(q, sortBy, filtersToggle(side));', APP)
-        self.assertIn('side.append(filtersRow, filtersGroup(cfg.filters), metaRow,', APP)
-        self.assertIn('.split-list>input,.split-list>.filters-panel>input{', CSS)
+    def test_the_head_controls_are_44px_under_a_coarse_pointer(self):
+        self.assertRegex(CSS, r'@media \(pointer:coarse\)\{\.list-head \.chip-x,\.list-head \.filters-btn,\.list-head \.list-bar>input\{min-height:var\(--hit\)')

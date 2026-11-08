@@ -74,6 +74,10 @@ function paint() {
     if (again) again.focus();
   });
   bar.append(toggle);
+  // on a phone the whole line is the button: a tap anywhere on it opens the notices
+  bar.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) toggle.click();
+  });
   strip.replaceChildren(bar, details);
 }
 
