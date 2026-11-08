@@ -32,7 +32,7 @@ def evaluate(name, counts):
         return None
     addresses = sorted(flooded)
     seen = max(flooded.values())
-    evidence = {'source': 'nmap', 'addresses': addresses[:10], 'open_ports_kept': seen, 'port_list_truncated': True,
+    evidence = {'source': 'port sweep', 'addresses': addresses[:10], 'open_ports_kept': seen, 'port_list_truncated': True,
                 'severity_basis': 'rated info: a list of this length says something about the host, not about a service on it', 'remediation': FIX}
     return Finding(CHECK, INFO, f'{name}: answers on an unusually large number of ports ({seen}+ kept; the list is cut)',
                    f'{NOTE}. The ports shown are the first {seen}; the rest are not stored, and none of them is a finding of its own. Fix: {FIX}', name, evidence)

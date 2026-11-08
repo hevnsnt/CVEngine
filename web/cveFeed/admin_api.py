@@ -7,6 +7,7 @@ Who may do what:
   everyone else          403.
 Every handler checks the specific org it touches, so an Org Admin of A can never reach B.
 """
+import time
 import json
 import re
 import secrets
@@ -640,21 +641,68 @@ WORKER_PROBE_KEY = 'cvengine:admin:worker-probe'
 WORKER_PROBE_SECONDS = 30  # the workers' answer is served this long without asking again (and older ones at once, refreshed behind the request)
 
 
+WORKER_PING_SECONDS = 10  # one ping waits this long for a busy worker (it was 5: a worker under load missed it and was reported as missing)
+WORKER_PING_TRIES = 3  # a worker that did not answer is asked again, up to this many pings in all, spaced WORKER_PING_GAP apart (about 30 seconds)
+WORKER_PING_GAP = 10
+WORKER_MISS_KEY = 'cvengine:admin:worker-miss'
+WORKER_MISS_EVALUATIONS = 2  # a worker is reported missing only when it was missing in this many probes in a row (about two minutes: one probe is about a minute)
+
+
+def _pause(seconds):
+    time.sleep(seconds)
+
+
+def _ask_workers(app, quick):
+    inspector = app.control.inspect(timeout=WORKER_PING_SECONDS, limit=len(WORKERS) if quick else None)
+    return {name: [q.get('name') for q in qs or []] for name, qs in (inspector.active_queues() or {}).items()}
+
+
+def _absent(queues):
+    """The required workers (``WORKERS``) none of whose replies names their queue."""
+    def has(prefix, queue):
+        return any(prefix in str(name).split('@') and queue in (qs or []) for name, qs in queues.items())
+    return [prefix for prefix, queue in WORKERS.items() if not has(prefix, queue)]
+
+
+def _confirm_misses(missing):
+    """Count, per required worker, the probes in a row that found it missing, and return ``(counts, confirmed)``: ``confirmed`` are the workers missing in
+    ``WORKER_MISS_EVALUATIONS`` probes in a row. A worker that answered resets its count, so one busy moment is never a problem."""
+    from django.core.cache import cache
+    try:
+        held = cache.get(WORKER_MISS_KEY) or {}
+    except Exception:  # noqa: BLE001
+        held = {}
+    counts = {w: int(held.get(w, 0)) + 1 for w in missing}
+    try:
+        cache.set(WORKER_MISS_KEY, counts, 900)
+    except Exception:  # noqa: BLE001
+        pass
+    return counts, [w for w, n in counts.items() if n >= WORKER_MISS_EVALUATIONS]
+
+
 def _inspect_workers(app, quick=False):
     """What the workers say, as plain counts and names (task arguments never leave the worker): ``{'queues': {worker: [queue names]}, 'active': {worker:
-    running tasks}, 'active_warning': text}``. Celery waits out the whole 5 seconds when it does not know how many workers will answer, so the second
-    question names the workers that did answer (``destination``: it returns as soon as they all have); ``cveFeed.probe_cache`` keeps this off the request path."""
-    # ``quick`` (the one request with nothing held): stop waiting once as many workers as the layout has have answered; the refresh behind the next
-    # request waits the whole timeout, so a fifth worker that answered first cannot hide one of ours for longer than that
-    inspector = app.control.inspect(timeout=5, limit=len(WORKERS) if quick else None)
-    queues = {name: [q.get('name') for q in qs or []] for name, qs in (inspector.active_queues() or {}).items()}
+    running tasks}, 'active_warning': text, 'pings': how many pings were sent, 'seconds': how long they took, 'confirmed': [workers missing in
+    ``WORKER_MISS_EVALUATIONS`` probes in a row]}``. A busy worker can miss one ping, so a required worker that did not answer is asked again (up to
+    ``WORKER_PING_TRIES`` pings over about 30 seconds, ``WORKER_PING_SECONDS`` each) and what any ping heard is kept; only the probes that still find
+    it missing, twice in a row (``_confirm_misses``), make it a problem. ``cveFeed.probe_cache`` keeps all of this off the request path; the one request
+    with nothing held (``quick``) sends one ping and confirms nothing."""
+    started = time.time()
+    queues = _ask_workers(app, quick)
+    pings = 1
+    while not quick and pings < WORKER_PING_TRIES and _absent(queues):
+        _pause(WORKER_PING_GAP)
+        for name, qs in _ask_workers(app, False).items():
+            queues[name] = sorted(set(queues.get(name) or []) | set(qs))
+        pings += 1
     active, warning = {}, ''
     if queues:
         try:
-            active = {name: len(tasks or []) for name, tasks in (app.control.inspect(timeout=5, destination=list(queues)).active() or {}).items()}
+            active = {name: len(tasks or []) for name, tasks in (app.control.inspect(timeout=WORKER_PING_SECONDS, destination=list(queues)).active() or {}).items()}
         except Exception:  # queue routing remains observable even if the active-task query times out
             warning = ' Active-task inspection did not respond.'
-    return {'queues': queues, 'active': active, 'active_warning': warning}
+    confirmed = [] if quick else _confirm_misses(_absent(queues))[1]
+    return {'queues': queues, 'active': active, 'active_warning': warning, 'pings': pings, 'seconds': int(time.time() - started), 'confirmed': confirmed}
 
 
 def scheduler_health(request, actor):
@@ -699,24 +747,34 @@ def scheduler_health(request, actor):
         probe, workers_checked = probe_cache.cached_probe(WORKER_PROBE_KEY, lambda: _inspect_workers(app), fresh=WORKER_PROBE_SECONDS,
                                                               first=lambda: _inspect_workers(app, quick=True))
         queues, active, active_warning = probe['queues'], probe['active'], probe['active_warning']
-        if queues:
-            def is_worker_name(name, prefix):
-                # Celery deployments use both worker@host and celery@worker hostnames.
-                return prefix in str(name).split('@')
-            for prefix, queue in expected.items():
-                names = [name for name in queues if is_worker_name(name, prefix)]
-                consuming = (any(queue in (queues.get(name) or []) for name in names) if names else None)
-                workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
-                                'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
-                                'active': sum(active.get(name) or 0 for name in names) if active and names else None})
-            missing = [row['worker'] for row in workers if row['consuming'] is not True]
-            silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s']
-            without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue']
-            worker_state = 'degraded' if missing else 'responding'
-            detail = ''.join([f" Did not reply within 5 seconds: {', '.join(silent)}." if silent else '',
-                              f" Replied without its queue: {', '.join(without_queue)}." if without_queue else ''])
-            worker_note = ('Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail
-                           if missing else 'Required queue names were reported by workers; this does not prove scheduled tasks executed.') + active_warning
+        confirmed = set(probe.get('confirmed') or [])
+
+        def is_worker_name(name, prefix):
+            # Celery deployments use both worker@host and celery@worker hostnames.
+            return prefix in str(name).split('@')
+        for prefix, queue in expected.items():
+            names = [name for name in queues if is_worker_name(name, prefix)]
+            consuming = (any(queue in (queues.get(name) or []) for name in names) if names else None)
+            workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
+                            'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
+                            'active': sum(active.get(name) or 0 for name in names) if active and names else None})
+        missing = [row['worker'] for row in workers if row['consuming'] is not True]
+        unconfirmed = [w for w in missing if w not in confirmed]
+        missing = [w for w in missing if w in confirmed]  # one missed ping is not a missing consumer: only a worker missing probe after probe is
+        silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s' and row['worker'] in missing]
+        without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue' and row['worker'] in missing]
+        worker_state = 'degraded' if missing else 'responding'
+        pings = probe.get('pings', 1)
+        tried = (f" Tried: no reply to {pings} ping{'s' if pings != 1 else ''} over {probe.get('seconds', 0)} s ({WORKER_PING_SECONDS} s each), "
+                 f"in {WORKER_MISS_EVALUATIONS} checks in a row, and no consumer on the queue.")
+        detail = ''.join([f" No reply from: {', '.join(silent)}." if silent else '',
+                          f" Replied without its queue: {', '.join(without_queue)}." if without_queue else '', tried])
+        if missing:
+            worker_note = 'Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail + active_warning
+        else:
+            worker_note = ('Required queue names were reported by workers; this does not prove scheduled tasks executed.'
+                           + (f" {', '.join(unconfirmed)} did not answer the last check; confirming before this is a problem." if unconfirmed else '')
+                           + active_warning)
     except Exception as exc:  # noqa: BLE001 - expose a safe category, never raw broker addresses or credentials
         worker_note = ('Worker inspection failed (broker connection).' if isinstance(exc, (ConnectionError, OSError))
                        else 'Worker inspection failed (internal error).')
