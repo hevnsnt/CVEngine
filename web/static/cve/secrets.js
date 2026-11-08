@@ -1,13 +1,13 @@
 // Exposed secrets: the project's secrets inventory (docs/SECRETS-PLAN.md section 11). One row per secret, however many hosts and URLs served it.
 // No value ever reaches this page: the API sends the mask (AIza…x7Qz), the kind and where it was seen. DOM is built with textContent only.
-import { api, badge, button, dialog, el, selectOf, shortDate, table, toast } from "/staticfiles/cve/ui.js";
+import { api, badge, button, dialog, disclosure, el, selectOf, shortDate, table, toast, whatIs } from "/staticfiles/cve/ui.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import { STATUS_WORDS } from "/staticfiles/cve/secret-detail-logic.js";
 
 const SEV_BADGE = { critical: "critical", high: "high", medium: "medium", low: "low", info: "info" };
 const CLASS_WORDS = { P: "Browser key", S: "Server secret", I: "Identifier" };
+// The search is the head's line; the two selects sit in the Filters panel (app.js listHead), so the rows start under one short head.
 function filterBar(onChange) {
-  const tools = el("div", "tools");
   const status = selectOf([["open", "Open"], ["quiet", "Quiet (public, accepted, revoked, false positive)"], ["all", "All"], ["live", "Live (validated)"]], "open", "Show secrets that are");
   const klass = selectOf([["", "Every class"], ["S", "Server secrets"], ["P", "Browser keys"], ["I", "Identifiers"]], "", "Class");
   const q = el("input", "", null, { type: "search", placeholder: "Provider, kind, host or mask", "aria-label": "Filter secrets" });
@@ -16,8 +16,7 @@ function filterBar(onChange) {
     clearTimeout(q.timer);
     q.timer = setTimeout(onChange, 250);
   };
-  tools.append(status, klass, q);
-  return { tools, params: () => ({ status: status.value, class: klass.value, q: q.value.trim() }) };
+  return { q, panel: [status, klass], params: () => ({ status: status.value, class: klass.value, q: q.value.trim() }) };
 }
 
 function validationPanel(slug, state, refresh) {
@@ -62,19 +61,27 @@ function validationPanel(slug, state, refresh) {
   return box;
 }
 
-export async function secretsPage(mount, { slug, all, canWrite }) {
-  mount.append(el("p", "note page-intro", "API keys, tokens and private keys the project's pages and scripts serve, one row per secret however many places serve it. Values are never stored or shown: only the format prefix and the last four characters. A browser key (Google, Stripe pk_, Mapbox pk.) is meant to be public and is rated info until a person or a validation says otherwise."));
-  const top = el("div");
-  const summary = el("p", "note", "", { role: "status" });
-  const list = el("div");
+export async function secretsPage(mount, { slug, all, canWrite, listHead }) {
+  const root = el("div", "table-page");
+  mount.append(root);
   const bar = filterBar(() => load());
-  mount.append(top, bar.tools, summary, list);
+  const summary = el("span", "list-count note", "", { role: "status" });
+  const tools = el("span", "meta-tools");
+  const metaRow = el("div", "list-meta");
+  metaRow.append(summary, tools);
+  // the intro and the validation switch open over the rows from the count line; they no longer sit above the table
+  const top = el("div", "secrets-top");
+  tools.append(whatIs("API keys, tokens and private keys the project's pages and scripts serve, one row per secret however many places serve it. Values are never stored or shown: only the format prefix and the last four characters. A browser key (Google, Stripe pk_, Mapbox pk.) is meant to be public and is rated info until a person or a validation says otherwise."));
+  const lh = listHead({ page: "secrets", lead: [bar.q], panelNodes: bar.panel, meta: metaRow });
+  const list = el("div");
+  root.append(lh.head, list);
 
   async function settings() {
     if (all) return;
-    top.textContent = "";
     try {
-      top.append(validationPanel(slug, await api("GET", `/api/v1/projects/${encodeURIComponent(slug)}/secrets/settings`), settings));
+      const state = await api("GET", `/api/v1/projects/${encodeURIComponent(slug)}/secrets/settings`);
+      if (!top.isConnected) tools.prepend(top);
+      top.replaceChildren(disclosure(`Validation: ${state.validation.enabled ? "on" : "off"}`, validationPanel(slug, state, settings)));
     } catch (_) {
       /* the switch is a convenience on this page */
     }
@@ -96,9 +103,9 @@ export async function secretsPage(mount, { slug, all, canWrite }) {
       const cols = [
         { label: "Severity", render: (s) => badge(s.severity, SEV_BADGE[s.severity] || "info") },
         { label: "Provider", render: (s) => s.provider || "(none)" },
-        { label: "Kind", render: (s) => `${s.kind}${s.catalogued ? "" : " (uncatalogued)"}` },
+        { label: "Kind", cls: "clip", render: (s) => `${s.kind}${s.catalogued ? "" : " (uncatalogued)"}` },
         { label: "Secret", render: (s) => el("code", "", s.masked) },
-        { label: "Found at", render: (s) => (s.where ? `${s.where.url}${s.where.line != null ? ` (line ${s.where.line})` : ""}` : "not served now") },
+        { label: "Found at", cls: "clip", render: (s) => (s.where ? `${s.where.url}${s.where.line != null ? ` (line ${s.where.line})` : ""}` : "not served now") },
         { label: "Class", render: (s) => CLASS_WORDS[s.class] || s.class },
         { label: "Status", render: (s) => STATUS_WORDS[s.status] || s.status },
         { label: "Hosts", render: (s) => String(s.hosts) },

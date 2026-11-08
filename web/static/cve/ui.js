@@ -111,6 +111,24 @@ export function dialog(title, build) {
   return d;
 }
 
+// A one-line button that opens its body OVER the page instead of pushing the rows down: the intro of a list page ("What is this"), a chart,
+// a settings card. Escape and a press outside close it. Built with the list head (app.js listHead) on the table lists.
+export function disclosure(label, ...body) {
+  const d = el('details', 'what-is');
+  const panel = el('div', 'what-body');
+  panel.append(...body);
+  d.append(el('summary', '', label), panel);
+  document.addEventListener('pointerdown', (e) => { if (d.isConnected && d.open && !d.contains(e.target)) d.open = false; }, true);
+  d.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !d.open) return;
+    e.stopPropagation();
+    d.open = false;
+    d.querySelector('summary').focus();
+  });
+  return d;
+}
+export const whatIs = (words) => disclosure('What is this', el('p', 'note', words));
+
 export function table(columns, rows) {
   const t = el('table', 'table');
   const head = el('tr');
@@ -123,6 +141,7 @@ export function table(columns, rows) {
       const td = el('td', c.cls || '', null, { 'data-label': c.label });
       const out = c.render(r);
       if (out instanceof Node) td.append(out); else td.textContent = out == null ? '' : out;
+      if (/\bclip\b/.test(c.cls || '')) td.title = td.textContent; // a cell kept to one line says all of itself on hover
       tr.append(td);
     });
     tbody.append(tr);

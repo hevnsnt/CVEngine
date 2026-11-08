@@ -15,9 +15,11 @@ import {
   copyButton,
   copyText,
   dialog,
+  disclosure,
   emptyState,
   field,
   text as uiText,
+  whatIs,
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
@@ -2415,8 +2417,14 @@ function findingPage(mount, cfg) {
         if (r.title instanceof Node) title.append(r.title);
         else title.textContent = r.title;
         row.append(title);
+        // a row is two lines: the title, then one line of meta that opens with the host (and product) and carries the badges; what does not fit
+        // on that line (the description, the badges past the edge) is in the pane, and the row's tooltip says all of it
         const meta = el("span", "host-meta");
+        const lines = (r.notes || []).filter(Boolean);
+        const hostLine = lines.length && lines[0] instanceof Node ? lines.shift() : null;
+        if (hostLine) meta.append(hostLine);
         meta.append(...r.meta.filter(Boolean));
+        r.notes = lines;
         if (isNewSince(detectedOf(item), lastLook)) {
           row.dataset.fresh = "1";
           meta.prepend(newTag());
@@ -2425,6 +2433,7 @@ function findingPage(mount, cfg) {
         if (aging) meta.append(...ageTags(item));
         if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
+        row.title = [title.textContent, ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
@@ -2924,19 +2933,31 @@ const pages = {
       }
       stopAll.disabled = false;
     };
-    const bar = el("div", "scans-bar");
-    bar.append(status.node);
-    if (!ALL) bar.append(stopAll); // stopping scans is per project
+    // the same head as Findings and Hosts: the status chips are the Filters panel, Stop all and the activity chart open from the count line
+    const root = el("div", "table-page");
+    mount.append(root);
     const rhythm = el("div", "chart-slot");
-    mount.append(rhythm, bar);
+    const activity = disclosure("Scan activity", rhythm);
+    activity.hidden = true;
+    const countLine = el("span", "list-count note", "", { role: "status" });
+    const tools = el("span", "meta-tools");
+    tools.append(activity);
+    if (!ALL) tools.append(stopAll); // stopping scans is per project
+    const metaRow = el("div", "list-meta");
+    metaRow.append(countLine, tools);
+    const lh = listHead({ page: "scans", lead: [], panelNodes: [status.node], meta: metaRow });
+    root.append(lh.head);
     api("GET", `${base}/scans?${query({ page_size: 200 })}`)
       .then((r) => {
         const dates = r.results.map((x) => x.started).filter(Boolean);
-        if (dates.length > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+        if (dates.length > 1) {
+          rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+          activity.hidden = false;
+        }
       })
       .catch(() => {});
     const list = createList({
-      mount,
+      mount: root,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
       empty: () =>
@@ -2950,7 +2971,11 @@ const pages = {
             },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
-      onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
+      onLoaded: (data, reset, quiet) => {
+        countLine.textContent = `${data.count} ${data.count === 1 ? "scan" : "scans"}`;
+        lh.refresh();
+        if (reset && !quiet) status.refresh();
+      },
       render: table(
         withProject(readOnlyColumns([
           {
@@ -4984,9 +5009,9 @@ pages.scan = async function scanDetail(mount) {
 };
 
 // Third-party suppliers: host cards and the technology search (static/cve/suppliers.js)
-pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL });
+pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL, listHead });
 
 // Exposed secrets: the secrets inventory, masked values only (static/cve/secrets.js); the API refuses a change the caller's role does not allow
-pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL });
+pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL, listHead });
 
 pages[kind](root.querySelector("#view"));

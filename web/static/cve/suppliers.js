@@ -1,7 +1,7 @@
 // Third-party suppliers: a Shodan-style host card per supplier domain, and a technology search across all of them ("who runs PHP?").
 // A supplier is not an owned host: nothing here scans, and the checks behind it are passive (a TLS handshake, normal page requests, DNS).
 // DOM is built with textContent only; everything shown that came from a supplier's own responses is text, never markup.
-import { api, ask, badge, copyText, dialog, el, field, selectOf, shortDate, text, toast } from "/staticfiles/cve/ui.js";
+import { api, ask, badge, copyText, dialog, el, field, selectOf, shortDate, text, toast, whatIs } from "/staticfiles/cve/ui.js";
 import { SUPPLIER_CLOSE_OPTIONS } from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 
@@ -165,25 +165,28 @@ function addDialog(slug, limits, done) {
   });
 }
 
-export async function suppliersPage(mount, { slug, all }) {
+export async function suppliersPage(mount, { slug, all, listHead }) {
   if (all) {
     mount.append(el("p", "note ro-note", "Suppliers belong to one project. Pick a project to see and manage its suppliers."));
     return;
   }
   const base = `/api/v1/projects/${encodeURIComponent(slug)}/suppliers`;
-  mount.append(
-    el("p", "note page-intro", "Vendors this project depends on and cannot fix for itself. Each name gets a host card from passive checks only: what its public services announce about themselves (headers, certificate, technology and versions). Search by technology to ask the vendors that run it whether they are patched. Nothing here is scanned, enumerated or assigned to your team."),
-  );
-  const tools = el("div", "tools");
+  const root = el("div", "table-page");
+  mount.append(root);
   const search = el("input", "", null, { type: "search", placeholder: "Search technology: php, node, nginx 1.1", "aria-label": "Search suppliers by technology" });
   const clear = el("button", "btn ghost sm", "Clear", { type: "button" });
   const addButton = el("button", "btn sm", "Add supplier", { type: "button" });
   addButton.hidden = true;
-  tools.append(search, clear, addButton);
-  const facets = el("div", "chips supplier-facets");
-  const summary = el("p", "note", "", { role: "status" });
+  // the same head as Findings and Hosts: the search is its line, the technology chips are the Filters panel, the intro opens from "What is this"
+  const facets = el("div", "chips supplier-facets", null, { "aria-label": "Technologies" });
+  const summary = el("span", "list-count note", "", { role: "status" });
+  const tools = el("span", "meta-tools");
+  tools.append(whatIs("Vendors this project depends on and cannot fix for itself. Each name gets a host card from passive checks only: what its public services announce about themselves (headers, certificate, technology and versions). Search by technology to ask the vendors that run it whether they are patched. Nothing here is scanned, enumerated or assigned to your team."), clear, addButton);
+  const metaRow = el("div", "list-meta");
+  metaRow.append(summary, tools);
+  const lh = listHead({ page: "suppliers", lead: [search], panelNodes: [facets], meta: metaRow });
   const list = el("div", "supplier-list");
-  mount.append(tools, facets, summary, list);
+  root.append(lh.head, list);
 
   let state = { suppliers: [], canEdit: false, limits: { max_domains: 10 } };
   let version = 0;
@@ -283,13 +286,23 @@ export async function suppliersPage(mount, { slug, all }) {
       };
       actions.append(remove);
     }
-    head.append(actions);
-    block.append(head);
-    if (s.contact || s.notes) block.append(el("p", "note", [s.contact && `Contact: ${s.contact}`, s.notes].filter(Boolean).join(" · ")));
-    if (!cards.length) block.append(el("p", "note", `Names to check: ${s.domains.join(", ")}. No host card yet: the daily sweep makes one.`));
+    // a row is its head: the contact line, the host cards and the findings open under it (host cards open at once when a technology is searched)
+    const more = el("div", "supplier-body");
+    if (s.contact || s.notes) more.append(el("p", "note", [s.contact && `Contact: ${s.contact}`, s.notes].filter(Boolean).join(" · ")));
+    if (!cards.length) more.append(el("p", "note", `Names to check: ${s.domains.join(", ")}. No host card yet: the daily sweep makes one.`));
     const grid = el("div", "supplier-grid");
     cards.forEach((c) => grid.append(hostCard(c, t)));
-    block.append(grid, findingsHost);
+    more.append(grid);
+    const openCards = t.length > 0;
+    more.hidden = !openCards;
+    const cardsBtn = el("button", "btn ghost sm", `Host cards (${cards.length})`, { type: "button", "aria-expanded": String(openCards) });
+    cardsBtn.onclick = () => {
+      more.hidden = !more.hidden;
+      cardsBtn.setAttribute("aria-expanded", String(!more.hidden));
+    };
+    actions.prepend(cardsBtn);
+    head.append(actions);
+    block.append(head, more, findingsHost);
     return block;
   }
 
