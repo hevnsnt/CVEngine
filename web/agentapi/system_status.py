@@ -500,10 +500,14 @@ def _sentinels(problems):
     queue = {status: tasks.filter(status=status).count() for status in ('queued', 'claimed', 'running')}
     finished_24h = {status: tasks.filter(status=status, finished_at__gte=day_ago).count() for status in ('done', 'failed', 'expired')}
     finished_total = sum(finished_24h.values())
-    bad = finished_24h['failed'] + finished_24h['expired']
+    from agentapi import sentinel_broker as _sb
+    waiting = tasks.filter(_sb.waiting_q(), finished_at__gte=day_ago).count()  # expired only because no slot was free: the targets stay due, not a failure
+    finished_24h['waiting_for_slot'] = waiting
+    bad = finished_24h['failed'] + finished_24h['expired'] - waiting
+    finished_total -= waiting
     if finished_total >= 5 and bad / finished_total >= SENTINEL_ERROR_RATE_PROBLEM:
-        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or expired")
-    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).order_by('-finished_at')
+        problems.append(f"sentinels: {bad} of the last {finished_total} SentinelTasks in 24h failed or stopped reporting")
+    recent_errors = list(tasks.filter(status__in=('failed', 'expired'), finished_at__gte=day_ago).exclude(_sb.waiting_q()).order_by('-finished_at')
                          .values('id', 'kind', 'error', 'finished_at', 'agent__name')[:SENTINEL_RECENT_ERRORS])
     from agentapi import sentinel_broker
     with sentinel_broker.memoised_rights():  # the live Sentinels' rights are built once for both answers below

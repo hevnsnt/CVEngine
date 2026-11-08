@@ -558,20 +558,30 @@ def ops_checks(now=None, templates_release=None):
 
     # Sentinel task failures, by Sentinel and kind
     six = now - timedelta(hours=6)
-    groups = list(SentinelTask.objects.filter(status__in=('failed', 'expired'), finished_at__gte=six)
+    from agentapi import sentinel_broker
+    not_waiting = ~sentinel_broker.waiting_q()  # a task that expired waiting for a free slot is back-pressure, counted below, not a failure
+    groups = list(SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
                   .values('agent__name', 'kind').annotate(n=Count('id')).order_by('-n')[:10])
     bad = [g for g in groups if g['n'] >= SENTINEL_FAILED_PROBLEM]
     if bad:
         samples = {}
         for g in bad[:5]:
-            err = (SentinelTask.objects.filter(status__in=('failed', 'expired'), finished_at__gte=six, agent__name=g['agent__name'], kind=g['kind'])
+            err = (SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six, agent__name=g['agent__name'], kind=g['kind'])
                    .exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
             samples[f"{g['agent__name']}/{g['kind']}"] = str(err or '')[:200]
         checks.append(_check('sentinel_errors', 'problem', 'Sentinel tasks are failing',
-                             '; '.join(f"{g['agent__name'] or 'a Sentinel'}: {g['n']} {g['kind']} task(s) failed or expired" for g in bad) + '.',
+                             '; '.join(f"{g['agent__name'] or 'a Sentinel'}: {g['n']} {g['kind']} task(s) failed or stopped reporting" for g in bad) + '.',
                              {'groups': [{'sentinel': g['agent__name'], 'kind': g['kind'], 'failed': g['n']} for g in bad], 'last_errors': samples}))
     else:
         checks.append(_check('sentinel_errors', 'ok', 'Sentinel tasks succeed', '', {}))
+    # tasks that expired only because every Sentinel slot was busy: the targets stay due and are asked again, so a note, never a failure
+    held = list(SentinelTask.objects.filter(sentinel_broker.waiting_q(), finished_at__gte=six).values('kind').annotate(n=Count('id')).order_by('-n')[:10])
+    waited = sum(r['n'] for r in held)
+    if waited >= SENTINEL_FAILED_PROBLEM:
+        checks.append(_check('sentinel_waiting', 'warning', 'Sentinel tasks are waiting for a free slot',
+                             f"{waited} task(s) waited for a Sentinel slot in the last six hours ({', '.join(str(r['n']) + ' ' + r['kind'] for r in held[:5])}); "
+                             'their targets stay due and are asked again. The Sentinels are busy: add one, or give the one you have more slots.',
+                             {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}}, severity='info'))
 
     # failed activity lines, by kind
     failed_kinds = list(AgentActivity.objects.filter(status='failed', created_at__gte=six).values('kind').annotate(n=Count('id')).order_by('-n')[:10])

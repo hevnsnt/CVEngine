@@ -152,7 +152,14 @@ class SentinelTask(models.Model):
         ordering = ['-priority', 'created_at', 'id']
         indexes = [models.Index(fields=['status', 'lease_expires_at'], name='sentineltask_lease_idx'),
                    models.Index(fields=['project', 'status'], name='sentineltask_project_idx'),
-                   models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx')]
+                   models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx'),
+                   # the Sentinels page's polls (live_overview, activity_metrics): the last five finished tasks of each Sentinel, the day's counts, the hour's
+                   # work and claims. Without them each read the Sentinel's whole history (17 ms per Sentinel, 40 ms for the hour) of a table that holds 30 days of work.
+                   # The first covers the 24 hour counts as an index-only scan; the other two serve the hour's windows.
+                   models.Index(fields=['agent', '-finished_at', '-id'], name='sentineltask_agent_done_idx', include=['status', 'accepted_at', 'claimed_at', 'kind'],
+                                condition=models.Q(status__in=['done', 'failed'])),
+                   models.Index(fields=['finished_at'], name='sentineltask_finished_idx', condition=models.Q(finished_at__isnull=False)),
+                   models.Index(fields=['claimed_at'], name='sentineltask_claimed_idx', condition=models.Q(claimed_at__isnull=False))]
 
     def __str__(self):
         return f'sentinel task #{self.pk} {self.kind} ({self.status})'

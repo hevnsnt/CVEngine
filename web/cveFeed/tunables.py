@@ -66,6 +66,9 @@ GROUPS = [
     Group('autotune_pace', 'Auto-tuning pace',
           'The auto-tuner aims high for this machine first, backs off at once on trouble, then probes upward slowly. These say how slowly, and how much '
           'history it reads. Longer waits make it calmer, shorter ones let it follow a changing load sooner. The AI advisor\'s own budget is under AI spend.'),
+    Group('retention', 'Data retention',
+          'How long finished work is kept before the weekly cleanup deletes it. Shorter keeps the database smaller on a small server; longer keeps more '
+          'history for the Sentinels page. The audit log keeps who did what either way.'),
     Group('egress', 'Outbound connections',
           'What this server\'s own scanners may send when a stage runs here instead of on a Sentinel. Hosting providers watch outbound port 25 '
           'and may block it after a burst; these numbers pace it (nothing is dropped: a port over budget is probed later) and cap how often a stage '
@@ -156,6 +159,11 @@ TUNABLES = [
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
+    Tunable('sentinel_task_retention_days', 'Days finished Sentinel and agent tasks are kept',
+            'A finished, failed or expired Sentinel task (and a finished agent task) is deleted by the weekly cleanup once it is older than this. A task is a '
+            'row of about a kilobyte; at 3000 targets a day of scanning adds tens of thousands of them. In .env it is CVENGINE_AGENT_TASK_RETENTION_DAYS.',
+            'retention', 'CVENGINE_AGENT_TASK_RETENTION_DAYS', 30, 1, 365, 'days',
+            note='Applies at the next weekly cleanup', auto_tunable=False),
     Tunable('heat_policy', 'Heat policy (1 KEV rule, 0 legacy)',
             'Which rule rates CVE findings. 1, the KEV rule: on the KEV (or with a known exploit) and the version proven on the host is fire, the '
             'version only inferred is smoke, not on the KEV and no known exploit is ice. 0, legacy: KEV, exploits, CVSS 9+ and EPSS make fire, '
