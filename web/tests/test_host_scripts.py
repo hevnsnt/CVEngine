@@ -55,6 +55,19 @@ class OpenvasStateTests(unittest.TestCase):
             self.assertEqual(self.state('openvas-applied', bad).returncode, 1, bad)
         self.assertFalse((self.tmp / 'web' / '.openvas-applied').exists())
 
+    def test_the_scanner_update_marker_replaces_a_planted_link_and_the_watcher_acts_on_the_request_once(self):
+        (self.tmp / 'web' / '.scanner-update-done').symlink_to(self.victim)
+        result = self.state('scanner-update-done')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.victim.read_text(), 'keep me')
+        published = self.tmp / 'web' / '.scanner-update-done'
+        self.assertFalse(published.is_symlink())
+        self.assertIsInstance(json.loads(published.read_text())['at'], int)
+        watch = (SCRIPTS / 'update-watch.sh').read_text()
+        self.assertIn('web/.scanner-update-requested -nt web/.scanner-update-done', watch)  # newer than the marker: one run per request
+        self.assertIn('[ ! -L web/.scanner-update-requested ]', watch)  # a link planted by the container is never acted on
+        self.assertIn('scripts/update-state.py scanner-update-done', watch)  # the marker is published, never redirected into the shared mount
+
     def test_the_gvmd_restart_answer_replaces_a_planted_link(self):
         (self.tmp / 'web' / '.openvas-restarted').symlink_to(self.victim)
         result = self.state('openvas-restarted', 'ok')

@@ -221,6 +221,8 @@ The built-in scanner is a Sentinel that runs next to the server as the `scanner`
 | `CVENGINE_SCANNER_READY_SECONDS` | `300` | How long an update waits for the new scanner image to be healthy and checked in with an accepted contract before it rolls back to the previous image. Read by the update scripts. |
 | `CVENGINE_SCANNER_DRAIN_SECONDS` | `900` | How long the Scanner update lets a running scanner finish its tasks before it gives up for this run (it tries again at the next). |
 | `CVENGINE_SCANNER_UPDATE_HOURS` | `24` | How often the updater timer (`scripts/auto-deploy.sh`) runs the Scanner update, whatever the update mode. `0` turns the schedule off (the updates still pull the newest image). |
+| `CVENGINE_SENTINEL_UPDATE_GRACE_MINUTES` | `90` | How long a Sentinel that was asked to update (Settings, Sentinels, Keep Sentinels on the newest version) has to report a new version before the Sentinels page flags it and the server stops asking. 5 to 1440. |
+| `SENTINEL_REF` | `main` | Read by compose and the build scripts: the Sentinel branch, tag or full commit whose library the server image installs (resolved to a commit at build time by `scripts/sentinel-ref.sh`). To hold a server on one Sentinel library, set a commit. See [UPDATES.md](UPDATES.md#the-sentinel-library-in-the-server-image). |
 | `SCANNER_MEM_LIMIT` | `3g` | Memory limit of the `scanner` container, read by compose. The installer writes `1g` on a host with less than about 7 GB of memory. The workers' own limit is `CELERY_MEM_LIMIT` ([DEPLOYMENT.md](DEPLOYMENT.md#memory)). |
 | `CVENGINE_WEB_HOST_PORT` | `8000` | Only with `docker-compose.hostnet.yml`: the loopback port the web service is published on, where the built-in scanner (on the host network with celery) reaches the server. |
 

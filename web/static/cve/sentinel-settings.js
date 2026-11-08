@@ -368,6 +368,26 @@ export function newestLine(d) {
   return parts.length ? el("p", "note ss-detail", parts.join(", ")) : null;
 }
 
+// "running abc1234, newest def5678, update requested 10:42": what cvENGINE knows about keeping this Sentinel on the newest version, in plain words
+// (``d.auto_update`` from agentapi/sentinel_autoupdate.py). Nothing is drawn for a server that does not report it.
+const short = (v) => (v ? String(v).slice(0, 7) : "");
+export function updateLine(d) {
+  const a = d.auto_update;
+  if (!a) return null;
+  const u = d.update || {};
+  const parts = [`running ${short(a.running || d.version) || "unknown"}`];
+  if (a.newest) parts.push(`newest ${short(a.newest)}`);
+  let tail;
+  if (a.code === "requested") {
+    const when = a.requested_at ? new Date(a.requested_at) : null;
+    const hhmm = when && !Number.isNaN(when.getTime()) ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    tail = ["draining", "updating"].includes(u.status) ? "updating" : `update requested${hhmm ? ` ${hhmm}` : ""}`;
+  } else if (a.code === "current") tail = "current";
+  else tail = a.text || "";
+  if (tail) parts.push(tail);
+  return el("p", a.flagged ? "msg err ss-detail" : "note ss-detail", parts.join(", "));
+}
+
 // Why a kind is not being taken, as the Sentinel itself reports it: a heavy kind waiting for memory (what it needs, what is free, which tasks hold the rest), and
 // a task the server took back that is still stopping. Nothing is drawn when nothing waits.
 const minutesOrSeconds = (s) => (s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`);
@@ -408,6 +428,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
   box.append(line);
   const newest = newestLine(d);
   if (newest) box.append(newest);
+  const keeping = updateLine(d);
+  if (keeping) box.append(keeping);
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
   box.append(...waitingLines(d));

@@ -1930,7 +1930,11 @@ def feed_sentinels():
 @app.task(name="ensure_builtin_scanner", bind=False, queue="cve_feed_queue")
 def ensure_builtin_scanner():
     """Every few minutes: keep the built-in scanner's enrollment ready (a no-op unless CVENGINE_BUILTIN_SCANNER is on; see ``agentapi.builtin_scanner``)."""
-    from agentapi import builtin_scanner
+    from agentapi import builtin_scanner, sentinel_autoupdate
+    try:
+        sentinel_autoupdate.sweep()  # a Sentinel asked to update that never came back is flagged here (it sends no heartbeat that would settle the request)
+    except Exception:  # noqa: BLE001 - never stops the enrollment from being kept ready
+        logger.exception('the Sentinel update sweep failed')
     return builtin_scanner.ensure()
 
 

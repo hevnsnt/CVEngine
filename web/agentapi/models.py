@@ -267,6 +267,9 @@ class SentinelDefaults(models.Model):
     configuration set a value. ``self_update`` is ``off``, ``manual`` (it updates only when an administrator presses Update now) or
     ``automatic``; empty means "follow the instance's own Automatic or Manual update choice" (``cveFeed.updater.read_mode``)."""
     self_update = models.CharField(max_length=10, blank=True, default='')
+    # "Keep Sentinels on the newest version" (``agentapi.sentinel_autoupdate``): on by default. While on, cvENGINE asks a Sentinel that runs a build behind the newest
+    # published one to update (rate limited, never during heavy tasks, never to a build the server cannot run), and a Sentinel that follows the instance default is Automatic.
+    keep_newest = models.BooleanField(default=True, db_default=True)
     # The capability policy defaults (``agentapi.sentinel_policy``): ``{kind: {'mode': 'allow'|'deny'|'prefer', 'max_concurrent': int|None}}`` applied to a
     # Sentinel with no policy of its own for a kind. ``builtin_kinds`` is for the install's own scanner (``None``: nothing was ever chosen, so the shipped
     # default applies: OpenVAS denied; ``{}``: an administrator chose no defaults), ``external_kinds`` for every other Sentinel (empty: all declared kinds allowed).

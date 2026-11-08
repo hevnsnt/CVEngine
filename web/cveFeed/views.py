@@ -697,7 +697,9 @@ def how_page(request):
 def about_page(request):
     from . import software
     groups = software.inventory()
-    context = {'inventory': groups, 'inventory_count': sum(g['count'] for g in groups), 'source_groups': software.source_groups()}
+    from agentapi import sentinel_source
+    context = {'inventory': groups, 'inventory_count': sum(g['count'] for g in groups), 'source_groups': software.source_groups(),
+               'sentinel_contract_line': sentinel_source.contract_line()}
     return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context, 'no_scanner_bar': True})  # reference text: no scanner status strip
 
 
@@ -723,7 +725,8 @@ def sentinels_page(request):
     from tenancy import roles
     # the organizations this person may provision an organization-wide Sentinel for: the same check the enroll endpoint applies
     enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
-    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs,
+    from agentapi import sentinel_source
+    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs, 'sentinel_contract_line': sentinel_source.contract_line(),
                                                       **ui_context(request, 'sentinels')})
 
 

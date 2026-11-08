@@ -83,6 +83,8 @@ deploy_steps() {
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
   build_free_memory
+  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
+  export SENTINEL_SHA
   if ! "${compose[@]}" build web celery celery-beat; then
     build_restore_memory
     DEPLOY_WHY="The new version could not be built (see the update log). Nothing was changed: the version that was running is still running."
