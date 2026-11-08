@@ -78,6 +78,18 @@ web/.openvas-applied
 web/.openvas-applied.tmp
 web/.scanner-update-requested
 web/.scanner-update-requested.tmp
+# Runtime state the app and the update scripts write into the checkout. Tracking one makes `git merge --ff-only` refuse on every server that already has it (an update then stops with "cannot be fast-forwarded")
+web/.cert-status.json
+web/.update-phase.json
+web/.update-disk.json
+web/.update-source
+web/.update-source.tmp
+web/.updater-heartbeat
+web/.upstream-state.json
+web/.update-sentinels
+web/.scanner-plan-applied.json
+web/.scanner-plan-wanted
+web/exports/
 web/.scanner-update-done
 web/.openvas-log
 web/.openvas-restart
