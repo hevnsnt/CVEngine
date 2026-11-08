@@ -1,6 +1,8 @@
-// App Admins only: one bar per open admin alert (cveFeed.reviewer: the operations checks raise and resolve them, and the AI reviewer adds its
+// App Admins only: one notice per open admin alert, in the status strip (cveFeed.reviewer: the operations checks raise and resolve them, and the AI reviewer adds its
 // diagnosis; docs/AI-REVIEWER.md). Every word is set with textContent: an alert can quote a Sentinel's error or what a scanned host said,
 // and none of it is ever HTML.
+import { setNotices } from "/staticfiles/cve/statusstrip.js";
+
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -10,15 +12,11 @@ const el = (tag, cls, text) => {
 };
 const SHOWN = 3;
 const POLL_MS = 120000;
-let box = null;
 
+// Each open alert is one notice in the status strip (statusstrip.js), drawn there as its own row with the Dismiss button; the strip's first line
+// is the most severe notice and its count includes these.
 function render(alerts) {
-  if (box) box.remove();
-  box = null;
-  if (!alerts.length) return;
-  box = el("div", "alertbar");
-  box.setAttribute("role", "status");
-  for (const a of alerts.slice(0, SHOWN)) {
+  const items = alerts.slice(0, SHOWN).map((a) => {
     const row = el("div", `ab-row ab-${["info", "warning", "critical"].includes(a.severity) ? a.severity : "warning"}`);
     const text = el("div", "ab-text");
     text.append(el("strong", "", a.title));
@@ -38,14 +36,20 @@ function render(alerts) {
         });
       } finally {
         row.remove();
+        const rest = items.filter((i) => i.node !== row);
+        items.length = 0;
+        items.push(...rest);
+        setNotices("alerts", items.slice());
       }
     });
     row.append(text, dismiss);
-    box.append(row);
+    return { kind: "alert", text: a.title, node: row, rank: a.severity === "critical" ? 0 : 2 };
+  });
+  if (alerts.length > SHOWN) {
+    const more = `${alerts.length - SHOWN} more alert(s): see Settings, AI model.`;
+    items.push({ kind: "more", text: more, node: el("p", "ab-more", more), rank: 3 });
   }
-  if (alerts.length > SHOWN) box.append(el("p", "ab-more", `${alerts.length - SHOWN} more alert(s): see Settings, AI model.`));
-  const layout = document.querySelector(".layout") || document.getElementById("main");
-  if (layout && layout.parentNode) layout.parentNode.insertBefore(box, layout);
+  setNotices("alerts", items);
 }
 
 async function poll() {

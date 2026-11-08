@@ -216,6 +216,7 @@ const steps = {
     list.append(el('p', 'note', mem
       ? `Suggested for this machine (${mem} GB of memory): ${state.suggested_off.length ? 'the heavy checks start off.' : 'everything but OpenVAS starts on.'} Change anything you like.`
       : 'Suggested for a small server: the heavy checks start off. Change anything you like.', { style: 'margin:0 0 12px' }));
+    if (state.heavy_off_reason) list.append(el('p', 'note', `Heavy: ${state.heavy_off_reason.replace(/^heavy: /, '')}.`, { style: 'margin:0 0 12px' }));
     state.families.forEach((f) => {
       const card = el('div', 'fam');
       const master = el('input', '', null, { type: 'checkbox', 'aria-label': `${f.title}: all` });
@@ -233,7 +234,13 @@ const steps = {
         boxes[k.kind] = cb; cb.addEventListener('change', syncMaster);
         l.append(cb, document.createTextNode(k.label));
         if (k.heavy) l.append(el('span', 'tag', 'heavy'));
-        li.append(l); ul.append(li);
+        li.append(l);
+        if (k.off_reason) {
+          const why = el('small', 'why', k.off_reason);
+          const showWhy = () => { why.hidden = cb.checked; };
+          cb.addEventListener('change', showWhy); showWhy(); li.append(why);
+        }
+        ul.append(li);
       });
       master.addEventListener('change', () => { f.kinds.forEach((k) => { if (!k.locked) boxes[k.kind].checked = master.checked; }); syncMaster(); });
       syncMaster();

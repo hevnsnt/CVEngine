@@ -76,8 +76,9 @@ export function field(label, input, help) {
   return wrap;
 }
 export const text = (value = '', attrs = {}) => Object.assign(el('input', '', null, attrs), { value });
-export function selectOf(options, value) {
+export function selectOf(options, value, label) {
   const s = el('select');
+  if (label) s.setAttribute('aria-label', label);  // a select with no <label> needs a name of its own
   options.forEach(([v, t]) => s.append(Object.assign(el('option', '', t), { value: v })));
   if (value != null) s.value = value;
   return s;
