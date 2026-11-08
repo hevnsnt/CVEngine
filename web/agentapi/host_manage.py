@@ -517,6 +517,22 @@ def list_exclusions(ctx, slug):
                          'by': r.created_by.username if r.created_by else None} for r in rows]}
 
 
+def list_excluded_addresses(ctx, slug, host=None):
+    """The do-not-scan address list of this project's organization (read only; any access to the project). With ``host``: whether that name or address is covered, and why."""
+    from agentapi import excluded_addresses
+    from cveFeed import exclusions
+    project, _ = get_one_project(ctx, slug)
+    if project.org_id is None:
+        return {'organization': None, 'results': []}
+    out = {'organization': project.org.slug, **excluded_addresses.list_rows(project.org_id)}
+    if host:
+        if not isinstance(host, str) or len(host) > 500:
+            raise ApiError(400, 'host must be a name or an address')
+        reason = exclusions.address_excluded(project.pk, host)
+        out.update({'host': host, 'excluded': bool(reason), 'reason': str(reason) if reason else ''})
+    return out
+
+
 def remove_exclusion(ctx, slug, host):
     """Let the organization scan a host again (an org admin only: it changes what every project of the org scans). The data that
     was deleted does not come back; the host returns when a scan next finds it."""

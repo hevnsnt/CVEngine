@@ -243,6 +243,9 @@ TOOLS = [
                                      with_aliases=bool(a.get('with_aliases'))), True),
     ('list_exclusions', 'Hosts excluded for the project\'s organization (never scanned again).', _schema({'project': SLUG}, ['project']),
      lambda c, a: hosts.list_exclusions(c, a.get('project')), False),
+    ('list_excluded_addresses', 'The organization\'s do-not-scan address list (IPv4/IPv6 addresses and CIDR networks): no task is created for an address inside one or a host that resolves into one. Pass host to ask whether a name or address is covered and why.',
+     _schema({'project': SLUG, 'host': {'type': 'string'}}, ['project']),
+     lambda c, a: hosts.list_excluded_addresses(c, a.get('project'), a.get('host')), False),
     ('remove_exclusion', 'Lift an exclusion so the organization can scan the host again (organization admin only).', _schema(
         {'project': SLUG, 'host': {'type': 'string'}}, ['project', 'host']),
      lambda c, a: hosts.remove_exclusion(c, a.get('project'), a['host']), True),

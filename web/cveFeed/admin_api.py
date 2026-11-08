@@ -416,6 +416,35 @@ def org_api_credential_delete(request, actor, org_id, service):
     return {'deleted': True}
 
 
+def org_excluded_addresses_list(request, actor, org_id):
+    """The organization's \"Addresses we must never scan\" list (organization admins and App Admins only: the same answer for a missing org and one that is not yours)."""
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    return excluded_addresses.list_rows(org.pk)
+
+
+def org_excluded_addresses_add(request, actor, org_id):
+    """Add one address or network; body {cidr, note, confirm_broad}. A network broader than /8 (IPv4) or /32 (IPv6) needs ``confirm_broad: true``."""
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    data = _body(request)
+    try:
+        row, cancelled = excluded_addresses.add(actor, org, data.get('cidr'), data.get('note', ''), data.get('confirm_broad'))
+    except excluded_addresses.EntryError as exc:
+        raise AdminError(exc.status, exc.message) from None
+    return {**excluded_addresses._row(row), 'cancelled_tasks': cancelled}, 201
+
+
+def org_excluded_addresses_remove(request, actor, org_id, entry_id):
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    try:
+        cidr = excluded_addresses.remove(actor, org, entry_id)
+    except excluded_addresses.EntryError as exc:
+        raise AdminError(exc.status, exc.message) from None
+    return {'removed': cidr}
+
+
 @transaction.atomic
 def orgs_delete(request, actor, org_id):
     if not actor.is_superuser:
@@ -831,6 +860,9 @@ ROUTES = [
     ('GET', r'orgs/(?P<org_id>\d+)/api-keys', org_api_credentials_list),
     ('PUT', r'orgs/(?P<org_id>\d+)/api-keys/(?P<service>[-\w]+)', org_api_credential_set),
     ('DELETE', r'orgs/(?P<org_id>\d+)/api-keys/(?P<service>[-\w]+)', org_api_credential_delete),
+    ('GET', r'orgs/(?P<org_id>\d+)/excluded-addresses', org_excluded_addresses_list),
+    ('POST', r'orgs/(?P<org_id>\d+)/excluded-addresses', org_excluded_addresses_add),
+    ('DELETE', r'orgs/(?P<org_id>\d+)/excluded-addresses/(?P<entry_id>\d+)', org_excluded_addresses_remove),
     ('GET', r'projects', projects_list), ('POST', r'projects', projects_create),
     ('DELETE', r'projects/(?P<project_id>\d+)', projects_delete),
     ('GET', r'timings', timings_get), ('PUT', r'timings', timings_put),
