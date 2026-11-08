@@ -23,10 +23,10 @@
 # a scheduled update lets the running scanner finish its tasks before it gives up for this time.
 # When a new image is refused, the reason is logged and, through the scanner that is running again, reported to the server (the Sentinels page shows it).
 
-CVENGINE_SCANNER_ROLLBACK_TAG=cvengine-sentinel-rollback:previous
-CVENGINE_SCANNER_WHY=''          # why the last new image was refused (set by _cvengine_scanner_ready)
-CVENGINE_SCANNER_RESULT=''       # cvengine_scanner_update: `done` (on the newest image, or held, or off: nothing more to do), `busy` or `no-pull` (try again at the next run)
-CVENGINE_SCANNER_PULLED=''       # fetch: `ok`, `failed`, `own` (an administrator's image: nothing pulled), or empty (nothing tried)
+_cv_scanner_rollback_tag=cvengine-sentinel-rollback:previous
+_cv_scanner_why=''          # why the last new image was refused (set by _cvengine_scanner_ready)
+_cv_scanner_result=''       # cvengine_scanner_update: `done` (on the newest image, or held, or off: nothing more to do), `busy` or `no-pull` (try again at the next run)
+_cv_scanner_pulled=''       # fetch: `ok`, `failed`, `own` (an administrator's image: nothing pulled), or empty (nothing tried)
 
 _cvengine_scanner_log() { if declare -F log >/dev/null 2>&1; then log "$*"; else echo "$*" >&2; fi; }
 
@@ -91,7 +91,7 @@ _cvengine_scanner_image_id() {  # REF: the id of the local image REF names, or n
 
 cvengine_scanner_fetch() {
   local file wanted own
-  CVENGINE_SCANNER_PULLED=''
+  _cv_scanner_pulled=''
   if ! cvengine_scanner_enabled "$@"; then
     if "$@" config --services 2>/dev/null | grep -qx scanner; then
       "$@" rm -sf scanner >/dev/null 2>&1 || true
@@ -104,17 +104,17 @@ cvengine_scanner_fetch() {
   _cvengine_scanner_rollback "$file" ''  # the newest image is tried again
   wanted=$(cvengine_scanner_wanted_image "$@") || { _cvengine_scanner_log "could not read scanner.lock.json; the built-in scanner keeps the image it has"; return 0; }
   if [ -n "$own" ]; then
-    CVENGINE_SCANNER_PULLED=own
+    _cv_scanner_pulled=own
     [ -n "$(_cvengine_scanner_image_id "$wanted")" ] || docker pull -q "$wanted" >/dev/null 2>&1 ||
       _cvengine_scanner_log "CVENGINE_SCANNER_IMAGE=$wanted is not on this host and could not be pulled; the built-in scanner keeps the image it has"
     return 0
   fi
   # the moving tag: pulled every time (that is the update). A failure never stops the update; the image on this host is kept.
   if docker pull -q "$wanted" >/dev/null 2>&1; then
-    CVENGINE_SCANNER_PULLED=ok
+    _cv_scanner_pulled=ok
     _cvengine_scanner_log "the newest published built-in scanner image ($wanted) is on this host"
   else
-    CVENGINE_SCANNER_PULLED=failed
+    _cv_scanner_pulled=failed
     _cvengine_scanner_log "could not pull the built-in scanner image $wanted (offline, or the registry refused); the scanner keeps the image it has. Build the tested floor from source with: make scanner-build"
   fi
   return 0
@@ -156,7 +156,7 @@ _cvengine_scanner_release() {  # docker compose [ARGS...]: the release (commit) 
 
 _cvengine_scanner_ready() {  # docker compose [ARGS...]: wait until the running scanner is healthy and checked in with a contract version this server accepts
   local deadline=$((SECONDS + ${CVENGINE_SCANNER_READY_SECONDS:-300})) declared server sv sm why; local -a server_args
-  CVENGINE_SCANNER_WHY=''
+  _cv_scanner_why=''
   while [ "$SECONDS" -lt "$deadline" ]; do
     if _cvengine_scanner_exec "$@" -- python3 -m client.control heartbeat >/dev/null 2>&1; then
       declared=$(_cvengine_scanner_exec "$@" -- python3 -c 'from client import config; print(config.CONTRACT_VERSION)' 2>/dev/null | tr -dc '0-9') || declared=''
@@ -164,16 +164,16 @@ _cvengine_scanner_ready() {  # docker compose [ARGS...]: wait until the running 
       read -r sv sm <<<"$server" || true
       if [[ ${sv:-} =~ ^[0-9]+$ && ${sm:-} =~ ^[0-9]+$ ]]; then server_args=("$sv" "$sm"); else server_args=(); fi
       if [ -z "$declared" ]; then
-        CVENGINE_SCANNER_WHY='it checked in but did not report its contract version'
+        _cv_scanner_why='it checked in but did not report its contract version'
         return 2
       fi
       if why=$(python3 scripts/scanner_lock.py accepts "$declared" ${server_args[@]+"${server_args[@]}"} 2>&1); then return 0; fi
-      CVENGINE_SCANNER_WHY="it checked in, but $why"
+      _cv_scanner_why="it checked in, but $why"
       return 2
     fi
     sleep "${CVENGINE_SCANNER_POLL:-5}"
   done
-  CVENGINE_SCANNER_WHY="it sent no heartbeat within ${CVENGINE_SCANNER_READY_SECONDS:-300}s"
+  _cv_scanner_why="it sent no heartbeat within ${CVENGINE_SCANNER_READY_SECONDS:-300}s"
   return 1
 }
 
@@ -191,8 +191,8 @@ cvengine_scanner_start() {
   if [ "$wait" = 0 ] && [ -n "$previous_id" ] && [ -z "$own" ] && [ "$previous_id" != "$wanted_id" ]; then wait=1; fi
   if [ -n "$previous_id" ] && [ "$wait" = 1 ]; then previous_release=$(_cvengine_scanner_release "$@"); else previous_release=''; fi
   if [ -n "$wanted" ] && [ -z "$wanted_id" ]; then
-    if [ -n "$previous_id" ] && [ -z "$own" ] && docker tag "$previous_id" "$CVENGINE_SCANNER_ROLLBACK_TAG" 2>/dev/null; then
-      _cvengine_scanner_rollback "$file" "$CVENGINE_SCANNER_ROLLBACK_TAG"
+    if [ -n "$previous_id" ] && [ -z "$own" ] && docker tag "$previous_id" "$_cv_scanner_rollback_tag" 2>/dev/null; then
+      _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
       _cvengine_scanner_log "the built-in scanner image $wanted is not on this host; keeping the one that ran (${previous_ref:-$previous_id})"
       up_args=(--pull never)
     else
@@ -201,7 +201,7 @@ cvengine_scanner_start() {
     fi
   elif [ -n "$previous_id" ] && [ "$previous_id" != "$wanted_id" ] && [ -z "$own" ]; then
     # the moving tag will name the new image, so the image that works now gets a name of its own to go back to (and is kept from pruning)
-    docker tag "$previous_id" "$CVENGINE_SCANNER_ROLLBACK_TAG" >/dev/null 2>&1 || previous_id=''
+    docker tag "$previous_id" "$_cv_scanner_rollback_tag" >/dev/null 2>&1 || previous_id=''
   fi
   # recreated after celery: it joins celery's network namespace by container id, so it lost its network when celery was recreated
   if ! "$@" up -d --no-deps --force-recreate ${up_args[@]+"${up_args[@]}"} scanner; then
@@ -218,23 +218,23 @@ cvengine_scanner_start() {
     return 0
   fi
   if [ -n "$previous_id" ] && [ "$previous_id" != "$(_cvengine_scanner_running_id "$@")" ] && [ -z "$own" ] && [ -z "$(_cvengine_scanner_value CVENGINE_SCANNER_ROLLBACK_IMAGE "$file")" ]; then
-    _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $CVENGINE_SCANNER_WHY. Putting the previous image back (${previous_ref:-$previous_id}); the next update tries the newest again"
-    _cvengine_scanner_rollback "$file" "$CVENGINE_SCANNER_ROLLBACK_TAG"
+    _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $_cv_scanner_why. Putting the previous image back (${previous_ref:-$previous_id}); the next update tries the newest again"
+    _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
     if "$@" up -d --no-deps --force-recreate --pull never scanner; then
       # the restored scanner tells the server why, through its next heartbeat (the Sentinels page shows a failed update with its reason)
-      _cvengine_scanner_exec "$@" -- python3 -m client.control report failed --phase scanner-update --detail "kept the previous image: $CVENGINE_SCANNER_WHY" --from "${previous_release:-unknown}" --to "${wanted##*/}" >/dev/null 2>&1 || true
+      _cvengine_scanner_exec "$@" -- python3 -m client.control report failed --phase scanner-update --detail "kept the previous image: $_cv_scanner_why" --from "${previous_release:-unknown}" --to "${wanted##*/}" >/dev/null 2>&1 || true
     else
       _cvengine_scanner_log "could not start the built-in scanner on the previous image either; see docker compose logs scanner"
     fi
   else
-    _cvengine_scanner_log "the built-in scanner is not accepted yet ($CVENGINE_SCANNER_WHY); it keeps trying (see docker compose logs scanner and the Sentinels page)"
+    _cvengine_scanner_log "the built-in scanner is not accepted yet ($_cv_scanner_why); it keeps trying (see docker compose logs scanner and the Sentinels page)"
   fi
   return 0
 }
 
 cvengine_scanner_update() {  # docker compose [ARGS...]
   local file own running_id wanted wanted_id
-  CVENGINE_SCANNER_RESULT=done
+  _cv_scanner_result=done
   if ! cvengine_scanner_enabled "$@"; then
     _cvengine_scanner_log "the built-in scanner is not on this install (or CVENGINE_BUILTIN_SCANNER=0): nothing to update"
     return 0
@@ -247,7 +247,7 @@ cvengine_scanner_update() {  # docker compose [ARGS...]
   fi
   running_id=$(_cvengine_scanner_running_id "$@")
   cvengine_scanner_fetch "$@"
-  [ "$CVENGINE_SCANNER_PULLED" = ok ] || { CVENGINE_SCANNER_RESULT=no-pull; _cvengine_scanner_log "no new scanner image was fetched; the running scanner is left as it is"; return 0; }
+  [ "$_cv_scanner_pulled" = ok ] || { _cv_scanner_result=no-pull; _cvengine_scanner_log "no new scanner image was fetched; the running scanner is left as it is"; return 0; }
   wanted=$(cvengine_scanner_wanted_image "$@") || return 0
   wanted_id=$(_cvengine_scanner_image_id "$wanted")
   if [ -n "$running_id" ] && [ "$running_id" = "$wanted_id" ]; then
@@ -259,7 +259,7 @@ cvengine_scanner_update() {  # docker compose [ARGS...]
     _cvengine_scanner_exec "$@" -- python3 -m client.control drain >/dev/null 2>&1 || true
     if ! _cvengine_scanner_exec "$@" -- python3 -m client.control wait-idle --timeout "${CVENGINE_SCANNER_DRAIN_SECONDS:-900}" >/dev/null 2>&1; then
       _cvengine_scanner_exec "$@" -- python3 -m client.control undrain >/dev/null 2>&1 || true
-      CVENGINE_SCANNER_RESULT=busy
+      _cv_scanner_result=busy
       _cvengine_scanner_log "the built-in scanner is still busy; the newer image is on this host and is started at the next run"
       return 0
     fi

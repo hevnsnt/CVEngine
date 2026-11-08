@@ -32,4 +32,4 @@ if command -v flock >/dev/null 2>&1; then
   fi
 fi
 cvengine_scanner_update "${COMPOSE[@]}"
-case "$CVENGINE_SCANNER_RESULT" in done) date +%s > "$state/scanner-update.last" 2>/dev/null || true ;; esac  # busy or no pull: the next scheduled run tries again
+case "$_cv_scanner_result" in done) date +%s > "$state/scanner-update.last" 2>/dev/null || true ;; esac  # busy or no pull: the next scheduled run tries again
