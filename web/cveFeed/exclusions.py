@@ -48,7 +48,7 @@ def as_address(value):
     """The ``ip_address`` of ``value`` (a bare literal, ``[v6]:port``, ``v4:port``, a URL), or None. An IPv4-mapped IPv6 address is its IPv4 address."""
     if not isinstance(value, str):
         return None
-    text = value.strip().strip('[]')
+    text = value.strip()
     for candidate in (text, normalize(text)):
         try:
             ip = ipaddress.ip_address(candidate)

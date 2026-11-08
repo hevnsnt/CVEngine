@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 LOOKUP_ONLY = ('dns_resolve',)  # asks DNS for names, contacts no address: allowed through, its answers are checked as they come in
 IGNORED_KEYS = ('scope', 'template', 'token', 'api_keys', 'presets', 'require_flags', 'exclude_modules')  # target keys that carry no address of work
 RESULT_KEYS = ('ip', 'address', 'host', 'addresses', 'ips', 'hosts', 'ip_address', 'matched-at', 'target', 'url')  # result keys read for the addresses a Sentinel reached
+NAME_KEYS = ('name', 'host', 'hostname', 'domain', 'url', 'address', 'ip')  # target keys, at any depth, whose string is a host the task reaches
 NOTE_TTL = 6 * 3600  # seconds: a host's skip line is written once per this long
 MAX_VALUES = 5000
 
@@ -47,6 +48,23 @@ def _strings(value, depth=0):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _strings(item, depth + 1)
+
+
+def _named(value, depth=0):
+    """The strings under ``NAME_KEYS`` at any depth of a target (a list of hosts as dicts, pages with a url, names under an address), skipping ``IGNORED_KEYS``."""
+    if depth > 8:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in IGNORED_KEYS:
+                continue
+            if key in NAME_KEYS and isinstance(item, str) and 0 < len(item) <= 300 and not any(c.isspace() for c in item):
+                yield item
+            else:
+                yield from _named(item, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _named(item, depth + 1)
 
 
 def _is_address_like(text):
@@ -77,6 +95,7 @@ def task_values(kind, target, host='', ips=None):
     for group in ('targets', 'endpoints', 'probes', 'reads', 'checks'):
         values += [i['ip'] for i in target.get(group) or [] if isinstance(i, dict) and isinstance(i.get('ip'), str)]
     values += [s for s in _strings(target) if _is_address_like(s)]
+    values += list(_named(target))
     seen, out = set(), []
     for value in values:
         key = value.strip().lower()
@@ -254,9 +273,11 @@ def note_skipped(project, refusals, scan=None, kind=''):
         names = [v for v in fresh if v not in addresses]
         parts = []
         if names:
-            parts.append(f"Skipped {len(names)} host{'s' if len(names) != 1 else ''} that resolve{'s' if len(names) == 1 else ''} to an address on the organization's do-not-scan list")
+            parts.append(f"Skipped {len(names)} host{'s' if len(names) != 1 else ''} that resolve{'s' if len(names) == 1 else ''} to an address on the organization's do-not-scan list: "
+                         + ', '.join(sorted(names)[:5]) + (f' and {len(names) - 5} more' if len(names) > 5 else ''))
         if addresses:
-            parts.append(f"Skipped {len(addresses)} address{'es' if len(addresses) != 1 else ''} on the organization's do-not-scan list")
+            parts.append(f"Skipped {len(addresses)} address{'es' if len(addresses) != 1 else ''} on the organization's do-not-scan list: "
+                         + ', '.join(sorted(addresses)[:5]) + (f' and {len(addresses) - 5} more' if len(addresses) > 5 else ''))
         message = '. '.join(parts)
     detail = {'address_excluded': True, 'hosts': sorted(fresh)[:50], 'work': kind or ''}
     if scan is not None and getattr(scan, 'id', None):
