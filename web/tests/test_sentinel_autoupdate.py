@@ -204,6 +204,22 @@ class MatrixTests(Base):
         self.assertTrue(shown['flagged'])
         self.assertIn('Press Update now', shown['text'])
 
+    def test_a_sentinel_that_never_came_back_is_flagged_by_the_sweep_and_shown_flagged_before_it(self):
+        agent = self.sentinel()
+        self.refresh()
+        au.consider(agent, self.now)  # it is asked, then goes away and sends no heartbeat at all
+        agent.refresh_from_db()
+        late = self.now + timedelta(minutes=au.grace_minutes() + 1)
+        shown = au.view(agent, late)  # the page says so at once, even before anything wrote it down
+        self.assertEqual((shown['code'], shown['flagged']), ('flagged', True))
+        self.assertIn('Press Update now', shown['text'])
+        self.assertEqual(au.sweep(self.now + timedelta(minutes=10)), 0)  # still inside the grace period: nothing
+        self.assertEqual(au.sweep(late), 1)
+        agent.refresh_from_db()
+        self.assertEqual(au.stored(agent)['status'], 'failed')
+        self.assertEqual(len(self.audits('sentinel.update_flagged')), 1)
+        self.assertEqual(au.sweep(late + timedelta(hours=1)), 0)  # flagged once, not again
+
     def test_update_now_clears_the_flag_and_asks_again(self):
         agent = self.sentinel()
         self.refresh()

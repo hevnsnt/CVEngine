@@ -51,7 +51,7 @@ TEXT = {
     'host_watcher': 'The host updater of this server is not reporting, so the built-in scanner cannot be asked to update',
     'requested': 'Update requested',
     'flagged': 'Did not come back on a newer version',
-    'request': 'Update requested',
+    'request': 'An update will be requested at this Sentinel\'s next check-in',
 }
 
 
@@ -221,9 +221,27 @@ def settle(agent, now=None):
         return state
     asked = _parse(state.get('requested_at'))
     if asked and now - asked > timedelta(minutes=grace_minutes()):
-        return _flag(agent, state, now, f'Did not report a newer version within {grace_minutes()} minutes of the request ({"the host updater of this server" if state.get("host") else "its updater or supervisor"} '
-                                         f'may not be running), so cvENGINE stopped asking. Press Update now to try again')
+        return _flag(agent, state, now, flag_text(state))
     return state
+
+
+def flag_text(state):
+    return (f'Did not report a newer version within {grace_minutes()} minutes of the request ({"the host updater of this server" if state.get("host") else "its updater or supervisor"} '
+            f'may not be running), so cvENGINE stopped asking. Press Update now to try again')
+
+
+def sweep(now=None):
+    """Settle every open request, so a Sentinel that never came back (and so sends no heartbeat that would settle it) is flagged and audited too. Run every few
+    minutes by the ``ensure_builtin_scanner`` task. Returns how many were flagged."""
+    now = now or timezone.now()
+    flagged = 0
+    for agent in Agent.objects.filter(kind='scanner', info__auto_update__status='requested').exclude(status='revoked'):
+        try:
+            if settle(agent, now).get('status') == 'failed':
+                flagged += 1
+        except Exception:  # noqa: BLE001 - one row must not stop the rest
+            logger.exception('could not settle the update request of Sentinel %s', agent.pk)
+    return flagged
 
 
 def consider(agent, now=None):
@@ -262,9 +280,15 @@ def view(agent, now=None, keep=None, instance_update=None):
     now = now or timezone.now()
     state = stored(agent)
     found = decide(agent, now, verdict=verdict, keep=keep, instance_update=instance_update, check_busy=False)
-    requested_at = state.get('requested_at') if state.get('status') == 'requested' else None
+    version = str(verdict.get('version') or '').lower()
+    open_request = state.get('status') == 'requested' and not (version and version != str(state.get('from') or '').lower())  # a Sentinel back on another version has answered it
+    requested_at = state.get('requested_at') if open_request else None
     code = found['code']
-    if state.get('status') == 'requested':
-        code = 'requested'
-    return {'code': code, 'text': found['text'] if code != 'requested' else TEXT['requested'], 'running': verdict.get('version'), 'newest': verdict.get('latest'),
-            'requested_at': requested_at, 'flagged': state.get('status') == 'failed', 'next_after': state.get('next_after')}
+    expired = False
+    if open_request:
+        asked = _parse(state.get('requested_at'))
+        expired = bool(asked and now - asked > timedelta(minutes=grace_minutes()))  # nobody settled it yet (a Sentinel that never came back sends no heartbeat); the page still says so
+        code = 'flagged' if expired else 'requested'
+    text = TEXT['requested'] if code == 'requested' else flag_text(state) if expired else found['text']
+    return {'code': code, 'text': text, 'running': verdict.get('version'), 'newest': verdict.get('latest'),
+            'requested_at': requested_at, 'flagged': state.get('status') == 'failed' or expired, 'next_after': state.get('next_after')}
