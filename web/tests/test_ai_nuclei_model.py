@@ -4,7 +4,6 @@ haiku default and both calls are in the usage table, the setting is validated li
 All through the fake Anthropic API (tests/anthropic_fake.py): no network, no key."""
 import json
 import os
-import re
 from pathlib import Path
 from unittest import mock
 
