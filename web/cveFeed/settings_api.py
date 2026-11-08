@@ -307,6 +307,7 @@ MODELS_FAIL_WORDS = {
     'provider_network': 'nothing answered at that address (check the address and the port, and that the server is running)',
     'provider_http': 'it answered with an error (check the address: it may not offer a list of models)',
     'provider_json': 'it answered, but not with a list of models (check the address, often it ends in /v1)',
+    'provider_redirect': 'redirected to an address this server will not call (use the final address of the server instead)',
     'provider_shape': 'it answered, but not with a list of models (check that the provider type matches the server)',
 }
 
@@ -397,6 +398,7 @@ AI_ERROR_HINTS = {
     'provider_network': 'the server could not be reached: check the address and the port, that the server is running, and that this machine can reach it (inside Docker, localhost is the Docker host)',
     'provider_http': 'the server answered with an error: check the model name and the address (a model it does not serve, or the wrong path, shows up here)',
     'provider_json': 'the address answered, but not with an AI API: check that it is the server\'s API address (often ending in /v1)',
+    'provider_redirect': 'redirected to an address this server will not call (use the final address of the server instead)',
     'provider_shape': 'the address answered, but not in the shape this provider type uses: check that the provider type matches the server',
     'output_truncated': 'the reply was cut off at the reply limit: raise "Reply limit" (a reasoning model spends part of it thinking)',
     'refused': 'the model declined to answer (stop reason: refusal): asking again does not change that; check the model and what it was asked',

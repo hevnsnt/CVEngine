@@ -367,6 +367,90 @@ def _epoch(value):
 		return 0
 
 
+REDIRECT_REFUSED = 'redirected to an address this server will not call'
+_REDIRECTS = (301, 302, 303, 307, 308)
+MAX_REDIRECTS = 3
+
+
+def _internal_host(host):
+	"""Whether a host is (or resolves to) a loopback, private, link-local or otherwise non-public address."""
+	import ipaddress
+	import socket
+	host = (host or '').lower().rstrip('.')
+	try:
+		addresses = {ipaddress.ip_address(host)}
+	except ValueError:
+		try:
+			addresses = {ipaddress.ip_address(i[4][0].split('%')[0]) for i in socket.getaddrinfo(host, None)}
+		except (OSError, UnicodeError, ValueError):
+			return False
+	return any(not a.is_global or getattr(a, 'ipv4_mapped', None) is not None and not a.ipv4_mapped.is_global for a in addresses)
+
+
+def _redirect_refused(from_url, to_url):
+	"""True when a redirect target is unparseable, is a blocked address (ai_url_blocked), or moves from one host to a loopback or private one:
+	the address check judges the typed URL only, so every hop is judged again here."""
+	from urllib.parse import urlsplit
+	from cveFeed.settings_api import ai_url_blocked
+	try:
+		target = urlsplit(to_url)
+		host = target.hostname
+		target.port  # noqa: B018 (raises ValueError for a bad port)
+	except ValueError:
+		return True
+	if target.scheme not in ('http', 'https') or not host:
+		return True
+	if ai_url_blocked(to_url):
+		return True
+	same_host = (urlsplit(from_url).hostname or '').lower() == host.lower()
+	return not same_host and _internal_host(host)
+
+
+def _well_formed(url):
+	from urllib.parse import urlsplit
+	try:
+		parts = urlsplit(url)
+		parts.port  # noqa: B018
+	except ValueError:
+		return False
+	return parts.scheme in ('http', 'https') and bool(parts.hostname)
+
+
+def guarded_request(method, url, headers=None, **kwargs):
+	"""requests.get/post that never follows a redirect blindly. Each hop (at most MAX_REDIRECTS) is checked by _redirect_refused; a
+	cross-host hop drops the request headers (the API key). A refused or unparseable hop raises AIProviderError(REDIRECT_REFUSED)."""
+	from urllib.parse import urljoin, urlsplit
+	headers = dict(headers or {})
+	for _hop in range(MAX_REDIRECTS + 1):
+		try:
+			resp = getattr(requests, method)(url, headers=headers, allow_redirects=False, **kwargs)
+		except (requests.exceptions.InvalidURL, requests.exceptions.InvalidSchema, requests.exceptions.MissingSchema):
+			# requests parses the Location of a redirect it was told not to follow, and fails on one it cannot read: that is a refused redirect
+			# when the address we asked is itself well formed, and an ordinary bad address otherwise
+			if _well_formed(url):
+				raise AIProviderError(REDIRECT_REFUSED, category='provider_redirect') from None
+			raise
+		status = getattr(resp, 'status_code', None)
+		if status not in _REDIRECTS:
+			return resp
+		location = (getattr(resp, 'headers', None) or {}).get('Location')
+		if not location:
+			return resp
+		try:
+			target = urljoin(url, location)
+			refused = _redirect_refused(url, target)
+		except ValueError:  # an unparseable Location
+			refused = True
+		if refused:
+			raise AIProviderError(REDIRECT_REFUSED, category='provider_redirect')
+		if (urlsplit(url).hostname or '').lower() != (urlsplit(target).hostname or '').lower():
+			headers = {}
+		if method == 'post' and status in (301, 302, 303):
+			method, kwargs = 'get', {k: v for k, v in kwargs.items() if k not in ('json', 'data')}
+		url = target
+	raise AIProviderError(REDIRECT_REFUSED, category='provider_redirect')
+
+
 class AIProvider:
 	name = ''
 	timeout = REQUEST_TIMEOUT  # seconds a completion may take; a provider that loads models on demand overrides it
@@ -418,7 +502,7 @@ class AIProvider:
 
 	def _post(self, url, headers, payload):
 		try:
-			resp = requests.post(url, headers=headers, json=payload, timeout=(connect_timeout(self.runtime), request_timeout(self.timeout, self.runtime)))
+			resp = guarded_request('post', url, headers=headers, json=payload, timeout=(connect_timeout(self.runtime), request_timeout(self.timeout, self.runtime)))
 			resp.raise_for_status()
 			try:
 				data = resp.json()
@@ -447,7 +531,7 @@ class AIProvider:
 
 	def _get(self, url, headers=None):
 		try:
-			resp = requests.get(url, headers=headers or {}, timeout=30)
+			resp = guarded_request('get', url, headers=headers or {}, timeout=30)
 			resp.raise_for_status()
 			return resp.json()
 		except (requests.RequestException, ValueError) as e:
