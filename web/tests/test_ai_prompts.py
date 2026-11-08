@@ -60,8 +60,8 @@ def system_prompts():
 # Budgets in characters of the system prompt (about 3.5 characters a token for this English and JSON text): the size at the time of the
 # change plus a little room. A job whose prompt grows past its budget fails here, so a longer prompt is a decision, not an accident.
 SYSTEM_BUDGET = {
-    'nuclei_tag_selection': 1500, 'finding_triage': 4900, 'local_check_suggestion': 2400, 'validation_plan': 3000, 'cve_detection': 7900,
-    'template_generation': 1800, 'autotune_advisor': 1500, 'rdp_screenshot': 900, 'finding_review': 4400, 'operations_check': 2400,
+    'nuclei_tag_selection': 1350, 'finding_triage': 4720, 'local_check_suggestion': 2190, 'validation_plan': 2950, 'cve_detection': 7600,
+    'template_generation': 1710, 'autotune_advisor': 1360, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 1660,
 }
 
 
@@ -267,6 +267,15 @@ class TextRulesTests(SimpleTestCase):
         self.assertEqual(set(prompts), set(SYSTEM_BUDGET))
         for stage, prompt in prompts.items():
             self.assertLessEqual(len(prompt), SYSTEM_BUDGET[stage], f'{stage}: {len(prompt)} characters (about {len(prompt) * 2 // 7} tokens)')
+
+    def test_the_framing_every_job_pays_stays_short(self):
+        for stage, task in ai_prompts.TASKS.items():
+            self.assertLessEqual(len(ai_prompts.PREAMBLE) + len(task), 850, stage)  # about 240 tokens: the preamble and one task line
+
+    def test_the_nuclei_targeting_prompt_costs_what_it_did_plus_the_framing(self):
+        system, user = nt.targeting_prompt([('nginx', 'nginx 1.18.0')], {'nginx', 'php'})
+        self.assertLessEqual(len(system), 1000)
+        self.assertLessEqual(len(user), 200)
 
     def test_the_preamble_is_short(self):
         self.assertLessEqual(len(ai_prompts.PREAMBLE), 450)  # about 90 tokens, paid on every call

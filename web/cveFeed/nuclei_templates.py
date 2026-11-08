@@ -164,14 +164,19 @@ def _parse_ai_tags(reply):
 	return picked if isinstance(picked, list) else []
 
 
+def tag_selection_prompt(unmapped):
+	"""``(system, user)`` of the tag-selection request for these technology names (already limited to the static table's misses)."""
+	return AI_SYSTEM_PROMPT, ai_prompts.USER_TAG_SELECTION + json.dumps(unmapped)
+
+
 def ai_tags_for(tech_names, provider):
 	"""Tags an AI provider picks for technology names the static table didn't cover. The result is
 	always a subset of CANDIDATE_TAGS, whatever the model actually replies with."""
 	unmapped = [n for n in tech_names if (n or '').strip().lower() not in STATIC_TAG_MAP][:MAX_AI_TECH_NAMES]
 	if not unmapped or provider is None:
 		return set()
-	user = ai_prompts.USER_TAG_SELECTION + json.dumps(unmapped)
-	reply = _ask('nuclei_tag_selection', provider, AI_SYSTEM_PROMPT, user)
+	system, user = tag_selection_prompt(unmapped)
+	reply = _ask('nuclei_tag_selection', provider, system, user)
 	if reply is None:
 		return set()
 	allowed = set(CANDIDATE_TAGS)
@@ -439,6 +444,21 @@ def pertinent_tags(signatures, allowed, limit=OFFER_MAX, index=None):
 	return [tag for tag, _score in sorted(scored.items(), key=lambda item: (-item[1], item[0]))[:limit]]
 
 
+def targeting_prompt(signatures, allowed, offered=None):
+	"""``(system, user)`` of the targeting request for these host signatures: the shared framing, the task, the allowed tags, and the
+	strict-cleaned software names as one JSON object (technology and product names come from responses a target controls, so there is no
+	room in them for a sentence)."""
+	system = ai_prompts.compose('nuclei_targeting',
+	          'Reply with ONLY a JSON object '
+	          'mapping each host number to {"tags": [...], "severities": [...]}. Tags must be drawn verbatim from this allowed list '
+	          'and no others: ' + json.dumps(sorted(allowed) if offered is None else sorted(offered)) + '. Severities must be from: '
+	          + json.dumps(SEVERITY_CHOICES))
+	from reNgine.ai_providers import clean_text
+	user = (ai_prompts.USER_TARGETING + json.dumps({str(i): [clean_text(name, 60, strict=True) for name in sig][:40]
+	                                    for i, sig in enumerate(signatures)}))
+	return system, user
+
+
 def ai_plan(signatures, provider, allowed, offered=None, notes=None):
 	"""One AI call for a batch of distinct host signatures: ``{index: (tags, severities)}``. Strictly a closed-set
 	classifier: tags are intersected with ``allowed`` (every installed tag) and severities with the five nuclei severities,
@@ -447,15 +467,7 @@ def ai_plan(signatures, provider, allowed, offered=None, notes=None):
 	receives a plain sentence for why the AI gave nothing (the caller says it in the scan's activity)."""
 	if not signatures or provider is None:
 		return {}
-	system = ai_prompts.compose('nuclei_targeting',
-	          'Reply with ONLY a JSON object '
-	          'mapping each host number to {"tags": [...], "severities": [...]}. Tags must be drawn verbatim from this allowed list '
-	          'and no others: ' + json.dumps(sorted(allowed) if offered is None else sorted(offered)) + '. Severities must be from: '
-	          + json.dumps(SEVERITY_CHOICES))
-	# technology and product names come from responses a target controls: strict-cleaned, so there is no room for a sentence
-	from reNgine.ai_providers import clean_text
-	user = (ai_prompts.USER_TARGETING + json.dumps({str(i): [clean_text(name, 60, strict=True) for name in sig][:40]
-	                                    for i, sig in enumerate(signatures)}))
+	system, user = targeting_prompt(signatures, allowed, offered)
 	reply = _ask('nuclei_targeting', provider, system, user, notes)
 	if reply is None:
 		return {}
