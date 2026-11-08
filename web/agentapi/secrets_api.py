@@ -16,6 +16,12 @@ from agentapi.services import (ApiError, SEVERITY_NAMES, _is_all, _iso, _scoped,
 from cveFeed import secrets_catalog as catalog
 
 MAX_OCCURRENCES = 200
+CONTEXT_MISSING = {'kingfisher': 'Context not stored: the Sentinel that read this page did not send the text around the match (it is older than the one that '
+                                 'does, or the line could not be cut with the value hidden). Update the Sentinel, then rescan.',
+                   'route': 'Context not stored: the scanner that read this route did not send the text around the key (an older Sentinel, or the line could not '
+                            'be cut with the value hidden). Update the Sentinel, then rescan.'}
+CONTEXT_MISSING_DEFAULT = 'Context not stored, rescan to capture.'
+STATUS_ACTIONS = ('public_by_design', 'false_positive', 'accepted')  # the buttons of the detail view, each one a person's decision (set_secret_status)
 FILTER_STATUSES = ('open', 'quiet', 'all') + catalog.STATUSES
 
 
@@ -72,7 +78,23 @@ def list_secrets(ctx, slug, params):
     if everywhere:
         qs = qs.select_related('project')
     qs = _filtered(qs, params).order_by('-severity', '-last_seen', 'id')
-    return paginate(qs, params, _tagged(_secret, lambda s: s.project) if everywhere else _secret)
+    page = paginate(qs, params, _tagged(_secret, lambda s: s.project) if everywhere else _secret)
+    _add_where(page['results'])
+    return page
+
+
+def _add_where(rows):
+    """Each listed secret says where it is served now (its newest live occurrence: URL, line, source), one query for the page: the list says where
+    to look without opening the secret."""
+    from cveFeed.models import SecretOccurrence
+    if not rows:
+        return
+    first = {}
+    for o in (SecretOccurrence.objects.filter(finding_id__in=[r['id'] for r in rows], retired_at__isnull=True)
+              .order_by('finding_id', '-last_seen', 'id').values('finding_id', 'url', 'line', 'source')):
+        first.setdefault(o['finding_id'], {'url': o['url'], 'line': o['line'], 'source': o['source']})
+    for r in rows:
+        r['where'] = first.get(r['id'])
 
 
 def _row(ctx, slug, secret_id, write=False):
@@ -88,20 +110,72 @@ def _row(ctx, slug, secret_id, write=False):
     return project, role, row
 
 
+def _explain(row, kind):
+    """The secret in plain words, for the detail view: what it is, what anyone who reads it can do, how to fix it, why it is rated as it is."""
+    words = catalog.CLASS_EXPLAIN.get(row.klass) or catalog.CLASS_EXPLAIN['I']
+    rules = ', '.join(row.rule_ids or []) or row.kind
+    title = kind.label[:1].upper() + kind.label[1:]
+    return {'title': title, 'what': f'{title}. This is {words["what"]}.',
+            'abuse': words['abuse'],
+            'how_to_fix': words['fix'],
+            'provider_fix': '' if kind.remediation == catalog._ROTATE else kind.remediation,  # the generic text says what 'how_to_fix' already says
+            'rating': (f'{row.severity_basis[:1].upper() + row.severity_basis[1:].rstrip(".")}.' if row.severity_basis else ''),
+            'catalogue': ((f'The rule ({rules}) is in the secrets catalogue, so it is rated by what it is.' if row.catalogued else
+                           f'The rule ({rules}) is not in the secrets catalogue. Until a person reviews it, it is treated as a server secret of medium '
+                           'severity: mark it as an intended public key if it is meant to be public, or a false positive if it is not a secret.')),
+            'validated': ({'done': True, 'words': f'Validated: the provider answered "{row.validation_outcome.replace("_", " ")}".'} if row.validation_outcome
+                          else {'done': False, 'words': 'Not validated: nothing has checked with the provider whether the credential still works.'})}
+
+
+def _where(o):
+    """One occurrence for the detail view: where, how it was found, and the masked text around it, or why there is none."""
+    return {'host': o.host, 'url': o.url, 'source': o.source, 'source_label': catalog.SOURCE_WORDS.get(o.source, o.source), 'rule_id': o.rule_id,
+            'line': o.line, 'context': o.context or '',
+            'context_note': '' if o.context else CONTEXT_MISSING.get(o.source, CONTEXT_MISSING_DEFAULT),
+            'first_seen': _iso(o.first_seen), 'last_seen': _iso(o.last_seen), 'retired_at': _iso(o.retired_at), 'finding_id': o.vulnerability_id,
+            'scan_id': o.scan_id}
+
+
+def _can_write(ctx, slug):
+    try:
+        get_one_project(ctx, slug, write=True)
+        return True
+    except ApiError:
+        return False
+
+
 def get_secret(ctx, slug, secret_id):
     """One secret with where it was seen (newest first, at most MAX_OCCURRENCES), why it is rated as it is, how to fix it, the findings it came from
     and the resources it points at. Never the value."""
     from cveFeed import secrets_inventory
     project, _, row = _row(ctx, slug, secret_id)
     kind = secrets_inventory.kind_of(row)
-    occurrences = [{'host': o.host, 'url': o.url, 'source': o.source, 'rule_id': o.rule_id, 'line': o.line, 'first_seen': _iso(o.first_seen),
-                    'last_seen': _iso(o.last_seen), 'retired_at': _iso(o.retired_at), 'finding_id': o.vulnerability_id, 'scan_id': o.scan_id}
-                   for o in row.occurrences.order_by('retired_at', '-last_seen', 'id')[:MAX_OCCURRENCES]]
-    return {**_secret(row), 'remediation': kind.remediation, 'docs': kind.docs,
+    occurrences = [_where(o) for o in row.occurrences.order_by('retired_at', '-last_seen', 'id')[:MAX_OCCURRENCES]]
+    return {**_secret(row), 'remediation': kind.remediation, 'docs': kind.docs, 'explain': _explain(row, kind), 'can_write': _can_write(ctx, slug),
+            'assignee': _user_brief(row.assignee), 'status_actions': list(STATUS_ACTIONS),
             'status_by': _user_brief(row.status_by), 'status_at': _iso(row.status_at), 'status_note': row.status_note,
             'occurrence_list': occurrences,
             'resources': [{'kind': r.kind, 'identifier': r.identifier, 'host': r.host} for r in row.resources.all()[:50]],
             'validation_available': _validation_state(ctx, project)}
+
+
+def set_secret_assignee(ctx, slug, secret_id, body):
+    """Give a secret to a person: ``assignee`` is the id of a user who can see the project, or null to unassign (the ids ``projects/<slug>/members``
+    lists). A write role; audited as ``secrets.assign``."""
+    from agentapi.services import _resolve_assignee
+    from tenancy import audit
+    require_write_token(ctx)
+    project, _, row = _row(ctx, slug, secret_id, write=True)
+    body = body if isinstance(body, dict) else {}
+    if 'assignee' not in body:
+        raise ApiError(400, 'send {assignee: <user id>|null}')
+    user = _resolve_assignee(project, body['assignee'])
+    before = _user_brief(row.assignee)
+    row.assignee = user
+    row.save(update_fields=['assignee'])
+    audit.record(ctx.user, 'secrets.assign', f'secret #{row.pk}', org=project.org_id, project=project.slug, secret_id=row.pk,
+                 before=before, after=_user_brief(user), masked=row.masked)
+    return {'id': row.pk, 'assignee': _user_brief(user)}
 
 
 def set_secret_status(ctx, slug, secret_id, body):

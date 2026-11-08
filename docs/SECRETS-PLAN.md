@@ -500,6 +500,29 @@ When the inventory has the secret, `scoring` reads the worst open `SecretFinding
   - filters on status, class and provider;
   - a detail drawer with occurrences, severity basis, remediation and the status workflow with notes;
   - the host page gets a "Secrets" chip.
+- **Why a host scores (every number opens its evidence).** `cveFeed.scoring.score_host` stores every contributor of a score as
+  `{label, points, kind, text, ref}`, so the lines are the score (a sum over 100 is shown as 100 and says so). `label` is the short name, `text` one plain
+  sentence (what it is, where, why it scores), `ref` the evidence the line stands on: a CVE match, a scanner or hygiene finding, a secret
+  (`/secrets/?open=<id>`), or a tab of the host page (`/hosts/?host=<name>&tab=web`). `static/cve/score-detail-logic.js` turns a `ref` into the link. The
+  Attack surface tile opens a dialog with every line on a click (the hover card lists all of them too); the host page lists the same lines under "Why
+  the score is N". A line stored before the sentences existed shows its label and points and gets its sentence at the next rescore.
+  A score line for a secret says the masked value (`…dea4`), the URL and line, the class in words and the severity basis (why it is rated so, for
+  example "uncatalogued: treated as a server secret of medium severity until a person reviews it"); the value is never part of it.
+- **The secret in a side panel.** `static/cve/secret-panel.js` opens one secret from the Secrets list, from a score line on the dashboard or the host
+  page, and from `/secrets/?open=<id>`. It says, in plain words: what was found (the provider's kind, its class in words and what anyone who reads it can do
+  with it); where (every place, the full URL as a link that opens the page in a new tab, the line, how it was found: Kingfisher scan or route read, and
+  the masked text around the match); why it is rated so (the severity basis, whether the rule is in the catalogue, whether a validation checked it); how
+  many other places serve it; first and last seen, status and assignee; and how to fix it (one paragraph per class: S rotate at the provider and move the
+  call server-side, P restrict by referrer and API at the provider, I review, then the provider's own remediation). A person decides with *Mark as
+  intended public key*, *Mark false positive*, *Accept risk* or *Assign* (all audited).
+  - **The masked context.** `SecretOccurrence.context` (migration `0151`) holds at most 300 characters of the line around the match with the value
+    replaced by its mask (`cveFeed.secrets_catalog.context_snippet` / `mask_context`): other secret shapes in the window are redacted too, and a snippet in
+    which the value or any 12 characters of it could still be read is dropped, never stored. `secrets_inventory.record` applies it to whatever context it
+    is given, so a caller cannot store a raw one. Today only a body the server reads itself (the route check's local path) captures it. A secrets_scan
+    finding carries the line number but not the text, and a route_probe credential carries neither, so for those the panel says *Context not stored*:
+    capturing it needs an optional `context` (and, for routes, `line`) in the Sentinel contract, a Sentinel change.
+  - `POST projects/<slug>/secrets/<id>/assign {assignee: <user id>|null}` (write role, audited as `secrets.assign`); `GET .../secrets/<id>` adds `explain`,
+    per-place `context`, `can_write` and `assignee`; the list rows add `where` (the newest place served now).
 - **REST.**
   - `GET projects/<slug>/secrets` (filters as above, paged);
   - `GET projects/<slug>/secrets/<id>`;

@@ -135,10 +135,13 @@ def _sub_shape(kind, prefix):
     return lambda match: _mask(match.group(0), kind, _prefix_of(match.group(0), prefix))
 
 
+_A_MASK = re.compile('^[A-Za-z0-9_.:/+-]{0,40}\u2026[A-Za-z0-9_-]{0,4}$')  # what ``secrets_catalog.mask`` makes of a value: a prefix, an ellipsis, up to four characters
+
+
 def _plausible_value(value, quoted):
     """Whether a value after ``password=`` looks like a secret and not like prose or a placeholder: not already masked, not a placeholder or a
     template variable, and either quoted (a config or JSON value) or holding a digit or a symbol."""
-    if value.startswith(('\u2026', '$', '{', '%', '@')) or '[redacted' in value or _PLACEHOLDER.match(value):
+    if value.startswith(('\u2026', '$', '{', '%', '@')) or '[redacted' in value or _A_MASK.match(value) or _PLACEHOLDER.match(value):
         return False
     return quoted or bool(re.search(r'[0-9!#$%^*_+=/~]', value))
 

@@ -1359,6 +1359,30 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind in ('wpscan', 'wpscan_thorough') and target.get('token') not in (None, '', '***') else {}
 
 
+def scrub_values(task_id):
+    """Drop the secret values (and the context a scanner cut around them) from the stored result of a ``secrets_scan`` or ``route_probe`` task once its
+    findings are filed in the inventory (``cveFeed.secrets_inventory``, which fingerprints and masks them there). A result is stored as the scanner sent
+    it, and the contract's value fields (``secrets_scan`` ``findings[].secret``, ``route_probe`` ``credentials[].value``) carry the value for that one
+    step: nothing may keep it in the database afterwards. Each value becomes its mask, and the result says so (``values_scrubbed``), so a stage that
+    reads it again files nothing from it. Returns whether a result was scrubbed."""
+    from cveFeed import secrets_catalog as catalog
+    task = SentinelTask.objects.filter(pk=task_id).only('id', 'kind', 'result').first()
+    if task is None or not isinstance(task.result, dict) or task.result.get('values_scrubbed'):
+        return False
+    result = dict(task.result)
+    if task.kind == 'secrets_scan':
+        result['findings'] = [{**{k: v for k, v in f.items() if k != 'context'}, 'secret': catalog.mask(f.get('secret'))}
+                              for f in result.get('findings') or [] if isinstance(f, dict)]
+    elif task.kind == 'route_probe':
+        result['routes'] = [{**r, 'credentials': [{'type': c.get('type'), 'value': catalog.mask(c.get('value'))} for c in r.get('credentials') or [] if isinstance(c, dict)]}
+                            if isinstance(r, dict) and r.get('credentials') else r for r in result.get('routes') or []]
+    else:
+        return False
+    result['values_scrubbed'] = True
+    SentinelTask.objects.filter(pk=task.pk).update(result=result)
+    return True
+
+
 def expire(task, reason=None, actor=None):
     """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
     caller left the targets due (no kind runs on this server), so this

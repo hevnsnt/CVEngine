@@ -186,7 +186,7 @@ class FeederTests(Base):
 
 class ScoringTests(Base):
     def score(self, routes=(), secrets=(), covered=False):
-        return scoring._sensitive_line(list(routes), list(secrets), covered)
+        return [{'label': l['label'], 'points': l['points']} for l in scoring._sensitive_line(list(routes), list(secrets), covered)]  # the sentence and link: tests.test_score_explained
 
     def test_a_browser_key_alone_scores_five_and_a_server_secret_twenty_five(self):
         route = {'path': '/', 'sensitive_score': 25, 'sensitive': {'google_key': {'count': 1, 'sample': 'x'}}}

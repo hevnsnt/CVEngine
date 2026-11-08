@@ -52,7 +52,10 @@ class Kind:
 
     @property
     def label(self):
-        return f'{self.provider} {self.kind.replace("-", " ")}'.strip() if self.provider else self.kind.replace('-', ' ')
+        words = self.kind.replace('-', ' ')
+        if self.provider and not words.lower().startswith(self.provider.lower()):
+            return f'{self.provider} {words}'
+        return (self.provider + words[len(self.provider):]) if self.provider else words  # ``rapidapi-access-token`` of RapidAPI names its provider already: said once
 
 
 _ROTATE = 'Rotate the credential at the provider, remove it from what the site serves, and check the provider\'s logs for use you do not recognise.'
@@ -273,3 +276,107 @@ def status_after_validation(current, outcome):
     if current in ('public_by_design', 'accepted', 'revoked', 'false_positive'):
         return current
     return OUTCOME_STATUS.get(outcome, current)
+
+
+# ----------------------------------------------------------------------------- plain words (the secret's detail view)
+
+# What a class of secret is, what anyone who reads it can do with it, and what to do about it. The detail view says these in full sentences next to the
+# provider's own remediation (``Kind.remediation``); nothing here depends on a value.
+CLASS_EXPLAIN = {
+    'S': {'what': 'a server credential: a key or token that proves who you are to a provider',
+          'abuse': 'Anyone who loads the page can copy it and call the provider as you: read or change what the account holds and run up its bill, '
+                   'for as long as the credential stays valid.',
+          'fix': 'Rotate it at the provider now: make a new one, switch your server to it, then revoke this one. After that move the call that '
+                 'needs it to your server, so the value is never sent to a browser, and check the provider\'s logs for use you do not recognise.'},
+    'P': {'what': 'a browser key: a key that is meant to sit in a page, and is protected by the restrictions you set at its provider, not by being secret',
+          'abuse': 'Anyone can use it from their own page or script and spend your quota; if the provider does not restrict it, they can also run '
+                   'up charges on APIs you pay for.',
+          'fix': 'Restrict it at the provider: allow only your site\'s referrers (or your app) and only the APIs the site uses, and set a quota. '
+                 'If it is meant to be public and is already restricted, mark it as an intended public key.'},
+    'I': {'what': 'a token or identifier: it names an account, a client or a session at a provider',
+          'abuse': 'On its own it tells an attacker which account to target; if it is a token that has not expired it may also act for that account.',
+          'fix': 'Review it: find out what it identifies and whether it grants access by itself. Revoke it if it does. If it is only an identifier, '
+                 'mark it accepted, or an intended public key if it is meant to be public.'},
+}
+SOURCE_WORDS = {'kingfisher': 'Kingfisher scan of the page and its scripts', 'route': 'route read (the web route check read this page)',
+                'nuclei': 'Nuclei token template', 'bbot': 'bbot discovery module'}
+MAX_CONTEXT = 300
+MAX_CONTEXT_SENT = 400  # what a Sentinel may send (the contract's maxLength); a correct one sends at most 200
+CONTEXT_WIDTH = 80  # characters kept either side of the value
+_NOT_TEXT = frozenset({'Cc', 'Cf', 'Cs', 'Co', 'Cn'})  # control, format (a right-to-left override, a zero-width joiner), surrogate, private use, unassigned
+
+
+def _chars(text):
+    """``text`` with its control and format characters as spaces (a tab and a line break stay, so a value of several lines is still found in it)."""
+    import unicodedata
+    return ''.join(' ' if unicodedata.category(c) in _NOT_TEXT and c not in '\t\n' else c for c in text)
+
+
+def clean_context(raw):
+    """The context a scanner sent, typed and bounded: a string of at most ``MAX_CONTEXT_SENT`` characters whose control and format characters are
+    spaces. ``''`` for anything else (not a string, too long): the finding is kept, the context is not. It is not yet safe to show: ``mask_context``
+    does that, with the finding's value in hand (``secrets_inventory.record``)."""
+    return re.sub(r'\s+', ' ', _chars(raw)).strip() if isinstance(raw, str) and len(raw) <= MAX_CONTEXT_SENT else ''
+
+
+# A run of letters and digits that holds both and is long enough to be a key, a token or a hash: masked even when no detector knows its provider.
+# The same rule as the Sentinel's (``cvengine_scanner.context.mask_runs``): a context that arrives already masked is left exactly as it is.
+_RUN = re.compile(r'(?<![A-Za-z0-9])[A-Za-z0-9]{24,512}(?![A-Za-z0-9])')
+
+
+def mask_runs(text):
+    def sub(match):
+        run = match.group(0)
+        return f'\u2026[redacted {len(run)} chars, token]' if re.search(r'[0-9]', run) and re.search(r'[A-Za-z]', run) else run
+    return _RUN.sub(sub, text)
+
+
+def _unmasked_shape(text, needle):
+    """Whether ``text`` still holds a run of the shape of ``needle``: its public prefix (or its first four characters), then token characters, for most of
+    its length. A mask never does (an ellipsis follows the prefix); a value a scanner failed to hide, or hid only in part, does."""
+    if len(needle) < 12:
+        return False
+    found = _PREFIXES.match(needle)
+    head = found.group(0) if found and len(found.group(0)) <= 12 else needle[:4]
+    least = max(12, int(len(needle) * 0.6))
+    return any(len(run) >= least for run in re.findall(re.escape(head) + r'[A-Za-z0-9_+/=.-]*', text))
+
+
+def mask_context(context, value, kind=''):
+    """``context`` (text around a secret) with ``value`` replaced by its mask, every other secret-looking token masked, control characters removed and
+    the length clipped. The only form of context anything stores or shows. Returns ``''`` when ``value`` could still be read in the result (a variant
+    this function does not know), or something of its shape is still there: a snippet that cannot be proved clean is not kept."""
+    from cveFeed import secret_redaction
+    text = _chars(str(context or '')[:20000])
+    needle = normalise(value)
+    if needle:
+        masked = mask(needle, kind)
+        for variant in dict.fromkeys((needle, needle.replace('/', '\\/'), needle.replace('\\', '\\\\'), needle.replace('"', '\\"'))):
+            text = text.replace(variant, masked)
+    text = mask_runs(secret_redaction.redact_text(text))
+    shown = mask(needle, kind) if needle else ''  # words of the mask itself (a PEM header) are no leak
+    if needle and (needle in text or _unmasked_shape(text, needle)
+                   or any(piece in text and piece not in shown for piece in (needle[i:i + 12] for i in range(0, max(1, len(needle) - 11), 4)))):
+        return ''  # the value, a piece of 12 characters of it, or a run of its shape is still readable: a snippet that cannot be proved clean is not kept
+    return re.sub(r'\s+', ' ', text).strip()[:MAX_CONTEXT]
+
+
+def context_snippet(text, value, kind='', width=CONTEXT_WIDTH):
+    """``(line, snippet)`` for the first place ``value`` is in ``text``: its 1-based line and the stretch of that line around it (``width`` characters
+    either side) with the value masked (``mask_context``). ``(None, '')`` when the value is not in the text or cannot be shown safely."""
+    text = str(text or '')
+    needle = normalise(value)
+    if len(needle) < 8:
+        return None, ''
+    at = text.find(needle)
+    if at < 0:
+        return None, ''
+    line = text.count('\n', 0, at) + 1
+    start = text.rfind('\n', 0, at) + 1
+    end = text.find('\n', at + len(needle))
+    end = len(text) if end < 0 else end
+    low, high = max(start, at - width), min(end, at + len(needle) + width)
+    snippet = mask_context(text[low:high], needle, kind)
+    if not snippet:
+        return line, ''
+    return line, ('... ' if low > start else '') + snippet + (' ...' if high < end else '')
