@@ -97,6 +97,24 @@ class AccessTests(WizardBase):
         path = os.path.join(os.path.dirname(__file__), '..', 'cveFeed', 'templates', 'cveFeed', 'dashboard.html')
         self.assertIn("{% url 'cve_welcome' %}?again=1", open(path, encoding='utf-8').read())
 
+    def test_the_last_screen_says_only_that_things_are_getting_ready(self):
+        import os, re
+        base = os.path.join(os.path.dirname(__file__), '..')
+        js = open(os.path.join(base, 'static', 'cve', 'welcome.js'), encoding='utf-8').read()
+        build = js[js.index('  build(node) {'):js.index("document.getElementById('skip-all')")]
+        for gone in ('Building your workspace', 'The first discovery is running', 'Discovery running', 'Hosts found', 'Sentinel ready', 'found so far',
+                     'Giving discovery', 'Latest:', 'build-steps', 'build-wait', 'really happening', 'Time given to discovery'):
+            self.assertNotIn(gone, js)
+        for said in ('Getting everything ready', 'This takes about a minute.', 'Opening your dashboard'):
+            self.assertIn(said, build)
+        # every string the screen can show to the person
+        words = ' '.join(re.findall(r"'([^']*)'", re.sub(r'(?m)\s//.*$', '', build)))
+        self.assertNotRegex(words, r'(?i)scan|discover|sentinel|\bhosts?\b|subdomain|running')
+        self.assertIn("'aria-live': 'polite'", build)
+        self.assertNotIn('builtin_state', build)  # no internals are read by it
+        html = open(os.path.join(base, 'cveFeed', 'templates', 'cveFeed', 'welcome.html'), encoding='utf-8').read()
+        self.assertIn('prefers-reduced-motion:reduce){.step{animation:none}.meter.indeterminate span{animation:none', html)
+
     def test_the_first_minute_sentence_and_the_password_card_say_what_is_true(self):
         import os
         text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'welcome.js'), encoding='utf-8').read()
@@ -528,7 +546,8 @@ class ProgressTests(WizardBase):
         self.assertEqual(out['discovery']['hosts'], 30)
         self.assertEqual(out['discovery']['state'], 'running')
         self.assertIn('30 hosts found so far', out['discovery']['text'])
-        self.assertTrue(out['dwell']['ready'])  # plenty found: no reason to wait
+        self.assertTrue(out['build']['hosts_present'])  # hosts exist: nothing to cover, the last screen is not shown
+        self.assertFalse(out['build']['show'])
 
     def queries_of_progress(self):
         from django.db import connection
@@ -538,33 +557,60 @@ class ProgressTests(WizardBase):
         self.assertLessEqual(len(ctx), 14)  # a constant, however many hosts were found
         return len(ctx)
 
-    def test_nothing_found_yet_holds_the_wait_until_the_dwell_is_over(self):
+    def build(self, **env):
+        with mock.patch.dict('os.environ', env):
+            return self.c.get('/cve/api/welcome/progress?build=1').json()['build']
+
+    def test_with_no_host_the_last_screen_shows_for_at_most_sixty_seconds_from_its_first_ask(self):
         self.live = False
         self.seed()
-        out = self.c.get('/cve/api/welcome/progress').json()
-        self.assertFalse(out['dwell']['ready'])
-        self.assertTrue(out['dwell']['hold'])
-        self.assertEqual(out['dwell']['min_seconds'], 90)
-        self.assertEqual(out['discovery']['state'], 'queued')
-        self.assertIn('No Sentinel is connected yet', out['discovery']['text'])
+        out = self.build()
+        self.assertEqual((out['show'], out['seconds'], out['hosts_present']), (True, 60, False))
         row = SetupWizard.objects.get()
-        row.data = {**row.data, 'discovery': {**row.data['discovery'], 'started_at': (timezone.now() - timedelta(seconds=100)).isoformat()}}
+        self.assertIn('build_started_at', row.data)
+        row.data = {**row.data, 'build_started_at': (timezone.now() - timedelta(seconds=30)).isoformat()}
         row.save()
-        self.assertTrue(self.c.get('/cve/api/welcome/progress').json()['dwell']['ready'])  # a person who took their time is never made to wait
+        self.assertTrue(30 <= self.build()['elapsed'] <= 33)  # a reload does not restart the clock
+        self.assertTrue(self.build()['show'])
+        row.data = {**row.data, 'build_started_at': (timezone.now() - timedelta(seconds=61)).isoformat()}
+        row.save()
+        self.assertFalse(self.build()['show'])  # a reload after the time is up goes to the dashboard
 
-    def test_the_dwell_is_configurable(self):
+    def test_progress_without_the_build_flag_never_starts_the_clock(self):
         self.seed()
-        with mock.patch.dict('os.environ', {'CVENGINE_SETUP_DWELL_SECONDS': '0'}):
-            self.assertTrue(self.c.get('/cve/api/welcome/progress').json()['dwell']['ready'])
-        with mock.patch.dict('os.environ', {'CVENGINE_SETUP_DWELL_SECONDS': '300'}):
-            self.assertEqual(self.c.get('/cve/api/welcome/progress').json()['dwell']['min_seconds'], 300)
+        self.c.get('/cve/api/welcome/progress')
+        self.assertNotIn('build_started_at', SetupWizard.objects.get().data)
 
-    def test_a_finished_discovery_ends_the_wait(self):
+    def test_one_host_anywhere_ends_it_at_once(self):
+        self.seed()
+        self.assertTrue(self.build()['show'])
+        Subdomain.objects.create(name='www.seed.test', scan_history=ScanHistory.objects.get(), target_domain=Domain.objects.get(), discovered_date=timezone.now())
+        out = self.build()
+        self.assertEqual((out['show'], out['hosts_present']), (False, True))
+
+    def test_a_host_already_on_the_install_means_it_is_never_shown_and_the_clock_never_starts(self):
+        self.seed()
+        first = ScanHistory.objects.get()
+        other = ScanHistory.objects.create(domain=first.domain, scan_type=first.scan_type, scan_status=discovery.SUCCESS, start_scan_date=timezone.now(), results_dir='/tmp')
+        Subdomain.objects.create(name='old.seed.test', scan_history=other, target_domain=Domain.objects.get(), discovered_date=timezone.now())
+        self.assertFalse(self.build()['show'])
+        self.assertNotIn('build_started_at', SetupWizard.objects.get().data)
+
+    def test_the_cap_is_configurable_and_zero_turns_the_screen_off(self):
+        self.seed()
+        self.assertFalse(self.build(CVENGINE_SETUP_DWELL_SECONDS='0')['show'])
+        self.assertEqual(self.build(CVENGINE_SETUP_DWELL_SECONDS='300')['seconds'], 300)
+
+    def test_a_discovery_that_already_ended_has_nothing_coming_so_no_screen(self):
         self.seed()
         ScanHistory.objects.update(scan_status=discovery.SUCCESS)
-        out = self.c.get('/cve/api/welcome/progress').json()
-        self.assertTrue(out['dwell']['ready'])
-        self.assertEqual(out['discovery']['state'], 'done')
+        self.assertFalse(self.build()['show'])
+
+    def test_finishing_clears_the_clock(self):
+        self.seed()
+        self.build()
+        post(self.c, 'finish')
+        self.assertNotIn('build_started_at', SetupWizard.objects.get().data)
 
     def test_a_live_sentinel_is_reported(self):
         self.seed()
@@ -575,7 +621,7 @@ class ProgressTests(WizardBase):
     def test_no_seed_means_no_discovery_and_nothing_to_wait_for(self):
         out = self.c.get('/cve/api/welcome/progress').json()
         self.assertIsNone(out['discovery'])
-        self.assertTrue(out['dwell']['ready'])
+        self.assertFalse(self.build()['show'])
 
 
 class FinishTests(WizardBase):
