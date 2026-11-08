@@ -323,13 +323,54 @@ class SystemStatusTests(SentinelWorld, TestCase):
         self.sentinel(['nmap'], seen='old')
         data = self.status(self.t_root)
         scanner = data['scanning']['scanner']
-        never = [k for k in ALL_KINDS if k != 'nmap']
+        never = [k for k in ALL_KINDS if k not in ('nmap', 'openvas')]  # OpenVAS is an opt-in add-on: nothing waits for it here, so it is not named
         self.assertEqual(scanner['never_seen'], never)
+        self.assertNotIn('openvas', scanner['never_seen_message'])
         self.assertEqual(scanner['never_seen_message'], scanner_state.messages(scanner)['never_seen'])
         self.assertIn(f"No scanner has ever registered for {', '.join(never)}, and this server runs none of them", scanner['never_seen_message'])
         self.assertIn(scanner['never_seen_message'], data['problems'])
         self.assertEqual(data['overall'], 'degraded')
         self.assertEqual(scanner['message'], 'Scanner offline: nmap work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.')
+
+    def openvas_problems(self, **setup):
+        data = self.status(self.t_root)
+        return data, [p for p in data['problems'] + data['notes'] if 'openvas' in p.lower()]
+
+    def test_openvas_absent_and_nothing_waiting_says_nothing_anywhere(self):
+        self.sentinel([k for k in ALL_KINDS if k != 'openvas'])
+        self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)
+        data, found = self.openvas_problems()
+        self.assertEqual(found, [])
+        scanner = data['scanning']['scanner']
+        self.assertNotIn('openvas', scanner['kinds'] + scanner['never_seen'])
+        self.assertFalse([m for m in scanner['messages'] if 'openvas' in m.lower()])
+        self.assertIsNone(scanner['never_seen_message'])
+
+    def test_a_queued_openvas_task_makes_the_missing_scanner_a_problem(self):
+        self.sentinel([k for k in ALL_KINDS if k != 'openvas'])
+        self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)
+        SentinelTask.objects.create(project=self.project, kind='openvas', status='queued', host='198.51.100.7', target={'addresses': ['198.51.100.7']})
+        data, found = self.openvas_problems()
+        self.assertEqual(len(found), 1)
+        self.assertIn('No scanner has ever registered for openvas', found[0])
+        self.assertIn(found[0], data['problems'])
+
+    def test_a_project_with_openvas_turned_on_makes_the_missing_scanner_a_problem(self):
+        from cveFeed.models import OpenvasProject, OpenvasSettings
+        self.sentinel([k for k in ALL_KINDS if k != 'openvas'])
+        self.sentinel(list(sentinel_broker.BUILTIN_KINDS), builtin=True)
+        OpenvasProject.objects.create(project=self.project, enabled=True)
+        self.assertEqual(self.openvas_problems()[1], [])  # the add-on's global switch is still off
+        row = OpenvasSettings.current()
+        row.enabled = True
+        row.save()
+        self.assertEqual(len(self.openvas_problems()[1]), 1)
+
+    def test_an_openvas_scanner_that_registered_and_went_offline_is_still_said(self):
+        self.sentinel(['openvas'], seen='old')
+        data, found = self.openvas_problems()
+        self.assertEqual(len(found), 1)
+        self.assertIn('openvas work is waiting', found[0])
 
     def test_a_misspelt_ignored_variable_is_no_problem_for_anyone(self):
         self.policy('nmap,nmpa')

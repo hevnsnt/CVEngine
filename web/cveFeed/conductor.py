@@ -189,6 +189,24 @@ def last_round():
 
 
 def status():
-    """What the conductor sees, for the system status: the wanted depth, scans running and queued, and its last round."""
+    """What the conductor sees, for the system status: the wanted depth, scans running and queued, its last round (and how old it is, in seconds), and
+    ``due``: whether any target is due to start right now, by the same rules the round uses (``next_targets``), so "nothing started" can be told from
+    "nothing was due"."""
+    from datetime import datetime
+
+    from django.utils import timezone
+
     from cveFeed.counts import queued_scans, running_scans
-    return {'wanted_depth': wanted_depth(), 'running': running_scans().count(), 'queued': queued_scans().count(), 'last_round': last_round()}
+    last = last_round()
+    age = None
+    try:
+        age = max(0, int((timezone.now() - datetime.fromisoformat(last['at'])).total_seconds())) if last and last.get('at') else None
+    except (TypeError, ValueError):
+        age = None
+    try:
+        due = bool(next_targets(1))
+    except Exception:  # noqa: BLE001 - a status read never fails on this
+        logger.warning('work conductor: could not read which targets are due', exc_info=True)
+        due = None
+    return {'wanted_depth': wanted_depth(), 'running': running_scans().count(), 'queued': queued_scans().count(), 'last_round': last,
+            'last_round_age_seconds': age, 'due': due}
