@@ -431,10 +431,23 @@ a.cve-link{font-family:var(--mono)}
 /* update bar */
 .updatebar{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;padding:var(--s-3) var(--gutter);background:var(--brand);color:var(--on-brand);font-size:var(--fs-3);font-weight:var(--fw-semi)}
 .updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
-.scannerbar{padding:var(--s-2) var(--gutter);background:var(--ice-bg);color:var(--ice-ink);border-bottom:1px solid var(--ring-ice);font-size:var(--fs-3);line-height:1.4}
-.scannerbar p{margin:0;overflow-wrap:anywhere}.scannerbar p+p{margin-top:var(--s-1)}
-.scannerbar .sb-disabled{padding:var(--s-2) var(--s-3);margin:var(--s-2) 0 0;background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice);font-weight:var(--fw-semi)}
-.scannerbar .sb-never{padding:var(--s-2) var(--s-3);margin:var(--s-2) 0 0;background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
+/* the one status strip (static/cve/statusstrip.js): scanner notices and an admin's alerts in a single 40px line with a count and a Details button;
+   the notices open in full under it. */
+.scannerbar{background:var(--ice-bg);color:var(--ice-ink);box-shadow:0 1px 0 var(--ring-ice);font-size:var(--fs-3);line-height:1.4}
+.scannerbar p{margin:0;overflow-wrap:anywhere}
+.sb-strip{display:flex;align-items:center;gap:var(--s-3);height:40px;padding:0 var(--gutter)}
+.sb-lead{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-count{flex:none;padding:0 var(--s-2);border-radius:var(--r-s);background:color-mix(in srgb,var(--ice-ink) 14%,transparent);font:var(--fw-medium) var(--fs-1)/20px var(--mono);white-space:nowrap}
+.sb-toggle{flex:none;display:inline-flex;align-items:center;height:28px;padding:0 var(--s-2);border:0;border-radius:var(--r-s);background:transparent;color:inherit;font:var(--fw-semi) var(--fs-2) var(--font);text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+@media (hover:hover) and (pointer:fine){.sb-toggle:hover{background:color-mix(in srgb,var(--ice-ink) 12%,transparent)}}
+.sb-details{padding:0 var(--gutter) var(--s-3);display:flex;flex-direction:column;gap:var(--s-2)}
+.sb-details[hidden]{display:none}
+.sb-row{display:flex;gap:var(--s-3);align-items:flex-start;justify-content:space-between}
+.sb-row p{flex:1;min-width:0}
+.sb-row .sb-dismiss{flex:none}
+@media (max-width:639px){.sb-row{flex-direction:column;align-items:flex-start}}
+.scannerbar .sb-disabled{padding:var(--s-2) var(--s-3);background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice);font-weight:var(--fw-semi)}
+.scannerbar .sb-never{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
 /* ================= live dashboard ================= */
@@ -2130,15 +2143,14 @@ section.internal[hidden]{display:none}
 .group-members li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0}
 .group-members a{overflow-wrap:anywhere}
 .group-note{margin:var(--s-2) 0}
-/* admin alerts (static/cve/alertbar.js, docs/AI-REVIEWER.md) */
-.alertbar{display:flex;flex-direction:column;gap:0;font-size:var(--fs-3);line-height:1.4}
-.alertbar .ab-row{display:flex;gap:var(--s-3);align-items:flex-start;padding:var(--s-2) var(--gutter);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
-.alertbar .ab-critical{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 3px 0 0 var(--fire)}
-.alertbar .ab-info{background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice)}
-.alertbar .ab-text{flex:1;min-width:0}
-.alertbar .ab-text p{margin:2px 0 0;white-space:pre-line;overflow-wrap:anywhere}
-.alertbar .ab-label{font-weight:var(--fw-semi)}
-.alertbar .ab-more{margin:0;padding:var(--s-1) var(--gutter);font-size:var(--fs-2)}
+/* admin alerts (static/cve/alertbar.js, docs/AI-REVIEWER.md): each is a row of the status strip's Details */
+.scannerbar .ab-row{display:flex;gap:var(--s-3);align-items:flex-start;padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
+.scannerbar .ab-critical{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 3px 0 0 var(--fire)}
+.scannerbar .ab-info{background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice)}
+.scannerbar .ab-text{flex:1;min-width:0}
+.scannerbar .ab-text p{margin:2px 0 0;white-space:pre-line;overflow-wrap:anywhere}
+.scannerbar .ab-label{font-weight:var(--fw-semi)}
+.scannerbar .ab-more{margin:0;font-size:var(--fs-2)}
 
 /* ---- CVE explorer (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
 .cvx-sr{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
