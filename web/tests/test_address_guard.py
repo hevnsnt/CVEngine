@@ -272,6 +272,37 @@ class Dispatch(World):
             dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': [IN]}, ips=[IN])
 
 
+class DiscoveryFirstLookup(World):
+    def test_a_single_host_target_is_looked_up_first_and_never_handed_to_the_scanner_when_it_points_into_the_list(self):
+        self.exclude('198.51.100.0/24')
+        domain = Domain.objects.create(name='lab.example.com', project=self.project, insert_date=timezone.now(), scope_mode='host')
+        self.assertTrue(domain.is_host_scoped())
+        with mock.patch('agentapi.probe_dispatch.try_dns_resolve', return_value=({('lab.example.com', IN)}, {})) as lookup:
+            with self.assertRaises(AddressExcluded) as caught:
+                address_guard.resolve_before_discovery(self.scan, domain)
+        lookup.assert_called_once()
+        self.assertIn('resolves to 198.51.100.7', str(caught.exception))
+        self.assertEqual(sorted(IpAddress.objects.filter(ip_addresses__name='lab.example.com').values_list('address', flat=True)), [IN])  # the inventory learned it
+        with mock.patch('agentapi.probe_dispatch.try_dns_resolve') as lookup:  # known now: no second lookup
+            with self.assertRaises(AddressExcluded):
+                address_guard.resolve_before_discovery(self.scan, domain)
+        lookup.assert_not_called()
+
+    def test_a_target_that_resolves_elsewhere_or_a_whole_domain_goes_ahead(self):
+        self.exclude('198.51.100.0/24')
+        host = Domain.objects.create(name='ok.example.com', project=self.project, insert_date=timezone.now(), scope_mode='host')
+        with mock.patch('agentapi.probe_dispatch.try_dns_resolve', return_value=({('ok.example.com', OUT)}, {})):
+            address_guard.resolve_before_discovery(self.scan, host)
+        with mock.patch('agentapi.probe_dispatch.try_dns_resolve') as lookup:
+            address_guard.resolve_before_discovery(self.scan, self.domain)  # a whole domain: discovered as before
+        lookup.assert_not_called()
+
+    def test_an_unreadable_list_refuses_the_run(self):
+        with mock.patch('cveFeed.exclusions.address_networks', side_effect=RuntimeError('db')):
+            with self.assertRaises(AddressExcluded):
+                address_guard.resolve_before_discovery(self.scan, self.domain)
+
+
 class Claim(World):
     def test_a_task_queued_before_its_address_was_listed_is_cancelled_when_it_is(self):
         queued = SentinelTask.objects.create(project=self.project, kind='nmap', target={'addresses': [IN]}, ips=[IN])

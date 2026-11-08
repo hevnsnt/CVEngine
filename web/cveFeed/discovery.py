@@ -295,6 +295,8 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
     domain = scan.domain
     api_keys = bool(extra_args and any(a != bbot_lib.TRUFFLEHOG_FLAG for a in extra_args))
     trufflehog = bbot_lib.TRUFFLEHOG_FLAG in extra_args
+    from agentapi import address_guard
+    address_guard.resolve_before_discovery(scan, domain)  # a single-host target that points into the do-not-scan list is never handed to the scanner
     target = sentinel_stream.bbot_target(domain, mode, discovery_timeout(), api_keys=api_keys, trufflehog=trufflehog)
     state = {'stored': stored}
 

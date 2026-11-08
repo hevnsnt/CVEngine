@@ -333,3 +333,48 @@ def cancel_pending(org_id, actor=None, reason=None):
     if cancelled:
         logger.info('cancelled %s pending task(s) for org %s: their addresses are now on the do-not-scan list', cancelled, org_id)
     return cancelled
+
+
+def resolve_before_discovery(scan, domain):
+    """Before a discovery run of a target that is ONE host (a name nothing resolved yet would otherwise be handed to the scanner, which resolves it and may
+    connect before anything is known): with a do-not-scan list in force, look the name up first (a lookup-only task), store what it resolved to in the inventory,
+    and raise ``AddressExcluded`` when it points into the list. A target that is a whole domain is discovered as before (the run carries the list as ranges it
+    never touches, and what it finds is judged per host). An unreadable list refuses the run."""
+    from cveFeed import exclusions
+    from reNgine.resources import AddressExcluded
+    project_id = _project_id(domain.project_id)
+    if not project_id:
+        return
+    try:
+        networks = exclusions.address_networks(project_id)
+    except Exception:  # noqa: BLE001 - fail closed
+        raise AddressExcluded('bbot_discovery', exclusions.Refusal(exclusions.UNREADABLE, unreadable=True)) from None
+    if not networks or not domain.is_host_scoped():
+        return
+    name = exclusions.normalize(domain.name)
+    refusal = exclusions.address_excluded(project_id, name)
+    if refusal is None and not exclusions.stored_addresses(project_id, [name]).get(name):
+        from agentapi import probe_dispatch
+        pairs, _ = probe_dispatch.try_dns_resolve(domain, [name], scan=scan)
+        ips = sorted({ip for n, ip in pairs if n == name})
+        if ips:
+            record_resolved(scan, domain, name, ips)
+            refusal = exclusions.address_excluded(project_id, name, resolved=ips)
+    if refusal:
+        note_skipped(domain.project, {name: refusal}, scan=scan, kind='bbot_discovery')
+        raise AddressExcluded('bbot_discovery', refusal)
+
+
+def record_resolved(scan, domain, name, ips):
+    """Keep what a lookup resolved ``name`` to in the inventory (the host with its addresses), so every later question about the host is answered from it."""
+    from startScan.models import IpAddress, Subdomain
+    org = domain.project.org if domain.project_id else None
+    sub = Subdomain.objects.filter(scan_history=scan, target_domain=domain, name=name).first() or \
+        Subdomain.objects.create(scan_history=scan, target_domain=domain, name=name, discovered_date=timezone_now())
+    for ip in ips:
+        sub.ip_addresses.add(IpAddress.objects.get_or_create(address=ip, org=org)[0])
+
+
+def timezone_now():
+    from django.utils import timezone
+    return timezone.now()
