@@ -72,6 +72,25 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertIn('The administrator is fixing it', page)
 		self.assertNotRegex(page, '[–—]')
 
+	def test_the_proxy_serves_the_live_status_file_from_its_own_folder(self):
+		conf = read('config', 'nginx', 'rengine.conf')
+		block = conf[conf.index('location = /maintenance-status.json'):]
+		block = block[:block.index('\n    }')]
+		self.assertIn('alias                                       /etc/nginx/state/status.json;', block)
+		self.assertIn('no-store', block)
+		self.assertNotIn('proxy_pass', block)  # not from the web container
+		self.assertLess(conf.index('location = /maintenance-status.json'), conf.index('location / {'))
+		self.assertNotIn('maintenance-status', read('docker-compose.yml'))  # the folder is already mounted into the proxy: no new mount is needed
+
+	def test_the_updater_writes_the_status_at_each_phase(self):
+		apply = read('scripts', 'apply-update.sh')
+		self.assertLess(apply.index('cv_status begin'), apply.index('freeze_background\n}'))
+		deploy = read('scripts', 'update-deploy.sh')
+		steps = deploy[deploy.index('deploy_steps() {'):]
+		self.assertEqual(re.findall(r'cv_status step (\w+)', steps), ['build', 'backup', 'migrating', 'starting', 'verifying', 'scanner'])
+		for reason in ('build_failed', 'previous_failed', 'restart_failed', 'stopped'):
+			self.assertIn(reason, apply + deploy)
+
 	def test_sentinel_and_api_locations_answer_503_with_a_retry_after_while_the_flag_exists(self):
 		conf = read('config', 'nginx', 'rengine.conf')
 		for location in ('location / {', 'location ~ ^/api/v1/sentinel/tasks/[0-9]+/(result|partial)$ {', 'location = /cve/api/settings/cve_seed/import {'):

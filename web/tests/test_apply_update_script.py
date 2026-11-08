@@ -49,7 +49,8 @@ case " $* " in
   *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
   *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
   *" --force-recreate reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
-  *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
+  *" build "*) if [ -f "$STUB_DIR/canary_output" ]; then cat "$STUB_DIR/canary_output"; fi
+    if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
     if [ -f "$STUB_DIR/fail_build_always" ]; then exit 1; fi
     if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
@@ -93,6 +94,14 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.work / 'scripts').mkdir()
         shutil.copy(SCRIPTS / 'apply-update.sh', self.work / 'scripts' / 'apply-update.sh')
         shutil.copy(SCRIPTS / 'update-state.py', self.work / 'scripts' / 'update-state.py')
+        # the status helper, behind a wrapper that records every call (what the updater asked for, in order) and then does the real thing
+        (self.work / 'scripts' / 'update-status.py').write_text(
+            '#!/usr/bin/env python3\nimport os, subprocess, sys\n'
+            'open(os.path.join(os.environ["STUB_DIR"], "status_calls.log"), "a").write(" ".join(sys.argv[1:]) + "\\n")\n'
+            'sys.exit(subprocess.call([sys.executable, %r] + sys.argv[1:]))\n' % str(SCRIPTS / 'update-status.py'))
+        # a `sleep` that records the status the page would be showing when the updater waits for it to be read (CVENGINE_STATUS_LINGER=7)
+        (self.stub / 'sleep').write_text('#!/usr/bin/env bash\nif [ "$1" = 7 ]; then cp config/nginx/state/status.json "$STUB_DIR/status_at_settle.json" 2>/dev/null; exit 0; fi\nexec /bin/sleep "$@"\n')
+        (self.stub / 'sleep').chmod(0o755)
         # the one-time PostgreSQL move is a separate script with its own docker calls; here it only records that it ran
         (self.work / 'scripts' / 'upgrade-postgres.sh').write_text('#!/usr/bin/env bash\necho "upgrade-postgres $*" >> "$STUB_DIR/calls.log"\n')
         (self.work / 'scripts' / 'upgrade-postgres.sh').chmod(0o755)
@@ -1189,6 +1198,90 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         builds = [line for line in self.flag_lines() if ' build web celery celery-beat' in line]
         self.assertTrue(builds and all(line.startswith('on ') for line in builds), builds)  # from the merge on, not after the build
         self.assertFalse(self.flag())
+
+    # --- the live status the maintenance page shows ----------------------------------------------------------------------------------------
+
+    def status_calls(self):
+        log = self.stub / 'status_calls.log'
+        return log.read_text().splitlines() if log.exists() else []
+
+    def status_json(self):
+        import json
+        path = self.work / 'config' / 'nginx' / 'state' / 'status.json'
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_the_status_is_written_at_each_phase_and_the_first_write_is_before_the_files_change(self):
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'cp config/nginx/state/status.json "$STUB_DIR/status_at_merge.json"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [c for c in self.status_calls() if not c.startswith('tick')]
+        self.assertEqual(calls[0].split()[0], 'begin')
+        steps = [c.split()[1] for c in calls if c.startswith('step ')]
+        self.assertEqual(steps, ['stopping', 'build', 'backup', 'migrating', 'starting', 'verifying'])
+        self.assertEqual(calls[-2:], ['done', 'clear'])
+        import json
+        at_merge = json.loads((self.stub / 'status_at_merge.json').read_text())
+        self.assertEqual((at_merge['state'], at_merge['step']), ('working', 'stopping'))  # already written, and the workers already being stopped
+        self.assertIsNone(self.status_json())  # gone with the page
+
+    def test_a_slow_step_keeps_the_status_fresh_so_the_page_can_tell_working_from_stalled(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'slow_build').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_STATUS_TICK='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreaterEqual(len([c for c in self.status_calls() if c == 'tick']), 2)
+
+    def test_a_failed_build_that_is_put_back_shows_the_failure_and_that_the_old_version_runs_before_the_page_goes(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'old_containers').write_text('')
+        (self.stub / 'fail_up').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_STATUS_LINGER='7')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('fail build_failed yes', self.status_calls())
+        import json
+        shown = json.loads((self.stub / 'status_at_settle.json').read_text())
+        self.assertEqual(shown['state'], 'failed')
+        self.assertIs(shown['error']['restored'], True)
+        self.assertEqual(shown['error']['summary'], 'The new version could not be built.')
+        self.assertFalse(self.flag())
+        self.assertIsNone(self.status_json())
+
+    def test_a_previous_version_that_cannot_be_restarted_leaves_the_failure_on_the_page(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        shown = self.status_json()
+        self.assertEqual(shown['state'], 'failed')
+        self.assertIs(shown['error']['restored'], False)
+        self.assertIn('make up', shown['error']['next'])
+        self.assertTrue(self.flag('maintenance-failed'))
+
+    def test_a_restart_that_keeps_failing_after_the_migration_says_so_on_the_page(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate_always').write_text('')
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 1)
+        shown = self.status_json()
+        self.assertEqual((shown['state'], shown['error']['summary']), ('failed', 'The new version was installed but did not start.'))
+        self.assertIs(shown['error']['restored'], False)
+
+    def test_secrets_in_the_build_output_never_reach_the_public_status(self):
+        from tests.test_update_status import CANARIES, CANARY_LOG
+        self.new = self.publish_deploy_file()
+        (self.stub / 'canary_output').write_text(CANARY_LOG)
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 1)
+        text = (self.work / 'config' / 'nginx' / 'state' / 'status.json').read_text()
+        self.assertIn('"log"', text)
+        for canary in CANARIES:
+            self.assertNotIn(canary, text, canary)
 
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')

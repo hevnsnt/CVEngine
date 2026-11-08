@@ -181,7 +181,7 @@ jobs:
           sleep 5
           touch "$HOME/probe.stop"; sleep 2
           awk '{print $2, $3, $4, $6}' "$HOME/probe.log" | uniq -c | head -60
-          "$GITHUB_WORKSPACE/.github/rehearsal/probe-check.sh" "$(cat "$HOME/installed.sha")" 0
+          "$GITHUB_WORKSPACE/.github/rehearsal/probe-check.sh" "$(cat "$HOME/installed.sha")" 0 1
           [ ! -e config/nginx/state/maintenance ] || { echo "::error::the maintenance flag is still set after a verified update"; exit 1; }
           "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
       - name: Approving the same commit again does nothing

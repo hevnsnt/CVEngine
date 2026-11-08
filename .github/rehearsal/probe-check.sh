@@ -7,14 +7,14 @@
 #   3. that includes the first sample after the files changed: the page was up BEFORE the fast-forward, not after the build;
 #   4. an API client (a Sentinel posting a result) got 503 with Retry-After (or a refused connection) in the same window, never a 500 or a hang;
 #   5. once the site answers again it keeps answering: no 503 after the first good sample.
-# usage: probe-check.sh <installed commit> [grace samples]   (a prefix is enough)
+# usage: probe-check.sh <installed commit> [grace samples] [1 to require the live status steps]   (a prefix is enough)
 # The first update from a version that predates the fix runs the host's OLD apply-update.sh up to the merge: the page then goes up as the first step of
 # the new deploy file, a second or two after the merge, so that update is checked with a grace of 4 samples. An update applied by the new scripts
 # (the second one of the overlay job) is checked with none: the page is up before the files change.
 set -euo pipefail
 log="$HOME/probe.log"; installed=${1:?installed commit}; installed=${installed:0:12}; grace=${2:-0}
 [ -s "$log" ] || { echo "::error::the probe recorded nothing"; exit 1; }
-awk -v installed="$installed" -v grace="$grace" '
+awk -v installed="$installed" -v grace="$grace" -v needstatus="${3:-0}" '
   function bad(msg) { print "::error::" msg; failed = 1 }
   { t=$1; code=$2; marker=$3; api=$4; retry=$5; head=$6; n++ }
   head != installed && head != "none" && !changed { changed = 1; first_changed = n; print "files changed at sample " n " (" t ")" }
@@ -36,7 +36,12 @@ awk -v installed="$installed" -v grace="$grace" '
     }
     if (served && code == 503) bad("sample " n ": the maintenance page came back after the site had answered")
   }
+  $7 != "" && $7 != "-" { steps[$7] = 1 }
   END {
+    if (needstatus) {
+      if (!("working:build" in steps)) bad("the live status never showed the build step (/maintenance-status.json)")
+      if (!("working:starting" in steps) && !("working:verifying" in steps) && !("working:migrating" in steps)) bad("the live status never showed a later step")
+    }
     if (!changed) bad("the checkout never moved from " installed " during the probe")
     if (!seen) bad("the maintenance page (503 with its text) was never served")
     if (!served) bad("the site never answered again")
