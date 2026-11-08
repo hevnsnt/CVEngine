@@ -1927,6 +1927,34 @@ def feed_sentinels():
     return coverage_topup.feed_sentinels()
 
 
+@app.task(name="work_planner_tick", bind=False, queue="cve_feed_queue", time_limit=120, soft_time_limit=100)
+def work_planner_tick(kick=False):
+    """Every minute (and 3 seconds after a planned batch ends): keep the Sentinels busy with checks that are due, when slots are idle and the queue is
+    shallow (``cveFeed.work_planner``). Deterministic, cheap, no AI. A second tick while one runs returns at once."""
+    from cveFeed import work_planner
+    return work_planner.run(kick=kick)
+
+
+@app.task(name="work_planner_census", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def work_planner_census():
+    """Every five minutes: count the checks that are due, per project (``cveFeed.work_planner.census``), for the planner's tick and the Scanners page.
+    Read-only."""
+    from cveFeed import work_planner
+    data = work_planner.census()
+    return {kind: sum(e['kinds'][kind]['due'] for e in data['projects'].values()) for kind in work_planner.specs()}
+
+
+@app.task(name="work_planner_batch", bind=False, queue="planner_queue", time_limit=7200, soft_time_limit=7000)
+def work_planner_batch(batch_id):
+    """One batch of due checks the planner chose, run through the same entry the scan stage uses (``cveFeed.work_planner.execute_batch``): one Sentinel task
+    at a time, waited for here. When it ends the planner is asked for the next batch."""
+    from cveFeed import work_planner
+    try:
+        return work_planner.execute_batch(batch_id)
+    finally:
+        work_planner.kick()
+
+
 @app.task(name="ensure_builtin_scanner", bind=False, queue="cve_feed_queue")
 def ensure_builtin_scanner():
     """Every few minutes: keep the built-in scanner's enrollment ready (a no-op unless CVENGINE_BUILTIN_SCANNER is on; see ``agentapi.builtin_scanner``)."""

@@ -102,8 +102,8 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     """Dispatch the scan's due web hosts to a scanner and file what comes back. Returns ``{'hosts', 'tasks', 'findings', 'secrets', 'waiting'}``.
     ``dispatch(project, target, hosts, scan)`` replaces ``sentinel_dispatch.dispatch_or_none`` in tests. Raises ``ScannerUnavailable`` when no scanner
     can take the kind (the stage then waits; it never runs here)."""
-    from agentapi import sentinel_broker, sentinel_dispatch
-    from cveFeed import activity, exclusions, ledger, secrets_validation
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain__project__org').get(pk=scan_id)
     project = scan.domain.project
@@ -119,6 +119,18 @@ def run_for_scan(scan_id, force=False, dispatch=None):
 
         def dispatch(project_, target, hosts, scan_):
             return sentinel_dispatch.dispatch_or_none(project_, KIND, target, host=','.join(hosts)[:500], scan=scan_)
+    _send(project, scan.domain, scan, rows, dispatch, force, summary)
+    activity.log('run_check', f'Secrets scan of {summary["hosts"]} web hosts of {scan.domain.name}: {summary["secrets"]} secrets in '
+                 f'{summary["findings"]} findings' + (f'; {summary["waiting"]} hosts wait for a scanner' if summary['waiting'] else ''),
+                 project=project.pk, scan_id=scan.id)
+    return summary
+
+
+def _send(project, domain, scan, rows, dispatch, force, summary):
+    """Send the planned ``rows`` (``plan``) of ``domain`` in tasks of at most ``MAX_HOSTS`` hosts and file what comes back, as the stage does: validation only
+    where ``secrets_validation.plan`` allows it. ``scan`` is the scan the tasks belong to (None for the work planner's, which has none). Adds to ``summary``."""
+    from agentapi import sentinel_broker
+    from cveFeed import exclusions, ledger, secrets_validation
     builtin = sentinel_broker.any_scanner_for(project, KIND, builtin_only=True)
     validate, validating = secrets_validation.plan(project.pk, sorted(rows), builtin, force=force)
     banned = exclusions.excluded_names(project.pk)
@@ -139,16 +151,32 @@ def run_for_scan(scan_id, force=False, dispatch=None):
                 if result is not None:
                     ledger.record(SERVICE, hosts, project.pk, scan, status='failed')
                 continue
-            filed = persist(project, scan.domain, scan.id, target, result)
+            filed = persist(project, domain, getattr(scan, 'id', None), target, result)
             summary['hosts'] += len(hosts)
             summary['findings'] += filed['findings']
             summary['secrets'] += filed['secrets']
             ledger.record(SERVICE, hosts, project.pk, scan)
             if validating_batch and filed['validated']:
                 ledger.record(secrets_validation.LEDGER, hosts, project.pk, scan)
-    activity.log('run_check', f'Secrets scan of {summary["hosts"]} web hosts of {scan.domain.name}: {summary["secrets"]} secrets in '
-                 f'{summary["findings"]} findings' + (f'; {summary["waiting"]} hosts wait for a scanner' if summary['waiting'] else ''),
-                 project=project.pk, scan_id=scan.id)
+
+
+def run_for_hosts(project, domain, hosts, dispatch=None, priority=1):
+    """Read the named web hosts of ``domain`` (a target of ``project``) with Kingfisher on a Sentinel and file what comes back: the work planner's entry
+    (``cveFeed.work_planner``), the same plan (routes already checked, exclusions, the bug bounty gate, the ledger window), validation rules and storage as
+    ``run_for_scan``, with no scan of its own. ``dispatch(project, target, hosts, scan)`` replaces the Sentinel call in tests. Returns the summary of
+    ``run_for_scan``; raises ``ScannerUnavailable`` when no Sentinel can take the kind."""
+    from agentapi import sentinel_dispatch
+    summary = {'hosts': 0, 'tasks': 0, 'findings': 0, 'secrets': 0, 'waiting': 0}
+    rows = plan(project.pk, domain_id=domain.pk, hosts=hosts)
+    if not rows:
+        return summary
+    if dispatch is None:
+        if not sentinel_dispatch.any_scanner_for(project, KIND):
+            sentinel_dispatch._no_scanner(KIND, project)  # never local: this raises ScannerUnavailable
+
+        def dispatch(project_, target, hosts_, scan_):
+            return sentinel_dispatch.dispatch_or_none(project_, KIND, target, host=','.join(hosts_)[:500], scan=scan_, priority=priority)
+    _send(project, domain, None, rows, dispatch, False, summary)
     return summary
 
 

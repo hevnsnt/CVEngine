@@ -313,7 +313,7 @@ def feed_sentinels(now=None):
         slots = sentinel_broker.total_slots()
         if not slots:
             return {'skipped': 'no live Sentinel'}
-        waiting = sentinel_broker.waiting_tasks()
+        waiting = sentinel_broker.waiting_tasks(planner=False)  # the work planner's own low-priority backlog (cveFeed.work_planner) is not first-pass work
         wanted = 2 * slots
         if waiting >= wanted:
             return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}

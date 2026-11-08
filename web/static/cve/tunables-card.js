@@ -124,4 +124,5 @@ registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
 registerTunableGroup("retention", "Data retention");
 registerTunableGroup("egress", "Outbound connections");
+registerTunableGroup("planner", "Work planner");
 registerTunableGroup("heat", "Heat policy");

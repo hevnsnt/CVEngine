@@ -315,6 +315,8 @@ def load(entries, now=None):
             assets.add(f'{h.name}:{number}')
         for address, number in _rdp_ports(h):
             assets.add(f'{address}:{number}')
+        for address, number in _ssh_ports(h):  # the ledger rows of the SSH inspection are per endpoint: without them an inspected endpoint read as never run
+            assets.add(f'{address}:{number}')
         heads.update(_norm(a.address) for a in _web_addresses(h))
     if not pids:
         return ev

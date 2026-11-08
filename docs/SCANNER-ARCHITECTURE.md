@@ -210,6 +210,10 @@ command, the status block, the reviewer's `local_share` check, the per-hour fall
 `CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR`) and the fallback warning of the egress status are removed (migration `agentapi.0019_drop_scanner_fallback`
 drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavailable`.
 
+## Work no scan asked for (the work planner)
+
+A Sentinel task is created by a Celery job that waits for it and files its result; the dispatch (`agentapi/sentinel_dispatch.py`) has no queue of its own. Every producer was therefore a scan stage, a host assessment or a sweep, and capacity that none of them used sat idle. The work planner (`cveFeed/work_planner.py`, [PIPELINE.md](PIPELINE.md#the-work-planner)) is one more producer, and the only one that starts from what is *due* rather than from a scan: it measures the Sentinels (`sentinel_broker.planner_capacity`), and while slots are idle it queues batches of due `ssh_probe` and `secrets_scan` units through the same stage entry points (`ssh_scan.run_for_hosts`, `secrets_scan.run_for_hosts`) on its own `planner_queue`. It adds no task kind and does not touch the contract: a Sentinel sees an ordinary `ssh_probe` or `secrets_scan` task, with priority 0 (`PLANNER_PRIORITY`), the lowest, so claims still go to validation, smoke and scan stages first. Scanning stays on Sentinels only; a kind nobody can take is not planned and its units stay due. A Sentinel that cannot run a kind (capability, policy, "Paused after repeated failures", contract version) is no capacity for it.
+
 ## Risks
 
 1. The scanner becomes a hard dependency. Addressed: a health check on its heartbeats, a watchdog restart, the status line and strip, non-fatal waiting with re-queueing (phase 4), a rollback of a new image that does not heartbeat, and the default taking kinds off the server only once the built-in scanner has enrolled (a host whose image never came up keeps scanning locally). `CVENGINE_LOCAL_FALLBACK=all` is the escape hatch.
