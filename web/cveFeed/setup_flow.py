@@ -65,7 +65,8 @@ FAMILIES = (
 )
 LOCKED_ON = ('bbot_discovery', 'discover')  # without them nothing is ever found: not offered as a choice
 HEAVY = ('nmap_full', 'nmap_udp', 'nuclei_deep', 'wpscan_thorough', 'web_screenshot', 'rdp_shot')  # off by default on a small machine
-SMALL_MEMORY_GB = 6
+SMALL_MEMORY_GB = 6  # the one threshold: a machine with less memory than this (or one whose memory cannot be read) is a small host
+HEAVY_OFF_REASON = 'heavy: off by default on this machine; turn on if you have the capacity'
 OPENVAS_COST = ('OpenVAS is a second, much heavier scanner: it needs about 4 GB of memory, 2 CPUs and 60 GB of disk on the machine that runs it, '
                 'and its first feed download takes hours. It is off unless you turn it on.')
 
@@ -86,17 +87,25 @@ def memory_gb():
     return None
 
 
+def small_host(memory=None):
+    """Whether this machine is small: under ``SMALL_MEMORY_GB`` of memory (memory that cannot be read counts as small)."""
+    memory = memory_gb() if memory is None else memory
+    return not (memory is not None and memory >= SMALL_MEMORY_GB)
+
+
 def suggested_off(memory=None):
     """The kinds switched off by default: none on a machine with enough memory, the heavy ones on a small VPS (``None`` memory counts as small)."""
-    memory = memory_gb() if memory is None else memory
-    return [] if memory is not None and memory >= SMALL_MEMORY_GB else sorted(HEAVY)
+    return sorted(HEAVY) if small_host(memory) else []
 
 
-def families_payload(off):
+def families_payload(off, default_off=()):
+    """The families as the page draws them. ``off`` is what is switched off now; ``default_off`` is what this machine switches off by default,
+    and each of those kinds carries ``off_reason`` so the page can say why."""
     from agentapi.sentinel_policy import label
-    off = set(off)
+    off, default_off = set(off), set(default_off)
     return [{'id': fid, 'title': title, 'about': about,
-             'kinds': [{'kind': k, 'label': label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY} for k in kinds]}
+             'kinds': [{'kind': k, 'label': label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY,
+                        'off_reason': HEAVY_OFF_REASON if k in HEAVY and k in default_off else ''} for k in kinds]}
             for fid, title, about, kinds in FAMILIES]
 
 
@@ -755,7 +764,8 @@ def view(request):
         'seed': {'org': (data.get('org') or {}).get('name') or '', 'project': (data.get('project') or {}).get('name') or '', 'domain': data.get('domain') or ''},
         'plan': plan, 'plan_chosen': 'plan' in (data.get('steps') or {}),
         'builtin': builtin_state(),
-        'families': families_payload(off), 'suggested_off': suggested_off(), 'memory_gb': memory_gb(),
+        'families': families_payload(off, suggested_off()), 'suggested_off': suggested_off(), 'memory_gb': memory_gb(),
+        'small_host': small_host(), 'heavy_off_reason': HEAVY_OFF_REASON if small_host() else '',
         'openvas': {'enabled': ov_enabled, 'where': ov_where, 'cost': OPENVAS_COST},
         'enrollments': enrollments_state(row),
         'notify': {'slack': bool(note and note.slack_hook_url), 'discord': bool(note and note.discord_hook_url)},
