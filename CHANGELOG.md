@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased (1.4)
 
+### Fixed
+
+- **Pages no longer flash unstyled content with a giant black glyph while the stylesheet loads.** Every inline icon now has `width` and `height`, the pages inline a small critical style (the icon stroke/size, background and text colour, the skip link, the rail width) before the stylesheet, and nginx serves hash-versioned `/staticfiles/` URLs with `Cache-Control: public, max-age=31536000, immutable` (any other URL keeps `no-cache`), so a second navigation fetches no stylesheet or script from the network.
+
 ### Added
 
 - **The About page is rebuilt to read at any width.** It now runs in the order: product card, what runs where (Server, Sentinel, OpenVAS add-on), a grouped software inventory (name, version, license, purpose; collapsible groups, a filter box, expanded when scripts are off), data sources and services with whether each is optional, licenses, contributors, and the reNgine credit last. Tables wrap instead of widening the page (no horizontal scroll from 390 to 1920 px), the page no longer shows the scanner status strip, and a test fails when an inventory row has no license or purpose.
