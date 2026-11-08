@@ -70,6 +70,10 @@ class SystemStatusTests(TestCase):
 		_, cls.t_root = create_token(cls.root, 'root')
 
 	def setUp(self):
+		# the conductor's last round lives in Redis too, which no test rolls back: an earlier test's round must not read as a stalled conductor here
+		patch = mock.patch('cveFeed.conductor.last_round', return_value={'at': timezone.now().isoformat(), 'depth': 3, 'started': 0, 'skipped': 'nothing is due'})
+		patch.start()
+		self.addCleanup(patch.stop)
 		# the egress ledger lives in Redis, which a test database does not roll back: Sentinel tasks that fell back to local execution in
 		# earlier tests of this run must not make this instance look unhealthy (tests.test_local_egress covers that problem line)
 		from tests.test_local_egress import _clear
@@ -330,6 +334,10 @@ class SystemStatusTests(TestCase):
 
 class WorkConductorStatusTests(TestCase):
 	def setUp(self):
+		# the conductor's last round lives in Redis too, which no test rolls back: an earlier test's round must not read as a stalled conductor here
+		patch = mock.patch('cveFeed.conductor.last_round', return_value={'at': timezone.now().isoformat(), 'depth': 3, 'started': 0, 'skipped': 'nothing is due'})
+		patch.start()
+		self.addCleanup(patch.stop)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		org = Org.objects.create(name='W', slug='w')
 		self.project = Project.objects.create(name='W', slug='ws', insert_date=NOW, org=org)
