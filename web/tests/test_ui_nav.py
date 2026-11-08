@@ -82,7 +82,7 @@ class ShellTests(TestCase):
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/suppliers/'))], ['Hosts', 'Targets', 'Graph', 'Secrets', 'Third parties'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/activity/'))], ['Scans', 'Activity'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/graph/'))][:3], ['Hosts', 'Targets', 'Graph'])
-		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Health', 'Sentinels', 'Integrations'])
+		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Health', 'Sentinels'])
 		self.assertEqual(tabs(self.get(self.root, '/cve/?skip=1')), [])  # Overview has no siblings
 
 	def test_the_current_page_marks_its_entry_in_the_rail(self):
@@ -104,16 +104,17 @@ class ShellTests(TestCase):
 		html = self.get(self.analyst, '/cve/alpha/hosts/')
 		index = html[html.index('id="nav-index"'):html.index('id="sheet-scrim"')]
 		for label in ('Findings', 'CVE matches', 'Config checks', 'Changes', 'Targets', 'Asset graph', 'Secrets', 'Third parties', 'Activity',
-					'Sentinels', 'API tokens and MCP', 'CVE catalog'):
+					'Sentinels', 'CVE catalog'):
 			self.assertIn(f'data-nav="{label}"', index)
+		self.assertIn('data-nav="API keys"', html)  # the account menu's own item: the palette reads every data-nav on the page
 
 	def test_account_menu_is_role_aware(self):
 		def menu(user):
 			html = self.get(user, '/cve/about/')
 			return re.findall(r'<a data-nav="([^"]+)"', html[html.index('<details class="acct">'):html.index('</aside>')])
-		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'Help'])
-		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'Help'])
-		self.assertEqual(menu(self.analyst), ['My account', 'Help'])
+		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'API keys', 'Help'])
+		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'API keys', 'Help'])
+		self.assertEqual(menu(self.analyst), ['My account', 'API keys', 'Help'])
 
 	def test_the_project_sentinels_tab_only_appears_for_a_project_that_has_one(self):
 		from unittest import mock
