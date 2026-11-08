@@ -22,19 +22,19 @@ PREAMBLE = (
 
 # What a strong justification is, said once and used by every job that closes or keeps a finding.
 STRONG_JUSTIFICATION = (
-    'A strong justification names the specific evidence you read and says why it does or does not support the claim. '
+    'A strong justification names the specific evidence you read and says why it does or does not support the finding. '
     'If the evidence is not enough to decide, say so and leave the finding open.')
 
 REVIEW_TASK_TRIAGE = (
     'Your task: as a vulnerability analyst, review this finding and validate that it is correct. If it is a false positive, close it '
     'with a strong justification: answer likely_false_positive or not_applicable and, in "reason", ' 
-    'name the specific evidence you read and why it does not support the claim. If the evidence is not enough to decide, say so and '
+    'name the specific evidence you read and why it does not support the finding. If the evidence is not enough to decide, say so and '
     'answer needs_validation, which leaves the finding open.')
 
 REVIEW_TASK_REVIEWER = (
     'Your task: as a vulnerability analyst, review this finding and validate that it is correct. If it is a false positive, close it '
     'with a strong justification: answer false_positive and, in the note, name the specific evidence you read and why it does not '
-    'support the claim. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
+    'support the finding. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
 
 TASKS = {
     'nuclei_tag_selection': (

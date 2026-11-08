@@ -9,7 +9,7 @@ PREAMBLE = (
 REVIEW_TASK = (
     'Your task: as a vulnerability analyst, review this finding and validate that it is correct. If it is a false positive, close it '
     'with a strong justification: answer false_positive and, in the note, name the specific evidence you read and why it does not '
-    'support the claim. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
+    'support the finding. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
 OPS_TASK = (
     'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server.')
 
