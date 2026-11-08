@@ -159,11 +159,11 @@ class DetailApi(Base):
         row.save()
         d = secrets_api.get_secret(self.ctx(self.member), self.project.slug, row.pk)
         self.assertIn('Context not stored', d['occurrence_list'][0]['context_note'])
-        self.assertIn('scanner reported the line number', d['occurrence_list'][0]['context_note'])
+        self.assertIn('did not send the text around the match', d['occurrence_list'][0]['context_note'])
         self.assertIn('verified active', d['explain']['validated']['words'])
         route = self.record(value=GOOGLE, rule='route:google_key', source='route', url='https://example.com/r')
         note = secrets_api.get_secret(self.ctx(self.member), self.project.slug, route.pk)['occurrence_list'][0]['context_note']
-        self.assertIn('rescan to capture', note)
+        self.assertIn('Update the Sentinel', note)
 
     def test_other_places_are_counted_and_the_list_says_where(self):
         row = self.record(url='https://example.com/a.js')

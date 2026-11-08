@@ -16,10 +16,10 @@ from agentapi.services import (ApiError, SEVERITY_NAMES, _is_all, _iso, _scoped,
 from cveFeed import secrets_catalog as catalog
 
 MAX_OCCURRENCES = 200
-CONTEXT_MISSING = {'kingfisher': 'Context not stored: the scanner reported the line number but not the text around it. Rescanning does not add it until the '
-                                 'scanner sends it.',
-                   'route': 'Context not stored, rescan to capture. A scanner that reads routes remotely does not send the text around a key; a read '
-                            'the server makes itself does.'}
+CONTEXT_MISSING = {'kingfisher': 'Context not stored: the Sentinel that read this page did not send the text around the match (it is older than the one that '
+                                 'does, or the line could not be cut with the value hidden). Update the Sentinel, then rescan.',
+                   'route': 'Context not stored: the scanner that read this route did not send the text around the key (an older Sentinel, or the line could not '
+                            'be cut with the value hidden). Update the Sentinel, then rescan.'}
 CONTEXT_MISSING_DEFAULT = 'Context not stored, rescan to capture.'
 STATUS_ACTIONS = ('public_by_design', 'false_positive', 'accepted')  # the buttons of the detail view, each one a person's decision (set_secret_status)
 FILTER_STATUSES = ('open', 'quiet', 'all') + catalog.STATUSES

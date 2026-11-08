@@ -301,26 +301,63 @@ CLASS_EXPLAIN = {
 SOURCE_WORDS = {'kingfisher': 'Kingfisher scan of the page and its scripts', 'route': 'route read (the web route check read this page)',
                 'nuclei': 'Nuclei token template', 'bbot': 'bbot discovery module'}
 MAX_CONTEXT = 300
+MAX_CONTEXT_SENT = 400  # what a Sentinel may send (the contract's maxLength); a correct one sends at most 200
 CONTEXT_WIDTH = 80  # characters kept either side of the value
-_CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+_NOT_TEXT = frozenset({'Cc', 'Cf', 'Cs', 'Co', 'Cn'})  # control, format (a right-to-left override, a zero-width joiner), surrogate, private use, unassigned
+
+
+def _chars(text):
+    """``text`` with its control and format characters as spaces (a tab and a line break stay, so a value of several lines is still found in it)."""
+    import unicodedata
+    return ''.join(' ' if unicodedata.category(c) in _NOT_TEXT and c not in '\t\n' else c for c in text)
+
+
+def clean_context(raw):
+    """The context a scanner sent, typed and bounded: a string of at most ``MAX_CONTEXT_SENT`` characters whose control and format characters are
+    spaces. ``''`` for anything else (not a string, too long): the finding is kept, the context is not. It is not yet safe to show: ``mask_context``
+    does that, with the finding's value in hand (``secrets_inventory.record``)."""
+    return re.sub(r'\s+', ' ', _chars(raw)).strip() if isinstance(raw, str) and len(raw) <= MAX_CONTEXT_SENT else ''
+
+
+# A run of letters and digits that holds both and is long enough to be a key, a token or a hash: masked even when no detector knows its provider.
+# The same rule as the Sentinel's (``cvengine_scanner.context.mask_runs``): a context that arrives already masked is left exactly as it is.
+_RUN = re.compile(r'(?<![A-Za-z0-9])[A-Za-z0-9]{24,512}(?![A-Za-z0-9])')
+
+
+def mask_runs(text):
+    def sub(match):
+        run = match.group(0)
+        return f'\u2026[redacted {len(run)} chars, token]' if re.search(r'[0-9]', run) and re.search(r'[A-Za-z]', run) else run
+    return _RUN.sub(sub, text)
+
+
+def _unmasked_shape(text, needle):
+    """Whether ``text`` still holds a run of the shape of ``needle``: its public prefix (or its first four characters), then token characters, for most of
+    its length. A mask never does (an ellipsis follows the prefix); a value a scanner failed to hide, or hid only in part, does."""
+    if len(needle) < 12:
+        return False
+    found = _PREFIXES.match(needle)
+    head = found.group(0) if found and len(found.group(0)) <= 12 else needle[:4]
+    least = max(12, int(len(needle) * 0.6))
+    return any(len(run) >= least for run in re.findall(re.escape(head) + r'[A-Za-z0-9_+/=.-]*', text))
 
 
 def mask_context(context, value, kind=''):
-    """``context`` (text around a secret) with ``value`` replaced by its mask, every other well-known secret shape redacted, control characters
-    removed and the length clipped. The only form of context anything stores or shows. Returns ``''`` when ``value`` could still be read in the result
-    (a variant this function does not know): a snippet that cannot be proved clean is not kept."""
+    """``context`` (text around a secret) with ``value`` replaced by its mask, every other secret-looking token masked, control characters removed and
+    the length clipped. The only form of context anything stores or shows. Returns ``''`` when ``value`` could still be read in the result (a variant
+    this function does not know), or something of its shape is still there: a snippet that cannot be proved clean is not kept."""
     from cveFeed import secret_redaction
-    text = _CONTROL.sub(' ', str(context or ''))
+    text = _chars(str(context or '')[:20000])
     needle = normalise(value)
     if needle:
         masked = mask(needle, kind)
         for variant in dict.fromkeys((needle, needle.replace('/', '\\/'), needle.replace('\\', '\\\\'), needle.replace('"', '\\"'))):
             text = text.replace(variant, masked)
-    text = secret_redaction.redact_text(text)
+    text = mask_runs(secret_redaction.redact_text(text))
     shown = mask(needle, kind) if needle else ''  # words of the mask itself (a PEM header) are no leak
-    if needle and (needle in text or any(piece in text and piece not in shown
-                                          for piece in (needle[i:i + 12] for i in range(0, max(1, len(needle) - 11), 4)))):
-        return ''  # the value, or a piece of 12 characters of it, is still readable: a snippet that cannot be proved clean is not kept
+    if needle and (needle in text or _unmasked_shape(text, needle)
+                   or any(piece in text and piece not in shown for piece in (needle[i:i + 12] for i in range(0, max(1, len(needle) - 11), 4)))):
+        return ''  # the value, a piece of 12 characters of it, or a run of its shape is still readable: a snippet that cannot be proved clean is not kept
     return re.sub(r'\s+', ' ', text).strip()[:MAX_CONTEXT]
 
 
