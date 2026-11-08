@@ -38,7 +38,11 @@ def _compute(now):
     if not off:
         return _empty()
     offered, denied, live_pks = set(), set(), set()
+    cooling = {}  # kind -> the live Sentinel that has it and is withholding it after repeated failures
     for eff in sentinel_broker._live_scanners(now):
+        for kind, info in (getattr(eff, 'withheld', None) or {}).items():
+            if kind in (eff.agent.capabilities or []) and (kind not in cooling or info['retry_at'] > cooling[kind][1]['retry_at']):
+                cooling[kind] = (eff.agent, info)
         offered |= eff.caps if eff.builtin else eff.caps - set(sentinel_broker.BUILTIN_KINDS)  # only the built-in scanner takes those
         live_pks.add(eff.agent.pk)
         # a kind it has (declared, or turned off on its machine) and its policy turns off
@@ -59,12 +63,27 @@ def _compute(now):
                 declared[kind] = last_seen
     heard = [t for k, t in declared.items() if t is not None]
     out = {'offline': True, 'kinds': kinds, 'never_seen': [k for k in kinds if k not in ever]}
-    disabled = [k for k in kinds if k in denied and k not in away]
+    paused = {k: _paused_row(k, *cooling[k]) for k in kinds if k in cooling}  # online, but this kind failed three times running and is withheld for a while
+    disabled = [k for k in kinds if k in denied and k not in away and k not in paused]
+    if paused:
+        out['cooling'] = paused
     if disabled:
         out['disabled'] = disabled
     if heard:
         out['since'] = max(heard).isoformat()
     return out
+
+
+ERROR_SHOWN = 140
+
+
+def _paused_row(kind, agent, info):
+    """``{'retry_at', 'failures', 'sentinel', 'error'}`` of a kind a live Sentinel withholds after repeated failures: the time of the next try and the last
+    error that Sentinel reported for the kind, shortened (the whole text is on the Sentinels page)."""
+    from agentapi.models import SentinelTask
+    last = (SentinelTask.objects.filter(agent=agent, kind=kind, status='failed').exclude(error='').order_by('-finished_at').values_list('error', flat=True)[:1])
+    error = ' '.join(str(last[0]).split())[:ERROR_SHOWN] if last else ''
+    return {'retry_at': info['retry_at'].isoformat(), 'failures': info['failures'], 'sentinel': agent.name, 'error': error}
 
 
 def tailscale_enabled():
@@ -153,6 +172,24 @@ def _words(kinds):
     return ', '.join(sentinel_policy.label(k) for k in kinds)
 
 
+def paused_sentence(kinds, rows):
+    """The sentence for kinds a live Sentinel withholds after repeated failures: the scanner is online, nothing is offline, and the time of the next try is in
+    UTC here (the page rewrites it into the viewer's own zone, ``scannerbar.js``). The last error is shortened; the Sentinels page has it whole."""
+    from datetime import datetime, timezone as tz
+    times = []
+    for k in kinds:
+        try:
+            times.append(datetime.fromisoformat(rows[k]['retry_at']))
+        except (KeyError, ValueError, TypeError):
+            pass
+    when = f' at {min(times).astimezone(tz.utc).strftime("%H:%M")} UTC' if times else ' shortly'
+    text = (f'Paused after repeated failures: {_join(kinds)}. The scanner is online; it retries{when} and the last error is on the Sentinels page.')
+    errors = [f'{k}: {rows[k]["error"]}' for k in kinds if rows.get(k, {}).get('error')]
+    if errors:
+        text += f' Last error, {errors[0]}'
+    return text
+
+
 def messages(snapshot=None):
     """The sentences the interface and the status show, ``{'offline': str|None, 'never_seen': str|None}``, and ``'disabled'`` when a kind is turned off. The
     first names the kinds that are waiting for a scanner that was set up before (it reconnects and the work resumes); the second the kinds no scanner was ever
@@ -160,14 +197,17 @@ def messages(snapshot=None):
     to bring back)."""
     snapshot = state() if snapshot is None else snapshot
     never = [k for k in snapshot.get('never_seen', [])]
-    disabled = [k for k in snapshot.get('disabled', []) if k not in never]
-    waiting = [k for k in snapshot.get('kinds', []) if k not in never and k not in disabled]
+    paused = [k for k in snapshot.get('cooling', {}) if k in snapshot.get('kinds', [])]
+    disabled = [k for k in snapshot.get('disabled', []) if k not in never and k not in paused]
+    waiting = [k for k in snapshot.get('kinds', []) if k not in never and k not in disabled and k not in paused]
     out = {
         'offline': (f'Scanner offline: {_join(waiting)} work is waiting. Nothing has failed; it resumes automatically when a scanner reconnects.'
                     if waiting else None),
         'never_seen': (f'No scanner has ever registered for {_join(never)}, and this server runs none of them: '
                        'nothing of that kind will run until one does.' if never else None),
     }
+    if paused:
+        out['cooling'] = paused_sentence(paused, snapshot['cooling'])
     if disabled:
         out['disabled'] = (f'{_words(disabled)} {"is" if len(disabled) == 1 else "are"} turned off on every Sentinel that has '
                            f'{"it" if len(disabled) == 1 else "them"}. Nothing has failed; the work stays due until one is turned back on (Sentinels page, Settings).')
@@ -187,8 +227,11 @@ def status(admin=True, snapshot=None):
         snapshot['never_seen'] = []
         snapshot['offline'] = bool(snapshot['kinds'])
         text['never_seen'] = None
-    snapshot['messages'] = [t for t in (text['offline'], text.get('disabled'), text['never_seen']) if t]
+    if not admin and snapshot.get('cooling'):
+        snapshot['cooling'] = {k: v for k, v in snapshot['cooling'].items() if k in snapshot['kinds']}
+    snapshot['messages'] = [t for t in (text['offline'], text.get('cooling'), text.get('disabled'), text['never_seen']) if t]
     snapshot['message'] = text['offline']
+    snapshot['cooling_message'] = text.get('cooling')
     snapshot['disabled_message'] = text.get('disabled')
     snapshot['never_seen_message'] = text['never_seen']
     return snapshot
