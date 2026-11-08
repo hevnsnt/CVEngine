@@ -26,6 +26,8 @@ import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 import { secretsPage } from "/staticfiles/cve/secrets.js";
+import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
@@ -3196,7 +3198,7 @@ const pages = {
     side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
-    let hostTab = "overview";
+    let hostTab = new URLSearchParams(location.search).get("tab") || "overview"; // ?tab=web: a link from a score line opens that tab
     let current = null;
 
     const kv = (k, v) => {
@@ -3643,24 +3645,27 @@ const pages = {
       }
       OV.main.prepend(surfaceCard(h, () => openTab("services")));
       OV.main.append(why);
-      // the score is the sum of these lines, so it can be checked rather than trusted
+      // the score is the sum of these lines, so it can be checked rather than trusted: every line says what it is, where and why it scores,
+      // and links to the evidence behind it (a stored line without a link still shows its label and points)
       if (h.score_detail && h.score_detail.length) {
-        const scoreBox = el("div", "why");
+        const scoreBox = el("div", "why score-why", null, { id: "score" });
         scoreBox.append(el("h3", "sec", `Why the score is ${h.score}`));
-        h.score_detail.forEach((d) => {
-          const line = el("div", "find");
-          // a line that cites a CVE match or a finding opens that item's page (the same links as the colour reasons above)
-          const hit =
-            reasons.find((r) => r.id && r.label && d.label.includes(r.label)) ||
-            (/CVE match/.test(d.label) ? reasons.find((r) => r.id && r.finding === "match") : null);
-          line.append(
-            hit
-              ? el("a", "", d.label, { href: `/cve/${encodeURIComponent(projectOf(h))}/${hit.finding === "match" ? "matches" : "vulns"}/#${hit.id}` })
-              : el("span", "", d.label),
-            el("span", "note mono", `+${d.points}`),
-          );
-          scoreBox.append(line);
-        });
+        scoreBox.append(
+          scoreList(h.score_detail, { slug: projectOf(h), host: h.host }, {
+            score: h.score,
+            // a line that points at a tab of this very page opens it in place
+            onOpen: (l) => {
+              if (l.ref && l.ref.type === "secret" && l.ref.id) {
+                openSecret(projectOf(h), l.ref.id);
+                return true;
+              }
+              if (!l.ref || l.ref.type !== "host_tab" || !(l.ref.tab in S)) return false;
+              openTab(l.ref.tab);
+              pane.scrollIntoView({ block: "start" });
+              return true;
+            },
+          }),
+        );
         OV.main.append(scoreBox);
       }
       if (h.title) hdr.append(el("p", "sub", h.title));

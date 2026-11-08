@@ -420,6 +420,7 @@ def _route_answers(result, by_host, chunk):
     """``{url: result or error}`` for the routes of ``chunk`` hosts in a route_probe or route_probe_signed result."""
     reported = {row['id']: row for row in result.get('routes') or []}
     answered = {}
+    spent = bool(result.get('values_scrubbed'))  # read again after its credentials were taken and dropped: they are not asked for twice
     for host in chunk:
         for url in by_host[host]:
             row = reported.get(url)
@@ -427,10 +428,16 @@ def _route_answers(result, by_host, chunk):
                 answered[url] = RuntimeError('the scanner did not report this route')
             elif row.get('error'):
                 answered[url] = RuntimeError(row['error'])
+            elif spent and row.get('credentials'):
+                answered[url] = RuntimeError('the credentials of this answer were already filed and dropped')  # asked again later, never read as "no credential"
             else:
-                answered[url] = {'credentials': [(c['type'], c['value']) for c in row['credentials']], 'status': row['status'], 'title': row['title'],
+                answered[url] = {'credentials': [(c['type'], c['value']) for c in row['credentials']],
+                                 'credential_context': [(c.get('line'), c.get('context', '')) for c in row['credentials']], 'status': row['status'], 'title': row['title'],
                                  'content_type': row['content_type'], 'state': row['state'], 'evidence': row['evidence'],
                                  'sensitive': row['sensitive'], 'sensitive_score': row['sensitive_score'], 'fp': None, 'bytes': row['bytes']}
+    if getattr(result, 'task_id', None) and any(isinstance(a, dict) and a['credentials'] for a in answered.values()):
+        from agentapi import sentinel_broker
+        sentinel_broker.scrub_values(result.task_id)  # the values are in memory now, on their way to the inventory: the task row does not keep them
     return answered
 
 

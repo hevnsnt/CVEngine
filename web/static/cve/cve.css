@@ -2170,3 +2170,51 @@ section.internal[hidden]{display:none}
 .cvx-refs li{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
 .cvx-refs a{min-width:0;overflow-wrap:anywhere;color:var(--ink-2)}
 @media (max-width:639px){.cvx-form{padding:10px}.cvx-filters{width:100%}.cvx-filters select{flex:1}.cvx-open{padding:12px 14px 12px 17px}.cvx-head,.cvx-pager{padding:12px 14px}}
+
+/* ---- score detail: every contributor of a score, with its points, a plain sentence and a link to the evidence ---- */
+.score-lines{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.score-line{display:grid;grid-template-columns:44px minmax(0,1fr);gap:4px 12px;padding:12px 0;border-top:1px solid var(--line)}
+.score-line:first-child{border-top:0}
+.score-pts{font:600 13px/1.4 var(--mono);font-variant-numeric:tabular-nums;color:var(--ink);text-align:right}
+.score-line.zero .score-pts{color:var(--faint)}
+.score-label{font:500 14px/1.4 var(--font);color:var(--ink);overflow-wrap:anywhere}
+a.score-label{text-decoration:underline;text-decoration-color:var(--line-2);text-underline-offset:3px}
+a.score-label:hover{text-decoration-color:var(--ink)}
+.score-text{margin:2px 0 0;font-size:13px;line-height:1.5;color:var(--muted);max-width:68ch}
+.score-more{border-top:1px solid var(--line);padding-top:8px}
+.score-more>summary{cursor:pointer;font:500 13px var(--font);color:var(--ink-2);padding:6px 0}
+.score-total{margin:8px 0 0;padding-top:12px;border-top:1px solid var(--ink);font-size:13px;color:var(--muted)}
+.score-total b{color:var(--ink);font-size:14px}
+.score-detail a:focus-visible,.score-detail summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:var(--r-s)}
+@media (max-width:480px){.score-line{grid-template-columns:36px minmax(0,1fr);gap:4px 8px}}
+.map-tip .tip-sum{margin-top:6px;padding-top:5px;border-top:1px solid var(--line);font:600 11.5px var(--mono);color:var(--ink)}
+.map-tip .tip-hint{margin-top:3px;font-size:11px;color:var(--faint)}
+.score-dlg .score-detail{margin-top:8px}
+.strip .sev-rest .hy-dot{background:var(--clean)}
+.strip #s-coverage_note:empty{display:none}
+
+/* ---- secret detail: a side panel on a desktop, a sheet on a phone ---- */
+.side-panel .dlg-body{display:flex;flex-direction:column;gap:4px}
+.sd-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 8px}
+.sd-mask{font:600 14px var(--mono);padding:2px 8px;border-radius:var(--r-s);background:var(--sunk);color:var(--ink);overflow-wrap:anywhere}
+.sd-section{padding:14px 0;border-top:1px solid var(--line)}
+.sd-section>h3{font:600 14px var(--font);margin:0 0 6px;letter-spacing:0}
+.sd-section p{margin:0 0 6px;font-size:14px;line-height:1.55;max-width:68ch}
+.sd-places{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:12px}
+.sd-place{padding:10px 12px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface-2)}
+.sd-url{font:500 13px/1.4 var(--mono);overflow-wrap:anywhere;color:var(--ink)}
+.sd-meta{margin:4px 0 0!important;font-size:12px!important}
+.sd-context{margin:8px 0 0;padding:8px 10px;border-radius:var(--r-s);background:var(--sunk);font:12.5px/1.5 var(--mono);color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;max-height:9em;overflow:auto}
+.sd-nocontext{margin:8px 0 0!important;font-size:12.5px!important}
+.sd-more>summary{cursor:pointer;font:500 13px var(--font);padding:8px 0}
+.sd-buttons{display:flex;gap:8px;flex-wrap:wrap}
+.sd-help{min-height:1.4em;margin:8px 0!important;font-size:12.5px!important}
+.sd-assign{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.side-panel a:focus-visible,.side-panel button:focus-visible,.side-panel summary:focus-visible,.side-panel select:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.side-panel h2:focus{outline:none}
+@media (min-width:900px){
+  .dlg.side-panel{margin:0 0 0 auto;width:min(600px,100vw);height:100dvh;max-height:100dvh;border-radius:0;border:0;border-left:1px solid var(--ink)}
+  .dlg.side-panel[open]{animation:none}
+}
+.sd-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.sd-top>h2{margin:0}
