@@ -147,6 +147,32 @@ class QueuedExpiryTests(SentinelBase):
         self.assertIn('waited in the queue', old.error)
         self.assertIsNotNone(old.finished_at)
 
+    def test_a_sweep_that_expires_many_writes_one_summary_row_with_counts_by_kind(self):
+        from dashboard.models import AuditLog
+        for _ in range(30):
+            self.queue('nmap', age=timedelta(minutes=30))
+        for _ in range(5):
+            self.queue('http_probe', age=timedelta(minutes=30))
+        young = self.queue('nmap', age=timedelta(minutes=1))
+        self.assertEqual(sb.reap_expired(), 35)
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire').count(), 0)  # not one row per task
+        row = AuditLog.objects.get(action='sentinel.task.expire_sweep')
+        self.assertEqual(row.detail['count'], 35)
+        self.assertEqual(row.detail['by_kind'], {'nmap': 30, 'http_probe': 5})
+        self.assertEqual(row.detail['by_reason'], {'no Sentinel took the task while it waited in the queue': 35})
+        self.assertEqual(len(row.detail['task_ids']), sb.SWEEP_SAMPLE)  # a sample, never the whole backlog
+        self.assertEqual(SentinelTask.objects.filter(status='expired').count(), 35)
+        young.refresh_from_db()
+        self.assertEqual(young.status, 'queued')
+        self.assertEqual(sb.reap_expired(), 0)  # nothing left: no empty summary row
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire_sweep').count(), 1)
+
+    def test_a_dispatchers_own_expiry_still_audits_that_task(self):
+        from dashboard.models import AuditLog
+        task = self.queue()
+        sb.expire(task, 'the dispatch wait timed out')
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire', detail__task_id=task.pk).count(), 1)
+
     def test_the_budget_is_the_dispatchers_own_queue_budget_plus_a_grace(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_QUEUE_TIMEOUT': '1200'}):
             task = self.queue(age=timedelta(minutes=20))  # inside 1200 s + 5 min

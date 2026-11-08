@@ -1412,20 +1412,26 @@ def waiting_q():
     return Q(status='expired') & q
 
 
-def expire(task, reason=None, actor=None):
-    """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
-    caller left the targets due (no kind runs on this server), so this
-    task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``)."""
-    if reason is None:
-        from agentapi import sentinel_dispatch
-        reason = f'the dispatch wait timed out; {sentinel_dispatch.outcome_text(task.kind)}'
-    now = timezone.now()
+def _end_as_expired(task, reason, now):
+    """Mark an active task expired (nothing else: no audit row). True when this call won it, False when another call changed it first."""
     won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
         status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, **_scrubbed(task))
     if won:
+        _ended(task, task.agent_id)
+    return bool(won)
+
+
+def expire(task, reason=None, actor=None):
+    """Hand a dispatched task back when nobody finished it in time: marked ``expired`` (not re-queued, not failed: the
+    caller left the targets due (no kind runs on this server), so this
+    task's work is simply over), its lease cleared. Also the fate of a task whose Sentinel stopped heartbeating mid-run (see ``reap_expired``).
+    One audit row for this task; a sweep that expires many (``reap_expired``) writes one summary row instead."""
+    if reason is None:
+        from agentapi import sentinel_dispatch
+        reason = f'the dispatch wait timed out; {sentinel_dispatch.outcome_text(task.kind)}'
+    if _end_as_expired(task, reason, timezone.now()):
         audit.record(actor, 'sentinel.task.expire', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=task.agent_id,
                      trace_id=task.trace_id, reason=reason)
-        _ended(task, task.agent_id)
     task.refresh_from_db()
     return task
 
@@ -1448,8 +1454,29 @@ def reap_expired(now=None):
     stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
              | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
     expired = SentinelTask._base_manager.filter(Q(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now) | stale).select_related('project')[:CANDIDATES]
-    return sum(bool(expire(t, 'the lease expired without a report' if t.status != 'queued' else 'no Sentinel took the task while it waited in the queue'))
-               for t in list(expired))
+    ended = {}  # org id -> [(task, reason)]
+    for task in list(expired):
+        reason = 'the lease expired without a report' if task.status != 'queued' else 'no Sentinel took the task while it waited in the queue'
+        if _end_as_expired(task, reason, now):
+            ended.setdefault(task.project.org_id, []).append((task, reason))
+    _audit_sweep(ended)
+    return sum(len(v) for v in ended.values())
+
+
+SWEEP_SAMPLE = 20  # task ids named in a sweep's summary row: enough to find the tasks, never a row the size of the sweep
+
+
+def _audit_sweep(ended):
+    """One audit row per organization for a whole sweep, not one per task: a backlog of tens of thousands of stale queued tasks (a Sentinel that
+    was away for a day) would otherwise write tens of thousands of rows in a minute. The row carries the counts by kind and by reason, and
+    the first ``SWEEP_SAMPLE`` task ids; every task itself keeps its own ``error`` and ``finished_at``."""
+    for org_id, items in ended.items():
+        by_kind, by_reason = {}, {}
+        for task, reason in items:
+            by_kind[task.kind] = by_kind.get(task.kind, 0) + 1
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        audit.record(None, 'sentinel.task.expire_sweep', f'{len(items)} task(s) expired', org=org_id, count=len(items), by_kind=by_kind,
+                     by_reason=by_reason, task_ids=[t.pk for t, _ in items[:SWEEP_SAMPLE]])
 
 
 def release_agent_tasks(agent, reason, actor=None):
