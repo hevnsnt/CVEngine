@@ -35,7 +35,7 @@ class ListViewportTests(SimpleTestCase):
 
 	def test_the_rows_are_not_a_scroll_box_inside_the_column(self):
 		self.assertIn('.split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}', CSS)
-		self.assertRegex(CSS, r'@media \(min-width:900px\)\{\s*\.split>\.split-list\{overflow-y:auto;[^}]*height:calc\(100dvh - var\(--bar\) - 8px\)\}')
+		self.assertRegex(CSS, r'\.split>\.split-list\{overflow-y:auto;[^}]*height:var\(--fit,calc\(100dvh - var\(--bar\) - var\(--s-2\)\)\)\}')
 		self.assertIn('.split>.split-list>.list-head{position:sticky;', CSS)
 		self.assertIn('.list-head .filters-pop{position:absolute;', CSS)  # over the rows, not pushing them
 
@@ -54,3 +54,8 @@ class ListViewportTests(SimpleTestCase):
 		self.assertIn('1366', SCRIPT)
 		self.assertIn('need = 6', SCRIPT)
 		self.assertIn('All ', SCRIPT)
+
+	def test_the_page_title_moves_beside_the_list_so_the_list_starts_under_the_top_bar(self):
+		self.assertIn('.wrap:has(#view>.split:not(.gallery)){display:grid;', CSS)
+		self.assertIn('.split>.split-list{grid-column:1;grid-row:1/span 6}', CSS.replace('.wrap:has(#view>.split:not(.gallery)) ', ''))
+		self.assertIn('side.style.setProperty("--fit"', APP)  # the column ends at the screen's bottom wherever the page is scrolled

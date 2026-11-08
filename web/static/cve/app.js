@@ -766,6 +766,19 @@ function listHead({ page, lead, panelNodes, meta }) {
   pop.addEventListener("change", later);
   // the rows scroll under this head: how tall it is says how far a row must be kept from the top when it scrolls into view
   if (window.ResizeObserver) new ResizeObserver(() => head.parentElement && head.parentElement.style.setProperty("--head-h", `${head.offsetHeight}px`)).observe(head);
+  // the column ends at the bottom of the screen wherever the page is scrolled: its top is the pinned edge once the page has scrolled past it, and
+  // wherever the page put it before that, so a row scrolled to the bottom of the column is on screen
+  const fit = () => {
+    const side = head.parentElement;
+    if (!side) return removeEventListener("scroll", fit);
+    if (!window.matchMedia("(min-width:900px)").matches) return side.style.removeProperty("--fit");
+    const bar = document.querySelector(".topbar");
+    const top = Math.max(side.getBoundingClientRect().top, (bar ? bar.offsetHeight : 56) + 4);
+    side.style.setProperty("--fit", `${Math.max(240, window.innerHeight - top - 8)}px`);
+  };
+  addEventListener("scroll", fit, { passive: true });
+  addEventListener("resize", fit);
+  requestAnimationFrame(fit);
   let was = false;
   try {
     was = localStorage.getItem(key) === "1";
@@ -2785,7 +2798,7 @@ const pages = {
           render: (t) => {
             const box = named(hostLink(t.name), t);
             // the edit sits with the name it labels (the actions column is already full)
-            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}` });
             edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
             edit.onclick = () => editLabel(t);
             box.append(el("br"), edit);
