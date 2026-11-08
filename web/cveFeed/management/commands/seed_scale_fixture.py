@@ -61,10 +61,15 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--hosts', type=int, default=3000)
         parser.add_argument('--seed', type=int, default=1)
+        parser.add_argument('--targets', type=int, default=TARGETS, help='how many targets (domains) the hosts are spread over')
+        parser.add_argument('--sentinels', type=int, default=2, help='how many Sentinel agents to create')
+        parser.add_argument('--tasks', type=int, default=400, help='how many SentinelTask rows (spread over --task-days, all finished but a small live backlog)')
+        parser.add_argument('--task-days', type=int, default=7)
+        parser.add_argument('--secrets', type=int, default=0, help='how many exposed secrets (and 2 occurrences each)')
         parser.add_argument('--history-scans', type=int, default=2, help='older scans of each target that keep a copy of every host')
         parser.add_argument('--reset', action='store_true', help='delete a previous run first')
 
-    def handle(self, *args, hosts, seed, history_scans, reset, **opts):
+    def handle(self, *args, hosts, seed, history_scans, reset, targets=TARGETS, sentinels=2, tasks=400, task_days=7, secrets=0, **opts):
         import os
         if not (os.environ.get('CVENGINE_SCALE_FIXTURE') == '1' or 'scale' in settings.DATABASES['default']['NAME']):
             raise CommandError('refusing: this writes thousands of rows; use a throwaway database named *scale* or set CVENGINE_SCALE_FIXTURE=1')
@@ -75,7 +80,7 @@ class Command(BaseCommand):
             self.reset()
         rng = random.Random(seed)
         with transaction.atomic():
-            counts = self.build(hosts, rng, history_scans)
+            counts = self.build(hosts, rng, history_scans, targets, sentinels, tasks, task_days, secrets)
         with connection.cursor() as c:
             c.execute('ANALYZE')
         self.stdout.write(self.style.SUCCESS('seeded ' + ', '.join(f'{k}={v}' for k, v in counts.items())))
@@ -96,7 +101,7 @@ class Command(BaseCommand):
         Org.objects.filter(slug=SLUG).delete()
         User.objects.filter(username__in=('scale-admin', 'scale-viewer')).delete()
 
-    def build(self, n_hosts, rng, history_scans):
+    def build(self, n_hosts, rng, history_scans, TARGETS=TARGETS, n_sentinels=2, n_tasks=400, task_days=7, n_secrets=0):
         from agentapi.models import Agent, SentinelTask
         from cveFeed.models import (AgentActivity, CVEEntry, CVEMatch, HostState, HygieneFinding, ServiceRun, StatsSnapshot, TlsCertificate,
                                     Triage)
@@ -120,7 +125,8 @@ class Command(BaseCommand):
         ProjectMembership.objects.create(user=viewer, project=project, role='audit')
         engine = EngineType.objects.get_or_create(engine_name='scale-fixture', defaults={'yaml_configuration': 'x', 'default_engine': False})[0]
 
-        domains = [Domain.objects.create(name=f't{k}.example.com', project=project, insert_date=now - timedelta(days=120)) for k in range(TARGETS)]
+        Domain.objects.bulk_create([Domain(name=f't{k}.example.com', project=project, insert_date=now - timedelta(days=120)) for k in range(TARGETS)])
+        domains = list(Domain.objects.filter(project=project).order_by('id'))
 
         # scans: history_scans older full scans, then the latest; a running and queued scan of a few targets
         gens = history_scans + 1
@@ -278,20 +284,72 @@ class Command(BaseCommand):
                           open_findings={'critical': 40, 'high': 150, 'medium': 600, 'low': 900, 'info': 3000}, cve_matches={'fire': 20, 'smoke': 200, 'ice': 900})
             for d in range(90)])
 
-        # two Sentinels with a backlog of work
+        # Sentinels (their raw bearer keys are ``cve_scalefx<i>`` padded, so a load script can call the real API) with task history
+        from agentapi import auth as agent_auth
         sentinels = []
-        for i in range(2):
-            token = ApiToken.objects.create(user=admin, name=f'scale-sentinel-{i}', key_hash=hashlib.sha256(f'scale-{i}'.encode()).hexdigest(), prefix=f'scalefx{i}')
+        for i in range(n_sentinels):
+            raw = f'cve_scalefx{i:03d}' + 'x' * 32
+            token = ApiToken.objects.create(user=admin, name=f'scale-sentinel-{i}', key_hash=agent_auth.hash_token(raw), prefix=raw[:8],
+                                            scope='sentinel')
             sentinels.append(Agent.objects.create(token=token, name=f'scale-sentinel-{i}', kind='scanner', status='active', last_seen=now,
-                                                  capabilities=['nmap', 'naabu', 'nuclei_light', 'http_probe', 'dns_resolve'], max_concurrent=4,
-                                                  scope={'projects': [SLUG]}, info={'version': '1.4.0'}))
-        tasks = []
-        for i in range(400):
-            status = pick(rng, (('done', .7), ('queued', .1), ('claimed', .05), ('running', .05), ('failed', .1)))
-            tasks.append(SentinelTask(project=project, scan=by_dom[domains[i % TARGETS].id][-1], kind=rng.choice(('nmap', 'naabu', 'nuclei_light', 'http_probe')),
-                                      host=host_defs[i % n_hosts][0], status=status,
-                                      agent=sentinels[i % 2] if status != 'queued' else None, ips=[], target={},
-                                      lease_expires_at=now + timedelta(minutes=5) if status in ('claimed', 'running') else None,
-                                      finished_at=now if status in ('done', 'failed') else None))
-        SentinelTask.objects.bulk_create(tasks)
+                                                  capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl', 'waf', 'discover', 'secrets_scan'],
+                                                  max_concurrent=4, scope={'projects': [SLUG]}, info={'version': '1.4.0'}))
+        out['sentinels'] = len(sentinels)
+        self.seed_tasks(project, sentinels, by_dom, domains, host_defs, n_tasks, task_days, rng)
+        out['sentinel_tasks'] = n_tasks
+        if n_secrets:
+            out['secrets'] = self.seed_secrets(project, domains, host_defs, n_secrets, rng, now)
         return out
+
+    def seed_tasks(self, project, sentinels, by_dom, domains, host_defs, n_tasks, days, rng):
+        """``n_tasks`` SentinelTask rows over the last ``days`` days: mostly finished, with the realistic status mix and a small live backlog.
+        One INSERT ... SELECT generate_series (a few hundred thousand rows in seconds); ``result`` is a small typed record like a Sentinel's."""
+        from agentapi.models import SentinelTask
+        table = SentinelTask._meta.db_table
+        kinds = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl', 'waf', 'discover', 'secrets_scan')
+        scan_ids = [by_dom[d.id][-1].id for d in domains]
+        agent_ids = [a.id for a in sentinels] or [None]
+        n_hosts = len(host_defs)
+        with connection.cursor() as c:
+            c.execute('create temp table _fx_scans (n int, scan_id int)')
+            c.executemany('insert into _fx_scans values (%s, %s)', [(k, sid) for k, sid in enumerate(scan_ids)])
+            c.execute('create temp table _fx_agents (n int, agent_id int)')
+            c.executemany('insert into _fx_agents values (%s, %s)', [(k, a) for k, a in enumerate(agent_ids)])
+            c.execute(f"""
+                insert into {table} (project_id, scan_id, kind, target, host, ips, priority, status, agent_id, attempts, max_attempts, lease_expires_at,
+                                     claimed_at, accepted_at, finished_at, result, error, secret_ref, secret_read_at, trace_id, partial_seq, created_by_id,
+                                     created_at, updated_at, not_before)
+                select %s, sc.scan_id, (%s::text[])[1 + t.g %% 8], jsonb_build_object('host', 'h' || (t.g %% %s) || '.example.com', 'ports', jsonb_build_array(80, 443)),
+                       'h' || (t.g %% %s) || '.t' || (t.g %% %s) || '.example.com', jsonb_build_array('192.0.2.' || (1 + t.g %% 254)), 1,
+                       st.status, case when st.status = 'queued' then null else ag.agent_id end, 1, 1,
+                       case when st.status in ('claimed', 'running') then now() + interval '5 minutes' end,
+                       case when st.status <> 'queued' then t.ts end, case when st.status in ('running', 'done', 'failed') then t.ts end,
+                       case when st.status in ('done', 'failed', 'expired') then t.ts + interval '40 seconds' end,
+                       case when st.status = 'done' then jsonb_build_object('outcome', 'done', 'ports', jsonb_build_array(jsonb_build_object('port', 80, 'service', 'http'),
+                            jsonb_build_object('port', 443, 'service', 'https')), 'notes', repeat('x', 600)) else '{{}}'::jsonb end,
+                       case when st.status = 'failed' then 'synthetic failure' else '' end, null, null, md5(t.g::text), 0, null, t.ts, t.ts, null
+                from (select g, now() - (random() * interval '{days} days') as ts, random() as r from generate_series(1, %s) g) t
+                cross join lateral (select case when t.g > %s - 60 then (array['queued', 'queued', 'claimed', 'running'])[1 + t.g %% 4]
+                                                when t.r < .78 then 'done' when t.r < .90 then 'failed' else 'expired' end as status) st
+                join _fx_scans sc on sc.n = t.g %% %s
+                join _fx_agents ag on ag.n = t.g %% %s
+                """, [project.id, list(kinds), n_hosts, n_hosts, len(domains), n_tasks, n_tasks, len(scan_ids), len(agent_ids)])
+
+    def seed_secrets(self, project, domains, host_defs, n, rng, now):
+        from cveFeed.models import SecretFinding, SecretOccurrence
+        kinds = (('aws_access_key', 'aws', 'S', 4), ('stripe_publishable', 'stripe', 'P', 1), ('github_token', 'github', 'S', 4), ('jwt', '', 'S', 2), ('google_api_key', 'google', 'P', 1))
+        rows = []
+        for i in range(n):
+            kind, provider, klass, sev = kinds[i % len(kinds)]
+            rows.append(SecretFinding(project=project, domain=domains[i % len(domains)], fingerprint=hashlib.sha256(f'fx-secret-{i}'.encode()).hexdigest(), provider=provider,
+                                      kind=kind, klass=klass, masked=f'{kind[:4]}...{i:04d}', severity=sev, status=rng.choice(('unverified', 'unverified', 'active', 'revoked')),
+                                      occurrence_count=2, host_count=2, rule_ids=[f'rule.{kind}']))
+        found = SecretFinding.objects.bulk_create(rows, batch_size=2000)
+        occ = []
+        for i, f in enumerate(found):
+            for k in range(2):
+                host = host_defs[(i * 2 + k) % len(host_defs)][0]
+                occ.append(SecretOccurrence(finding=f, project=project, domain=f.domain, host=host, url=f'https://{host}/static/app{k}.js', source='kingfisher',
+                                            rule_id=f'rule.{f.kind}', line=k + 10, context='const key = "****"'))
+        SecretOccurrence.objects.bulk_create(occ, batch_size=2000)
+        return len(found)
