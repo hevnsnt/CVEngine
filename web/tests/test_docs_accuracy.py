@@ -101,6 +101,54 @@ class EnvironmentVariableTests(SimpleTestCase):
             self.assertNotIn(f'| `{name}`', config.split('## Ignored or removed in 1.4', 1)[0])
 
 
+class OperatorNotesTests(SimpleTestCase):
+    """docs/1.4-OPERATOR-NOTES.md names only variables that exist."""
+    SENTINEL_SIDE = {'CVENGINE_SENTINEL_DENY_RANGES'}  # read by the Sentinel on its own machine (its README), not by this server
+
+    def test_every_variable_the_operator_notes_name_exists_in_the_code_or_compose(self):
+        text = doc_text('docs/1.4-OPERATOR-NOTES.md')
+        named = set(re.findall(r'\bCVENGINE_[A-Z0-9_]*[A-Z0-9]\b', text))
+        self.assertGreaterEqual(len(named), 8, 'the operator notes should name the new 1.4 variables')
+        known = EnvironmentVariableTests().read_by_the_code()
+        missing = sorted(named - known - self.SENTINEL_SIDE)
+        self.assertEqual(missing, [], f'named in docs/1.4-OPERATOR-NOTES.md but read by no code or compose file: {missing}')
+
+    def test_the_compose_and_postgres_names_exist_in_the_compose_files(self):
+        text = doc_text('docs/1.4-OPERATOR-NOTES.md')
+        compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+        for name in sorted(set(re.findall(r'\b(?:POSTGRES_[A-Z_]+|[A-Z]+_MEM_LIMIT)\b', text))):
+            self.assertIn(name, compose, f'{name} is named in the operator notes but not in docker-compose.yml')
+
+    def test_the_notes_cover_what_the_owner_asked_for(self):
+        text = doc_text('docs/1.4-OPERATOR-NOTES.md')
+        for needle in ('CVENGINE_DB_CONN_MAX_AGE', 'CVENGINE_AGENT_TASK_RETENTION_DAYS', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY', 'CVENGINE_REPORT_MAX_HOSTS',
+                       'CVENGINE_REPORT_MAX_FINDINGS', 'CVENGINE_BULK_DISCOVER_NOW', 'CVENGINE_SENTINEL_DENY_RANGES', 'POSTGRES_SHARED_BUFFERS',
+                       'Addresses we must never scan', 'BUILTIN-SCANNER.md', 'waiting for a free slot', 'Haiku', 'refusal', 'Rolling back'):
+            self.assertIn(needle, text)
+        self.assertNotIn('pin', re.sub(r'(?i)\b(?:pinned|pins|spinning)\b', '', text).lower().replace('chaining', ''), 'the scanner section must not describe pinning')
+
+    def test_the_upgrade_notes_give_the_real_migration_ranges(self):
+        text = doc_text('docs/UPGRADE.md').split('## Upgrading to 1.4', 1)[1].split('## Upgrading to 1.3', 1)[0]
+        last = {app: max(int(p.name[:4]) for p in (WEB / app / 'migrations').glob('0*.py')) for app in ('agentapi', 'cveFeed', 'dashboard')}
+        self.assertIn(f"`agentapi` 0010 to {last['agentapi']:04d}", text)
+        self.assertIn(f"`cveFeed` 0129 to {last['cveFeed']:04d}", text)
+        self.assertIn(f"`dashboard` {last['dashboard']:04d}", text)
+        self.assertIn('CONCURRENTLY', text)
+        for name in ('CVENGINE_DB_CONN_MAX_AGE', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY'):
+            self.assertIn(name, text)
+
+    def test_the_do_not_scan_editor_is_in_the_configuration_doc(self):
+        text = doc_text('docs/CONFIGURATION.md')
+        self.assertIn('**Addresses we must never scan.** Administration, Organizations', text)
+        self.assertIn('CVENGINE_DB_CONN_MAX_AGE', text)
+
+    def test_the_changelog_unreleased_names_the_1_4_changes(self):
+        text = doc_text('CHANGELOG.md').split('## Unreleased (1.4)', 1)[1].split('\n## v1.3', 1)[0]
+        for needle in ('Addresses we must never scan', 'CVENGINE_SENTINEL_DENY_RANGES', 'CVENGINE_DB_CONN_MAX_AGE', 'agentapi` 0020', 'report PDF',
+                       'waiting for a free slot', 'drop-down', 'refusal'):
+            self.assertIn(needle, text)
+
+
 class StaleClaimTests(SimpleTestCase):
     def test_no_document_says_the_server_still_runs_a_scan_tool_or_falls_back(self):
         stale = ('runs locally', 'falls back to running the tool locally', 'ran locally', 'the stage runs on the server, as before', 'always run on this server',
