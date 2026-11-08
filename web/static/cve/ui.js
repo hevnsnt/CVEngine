@@ -44,6 +44,8 @@ export function emptyState({ icon, title, body, actions = [], tone = '' }) {
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
     svg.setAttribute('class', 'empty-icon');
+    svg.setAttribute('width', '40');
+    svg.setAttribute('height', '40');
     const use = document.createElementNS(ns, 'use');
     use.setAttribute('href', `#i-${icon}`);
     svg.append(use);
@@ -188,6 +190,8 @@ export function copyButton(text, label = 'value', glyph = 'clip') {
   const NS = 'http://www.w3.org/2000/svg';
   const icon = (d) => {
     const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', '15');
+    svg.setAttribute('height', '15');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
     d.forEach((part) => {
