@@ -314,7 +314,9 @@ MODELS_FAIL_WORDS = {
 def _models_cache_key(provider, base_url, key):
     """The cache key of one list: provider, address and a hash of the key. The key itself is never part of it."""
     import hashlib
-    digest = hashlib.sha256((key or '').encode()).hexdigest()
+    from django.conf import settings
+    # a slow, salted derivation (the server's secret is the salt): the entry names a key without a dump of Redis being a way to guess it
+    digest = hashlib.pbkdf2_hmac('sha256', (key or '').encode(), f'cve-ai-models:{settings.SECRET_KEY}'.encode(), 20_000).hex()
     raw = hashlib.sha256(f'{provider}\0{(base_url or "").strip().rstrip("/").lower()}\0{digest}'.encode()).hexdigest()
     return f'cve:ai-models:{raw}'
 
