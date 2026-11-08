@@ -44,20 +44,19 @@
   .fam header{display:flex;gap:10px;align-items:center}.fam header b{font-size:15px}.fam p{margin:4px 0 8px;color:var(--muted);font-size:13.5px}
   .fam ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 14px}
   .fam li label{display:flex;gap:8px;align-items:center;font-size:13.5px}.fam li .tag{font:600 10px var(--mono);text-transform:uppercase;color:var(--muted)}
+  .fam li .why{display:block;margin:2px 0 0 26px;font-size:12px;color:var(--muted)}
+  .fam li .why[hidden]{display:none}
   .fam.vas{border-style:dashed}
   .extra{border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);padding:14px;margin:0 0 12px}
   .extra h3{margin:0 0 4px;font-size:15px;display:flex;justify-content:space-between;gap:8px}.extra h3 .st{font:600 11px var(--mono);text-transform:uppercase;color:var(--muted)}
   .extra h3 .st.done{color:var(--ok-ink)}
   .meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:0 0 8px}
   .meter span{display:block;height:100%;width:0;background:var(--brand);transition:width .6s ease}
-  .steps-list{list-style:none;margin:0 0 14px;padding:0;display:grid;gap:8px}
-  .steps-list li{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;font-size:14.5px}
-  .steps-list .g{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line-2);font:700 11px var(--mono);color:var(--muted)}
-  .steps-list li.ok .g{background:var(--ok);border-color:var(--ok);color:#fff}
-  .steps-list li.run .g{border-color:var(--brand);color:var(--brand)}
-  .steps-list small{display:block;color:var(--muted);font-size:13px}
+  .meter.indeterminate span{width:36%;transition:none;animation:meter-slide 1.6s ease-in-out infinite alternate}
+  @keyframes meter-slide{from{margin-left:0}to{margin-left:64%}}
+  @media (prefers-reduced-motion:reduce){.step{animation:none}.meter.indeterminate span{animation:none;width:100%;opacity:.5}}
+  #build-heading:focus{outline:none}#build-heading:focus-visible{outline:2px solid var(--ink);outline-offset:4px}
   .scene{width:100%;height:340px;border:1px solid var(--line);border-radius:var(--r-l);background:var(--surface);margin:0 0 14px}
-  .recent{font:12.5px var(--mono);color:var(--muted);margin:6px 0 0;word-break:break-all}
   .foot-skip{margin-top:22px;text-align:center;font-size:13px}
   .stepname{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 6px}
   .live-hint{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted);margin-top:14px}
@@ -66,7 +65,7 @@
 <body>
 <main class="wiz">
   <div class="wiz-card">
-    <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+    <a class="brand" href="/cve/" aria-label="cvENGINE FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span> <small>FieldCraft Cyber</small></a>
     <div class="dots" id="dots" aria-hidden="true"></div>
     <div class="disc" id="disc" role="status" aria-live="polite"><span class="live">live</span><span class="t" id="disc-text"></span></div>
     <div id="wizard" data-scene="{% static 'cve/maintenance.html' %}">{% csrf_token %}<div id="step"></div></div>

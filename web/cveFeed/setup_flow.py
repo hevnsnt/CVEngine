@@ -30,8 +30,7 @@ STEPS = ('seed', 'plan', 'scanners', 'extras', 'build')
 PLANS = ('internal', 'both', 'external')
 WHERES = ('internal', 'external', 'both')
 EXTRAS = ('ai', 'notify', 'timezone', 'password')
-DEFAULT_DWELL_SECONDS = 90
-ENOUGH_HOSTS = 10  # findings that end the wait early: the dashboard already has something to show
+DEFAULT_DWELL_SECONDS = 60  # the most the last wizard screen ever stays up, and only while no host has been found at all
 LIVE_WINDOW = timedelta(minutes=3)  # a Sentinel heard from this recently is live (the broker's own window)
 REQUEUE_EVERY = 30  # seconds between two tries to start a discovery that found no scanner
 MAX_ENROLLMENTS_SHOWN = 5
@@ -65,7 +64,8 @@ FAMILIES = (
 )
 LOCKED_ON = ('bbot_discovery', 'discover')  # without them nothing is ever found: not offered as a choice
 HEAVY = ('nmap_full', 'nmap_udp', 'nuclei_deep', 'wpscan_thorough', 'web_screenshot', 'rdp_shot')  # off by default on a small machine
-SMALL_MEMORY_GB = 6
+SMALL_MEMORY_GB = 6  # the one threshold: a machine with less memory than this (or one whose memory cannot be read) is a small host
+HEAVY_OFF_REASON = 'heavy: off by default on this machine; turn on if you have the capacity'
 OPENVAS_COST = ('OpenVAS is a second, much heavier scanner: it needs about 4 GB of memory, 2 CPUs and 60 GB of disk on the machine that runs it, '
                 'and its first feed download takes hours. It is off unless you turn it on.')
 
@@ -86,17 +86,25 @@ def memory_gb():
     return None
 
 
+def small_host(memory=None):
+    """Whether this machine is small: under ``SMALL_MEMORY_GB`` of memory (memory that cannot be read counts as small)."""
+    memory = memory_gb() if memory is None else memory
+    return not (memory is not None and memory >= SMALL_MEMORY_GB)
+
+
 def suggested_off(memory=None):
     """The kinds switched off by default: none on a machine with enough memory, the heavy ones on a small VPS (``None`` memory counts as small)."""
-    memory = memory_gb() if memory is None else memory
-    return [] if memory is not None and memory >= SMALL_MEMORY_GB else sorted(HEAVY)
+    return sorted(HEAVY) if small_host(memory) else []
 
 
-def families_payload(off):
+def families_payload(off, default_off=()):
+    """The families as the page draws them. ``off`` is what is switched off now; ``default_off`` is what this machine switches off by default,
+    and each of those kinds carries ``off_reason`` so the page can say why."""
     from agentapi.sentinel_policy import label
-    off = set(off)
+    off, default_off = set(off), set(default_off)
     return [{'id': fid, 'title': title, 'about': about,
-             'kinds': [{'kind': k, 'label': label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY} for k in kinds]}
+             'kinds': [{'kind': k, 'label': label(k), 'on': k not in off, 'locked': k in LOCKED_ON, 'heavy': k in HEAVY,
+                        'off_reason': HEAVY_OFF_REASON if k in HEAVY and k in default_off else ''} for k in kinds]}
             for fid, title, about, kinds in FAMILIES]
 
 
@@ -648,7 +656,7 @@ def skip_step(request):
 # --- the building screen -------------------------------------------------------------------------------------------------------------------
 
 def dwell_seconds():
-    """How long a discovery is given before the dashboard opens with nothing found yet (``CVENGINE_SETUP_DWELL_SECONDS``, default 90, 0 turns the wait off)."""
+    """The most the last screen ("Getting everything ready") stays up while no host exists yet (``CVENGINE_SETUP_DWELL_SECONDS``, default 60, 0 turns the screen off)."""
     try:
         return max(0, min(900, int(os.environ.get('CVENGINE_SETUP_DWELL_SECONDS', DEFAULT_DWELL_SECONDS))))
     except ValueError:
@@ -671,9 +679,7 @@ def progress(request, now=None):
     live = live_sentinels(now)
     if not live['builtin']:
         kick_builtin_scanner()
-    out = {'sentinel': {**live, 'builtin_state': builtin_state()}, 'discovery': None, 'dwell': {'min_seconds': dwell_seconds()}}
-    started = _parse(disc.get('started_at'))
-    elapsed = int((now - started).total_seconds()) if started else None
+    out = {'sentinel': {**live, 'builtin_state': builtin_state()}, 'discovery': None, 'build': {'seconds': dwell_seconds()}}
     found = 0
     if disc.get('scan_id'):
         scan = ScanHistory._base_manager.filter(pk=disc['scan_id']).select_related('domain').only(
@@ -691,12 +697,19 @@ def progress(request, now=None):
     if disc.get('pending') and not disc.get('scan_id'):  # held until a scanner is live: shown as queued, with no scan in the list yet
         out['discovery'] = {'scan_id': None, 'domain': disc.get('domain'), 'state': 'queued', 'hosts': 0, 'recent': [], 'queue_position': None, 'error': '',
                             'text': discovery_text('queued', disc.get('domain'), 0, False)}
-    over = elapsed is None or elapsed >= out['dwell']['min_seconds']
-    finished = bool(out['discovery'] and out['discovery']['state'] in ('done', 'ended'))
-    ready = over or found >= ENOUGH_HOSTS or finished
-    out['dwell'].update(elapsed=elapsed, ready=bool(ready), hold=not ready,
-                        reason=('' if ready else 'Discovery found nothing yet, so the dashboard would open empty: giving it a little longer.' if not found
-                                else f'Discovery has found {found} so far: giving it a little longer so the dashboard opens with more in it.'))
+    # The last screen exists only to cover a first minute with nothing to show. One host anywhere (this discovery's, or any already on the install)
+    # and there is nothing to cover: the dashboard opens at once. With none, it stays at most ``seconds``, counted from the first time this screen
+    # asked (stored, so a reload does not restart the clock), and never when no discovery was started at all (nothing is coming).
+    hosts_present = found > 0 or Subdomain._base_manager.exists()
+    expecting = bool(out['discovery'] and out['discovery']['state'] not in ('done', 'ended'))  # a discovery that already ended has nothing more coming
+    cap = out['build']['seconds']
+    since = _parse(data.get('build_started_at'))
+    if request.GET.get('build') == '1' and since is None and not hosts_present and expecting and cap:
+        since = now
+        _store(row, build_started_at=now.isoformat())
+    waited = max(0, int((now - since).total_seconds())) if since else 0
+    out['build'].update(hosts_present=hosts_present, elapsed=waited, show=bool(expecting and not hosts_present and waited < cap and cap))
+    out['discovery_scan'] = out['discovery']['scan_id'] if out['discovery'] else None
     out['next'] = next_step(data)
     out['completed'] = bool(row.completed_at)
     return out
@@ -730,7 +743,7 @@ def finish(request):
     steps = (row.data or {}).get('steps') or {}
     for step in STEPS[1:-1]:
         steps.setdefault(step, 'skipped')
-    _store(row, steps=steps)
+    _store(row, steps=steps, build_started_at=None)
     apply_scanner_policy(row, request.user, final=True)
     if not row.completed_at:
         row.completed_at, row.completed_by = timezone.now(), request.user.username
@@ -774,7 +787,8 @@ def view(request):
         'seed': {'org': (data.get('org') or {}).get('name') or '', 'project': (data.get('project') or {}).get('name') or '', 'domain': data.get('domain') or ''},
         'plan': plan, 'plan_chosen': 'plan' in (data.get('steps') or {}),
         'builtin': builtin_state(),
-        'families': families_payload(off), 'suggested_off': suggested_off(), 'memory_gb': memory_gb(),
+        'families': families_payload(off, suggested_off()), 'suggested_off': suggested_off(), 'memory_gb': memory_gb(),
+        'small_host': small_host(), 'heavy_off_reason': HEAVY_OFF_REASON if small_host() else '',
         'openvas': {'enabled': ov_enabled, 'where': ov_where, 'cost': OPENVAS_COST},
         'enrollments': enrollments_state(row),
         'notify': {'slack': bool(note and note.slack_hook_url), 'discord': bool(note and note.discord_hook_url)},
