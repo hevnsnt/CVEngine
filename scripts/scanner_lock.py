@@ -31,6 +31,7 @@ digest, so the default can never go stale); and the floor's contract version is 
 The operator who wants to hold a version sets CVENGINE_SCANNER_IMAGE in .env to a digest or tag; the update scripts then never pull over it.
 """
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -133,7 +134,11 @@ def remote_check(data):
     """The floor commit is the tip of, or behind, the Sentinel repository's main branch: ``(ok, why)``."""
     repo = re.sub(r'^https://github\.com/|\.git$', '', data['source']['repository'])
     url = f'https://api.github.com/repos/{repo}/compare/{floor_commit(data)}...main'
-    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'cvengine-scanner-lock'})
+    headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'cvengine-scanner-lock'}
+    token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+    if token:  # CI has one; it only lifts the anonymous rate limit
+        headers['Authorization'] = f'Bearer {token}'
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             status = json.load(response).get('status')

@@ -8,7 +8,7 @@
 #   cvengine_scanner_start [--no-wait] docker compose [ARGS...]
 #                                                     after celery was recreated: recreate the scanner, wait until it is healthy AND has checked in with a
 #                                                     contract version this server accepts, and put the previous image back when it does not (`make up`
-#                                                     passes --no-wait: no rollback)
+#                                                     passes --no-wait: a first start is not waited for; a changed image is still checked)
 #   cvengine_scanner_update docker compose [ARGS...]  the "Scanner update" routine for a running install (scripts/scanner-update.sh runs it): fetch,
 #                                                     then, only when the newest image is not the one running, let the scanner finish its work and start
 #                                                     the new one as above. Safe to run from cron or a timer.
@@ -187,6 +187,8 @@ cvengine_scanner_start() {
   previous_id=$(_cvengine_scanner_running_id "$@")
   previous_ref=$(_cvengine_scanner_image_of "$@")
   wanted_id=''; [ -z "$wanted" ] || wanted_id=$(_cvengine_scanner_image_id "$wanted")
+  # --no-wait is for a first start (nothing to go back to). A scanner that was running and is about to change image is always checked: that is the safety net.
+  if [ "$wait" = 0 ] && [ -n "$previous_id" ] && [ -z "$own" ] && [ "$previous_id" != "$wanted_id" ]; then wait=1; fi
   if [ -n "$previous_id" ] && [ "$wait" = 1 ]; then previous_release=$(_cvengine_scanner_release "$@"); else previous_release=''; fi
   if [ -n "$wanted" ] && [ -z "$wanted_id" ]; then
     if [ -n "$previous_id" ] && [ -z "$own" ] && docker tag "$previous_id" "$CVENGINE_SCANNER_ROLLBACK_TAG" 2>/dev/null; then

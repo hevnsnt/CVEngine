@@ -162,9 +162,9 @@ class SoftwareListTests(TestCase):
 	def test_the_list_was_read_at_the_sentinel_commit_the_server_pins(self):
 		import json
 		from cveFeed import software
-		lock = json.loads((ROOT / 'scanner.lock.json').read_text())['source']['commit']
+		lock = json.loads((ROOT / 'scanner.lock.json').read_text())['floor']['commit']
 		requirements = (ROOT / 'web' / 'requirements.txt').read_text()
-		self.assertEqual(software.SENTINEL_PINS_COMMIT, lock, 'scanner.lock.json moved: read the Sentinel pins again and update cveFeed/software.py')
+		self.assertEqual(software.SENTINEL_PINS_COMMIT, lock, 'the floor of scanner.lock.json moved: read the Sentinel pins again and update cveFeed/software.py')
 		self.assertIn(f'cvENGINE-sentinel@{lock}', requirements)
 
 	def test_the_greenbone_images_of_the_compose_file_are_on_the_list(self):
