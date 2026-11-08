@@ -34,7 +34,7 @@ certs: check-secrets	## Generate the HTTPS certificate.
 	@${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} -f docker-compose.setup.yml run --rm certs
 
 up: check-env		## Build and start all services.
-	@rm -f config/nginx/state/maintenance
+	@rm -f config/nginx/state/maintenance config/nginx/state/maintenance-failed
 	@./scripts/upgrade-postgres.sh
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	@python3 scripts/update-state.py upstream || true

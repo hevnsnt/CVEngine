@@ -13,12 +13,20 @@ SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 
 DOCKER_STUB = """#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls.log"
+# what visitors would see at this very call: the maintenance flag (and the failure flag) as the updater has left them
+echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)$([ -e config/nginx/state/maintenance-failed ] && echo +failed) docker $*" >> "$STUB_DIR/flags.log"
+# the updater is stopped by a signal (a reboot, kill) at the first call that matches
+if [ -n "${STUB_TERM_ON:-}" ] && [[ " $* " == *"$STUB_TERM_ON"* ]] && [ ! -f "$STUB_DIR/termed" ]; then touch "$STUB_DIR/termed"; kill -TERM $PPID; sleep 1; exit 143; fi
 # the updater is killed (SIGKILL, as a reboot or the OOM killer would) at the first call that matches: it is the shell running the update
 if [ -n "${STUB_KILL_ON:-}" ] && [[ " $* " == *"$STUB_KILL_ON"* ]] && [ ! -f "$STUB_DIR/killed" ]; then touch "$STUB_DIR/killed"; kill -KILL $PPID; exit 137; fi
 case " $* " in
   *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
     if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
   *" info "*) echo "$STUB_DIR";;
+  *" ps -q web "*|*" ps -q celery "*|*" ps -q celery-beat "*) if [ -f "$STUB_DIR/old_containers" ]; then echo oldcontainer; fi; exit 0;;
+  *" image inspect "*) if [ -f "$STUB_DIR/image_moved" ]; then echo sha256:new; else echo sha256:old; fi; exit 0;;
+  *" inspect -f {{.Image}} oldcontainer"*) echo sha256:old; exit 0;;
+  *" inspect -f {{.Config.Image}} oldcontainer"*) echo cvengine/web:latest; exit 0;;
   *" ps -q --status running db "*) echo dbid; exit 0;;
   *" exec dbid "*) case "$*" in *pg_dump*) if [ -f "$STUB_DIR/dump_fails" ]; then exit 1; fi
       echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
@@ -42,6 +50,7 @@ case " $* " in
   *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
   *" --force-recreate reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
   *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
+    if [ -f "$STUB_DIR/fail_build_always" ]; then exit 1; fi
     if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
     if [ -f "$STUB_DIR/fail_migrate_partial" ]; then rm -f "$STUB_DIR/fail_migrate_partial"
@@ -997,6 +1006,179 @@ class ApplyUpdateScriptTests(unittest.TestCase):
             self.assertEqual(self.run_script().returncode, 1)
         log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
         self.assertEqual(log.count('refusing: the checkout has local changes'), 1)
+
+    # --- the maintenance page goes up before anything the running containers read changes, and comes down only after a verified update ----------
+
+    def flag_lines(self):
+        log = self.stub / 'flags.log'
+        return log.read_text().splitlines() if log.exists() else []
+
+    def flag(self, name='maintenance'):
+        return (self.work / 'config' / 'nginx' / 'state' / name).exists()
+
+    def hook(self, name, body):
+        path = self.work / '.git' / 'hooks' / name
+        path.write_text('#!/usr/bin/env bash\n' + body + '\n')
+        path.chmod(0o755)
+
+    def test_the_maintenance_page_is_up_before_the_fast_forward_and_the_workers_are_stopped_first(self):
+        """./web is bind-mounted into the running containers: the moment the merge changes a file they run the new code on the old image."""
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"\n'
+                  'grep -c "stop -t 30 celery celery-beat" "$STUB_DIR/calls.log" > "$STUB_DIR/stopped_at_merge" || true')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'on')
+        self.assertEqual((self.stub / 'stopped_at_merge').read_text().strip(), '1')  # the workers read ./web too: stopped before it changed
+
+    def test_the_maintenance_page_is_up_before_the_checkout_switches_branch(self):
+        self.hook('post-checkout', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" >> "$STUB_DIR/flag_at_checkout"')
+        tip = self.develop_ahead()
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seen = (self.stub / 'flag_at_checkout').read_text().split()
+        self.assertTrue(seen and set(seen) == {'on'}, seen)
+
+    def test_the_page_stays_up_through_the_build_the_migration_and_the_swap_and_is_removed_after_verification(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        for fragment in (' build web celery celery-beat', ' migrate --noinput', ' collectstatic', '--force-recreate web', 'http.client'):
+            hits = [line for line in lines if fragment in line]
+            self.assertTrue(hits, fragment)
+            self.assertTrue(all(line.startswith('on ') for line in hits), (fragment, hits))
+        self.assertFalse(self.flag())
+        self.assertFalse(self.flag('maintenance-failed'))
+        self.assertEqual(self.phase_file().get('phase'), 'done')
+
+    def test_the_page_is_also_up_while_the_services_are_rebuilt_in_place(self):
+        """The files were pulled by hand: the running containers already read them, so there is no merge to hang the page on."""
+        self.new = self.publish_deploy_file()
+        self.git('pull', '--ff-only', cwd=self.work)
+        self.approve(self.git('rev-parse', 'HEAD', cwd=self.work))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        builds = [line for line in self.flag_lines() if ' build web celery celery-beat' in line]
+        self.assertTrue(builds and all(line.startswith('on ') for line in builds), builds)
+        self.assertFalse(self.flag())
+
+    def test_a_run_that_has_nothing_to_do_never_shows_the_page(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        before = len(self.flag_lines())
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse([line for line in self.flag_lines()[before:] if line.startswith('on')])
+
+    def test_a_flag_that_cannot_be_written_stops_the_update_before_anything_changes(self):
+        (self.work / 'config').mkdir()
+        (self.work / 'config' / 'nginx').write_text('a file where the state folder should be\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertFalse([c for c in self.calls() if ' build ' in c or ' stop ' in c])
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('maintenance page', self.phase_file().get('detail', ''))
+        self.assertFalse(self.approved())
+
+    def test_a_failed_build_with_the_old_services_untouched_restores_the_files_and_the_old_version_keeps_serving_without_a_rebuild(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'old_containers').write_text('')
+        (self.stub / 'fail_up').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertEqual((self.work / 'web' / 'README').read_text(), 'v1\n')  # the files the bind mount shows are the old ones again
+        calls = self.calls()
+        self.assertEqual(len([c for c in calls if c.endswith('build web celery celery-beat')]), 1)  # no second build
+        self.assertTrue([c for c in calls if c.endswith('start celery celery-beat') or c.endswith('start celery')])
+        self.assertFalse([c for c in calls if '--force-recreate' in c or ' migrate --noinput' in c])
+        self.assertFalse(self.flag())  # the old version is serving again: no page on it
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('Nothing was changed', self.phase_file().get('detail', ''))
+        self.assertFalse(self.approved())
+
+    def test_a_failed_build_that_moved_the_image_tag_is_put_back_by_redeploying_not_by_trusting_the_old_containers(self):
+        self.new = self.publish_deploy_file()
+        for name in ('old_containers', 'image_moved', 'fail_up'):
+            (self.stub / name).write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertEqual(len([c for c in self.calls() if c.endswith('build web celery celery-beat')]), 2)
+        self.assertFalse(self.flag())
+
+    def test_a_build_that_always_fails_and_cannot_be_put_back_leaves_the_page_saying_the_update_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('did not finish', self.phase_file().get('detail', ''))
+
+    def test_a_restart_that_keeps_failing_after_the_migration_keeps_the_page_and_says_it_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.new)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+        self.assertIn('did not finish', self.phase_file().get('detail', ''))
+
+    def test_a_restart_that_works_on_the_retry_takes_the_page_down_only_then(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.flag())
+        self.assertFalse(self.flag('maintenance-failed'))
+        recreates = [line for line in self.flag_lines() if '--force-recreate web' in line]
+        self.assertEqual(len(recreates), 2)
+        self.assertTrue(all(line.startswith('on') for line in recreates), recreates)
+
+    def test_an_updater_that_is_stopped_part_way_leaves_the_page_saying_the_update_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(STUB_TERM_ON=' migrate --noinput')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+
+    def test_an_older_apply_script_on_the_host_still_gets_the_page_before_the_build_from_the_deploy_file(self):
+        """The first update that delivers this runs the host's OLD copy of apply-update.sh up to the merge; the deploy file it then reads is new."""
+        # an older copy knows nothing about the flag: it neither sets it, nor says it owns it, nor clears it
+        text = (SCRIPTS / 'apply-update.sh').read_text()
+        for needle, repl in (('export UPDATE_OWNS_MAINTENANCE=1', ':'),
+                             ('cv_begin_maintenance() {\n', 'cv_begin_maintenance() {\n  return 0\n'),
+                             ('cv_maint_off() {', 'cv_maint_off() { return 0; }\n_unused() {'),
+                             ('cv_maint_failed() {', 'cv_maint_failed() { return 0; }\n_unused2() {')):
+            self.assertIn(needle, text)
+            text = text.replace(needle, repl, 1)
+        (self.work / 'scripts' / 'apply-update.sh').write_text(text)
+        self.git('update-index', '--assume-unchanged', 'scripts/apply-update.sh', cwd=self.work)  # the host's copy is what it is; not a local change
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        builds = [line for line in self.flag_lines() if ' build web celery celery-beat' in line]
+        self.assertTrue(builds and all(line.startswith('on ') for line in builds), builds)  # from the merge on, not after the build
+        self.assertFalse(self.flag())
 
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')

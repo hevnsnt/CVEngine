@@ -14,6 +14,12 @@
 #      commit and restarts it. Once the migration has succeeded the previous code is never put back, because it would
 #      run on the new schema: the restart is retried and, if it still fails, the approval is kept so the next run
 #      retries it. Schema migrations are never rolled back.
+#   6. the proxy shows its maintenance page from the instant the update starts changing anything the running containers can read (the
+#      checkout switching branch, the fast-forward, a rebuild in place: ./web is bind-mounted into web, celery and celery-beat), and the
+#      celery workers, beat and the scanner are stopped with it, so nothing runs half-new. The page stays through the build and the swap and is
+#      removed only after the new web service answers. When the update did not finish and the services were not yet replaced, the files
+#      go back to the previous commit and the previous version keeps serving without a rebuild; when it cannot be put back, the page says
+#      so (config/nginx/state/maintenance-failed) instead of a normal page on a mismatched build.
 # Results are retained in Git-private state and safely published to web/.update-log.
 # Needs python3, git and Docker, and a clone that can `git fetch origin`.
 #
@@ -57,6 +63,13 @@ ENV_MODE=
 cleanup() {
   local status=$?
   [ -z "$ENV_BACKUP" ] || rm -f "$ENV_BACKUP"
+  # the script ended (a command failed under set -e, a signal) with the maintenance page up and no decision about it: the files may be
+  # half changed, so the page says the update did not finish rather than "back soon"
+  if [ "${CV_MAINT_OPEN:-0}" = 1 ] && [ "$status" != 0 ]; then
+    cv_maint_failed
+    [ -z "${LOG:-}" ] || printf '%s the update stopped with the maintenance page up; it now says the update did not finish\n' "$(date -u +%FT%TZ)" >>"$LOG" 2>/dev/null || true
+    python3 "${STATE_HELPER:-scripts/update-state.py}" phase failed "the update stopped part way (see the update log); the administrator has to finish it. The maintenance page stays up until then" >>"${LOG:-/dev/null}" 2>&1 || true
+  fi
   if [ -f "$LOG" ]; then
     local helper=$STATE_HELPER
     [ -f "$helper" ] || helper=scripts/update-state.py  # the copy above is what failed
@@ -68,6 +81,8 @@ cleanup() {
   return "$status"
 }
 trap cleanup EXIT
+# a signal (the host shutting down, a kill) ends the script through the EXIT trap too, so cleanup can say the update did not finish
+trap 'exit 143' TERM HUP INT
 
 backup_env() {
   [ -f .env ] || return 0
@@ -95,6 +110,82 @@ log_once() {
   [ "$(cat "$STATE/last-refusal" 2>/dev/null)" = "$*" ] && return 0
   printf '%s' "$*" > "$STATE/last-refusal"
   log "$*"
+}
+
+# The maintenance page (see config/nginx/rengine.conf): the proxy answers 503 with web/static/cve/maintenance.html, from its own container, for as
+# long as config/nginx/state/maintenance exists, and says "the update did not finish" when config/nginx/state/maintenance-failed exists too.
+# Set BEFORE anything the running containers can read is changed, because ./web is a bind mount: the old image would run the new code. A
+# flag that cannot be written stops the update before anything changes (a page that cannot be shown is not a safe window to change files in).
+CV_MAINT_DIR=config/nginx/state
+CV_MAINT_OPEN=0
+cv_maint_on() {
+  mkdir -p "$CV_MAINT_DIR" 2>/dev/null && rm -f "$CV_MAINT_DIR/maintenance-failed" && : >"$CV_MAINT_DIR/maintenance" 2>/dev/null || return 1
+  CV_MAINT_OPEN=1
+}
+cv_maint_failed() { mkdir -p "$CV_MAINT_DIR" 2>/dev/null; : >"$CV_MAINT_DIR/maintenance" 2>/dev/null || true; : >"$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; CV_MAINT_OPEN=0; }
+cv_maint_off() { rm -f "$CV_MAINT_DIR/maintenance" "$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; CV_MAINT_OPEN=0; }
+export UPDATE_OWNS_MAINTENANCE=1  # scripts/update-deploy.sh then leaves the flag to this script (an older copy of this script does not say so, and the deploy sets and clears it itself)
+
+# What must not run while files change under it: the Celery workers and beat read ./web too (a worker process that restarts, or a task that
+# imports a module for the first time, loads the new code on the old image), and the scanner shares the workers' network namespace. Scans are
+# already paused and drained when this runs. Stopped, not killed: they are started again if the update is put back, and recreated by it otherwise.
+FROZEN=()
+freeze_background() {
+  local compose=("${COMPOSE[@]}") running svc
+  FROZEN=()
+  running=$("${compose[@]}" ps --status running --services 2>/dev/null) || running=''
+  for svc in scanner celery celery-beat; do  # the scanner first: it shares celery's network
+    grep -qx "$svc" <<<"$running" && FROZEN+=("$svc")
+  done
+  [ "${#FROZEN[@]}" -gt 0 ] || return 0
+  log "stopping ${FROZEN[*]} while the files change (the maintenance page is up; they are started again or replaced by the update)"
+  "${compose[@]}" stop -t 30 "${FROZEN[@]}" >>"$LOG" 2>&1 || log "could not stop ${FROZEN[*]} cleanly; the update goes on"
+}
+thaw_background() {
+  local compose=("${COMPOSE[@]}") svc s listed='' ok=0
+  [ "${#FROZEN[@]}" -gt 0 ] || return 0
+  for svc in celery celery-beat scanner; do  # celery first: the scanner joins its network
+    for s in "${FROZEN[@]}"; do
+      [ "$s" = "$svc" ] || continue
+      "${compose[@]}" start "$svc" >>"$LOG" 2>&1 || { ok=1; log "could not start $svc again (docker compose start $svc)"; }
+    done
+  done
+  if listed=$("${compose[@]}" config --services 2>/dev/null) && grep -qx tailscale <<<"$listed"; then
+    "${compose[@]}" restart tailscale >>"$LOG" 2>&1 || true  # it shares celery's network namespace
+  fi
+  FROZEN=()
+  return "$ok"
+}
+
+# Everything is as it was and the update did not start: nothing changed, so nothing to say; the page goes and the workers come back.
+cv_back_to_normal() { thaw_background || true; cv_maint_off; }
+
+# The very first thing an update that moves files does. Returns 1 (and changes nothing) when the page cannot be put up.
+cv_begin_maintenance() {
+  [ "$CV_MAINT_OPEN" != 1 ] || return 0
+  if ! cv_maint_on; then
+    log "refusing: could not write $CV_MAINT_DIR/maintenance, so visitors could not be shown the maintenance page while the files change (nothing was changed)"
+    return 1
+  fi
+  log "maintenance page up (visitors are told the site is being rebuilt) before the files change"
+  phase applying "maintenance page is up; stopping background work, then updating the files"
+  freeze_background
+}
+
+# Is the version that was running still the one that runs: the services up, the image each runs is still what its tag points at (a build
+# that tagged a new image did not leave the old containers on the old image with new tag waiting), and the web service answers?
+# Only then is a failed build put back by restoring the files alone.
+previous_version_intact() {
+  local compose=("${COMPOSE[@]}") svc cid have want
+  for svc in web celery celery-beat; do
+    cid=$("${compose[@]}" ps -q "$svc" 2>/dev/null | head -n1) || cid=''
+    [ -n "$cid" ] || return 1
+    have=$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null) || return 1
+    want=$(docker image inspect -f '{{.Id}}' "$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null)" 2>/dev/null) || return 1
+    [ -n "$have" ] && [ "$have" = "$want" ] || return 1
+  done
+  verify_running web celery celery-beat >/dev/null 2>&1 || return 1
+  "${compose[@]}" exec -T web python3 -c "import http.client, sys; c = http.client.HTTPConnection('127.0.0.1', 8000, timeout=5); c.request('GET', '/', headers={'Host': 'localhost'}); sys.exit(0 if c.getresponse().status < 500 else 1)" >/dev/null 2>&1
 }
 
 # The Compose layout this install runs with: every file, the env file and the project name. Recreating the containers from a different
@@ -465,6 +556,17 @@ rm -f "$STATE/last-wait" "$STATE/last-refusal" "$DRAIN_SINCE_FILE"
 
 PREV=$(git rev-parse HEAD)
 SWITCHED=0
+# From here the update changes files the running containers read (./web is a bind mount): the maintenance page goes up FIRST, before the
+# branch switch and before the fast-forward, not after the build. A run that has nothing to move (the files are already at the commit)
+# puts it up below, before it rebuilds.
+if [ "$SWITCH" = 1 ] || ! git merge-base --is-ancestor "$SHA" HEAD; then
+  if ! cv_begin_maintenance; then
+    resume_scanning
+    phase failed "could not show the maintenance page (config/nginx/state is not writable), so nothing was changed. Fix that folder's permissions, then approve again"
+    clear_approval
+    exit 1
+  fi
+fi
 if [ "$SWITCH" = 1 ]; then
   log "switching this checkout from $BRANCH to $WANT"
   phase applying "switching this server from $BRANCH to $WANT"
@@ -476,6 +578,7 @@ if [ "$SWITCH" = 1 ]; then
   else
     restore_env
     git checkout -q -f "$BRANCH" >>"$LOG" 2>&1 || true
+    cv_back_to_normal
     resume_scanning
     log "refusing: could not switch the checkout from $BRANCH to $WANT (see the lines above)"
     phase failed "could not switch this server from $BRANCH to $WANT; the update log has the git error. Fix it there or set the update branch back to $BRANCH"
@@ -495,9 +598,18 @@ if git merge-base --is-ancestor "$SHA" HEAD && [ "$BUILT" = "$PREV" ] && [ "$(de
   python3 "$STATE_HELPER" commit "$PREV"
   refresh_upstream
   clear_approval
+  cv_back_to_normal
   resume_scanning
   phase done
   exit 0
+fi
+
+# rebuilding in place (the files are already at the commit): the running containers read them, so the page goes up for this too
+if ! cv_begin_maintenance; then
+  resume_scanning
+  phase failed "could not show the maintenance page (config/nginx/state is not writable), so nothing was changed. Fix that folder's permissions, then approve again"
+  clear_approval
+  exit 1
 fi
 
 if [ "$PREV" = "$SHA" ]; then
@@ -514,6 +626,7 @@ else
   if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
     restore_env
     restore_branch
+    cv_back_to_normal
     resume_scanning
     log "refusing: $SHA is not a fast-forward of the local branch"
     phase failed "$SHA cannot be fast-forwarded onto this server's checkout (see the update log); merge it by hand with git merge, then scripts/update.sh or make up"
@@ -523,31 +636,32 @@ else
   restore_env
 fi
 
-if deploy >>"$LOG" 2>&1; then
+# The page comes down only here, after the new web service answered (scripts/update-deploy.sh verify_serving) and scanning resumed.
+finish_ok() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)"
   refresh_upstream
   mark_deployed "$(git rev-parse HEAD)"
   rm -f "$ATTEMPTS_FILE"
   clear_approval
+  FROZEN=()  # the deploy recreated the workers
   resume_scanning
+  cv_maint_off
   phase done
   log "updated to $SHA"
+}
+if deploy >>"$LOG" 2>&1; then
+  finish_ok
 elif [ "$DEPLOY_STAGE" = migrated ]; then
   # The database already has $SHA's schema (or part of it), so $PREV's code must not run on it: keep $SHA and retry the restart.
+  # The page stays up (it is not cleared by the deploy): a retry is not a working site on a half-new build.
   log "restarting $SHA failed after its migrations ran; keeping $SHA and retrying the restart"
   if deploy >>"$LOG" 2>&1; then
-    python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)"
-    refresh_upstream
-    mark_deployed "$(git rev-parse HEAD)"
-    rm -f "$ATTEMPTS_FILE"
-    clear_approval
-    resume_scanning
-    phase done
-    log "updated to $SHA"
+    finish_ok
   else
     printf '%s %s\n' "$SHA" "$((TRIES + 1))" >"$ATTEMPTS_FILE"
-    phase failed "restart of $SHA failed after migration; database already on new schema, scanning stays paused (run $((TRIES + 1)) of $MAX_ATTEMPTS)"
-    log "could not restart $SHA; the database is already migrated (or part way), so $PREV is not restored. Run $((TRIES + 1)) of $MAX_ATTEMPTS: the approval is kept and the next run retries until then; see $LOG"
+    cv_maint_failed
+    phase failed "The update did not finish: restarting after the migration failed (run $((TRIES + 1)) of $MAX_ATTEMPTS). The maintenance page stays up while the administrator fixes it"
+    log "could not restart $SHA; the database is already migrated (or part way), so $PREV is not restored. Run $((TRIES + 1)) of $MAX_ATTEMPTS: the approval is kept and the next run retries until then; the maintenance page now says the update did not finish; see $LOG"
     exit 1
   fi
 else
@@ -555,15 +669,28 @@ else
   restore_branch
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env
+  # A failed build changed nothing that runs: the containers are still the previous version on its image. Put the files back (above) and start
+  # the workers that were stopped, and it is serving again, with no second build (on a small host that is minutes to tens of minutes more).
+  if [ "$DEPLOY_STAGE" = build ] && thaw_background && previous_version_intact; then
+    log "the services were never replaced: $PREV is running again on its own files, no rebuild needed"
+    mark_deployed "$PREV"
+    resume_scanning
+    cv_maint_off
+    phase failed "${DEPLOY_WHY:-The update could not be applied (see the update log). Nothing was changed: the version that was running is still running.}"
+    clear_approval
+    exit 1
+  fi
   # The way back must not fail the check that sent it here: a build that stopped for lack of disk space is put back with what is already on the host.
   if CVENGINE_UPDATE_MIN_FREE_MB=0 deploy >>"$LOG" 2>&1; then
     mark_deployed "$PREV"
     resume_scanning
+    cv_maint_off
     # what stopped it (too little disk, a build that failed) is what the Update screen says, not a "done" that looks like an update that never happened
     if [ -n "${DEPLOY_WHY:-}" ]; then phase failed "$DEPLOY_WHY"; else phase done; fi
   else
     log "could not restart the previous version; redeploy by hand"
-    phase failed "could not restart $PREV after rolling back a failed update; scanning stays paused"
+    cv_maint_failed
+    phase failed "The update did not finish and the previous version could not be restarted. The maintenance page stays up while the administrator fixes it; scanning stays paused"
   fi
   clear_approval
   exit 1
