@@ -259,7 +259,7 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 
 | Target | What it does |
 | --- | --- |
-| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the built-in scanner's pinned image and starts it after celery ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the newest published built-in scanner image and starts it after celery ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make build` | Records the installed commit and builds the images. |
 | `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
 | `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one. |
@@ -271,7 +271,8 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
 | `make openvas-up`, `make openvas-down` | Start and stop the old in-stack Greenbone containers (no longer used by the app: a Sentinel runs OpenVAS, see [OPENVAS.md](OPENVAS.md)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
-| `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the Sentinel commit `scanner.lock.json` pins (the fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
+| `make scanner-update` | The Scanner update: pull the newest published scanner image, start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
+| `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the known-good floor commit `scanner.lock.json` names (the offline fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
 ## SETUP-WIZARD

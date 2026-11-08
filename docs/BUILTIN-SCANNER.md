@@ -6,12 +6,12 @@ It needs nothing from you. `sudo ./install.sh` takes `--sentinels=internal|both|
 
 ## What it is
 
-- **The image** is `ghcr.io/hevnsnt/cvengine-sentinel`, pinned by digest in `scanner.lock.json` at the top of the repository. A release runs exactly the scanner it was tested with: a tag that moves changes nothing. The Sentinel repository publishes it for amd64 and arm64 with an SBOM and provenance, and it contains no git, Go, GVM stack or docker socket. While the lock names no published digest, the image is built from the Sentinel commit the lock names (`make scanner-build`, below).
+- **The image** is `ghcr.io/hevnsnt/cvengine-sentinel:main`. The scanner **follows the newest published Sentinel**: `main` is the tag the Sentinel repository's publish workflow moves at every build of its `main` branch, which only receives code after its checks (all of its CI checks, image smoke tests included) have passed. The images are built for amd64 and arm64 and carry an SBOM and build provenance; they contain no git, Go, GVM stack or docker socket. That is all this says: nothing is reviewed by a person between a merge to the Sentinel's `main` and your scanner, and the checks are the gate. `scanner.lock.json` at the top of the repository is no longer a pin. It is the **known-good floor**: the Sentinel commit and result-contract version this release was tested with (and, for provenance, the digest that commit was published as). It sets what the update routine will accept (below) and which commit `make scanner-build` builds. A fix merged to the Sentinel reaches a fresh install, and an installed one at its next update or scheduled Scanner update, with nobody re-pinning anything.
 - **Its network** is the celery container's: the service joins celery's network namespace (`network_mode: service:celery`). Its scans leave from exactly where the server's own did, from the same address, through the Tailscale sidecar's route when that profile is on (the sidecar lives in the same namespace), and on the host network or macvlan overlays when you use one. It reaches the server as `http://web:8000` (on the host network overlay, `http://127.0.0.1:8000`, which that overlay publishes on loopback). Nothing connects to it.
 - **Where it scans from, for the rest:** the server sends it, in its settings, the egress proxy of **Settings > Proxy** and the private networks the server's own scans may reach (all of private space with `CVENGINE_ALLOW_PRIVATE_TARGETS`, the tailnet with the Tailscale profile). nuclei, WPScan, testssl.sh and wafw00f go through the proxy as they did on the server; nmap, naabu and the UDP sweep use raw sockets and go direct, as on the server. No other Sentinel is ever sent these settings or honours them.
 - **Its rights** are those of any Sentinel enrolled for the whole instance, with one addition: it alone may run signed-in work (below). Its capability policy is on its card on the Sentinels page; a fresh built-in scanner ships with OpenVAS denied (it has no GVM stack, and the server runs no OpenVAS of its own: the add-on is a Greenbone stack on a Sentinel, [OPENVAS.md](OPENVAS.md)).
 - **Its memory** is limited to 3 GB (`SCANNER_MEM_LIMIT`; the installer writes 1 GB on a host with less than about 7 GB). See [DEPLOYMENT.md](DEPLOYMENT.md#memory).
-- **It never updates itself.** The server's updater replaces its image ([UPDATES.md](UPDATES.md#the-built-in-scanner)).
+- **It does not update itself from inside.** Its own self-update is off. The server's updates and the Scanner update (below) replace its image from the host, and keep the new one only once it has checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)).
 
 ## What runs in it
 
@@ -79,9 +79,29 @@ for r in SentinelTask.objects.values('kind', 'status').annotate(n=Count('id')).o
     print(r['kind'], r['status'], r['n'])"
 ```
 
+## Keeping it current: the Scanner update
+
+Every update of the server pulls the newest image, and so does a schedule, so a Sentinel fix reaches you between server updates too. The routine is `scripts/scanner-update.sh` (`make scanner-update`):
+
+1. It pulls `ghcr.io/hevnsnt/cvengine-sentinel:main`. A pull that fails (offline, the registry refuses) changes nothing: the running scanner stays.
+2. When the pulled image is the one already running, it stops there. Otherwise it lets the scanner finish the tasks it holds (up to 15 minutes, `CVENGINE_SCANNER_DRAIN_SECONDS`; a scanner that is still busy is updated at the next run), starts the new container, and waits (up to 5 minutes, `CVENGINE_SCANNER_READY_SECONDS`) until it is healthy **and** has checked in with a contract version the server accepts: not below the floor in `scanner.lock.json`, not older than the server still speaks.
+3. If it is not, the **previous image comes back** (it was kept as `cvengine-sentinel-rollback:previous` and is started from this host, never from the registry), the reason is logged, and the scanner reports it to the server, so the Sentinels page shows the failed update with its reason. The next run tries the newest image again.
+
+With the updater timer (`scripts/install-auto-deploy.sh`) the routine runs about daily whatever the update mode (`CVENGINE_SCANNER_UPDATE_HOURS`, default 24, `0` turns the schedule off). A host that does not use the updater runs it from cron, one line in the checkout:
+
+```
+17 4 * * *  cd /opt/cvengine && scripts/scanner-update.sh >> /var/log/cvengine-scanner-update.log 2>&1
+```
+
+A plain `docker compose pull scanner && docker compose up -d scanner` also works, without the health and check-in wait and without a rollback. Compose's `pull_policy` for the scanner is `missing` on purpose (a registry that cannot be reached must not stop `docker compose up` for the whole stack); a host that wants `docker compose up` itself to pull each time sets `CVENGINE_SCANNER_PULL_POLICY=always` in `.env` and accepts that an outage fails that `up`.
+
+**To hold the scanner at one version,** set `CVENGINE_SCANNER_IMAGE` in `.env` to a digest (`ghcr.io/hevnsnt/cvengine-sentinel@sha256:...`) or a tag, then `make up`. An image set there is used as it is: never pulled over, never updated by the routine, never rolled back. Remove the line to follow the newest image again. A digest holds exactly; a tag holds whatever is on the host (nothing pulls it again).
+
+What the Sentinels page and **Settings, System status** show for it: the running commit, whether it is the newest build the server saw (the server looks at the Sentinel repository about twice a day), how many commits behind when it is not, since when that build has run (*last updated*), and, for a scanner whose contract is older than this server speaks, *This scanner is older than this server needs, update it*: the server offers such a scanner no work. A scanner on a newer contract than the server (fine) keeps getting the kinds this server knows, and fields the server does not read are ignored.
+
 ## Building it from source
 
-`make scanner-build` builds the image from the Sentinel commit `scanner.lock.json` names (10 to 25 minutes; on arm64 nmap is compiled) and tags it `cvengine-sentinel-local:<version>` and `cvengine-sentinel-local:latest`. It is the way to run when the published image cannot be pulled (an offline host, a registry that refuses): set `CVENGINE_SCANNER_IMAGE=cvengine-sentinel-local:latest` in `.env` and run `make up`. An image set there is used as it is: never pulled over, never rolled back. Remove the line to go back to the pinned image. Building needs outbound HTTPS to the Ubuntu mirrors, nmap.org, go.dev and the Go module proxy, GitHub, testssl.sh, PyPI and rubygems.
+`make scanner-build` builds the image from the floor commit `scanner.lock.json` names, the commit this release was tested with (10 to 25 minutes; on arm64 nmap is compiled), and tags it `cvengine-sentinel-local:<version>` and `cvengine-sentinel-local:latest`. It is the way to run when the published image cannot be pulled (an offline host, a registry that refuses): set `CVENGINE_SCANNER_IMAGE=cvengine-sentinel-local:latest` in `.env` and run `make up`. An image set there is used as it is, which also means it stays at that commit until you change it. Remove the line to go back to the newest published image. Building needs outbound HTTPS to the Ubuntu mirrors, nmap.org, go.dev and the Go module proxy, GitHub, testssl.sh, PyPI and rubygems.
 
 ## Turning it off
 
