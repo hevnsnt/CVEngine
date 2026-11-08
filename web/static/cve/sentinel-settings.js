@@ -337,6 +337,37 @@ export function kindsPanel(kinds, onReset, onValidity = () => {}) {
   return { node: box, paint, read, invalid };
 }
 
+// Whether the running build is the newest the server saw (its cached look at the Sentinel repository's main branch, never made while a page is built),
+// and since when it has been running: "last updated". Nothing is drawn for what the server did not report.
+function checkedAgo(when, now = Date.now()) {
+  const minutes = Math.max(0, Math.round((now - when.getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} days ago`;
+}
+
+export function newestLine(d) {
+  const v = d.version_state;
+  const parts = [];
+  if (v && v.status === "current") parts.push("The newest build the server saw");
+  else if (v && v.status === "behind")
+    parts.push(
+      `${typeof v.behind_by === "number" ? `${v.behind_by} commit${v.behind_by === 1 ? "" : "s"} behind` : "Behind"} the newest build (${v.latest || "unknown"})`,
+    );
+  if (v && v.checked_at && parts.length) {
+    const checked = new Date(v.checked_at);
+    if (!Number.isNaN(checked.getTime())) parts.push(`checked ${checkedAgo(checked)}`);
+  }
+  if (d.version_since) {
+    const when = new Date(d.version_since);
+    if (!Number.isNaN(when.getTime())) parts.push(`running since ${when.toLocaleString()}`);
+  }
+  return parts.length ? el("p", "note ss-detail", parts.join(", ")) : null;
+}
+
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
 // when it does not report these keys.
 // ``builtin`` (the install's own scanner) has no "Update now": it never updates itself, so the button would promise what cannot happen.
@@ -363,6 +394,10 @@ export function versionBlock(d, { onChange, builtin = false }) {
     line.append(badge("Update requested", "queued"));
   }
   box.append(line);
+  const newest = newestLine(d);
+  if (newest) box.append(newest);
+  if (d.contract && d.contract.note)
+    box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
   const sub =
     u.status === "failed"
       ? u.detail
@@ -379,7 +414,14 @@ export function versionBlock(d, { onChange, builtin = false }) {
         sub,
       ),
     );
-  if (builtin) box.append(el("p", "note ss-detail", "The built-in scanner never updates itself, so there is no Update now."));
+  if (builtin)
+    box.append(
+      el(
+        "p",
+        "note ss-detail",
+        "The built-in scanner follows the newest published Sentinel image. The server's updates and a daily Scanner update pull it and keep it only once it has checked in, so there is no Update now. To hold it at one version, set CVENGINE_SCANNER_IMAGE in .env.",
+      ),
+    );
   const actions = el("div", "ss-actions");
   const now = button(
     pending ? "Update requested" : "Update now",

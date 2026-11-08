@@ -290,7 +290,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
     commit = data.get('commit') or {}
     date = ((commit.get('committer') or {}).get('date')) or ''
     out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
-           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': ''}
+           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': '', 'compare_status': ''}
     if not installed:
         return out
     if installed == sha:
@@ -307,6 +307,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
         out['compare_error'] = f'GitHub answered {cmp.status_code} when this build was compared with {branch}, so whether it is behind cannot be told'
     if cmp.status_code == 200:
         body = cmp.json()
+        out['compare_status'] = str(body.get('status') or '')
         if body.get('status') in ('behind', 'identical'):
             out['behind_by'] = 0  # the installation is already at or past the remote head
         else:

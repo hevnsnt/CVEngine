@@ -2852,6 +2852,7 @@ def _live_overview(ctx):
             'withheld_kinds': {k: {'failures': v['failures'], 'retry_at': svc._iso(v['retry_at'])} for k, v in eff.withheld.items()},
             'problem': eff.problem or '', **_coverage(agent, orgs, org_of),
             'contract_version': (agent.info or {}).get('contract_version'), 'contract_state': sentinel_contract.state((agent.info or {}).get('contract_version')),
+            'contract_note': sentinel_contract.note((agent.info or {}).get('contract_version')), 'version_since': (agent.info or {}).get('version_since'),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
             # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then

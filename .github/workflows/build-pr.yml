@@ -112,6 +112,12 @@ jobs:
             curl -fsSL "https://raw.githubusercontent.com/hevnsnt/cvENGINE-sentinel/$sha/$f" -o "$dir/$f"
           done
           printf 'CVENGINE_SENTINEL_FILES=%s\nCVENGINE_REQUIRE_SENTINEL_FILES=1\n' "$dir" >> "$GITHUB_ENV"
+      - name: Scanner lock (the built-in scanner follows the newest Sentinel; the lock is its known-good floor)
+        # scripts/scanner_lock.py check: docker-compose.yml's default scanner image is the moving tag the lock names (never a digest), the floor's contract
+        # version is not above what this server reads, and (--remote) the floor commit exists on the Sentinel repository's main branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/scanner_lock.py check --remote
       - name: Django test suite
         working-directory: web
         env:

@@ -82,6 +82,8 @@ def _builtin_scanner(admin, problems):
         seen = datetime.fromisoformat(out['last_seen']) if out.get('last_seen') else None
         heard = f'last heard from {int((now - seen).total_seconds() // 60)} minutes ago' if seen else 'never heard from'
         problems.append(f'built-in scanner: enrolled but not checking in ({heard}); check the scanner container (docker compose ps scanner)')
+    if admin and out.get('enrolled') and out.get('contract_state') == 'unsupported':
+        problems.append(f'built-in scanner: {out["contract_note"]}; the Scanner update keeps the previous image and says why (docs/BUILTIN-SCANNER.md)')
     if not admin:  # the agent's id and name describe the server, not the caller's projects
         out = {k: out[k] for k in ('enabled', 'enrolled', 'live') if k in out}
     return out

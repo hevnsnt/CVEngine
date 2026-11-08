@@ -1,7 +1,7 @@
 """The software cvENGINE is built from and the services it contacts: the one list the About page shows.
 
 Every entry names where its version is pinned. ``pins`` is a list of ``(file, regex)``; a file is read from the repository root ("web/Dockerfile"),
-or, with the prefix ``sentinel:``, from the Sentinel repository's own file (hevnsnt/cvENGINE-sentinel, pinned by ``scanner.lock.json``). The page
+or, with the prefix ``sentinel:``, from the Sentinel repository's own file (hevnsnt/cvENGINE-sentinel, read at the known-good floor commit of ``scanner.lock.json``). The page
 shows the version read from the pin when the file is in the running image (the server image holds web/Dockerfile and requirements.txt as
 ``Dockerfile`` and ``requirements.txt`` in the application directory); otherwise it shows the ``version`` written here. tests/test_about_page.py holds
 the two equal, and fails when a tool pinned in either Dockerfile has no entry, so the list cannot drift from the images.
@@ -17,7 +17,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 
 GROUPS = (
-    ('scanners', 'Scanners and tools', 'These run on Sentinels, in the Sentinel image. The server image keeps only nuclei, to read and check templates'),
+    ('scanners', 'Scanners and tools', 'These run on Sentinels, in the Sentinel image, at the versions of the Sentinel commit this release was tested with; the built-in scanner follows the newest published Sentinel build, so what runs can be newer. The server image keeps only nuclei, to read and check templates'),
     ('greenbone', 'OpenVAS add-on', 'Greenbone Community Edition, in separate containers a Sentinel runs. Off until you turn it on'),
     ('platform', 'Platform', 'What the server and its containers run on'),
 )
@@ -29,7 +29,8 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 
 
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
-# scanner.lock.json and to the sha web/requirements.txt pins: re-pinning the Sentinel means reading its pins again, then changing this line.
+# the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
+# (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
 SENTINEL_PINS_COMMIT = 'cf29610a513cc3135c1a81f004cd02e0b0c0e604'
 
 GH = 'https://github.com/'
@@ -289,7 +290,7 @@ def inventory():
     pypi = 'https://pypi.org/project/'
     groups.append({'id': 'libraries-server', 'title': 'Python libraries, server image', 'intro': 'Pinned in web/requirements.txt, each under its own license',
                    'rows': [row(n, pypi + n + '/', v, lic, 'Python dependency of the server', 'server') for n, v, lic in server_libraries()]})
-    groups.append({'id': 'libraries-sentinel', 'title': 'Python libraries, Sentinel image', 'intro': 'Pinned in the Sentinel repository, each under its own license',
+    groups.append({'id': 'libraries-sentinel', 'title': 'Python libraries, Sentinel image', 'intro': 'Pinned in the Sentinel repository (as of the commit this release was tested with), each under its own license',
                    'rows': [row(n, pypi + n + '/', v, lic, 'Python dependency of the Sentinel', 'sentinel') for n, v, lic in SENTINEL_LIBRARIES]})
     for group in groups:
         group['count'] = len(group['rows'])

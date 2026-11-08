@@ -256,15 +256,21 @@ services:
   # server then writes no enrollment and revokes the scanner's token, and the container idles).
   # No container_name: it was a fixed name that a second stack on the same host collided with. Compose names the container <project>-scanner-1; every
   # script and doc reaches it by the service name (`make scanner-logs`, `docker compose logs scanner`).
-  # The image is the one scanner.lock.json pins BY DIGEST (scripts/scanner_lock.py keeps this default equal to it). The update scripts pull it, start it
-  # and keep it only once it reaches the server, else they put the previous image back (CVENGINE_SCANNER_ROLLBACK_IMAGE, which they write and clear).
-  # CVENGINE_SCANNER_IMAGE in .env runs another image (a `make scanner-build` from source). It never updates itself.
+  # The image FOLLOWS the newest published Sentinel: the moving tag `main` of ghcr.io/hevnsnt/cvengine-sentinel (the newest build of the Sentinel's main
+  # branch, which only receives code after its checks pass; amd64 and arm64, with an SBOM and build provenance). scripts/scanner_lock.py keeps this default
+  # equal to the tag scanner.lock.json names; the lock itself is the known-good floor the release was tested with, not a pin. Every update and a
+  # schedule (scripts/scanner.sh, scripts/scanner-update.sh) pull the tag, start the new container and keep it only once it is healthy AND has checked in with
+  # a contract version the server accepts, else they put the previous image back (CVENGINE_SCANNER_ROLLBACK_IMAGE, which they write and clear).
+  # TO HOLD THE SCANNER AT ONE VERSION set CVENGINE_SCANNER_IMAGE in .env to a digest or a tag: it is used as it is and never pulled over or rolled back.
+  # pull_policy is `missing` on purpose, like the proxy's above: `always` makes the pull part of `up`, and a registry that cannot be reached would then stop
+  # the whole stack from starting. The scripts fetch the newest image before anything is stopped and tolerate a failed pull; a host that starts the stack
+  # with plain `docker compose up` and wants it to pull each time sets CVENGINE_SCANNER_PULL_POLICY=always (and accepts that an outage fails that `up`).
   # It shares the celery container's network namespace, so its scans leave from exactly where the server's own did: the same address, the Tailscale
   # sidecar's tailnet route (which lives in that namespace too) and the host network or macvlan overlays. Nothing connects to it; it reaches
   # the server as http://web:8000. Every update and `make up` recreate it after celery, as they do the Tailscale sidecar.
   scanner:
-    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:685ddb251bf69ba552f68f6ef38203e7bc7afd75cdd668de600b45e6c7620a34}}"
-    pull_policy: missing
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel:main}}"
+    pull_policy: "${CVENGINE_SCANNER_PULL_POLICY:-missing}"
     restart: unless-stopped
     init: true
     network_mode: "service:celery"

@@ -165,4 +165,19 @@ def status(now=None):
     if agent is None:
         return {'enabled': True, 'enrolled': False}
     live = bool(agent.last_seen and now - agent.last_seen <= timedelta(minutes=3))
-    return {'enabled': True, 'enrolled': True, 'agent_id': agent.pk, 'name': agent.name, 'live': live, 'last_seen': agent.last_seen.isoformat() if agent.last_seen else None}
+    out = {'enabled': True, 'enrolled': True, 'agent_id': agent.pk, 'name': agent.name, 'live': live, 'last_seen': agent.last_seen.isoformat() if agent.last_seen else None}
+    out.update(release(agent))
+    return out
+
+
+def release(agent):
+    """What the running built-in scanner is: its build (``version``, the Sentinel commit), the contract it speaks and whether this server accepts it, whether it is
+    the newest build of the Sentinel's main branch the server saw (``newest``: True, False, or None while that is not known: the check is cached, never made here),
+    and ``version_since`` (when it last changed). The scanner follows the newest published image, so ``newest`` False is a scanner that has not been updated yet."""
+    from agentapi import sentinel_contract, sentinel_version
+    info = agent.info or {}
+    found = sentinel_version.state(agent)
+    return {'version': info.get('version'), 'contract_version': info.get('contract_version'), 'contract_state': sentinel_contract.state(info.get('contract_version')),
+            'contract_note': sentinel_contract.note(info.get('contract_version')),
+            'newest': {'current': True, 'behind': False}.get(found['status']), 'newest_version': found['latest'], 'behind_by': found['behind_by'], 'newest_checked_at': found['checked_at'],
+            'version_since': info.get('version_since')}
