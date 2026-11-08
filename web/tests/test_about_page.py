@@ -106,7 +106,8 @@ class SoftwareListTests(TestCase):
 					missing.append(f"{item['name']} {item['shown']}")
 		self.assertEqual(missing, [])
 		for name, version, _ in software.server_libraries():
-			self.assertIn(f'{name} {version}', html, f'{name} is pinned in web/requirements.txt and missing from the page')
+			# the name and its pinned version sit in one row of the inventory table
+			self.assertRegex(html, rf'>{re.escape(name)}</a></th>\s*<td[^>]*>{re.escape(version)}</td>', f'{name} {version} is pinned in web/requirements.txt and missing from the page')
 		for source in software.DATA_SOURCES + software.AI_PROVIDERS:
 			self.assertIn(source['url'], html)
 
@@ -176,3 +177,98 @@ class SoftwareListTests(TestCase):
 			self.assertTrue(part in names or part in ' '.join(t['name'] for t in software.TOOLS if t['group'] == 'greenbone') or
 			                part in ('vulnerability-tests', 'notus-data', 'scap-data', 'cert-bund-data', 'dfn-cert-data', 'data-objects', 'report-formats', 'gpg-data', 'redis-server', 'pg-gvm-migrator'),
 			                f'the Greenbone image {part} is not on the About page list')
+
+
+# ---- the page's shape: order, the reNgine credit last, a complete inventory, no scanner banner -------------------------------------------------------
+
+RENGINE_TEXT = ("CVEngine is a fork of reNgine 2.x by Yogesh Ojha, and still uses its code. Thanks to everyone who built it, including "
+                "Aju100, d1pakda5, subha7595, Suprita-25, TheBinitGhimire, Vinay Leo and Erdem Ozgen. "
+                "The full list is on reNgine's contributors page.")
+
+
+def _text(fragment):
+	import html as htmllib
+	return re.sub(r'\s+', ' ', htmllib.unescape(re.sub(r'<[^>]+>', '', fragment))).strip()
+
+
+class AboutPageShapeTests(TestCase):
+	def page(self):
+		return AboutPageTests.page(self)
+
+	def main(self):
+		html = self.page().content.decode()
+		return html.split('<main', 1)[1].split('</main>', 1)[0]
+
+	def test_sections_come_in_the_planned_order(self):
+		ids = re.findall(r'<section[^>]*\bid="([^"]+)"', self.main())
+		self.assertEqual(ids, ['product', 'where', 'software', 'sources', 'licenses', 'contributors', 'built-on-rengine'])
+
+	def test_the_rengine_credit_is_the_last_element_of_the_page_with_its_text_unchanged(self):
+		main = self.main()
+		last = re.findall(r'<section[^>]*\bid="([^"]+)"[^>]*>(.*?)</section>', main, flags=re.S)[-1]
+		self.assertEqual(last[0], 'built-on-rengine')
+		self.assertEqual(re.findall(r'<h2[^>]*>(.*?)</h2>', last[1], flags=re.S), ['Built on reNgine'])
+		self.assertEqual(_text(re.sub(r'<h2[^>]*>.*?</h2>', '', last[1], flags=re.S)), RENGINE_TEXT)
+		# the last heading of the page is that one, and after its section nothing but closing tags is left in <main>
+		self.assertEqual(_text(re.findall(r'<h2[^>]*>(.*?)</h2>', main, flags=re.S)[-1]), 'Built on reNgine')
+		tail = main.rsplit('</section>', 1)[1]
+		self.assertEqual(re.sub(r'</div>|\s', '', tail), '')
+		self.assertEqual(main.count('fork of'), 1)  # the credit appears once, and nowhere earlier
+
+	def test_the_product_card_links_the_repository_once(self):
+		card = self.main().split('id="product"', 1)[1].split('</section>', 1)[0]
+		self.assertEqual(card.count('github.com/hevnsnt/CVEngine"'), 1)
+		for label in ('Made by', 'Created by', 'Source code', 'Version', 'License'):
+			self.assertIn(f'<dt>{label}</dt>', card)
+
+	def test_about_shows_no_scanner_status_banner_but_other_pages_still_do(self):
+		loaded = r'<script type="module" src="[^"]*scannerbar\.js'  # the import map names every module; only a script tag loads one
+		self.assertIsNone(re.search(loaded, self.page().content.decode()))
+		user = User.objects.get(username='reader') if User.objects.filter(username='reader').exists() else User.objects.create_user('reader', password='x')
+		other = client_for(user).get('/cve/how-it-works/').content.decode()
+		self.assertIsNotNone(re.search(loaded, other))
+
+	def test_no_short_string_of_the_inventory_ends_in_a_period(self):
+		from cveFeed import software
+		for group in software.inventory():
+			for r in group['rows']:
+				for key in ('purpose', 'license', 'detail'):
+					self.assertFalse(r[key].endswith('.'), f"{r['name']} {key}: {r[key]!r}")
+
+
+class InventoryRowTests(TestCase):
+	"""Every row the page shows says what it is for and under which license, or says plainly that it does not know."""
+
+	def test_every_row_has_a_name_link_version_license_and_purpose(self):
+		from cveFeed import software
+		groups = software.inventory()
+		self.assertGreater(sum(g['count'] for g in groups), 40)
+		for group in groups:
+			self.assertEqual(group['count'], len(group['rows']))
+			for r in group['rows']:
+				for key in ('name', 'url', 'version', 'license', 'purpose', 'where'):
+					self.assertTrue(r.get(key), f"{group['id']}: {r.get('name')!r} has no {key}")
+				self.assertTrue(r['url'].startswith('https://'), r['name'])
+
+	def test_the_source_list_itself_states_a_license_and_a_purpose_for_every_tool(self):
+		from cveFeed import software
+		for item in software.TOOLS:
+			self.assertTrue(item['license'].strip(), f"{item['name']} has no license: write 'Unknown (why)' when it is not known")
+			self.assertTrue(item['purpose'].strip(), f"{item['name']} has no purpose")
+		for source in software.DATA_SOURCES + software.AI_PROVIDERS:
+			self.assertTrue(source['purpose'].strip(), source['name'])
+
+	def test_an_unknown_license_or_purpose_is_marked_unknown_not_left_blank(self):
+		from cveFeed import software
+		r = software.row('x', 'https://example.com', '', '', '', 'server')
+		self.assertEqual((r['license'], r['purpose'], r['version']), (software.NOT_STATED, 'Not stated', software.NOT_PINNED))
+
+	def test_a_license_note_moves_below_the_license_and_a_purpose_detail_below_the_purpose(self):
+		from cveFeed import software
+		r = software.row('x', 'https://example.com', '1', 'GPL-2.0 (a separate program, never linked)', 'Does a thing. It also does `more`.', 'both')
+		self.assertEqual((r['license'], r['license_note'], r['purpose'], r['detail'], r['where']), ('GPL-2.0', 'a separate program, never linked', 'Does a thing', 'It also does more', 'Both'))
+
+	def test_the_page_stylesheet_keeps_tables_from_widening_the_page(self):
+		css = (Path(__file__).resolve().parents[1] / 'static' / 'cve' / 'cve.css').read_text()
+		for needle in ('.about{min-width:0}', 'table-layout:fixed', 'overflow-wrap:anywhere', '@container (max-width:759px)'):
+			self.assertIn(needle, css)
