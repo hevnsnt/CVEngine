@@ -19,6 +19,7 @@ import {
   emptyState,
   field,
   text as uiText,
+  watchWide,
   whatIs,
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
@@ -781,6 +782,7 @@ function listHead({ page, lead, panelNodes, meta }) {
   addEventListener("scroll", fit, { passive: true });
   addEventListener("resize", fit);
   requestAnimationFrame(fit);
+  requestAnimationFrame(() => head.parentElement && head.parentElement.classList.contains("table-page") && watchWide(head.parentElement));
   let was = false;
   try {
     was = localStorage.getItem(key) === "1";

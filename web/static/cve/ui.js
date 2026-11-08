@@ -127,6 +127,23 @@ export function disclosure(label, ...body) {
   });
   return d;
 }
+// A table wider than the box around it scrolls sideways (.scrolls on its .table-wrap); one that fits keeps overflow visible, which is what lets
+// its header stay in view while the page scrolls. Watches every table in root, now and when its rows are redrawn.
+export function watchWide(root) {
+  let queued = false;
+  const check = () => {
+    queued = false;
+    root.querySelectorAll('.table-wrap').forEach((wrap) => {
+      const t = wrap.querySelector('.table');
+      wrap.classList.toggle('scrolls', Boolean(t) && wrap.scrollWidth > wrap.clientWidth + 1 && t.offsetWidth > wrap.clientWidth + 1);
+    });
+  };
+  const later = () => { if (!queued) { queued = true; requestAnimationFrame(check); } };
+  if (window.ResizeObserver) new ResizeObserver(later).observe(root);
+  new MutationObserver(later).observe(root, { childList: true, subtree: true });
+  window.addEventListener('resize', later);
+  later();
+}
 export const whatIs = (words) => disclosure('What is this', el('p', 'note', words));
 
 export function table(columns, rows) {
