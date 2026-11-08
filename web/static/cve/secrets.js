@@ -2,6 +2,7 @@
 // No value ever reaches this page: the API sends the mask (AIza…x7Qz), the kind and where it was seen. DOM is built with textContent only.
 import { api, badge, button, dialog, el, selectOf, shortDate, table, toast } from "/staticfiles/cve/ui.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
+import { pageAnchor, pageUrl } from "/staticfiles/cve/links.js";
 import { STATUS_WORDS } from "/staticfiles/cve/secret-detail-logic.js";
 
 const SEV_BADGE = { critical: "critical", high: "high", medium: "medium", low: "low", info: "info" };
@@ -62,6 +63,16 @@ function validationPanel(slug, state, refresh) {
   return box;
 }
 
+// Where a secret is served, as a link to that page on the scanned host (the line number stays text beside it).
+function foundAt(where) {
+  if (!where) return "not served now";
+  const line = where.line != null ? ` (line ${where.line})` : "";
+  if (!pageUrl({ url: where.url })) return `${where.url}${line}`;
+  const box = el("span");
+  box.append(pageAnchor({ url: where.url }, where.url, "host-link"), line);
+  return box;
+}
+
 export async function secretsPage(mount, { slug, all, canWrite }) {
   mount.append(el("p", "note page-intro", "API keys, tokens and private keys the project's pages and scripts serve, one row per secret however many places serve it. Values are never stored or shown: only the format prefix and the last four characters. A browser key (Google, Stripe pk_, Mapbox pk.) is meant to be public and is rated info until a person or a validation says otherwise."));
   const top = el("div");
@@ -98,7 +109,7 @@ export async function secretsPage(mount, { slug, all, canWrite }) {
         { label: "Provider", render: (s) => s.provider || "(none)" },
         { label: "Kind", render: (s) => `${s.kind}${s.catalogued ? "" : " (uncatalogued)"}` },
         { label: "Secret", render: (s) => el("code", "", s.masked) },
-        { label: "Found at", render: (s) => (s.where ? `${s.where.url}${s.where.line != null ? ` (line ${s.where.line})` : ""}` : "not served now") },
+        { label: "Found at", render: (s) => foundAt(s.where) },
         { label: "Class", render: (s) => CLASS_WORDS[s.class] || s.class },
         { label: "Status", render: (s) => STATUS_WORDS[s.status] || s.status },
         { label: "Hosts", render: (s) => String(s.hosts) },
