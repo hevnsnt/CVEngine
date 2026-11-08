@@ -351,6 +351,12 @@ def report_partial(ctx, task_id, body):
             SentinelTask.objects.filter(pk=task.pk, status='running').update(status='failed', finished_at=now, lease_expires_at=None,
                                                                              error=f'a partial result was rejected: {exc.message}'[:300])
         raise
+    from agentapi import address_guard
+    refusal = address_guard.task_refusal(task)
+    if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
+        broker.expire(task, f'cancelled: {refusal}')
+        raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
+    batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is read again for every batch)
     lease = min(now + broker.RUN_LEASE, (task.accepted_at or now) + broker.max_runtime(task))
     try:
         with transaction.atomic():
@@ -438,7 +444,7 @@ def scope_policy(domain):
     subtrees = getattr(excluded, 'subtrees', frozenset())
     rows = {h: h in subtrees for h in set(excluded) | set(subtrees) if h == name or h.endswith('.' + name)}
     bounty = bool(domain.project_id) and BountyEngagement._base_manager.filter(project_id=domain.project_id).exists()
-    ranges = [str(net) for net in internal_networks(domain.project_id)]
+    ranges = [str(net) for net in internal_networks(domain.project_id)] + [str(net) for net in getattr(excluded, 'networks', ())]  # the do-not-scan networks are never touched
     if bounty:
         out_names, out_ranges = _bounty_out_of_scope(domain.project_id, name)
         for host, subtree in out_names:

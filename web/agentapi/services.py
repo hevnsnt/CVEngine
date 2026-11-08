@@ -491,7 +491,7 @@ def _create_domains(project, names, description='', excluded=None, discovery_mod
     from startScan.ip_rows import org_id_of_project
     names = list(dict.fromkeys(names))
     org_id = org_id_of_project(project.id)
-    banned = excluded_names(project.id)
+    banned = excluded_names(project.id, names_only=True)  # adding a target is not scanning it: an address-excluded name is added, then never scanned
     if banned:
         skipped = [n for n in names if normalize(n) in banned]
         if excluded is not None:
@@ -740,9 +740,12 @@ def _internal_scan(ctx, project, domain):
 
 def _refuse_excluded(project, domain):
     """409 when the target itself is a host its organization excluded for good."""
-    from cveFeed.exclusions import is_excluded
-    if is_excluded(project.id, domain.name):
+    from cveFeed.exclusions import address_excluded, is_excluded
+    if is_excluded(project.id, domain.name, names_only=True):
         raise ApiError(409, f'{domain.name} is excluded for this organization and is not scanned')
+    refusal = address_excluded(project.id, domain.name)
+    if refusal:
+        raise ApiError(409, f'{domain.name} is not scanned: {refusal}')
 
 
 def _abort_scan(scan, user=None):

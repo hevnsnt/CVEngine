@@ -558,7 +558,7 @@ def seed_from_scan(scan, source):
     originals = list(Subdomain.objects.filter(scan_history=source).filter(under)
                      .prefetch_related('ip_addresses', 'technologies').order_by('id'))
     from cveFeed.exclusions import excluded_names
-    banned = excluded_names(scan.domain.project_id)  # an excluded host is never copied back into the inventory
+    banned = excluded_names(scan.domain.project_id, names_only=True)  # an excluded host is never copied back into the inventory
     originals = [o for o in originals if o.name.lower().rstrip('.') not in banned]
     copies = Subdomain.objects.bulk_create([
         Subdomain(scan_history=scan, target_domain=scan.domain, **{f: getattr(o, f) for f in fields}) for o in originals])

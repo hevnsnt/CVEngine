@@ -138,7 +138,7 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
     name = clean_host(host)
     if action not in ('archive', 'restore', 'pin'):
         raise ApiError(400, 'unknown archive action')
-    if is_excluded(project.pk, name) and action == 'restore':
+    if is_excluded(project.pk, name, names_only=True) and action == 'restore':
         raise ApiError(409, 'host is excluded; an organization admin must remove the exclusion first')
     if not isinstance(reason, str) or len(reason.strip()) > MAX_REASON:
         raise ApiError(400, f'reason must be text of at most {MAX_REASON} characters')
@@ -388,7 +388,7 @@ def move_host(ctx, slug, host, to_project, discover=True, whole_target=False):
     def purge():
         back = HostMove.objects.filter(project=dest)  # they once left the destination: moving them back lifts that block
         (back.filter(_host_q('host', name, True)) if whole else back.filter(host__in=names)).delete()
-        if is_excluded(dest.pk, name):
+        if is_excluded(dest.pk, name, names_only=True):
             raise ApiError(409, f'{name} is excluded in the destination\'s organization (an organization admin can lift the exclusion)')
         for n in names:
             HostMove.objects.update_or_create(project=source, host=n, defaults={'moved_to': dest, 'moved_by': ctx.user})

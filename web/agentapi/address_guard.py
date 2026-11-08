@@ -179,6 +179,47 @@ def result_refusal(task, result):
     return next(iter(refusals.values())) if refusals else None
 
 
+def _item_values(item):
+    """The addresses one entry of a streamed batch (a finding, an http record, an event, a screenshot) says it reached: address literals under ``RESULT_KEYS``.
+    Names are not judged here: a name seen in a batch is a record of what discovery learned (it keeps the host visible), and it carries no address."""
+    out = []
+
+    def walk(value, depth=0):
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                if key in RESULT_KEYS:
+                    out.extend(s for s in _strings(inner) if _is_address_like(s))
+                walk(inner, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for inner in value:
+                walk(inner, depth + 1)
+    walk(item)
+    return out
+
+
+def filter_batch(task, batch):
+    """``(batch, dropped)``: the partial batch of a streamed task without the entries about an address on the list; with an unreadable list every entry
+    that names an address is dropped. The sequence number still advances. One activity line says how many were dropped."""
+    if not isinstance(batch, dict):
+        return batch, 0
+    dropped, kept = 0, {}
+    for key, value in batch.items():
+        if isinstance(value, list) and value and all(isinstance(i, dict) for i in value):
+            refused = _refusals(task.project_id, [v for i in value for v in _item_values(i)])
+            keep = [i for i in value if not any(v in refused for v in _item_values(i))]
+            dropped += len(value) - len(keep)
+            kept[key] = keep
+        else:
+            kept[key] = value
+    if dropped:
+        from cveFeed import activity
+        activity.log('scan', f'Dropped {dropped} discovery result{"s" if dropped != 1 else ""} for addresses on the organization\'s do-not-scan list', project=task.project,
+                     status='done', address_excluded=True, sentinel_task_id=task.pk, scan_id=task.scan_id)
+    return kept, dropped
+
+
 def note_resolved(task, result):
     """A ``dns_resolve`` result that placed names inside the list: one skip line for the names (they are not scanned from now on)."""
     resolved = result.get('resolved') if isinstance(result, dict) else None

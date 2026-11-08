@@ -45,7 +45,7 @@ def persist_bbot_result(result, ctx):
 		scan = ScanHistory.objects.select_related('domain').filter(pk=ctx['scan_history_id']).first()
 		own_project, own_name = (scan.domain.project_id, scan.domain.name) if scan and scan.domain else (None, None)
 		project_id = own_project
-		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
+		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id, names_only=True), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
 		if ctx.get('domain_id'):
 			ctx['_domain'] = Domain.objects.filter(id=ctx['domain_id']).first()
 	subdomains = {}
@@ -196,7 +196,7 @@ def _persist_bbot_findings(result, ctx, subdomains):
 	from cveFeed.exclusions import excluded_names, normalize
 	banned = ctx.get('_excluded_hosts')
 	if banned is None:
-		banned = excluded_names(domain.project_id)
+		banned = excluded_names(domain.project_id, names_only=True)
 	from cveFeed import dangling_dns
 	pending = [f for f in result.findings if f['module'] == 'baddns' and not f.get('informational') and not (banned and normalize(f['host']) in banned)]
 	ratings = dict(zip(map(id, pending), dangling_dns.assess_all(pending, project=domain.project)))  # one batch, through a Sentinel when one can take it
@@ -691,7 +691,7 @@ def save_subdomain(subdomain_name, ctx={}):
 		from cveFeed.exclusions import excluded_names, normalize
 		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch
 		if banned is None:
-			banned = excluded_names(domain.project_id)
+			banned = excluded_names(domain.project_id, names_only=True)  # an address-excluded host is still recorded (it stays visible, unscanned)
 		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
 			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
 			return None, False
