@@ -673,6 +673,10 @@ def host_rdp_screenshot(request, slug, subdomain_id, port):
 def welcome_page(request):
     if not (request.user.is_authenticated and request.user.is_superuser):
         return redirect('cve_dashboard')  # the setup wizard is for the App Admin only
+    from dashboard.models import SetupWizard
+    row = SetupWizard.objects.order_by('id').first()
+    if row is not None and row.completed_at and request.GET.get('again') != '1':
+        return redirect('cve_dashboard')  # a finished wizard is not shown again as an empty Step 1; ?again=1 opens it on purpose
     return render(request, 'cveFeed/welcome.html', ui_context(request, 'welcome'))
 
 

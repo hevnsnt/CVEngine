@@ -161,7 +161,7 @@ const steps = {
     const authWrap = el('label', 'check', null, { for: 'authorized' });
     authWrap.append(auth, document.createTextNode('I am authorized to test this domain.'));
     const hint = el('div', 'live-hint');
-    hint.append(el('span', 'live', 'live'), document.createTextNode('Discovery starts the moment you continue, with public data sources only, and keeps running while you answer the next questions.'));
+    hint.append(el('span', 'live', 'live'), document.createTextNode('Discovery starts the moment you continue. In the first minute it asks public data sources about the domain, then runs light checks on the hosts it finds (for example whether a web page answers and which ports are open). It keeps running while you answer the next questions.'));
     form(node, {
       title: 'Let us start finding your hosts',
       lead: 'Name your organization and first project, and give one domain you own. We begin discovering it right away.',
@@ -376,7 +376,7 @@ const steps = {
       const nw = el('input', '', null, { type: 'password', autocomplete: 'new-password' });
       const again = el('input', '', null, { type: 'password', autocomplete: 'new-password' });
       const pb = el('div'); pb.append(field('Current password', cur), field('New password', nw, 'At least 12 characters is a good length.'), field('New password again', again));
-      holder.append(card('password', 'Choose your own password', 'If you were given a generated one, replace it now. The built-in scanner keeps working while you do.', [pb], async () => {
+      holder.append(card('password', 'Change your password again (optional)', 'A generated password was already replaced when you first signed in. Use this only if you want a different one now. The built-in scanner keeps working while you do.', [pb], async () => {
         if (!cur.value || !nw.value) throw new Error('Enter your current and a new password, or choose "Skip".');
         if (nw.value !== again.value) throw new Error('The two new passwords differ.');
         state = await welcome('POST', 'password', { current: cur.value, new: nw.value });

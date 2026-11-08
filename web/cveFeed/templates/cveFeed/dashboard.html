@@ -7,7 +7,7 @@
     <h1 class="sr">Live</h1>
     <span class="live" id="live" style="display:none">live</span>
   </div>
-  {% if not ai_ready and is_app_admin %}<a class="btn sm" href="{% url 'cve_welcome' %}">Connect your AI model</a>{% endif %}
+  {% if not ai_ready and is_app_admin %}<a class="btn sm" href="{% url 'cve_welcome' %}?again=1">Connect your AI model</a>{% endif %}
 </div>
 
 <a class="since-strip" id="since-strip" href="#" hidden></a>

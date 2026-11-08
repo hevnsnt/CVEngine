@@ -135,7 +135,8 @@ class StaticCachePolicyTests(SimpleTestCase):
 		conf = self.conf()
 		loc = conf[conf.index('location /staticfiles/'):]
 		loc = loc[:loc.index('\n    }')]
-		self.assertIn('add_header Cache-Control $cvengine_static_cache always;', loc)
+		self.assertRegex(loc, r'add_header Cache-Control \$cvengine_static_cache;')
+		self.assertNotIn('$cvengine_static_cache always', loc)  # 'always' would stamp the year-long value on a 404 too
 		self.assertNotIn('"no-cache"', loc)  # the default lives in the map
 		self.assertIn('add_header X-Content-Type-Options "nosniff" always;', loc)
 
