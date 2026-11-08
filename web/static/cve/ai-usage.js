@@ -142,7 +142,8 @@ if (mount) {
         { label: "Stage", render: (r) => r.stage },
         { label: "Attempts", render: (r) => count(r.attempts) },
         { label: "Errors", render: (r) => count(r.errors) },
-        { label: "Answered by", render: (r) => (r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model" },
+        { label: "Answered by", render: (r) => ((r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model")
+          + ((r.failed_reasons || []).length ? ` | Not answered: ${r.failed_reasons.map((f) => `${count(f.count)} ${f.recovered ? "cut off, answered by the automatic retry" : f.category}${f.stop_reason && !f.recovered ? ` [${f.stop_reason}]` : ""}`).join(", ")}` : "") },
       ], data.stages)));
       output.append(expandable("Recent attempts and errors", wrap([
         { label: "When (UTC)", render: (r) => shortDate(r.at) },

@@ -50,7 +50,8 @@ MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+\-]{0,200}$')
 # before 1.4, and two of the queue's.
 CATEGORIES = frozenset(('provider_error', 'provider_auth', 'provider_rate_limit', 'provider_http', 'provider_connect_timeout',
                         'provider_timeout', 'provider_network', 'provider_json', 'provider_shape', 'output_truncated', 'empty_response', 'refused',
-                        'unsupported', 'unexpected_error', 'malformed_job', 'lease_expired'))
+                        'unsupported', 'unexpected_error', 'malformed_job', 'lease_expired',
+                        'truncated_retried'))  # the last is not a failure: a cut-off attempt that was asked again with more room (see below)
 
 # kind -> the module that continues it. Each defines ``job_answer(job, text)`` (returns None, or a ``Retry``) and ``job_failure(job,
 # category, detail)``; optionally ``job_admit(job)`` (False keeps it queued, 'drop' expires it) and ``job_expired(job)``.
@@ -182,7 +183,13 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
     from cveFeed.models import AIJob
     if kind not in HANDLERS:
         raise ValueError(f'unknown AI job kind {kind!r}')
-    packet = {'system': str(system), 'parts': _clean_parts(parts), 'schema': schema, 'options': dict(options or {})}
+    from reNgine.ai_profiles import STAGE_ANSWER_CAPS
+    if stage not in STAGE_ANSWER_CAPS:  # tests/test_ai_truncation.py fails for a stage that is not in the table: a new stage must name its room
+        logger.warning('AI job stage %r has no answer room in ai_profiles.STAGE_ANSWER_CAPS: it gets the default', stage)
+    # every stage is sent with its own answer room and the one automatic retry of a cut-off reply (a stage may say ``retry_truncated: False``)
+    options = {'max_tokens': STAGE_ANSWER_CAPS.get(stage), 'retry_truncated': True, **dict(options or {})}
+    options = {k: v for k, v in options.items() if v is not None}
+    packet = {'system': str(system), 'parts': _clean_parts(parts), 'schema': schema, 'options': options}
     if len(json.dumps(packet, default=str)) > PACKET_MAX:
         raise ValueError('the job is too large')
     if image is not None:
@@ -301,11 +308,15 @@ def _record_calls(job, provider, calls, now):
             continue
         status = 'succeeded' if call.get('status') == 'succeeded' else 'failed'
         category = call.get('category') if call.get('category') in CATEGORIES else ('' if status == 'succeeded' else 'unexpected_error')
+        if call.get('retried') and category == 'output_truncated':
+            category = 'truncated_retried'  # cut off and asked again with more room: only a cut-off that survives the retry is a failure
+        stop = str(call.get('stop_reason') or '')
         model = str(call.get('model') or job.model or '')
         actual = str(call.get('actual_model') or '')
         duration = _count(call.get('duration_ms'), 24 * 3600 * 1000)
         rows.append(AIUsage(provider=provider, model=model[:200] if MODEL_NAME.match(model) else '', actual_model=actual[:200] if MODEL_NAME.match(actual) else '',
                             stage=job.stage, status=status, error_category=category, started_at=now - timedelta(milliseconds=duration or 0),
+                            stop_reason=stop[:24] if re.fullmatch(r'[a-z_]{1,24}', stop) else '',
                             input_tokens=_count(call.get('input_tokens')), output_tokens=_count(call.get('output_tokens')),
                             cache_read_tokens=_count(call.get('cache_read_tokens')), cache_write_tokens=_count(call.get('cache_write_tokens')),
                             duration_ms=duration))
@@ -340,6 +351,7 @@ def submit(job_id, body, now=None):
         if job.status != 'leased' or not job.lease or not isinstance(lease, str) or not secrets.compare_digest(lease, job.lease):
             raise JobError('this job is no longer leased to you', 409)
         rows = _record_calls(job, provider, body.get('calls'), now)
+        _count_retries(job, rows)
         if has_text:
             job.result = {'text': body['text']}
         else:
@@ -354,6 +366,22 @@ def submit(job_id, body, now=None):
         pk = job.pk
         transaction.on_commit(lambda: _schedule(pk))
     return {'accepted': True}
+
+
+def _count_retries(job, rows):
+    """A cut-off reply asked again is one more billable request for the stage's own daily budget: a triage's retry is written to the triage
+    ledger as a repair is, so ``TRIAGE_MAX_PER_DAY`` counts what was billed. The other stages' budgets (one template draft per CVE per
+    week, ``TEMPLATE_GEN_MAX_PER_DAY`` a day, one detection attempt per CVE per week) count jobs, and a job makes at most two requests."""
+    retried = sum(1 for r in rows if r.error_category == 'truncated_retried')
+    if not retried or job.kind != 'triage':
+        return
+    try:
+        from cveFeed import triage
+        claim = triage._claim_of(job)
+        for _ in range(retried if claim is not None else 0):
+            triage._count_repair(claim, job.context.get('kind'))
+    except Exception:  # noqa: BLE001 - accounting never changes an answer
+        logger.warning('AI job %s: its retry could not be counted against the triage budget', job.pk, exc_info=True)
 
 
 def _schedule(pk):

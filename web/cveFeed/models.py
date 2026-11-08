@@ -1678,7 +1678,9 @@ class CVEDetection(models.Model):
     rules_at = models.DateTimeField(null=True, blank=True)  # when the rules author last read the CVE's affected data
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
-    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer, or why the model could not be asked
+    ai_failures = models.PositiveSmallIntegerField(default=0, db_default=0)  # failed asks in a row (cveFeed.detection_author.AI_BACKOFF); 0 after an answer
+    ai_retry_at = models.DateTimeField(null=True, blank=True)  # the back-off: not asked again before this; None with failures at the limit means given up
     ai_input_hash = models.CharField(max_length=16, blank=True, default="", db_default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

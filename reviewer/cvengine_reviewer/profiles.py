@@ -199,3 +199,68 @@ def reasoning_plan(provider_id, model, level, max_tokens=None):
     if budget < BUDGET_MINIMUM:
         return {}, f'the reply limit ({max_tokens}) leaves no room for a thinking budget of at least {BUDGET_MINIMUM} tokens: raise CVENGINE_AI_MAX_TOKENS'
     return {'thinking': {'type': 'enabled', 'budget_tokens': budget}}, ''
+
+
+# ----------------------------------------------------------------------------- the reply limit: answer room, thinking room, retry
+
+# Tokens the ANSWER of each pipeline stage needs, with headroom (a limit is a ceiling, not a price: only the tokens written are billed).
+# Used when the operator set no limit of their own. A hosted model (Anthropic) is never sent less than DEFAULT_REPLY_CAP; a self-hosted
+# server is sent exactly the stage's own (see ``reply_cap_by_stage``). A stage that is not listed gets DEFAULT_REPLY_CAP.
+STAGE_ANSWER_CAPS = {
+    'finding_triage': 400, 'finding_triage_repair': 400,  # a short JSON object
+    'local_check_suggestion': 1024, 'rdp_screenshot': 1024, 'validation_plan': 1024, 'operations_check': 4000,
+    'finding_review': 4000, 'nuclei_tag_selection': 1024, 'nuclei_targeting': 2048, 'autotune_advisor': 2000, 'cve_detection': 8192,
+    'template_generation': 6144,  # a whole nuclei template (YAML with requests, matchers and extractors)
+}
+# The reasoning of a model (a thinking block, or a local model's reasoning) is paid from the reply limit on Anthropic and on the self-hosted
+# servers. Without room of its own it can take the whole limit before the first word of the answer (stop reason max_tokens, no text), so
+# the limit sent is the answer's room PLUS this reserve; the reserve follows the Reasoning setting and is 0 when no thinking can happen.
+THINKING_RESERVE = {None: 2048, 'off': 0, 'low': 2048, 'medium': 4096, 'high': 8192, 'max': 16384}
+REPLY_CEILING = 32768  # the largest reply limit ever sent: the Settings range's top
+# A reply cut off at its limit is asked once more with RETRY_FACTOR times the answer room, never more than RETRY_CEILING tokens in all (the
+# operator's own limit is the base, the retry may exceed it only up to this ceiling, and a limit already at it is not retried).
+RETRY_FACTOR = 2
+RETRY_CEILING = REPLY_CEILING
+
+
+def thinking_reserve(provider_id, model, level):
+    """Tokens of the reply limit to keep for the model's reasoning, apart from its answer: 0 for a provider that is sent no limit or a model
+    that does not reason (or has reasoning switched off), else by the Reasoning setting (``level``; None is \"not set\": a model that thinks
+    unless told not to is given the default). Pure."""
+    profile = PROFILES.get(provider_id)
+    if profile is None or not profile.reply_cap:
+        return 0
+    mechanism = profile.reasoning_detect(model)
+    if mechanism == 'none':
+        return 0
+    if mechanism == 'budget':  # thinks only when asked: the budget is the reserve
+        return _BUDGET.get(level, 0)
+    if level == 'off':
+        if provider_id == 'anthropic':
+            return 0 if anthropic_can_disable(model) else THINKING_RESERVE[None]
+        return 0 if profile.reasoning_field else THINKING_RESERVE[None]  # a switch that is not ours to flip: the model may still think
+    return THINKING_RESERVE.get(level, THINKING_RESERVE[None])
+
+
+def answer_room(profile, stage_cap=None):
+    """The answer room (tokens) a request gets when the operator set none: the stage's own for a self-hosted server, at least
+    DEFAULT_REPLY_CAP for a hosted one, 0 when the provider is sent no limit. Pure."""
+    if not profile.reply_cap:
+        return 0
+    stage = stage_cap if isinstance(stage_cap, int) and not isinstance(stage_cap, bool) and stage_cap > 0 else 0
+    if profile.reply_cap_by_stage:
+        return stage or profile.reply_cap
+    return max(stage, profile.reply_cap)
+
+
+def reply_total(answer, reserve, factor=1):
+    """The limit to send: ``factor`` times the answer room plus the thinking reserve, never more than REPLY_CEILING. Pure."""
+    return min(REPLY_CEILING, int(answer) * int(factor or 1) + int(reserve or 0)) if answer else 0
+
+
+def retry_total(answer, reserve, sent):
+    """The limit of the one retry after a reply was cut off at ``sent``, or 0 when asking again with more room is not possible (nothing was
+    sent, or ``sent`` is already at the ceiling). Pure."""
+    bigger = min(RETRY_CEILING, reply_total(answer, reserve, RETRY_FACTOR))
+    return bigger if bigger > (sent or 0) else 0
+
