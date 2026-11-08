@@ -615,12 +615,9 @@ def release_ineligible(agent):
 
 def prune_tasks(now=None, days=None):
     """Delete finished, failed and cancelled tasks older than the retention. The audit log keeps who did what; the rows would only pile up."""
-    import os
+    from cveFeed import tunables
     now = now or timezone.now()
-    try:
-        days = days or max(1, int(os.environ.get('CVENGINE_AGENT_TASK_RETENTION_DAYS', '')))
-    except ValueError:
-        days = RETENTION_DAYS
+    days = days or max(1, int(tunables.value('sentinel_task_retention_days', RETENTION_DAYS)))  # Settings, else CVENGINE_AGENT_TASK_RETENTION_DAYS, else 30
     old = AgentTask._base_manager.filter(status__in=('completed', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days))
     deleted = 0
     while True:

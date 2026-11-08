@@ -154,7 +154,7 @@ test('a card that fails to build shows its error line and the others still draw'
 test('the page code and the server registry name the same groups', () => {
   const dir = new URL('../static/cve/', import.meta.url);
   const src = readFileSync(new URL('tunables-card.js', dir), 'utf8');
-  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace'], ['egress', 'Outbound connections'], ['heat', 'Heat policy']]);
+  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace'], ['retention', 'Data retention'], ['egress', 'Outbound connections'], ['heat', 'Heat policy']]);
   assert.match(readFileSync(new URL('settings.js', dir), 'utf8'), /tunables-card\.js/);
 });
 

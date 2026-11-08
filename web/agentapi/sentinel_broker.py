@@ -1486,12 +1486,9 @@ def prune_tasks(now=None, days=None):
     """Delete finished, failed and expired SentinelTasks older than the retention (the same
     CVENGINE_AGENT_TASK_RETENTION_DAYS AgentTask uses; the audit log keeps the trail). Called from the weekly
     maintenance, like ``agent_broker.prune_tasks``."""
-    import os
+    from cveFeed import tunables
     now = now or timezone.now()
-    try:
-        days = days or max(1, int(os.environ.get('CVENGINE_AGENT_TASK_RETENTION_DAYS', '')))
-    except ValueError:
-        days = RETENTION_DAYS
+    days = days or max(1, int(tunables.value('sentinel_task_retention_days', RETENTION_DAYS)))  # Settings, else CVENGINE_AGENT_TASK_RETENTION_DAYS, else 30
     old = SentinelTask._base_manager.filter(status__in=('done', 'failed', 'expired'), finished_at__lt=now - timedelta(days=days))
     deleted = 0
     while True:
