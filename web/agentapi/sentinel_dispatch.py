@@ -242,6 +242,17 @@ def stage_parallel():
     return max(1, int(tunables.value('stage_parallel', DEFAULT_STAGE_PARALLEL)))
 
 
+def _refuse(project, kind, target, host, ips, scan=None):
+    """Raise ``AddressExcluded`` (nothing is created, nothing is waited for) when the task names an address on the organization's do-not-scan list, or a host
+    that resolves into it, or when the list could not be read (``agentapi.address_guard``: fails closed). The one dispatch-side check; every path that
+    makes a task goes through ``_Dispatch``, and ``SentinelTask.save`` asks the same question for any other."""
+    from agentapi import address_guard
+    from reNgine.resources import AddressExcluded
+    refusal = address_guard.dispatch_refusal(project, kind, target, host, ips, scan=scan)
+    if refusal:
+        raise AddressExcluded(kind, refusal)
+
+
 class _Dispatch:
     """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
     several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
@@ -250,6 +261,7 @@ class _Dispatch:
                  secret_ref=None):
         from agentapi.models import SentinelTask
         from cveFeed import activity
+        _refuse(project, kind, target, host, ips, scan)  # every task is made here: nothing is created for an address on the do-not-scan list
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
         self.builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task
         self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
@@ -458,6 +470,13 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from agentapi import stage_runs
+    from reNgine.resources import AddressExcluded
+    try:
+        _refuse(project, kind, target, host, ips, scan)
+    except AddressExcluded:
+        if internal:  # an internal task has no stage that waits: its caller already fails it
+            return None
+        raise
     run = stage_runs.current()
     if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
         return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome,
@@ -515,6 +534,30 @@ def _stopped(scan):
     return stopped(scan.id) or resources.global_pause_requested(fail_closed=False)
 
 
+def _guarded_prepare(project, kind, prepare, scan):
+    """``prepare`` that turns a chunk down (``None``: never offered to a Sentinel) when it names an address on the do-not-scan list, with the skip line written."""
+    from agentapi import address_guard
+
+    def guarded(chunk):
+        made = prepare(chunk)
+        if made is None:
+            return None
+        target, ips = made[0], made[1]
+        if kind in address_guard.LOOKUP_ONLY:
+            return made
+        refusals = address_guard.task_refusals(project, kind, target, '', ips)
+        if not refusals:
+            return made
+        address_guard.note_skipped(project, refusals, scan=scan, kind=kind)
+        listed = target.get('addresses') if isinstance(target, dict) else None
+        if isinstance(listed, list) and set(refusals) <= {str(a).strip() for a in listed}:
+            keep = [a for a in listed if str(a).strip() not in refusals]  # a chunk of addresses loses only the excluded ones, the rest still goes
+            if keep:
+                return ({**target, 'addresses': keep}, [i for i in (ips or []) if str(i).strip() not in refusals]) + tuple(made[2:])
+        return None
+    return guarded
+
+
 def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, created_by=None, priority=1, internal=False,
                   stop_on_none=False, labeler=None):
     """Send the chunks of one stage to Sentinels in parallel and yield ``(index, result)`` for each chunk as it finishes (``result`` is the task's
@@ -542,7 +585,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
     chunks = [list(c) for c in chunks]
     if not chunks:
         return
-    prepare = prepare or (lambda chunk: ({'addresses': chunk}, chunk))
+    prepare = _guarded_prepare(project, kind, prepare or (lambda chunk: ({'addresses': chunk}, chunk)), scan)
     from agentapi import stage_runs
     run = stage_runs.current()
     if run is not None:  # inside a StageRun: no wait loop here, the chunks are sent and the worker given back until they are over
@@ -787,6 +830,7 @@ def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
     once and handles all of them in one pass, so its own summary covers every item. The window is the free slots, as for ``dispatch_many``; with no
     live Sentinel left nothing more is sent and the loop's own calls decide, as they would have. Outside a StageRun it does nothing."""
     from agentapi import sentinel_broker, stage_runs
+    from reNgine.resources import AddressExcluded
     run = stage_runs.current()
     if run is None or not items:
         return
@@ -809,7 +853,10 @@ def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
             while pending and len(flying) < width:
                 index = pending.pop(0)
                 target, host, ips = items[index]
-                d = _Dispatch(project, kind, target, host, ips, scan, timeout, None, 1, internal, {**capacity, 'state': 'free' if free_left else 'busy'})
+                try:
+                    d = _Dispatch(project, kind, target, host, ips, scan, timeout, None, 1, internal, {**capacity, 'state': 'free' if free_left else 'busy'})
+                except AddressExcluded:
+                    continue  # on the do-not-scan list: no task; the loop's own dispatch_or_none call for it raises
                 run.add(keys[index], d, group=gid, index=index)
                 flying.append(index)
                 free_left = max(0, free_left - 1)

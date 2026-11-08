@@ -1704,6 +1704,14 @@ def _claim(agent, kinds, now):
                         _hint.other = True
                         held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is held for a less loaded Sentinel for up to {balance_for} seconds')
                         continue
+            from agentapi import address_guard
+            refusal = address_guard.task_refusal(task)  # an address excluded after this task was queued: it is never leased
+            if refusal:
+                if getattr(refusal, 'unreadable', False):
+                    held_back.setdefault(task.kind, 'the do-not-scan address list could not be read, so no address work is handed out')
+                else:
+                    expire(task, reason=f'cancelled: {refusal}')
+                continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
                 status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
@@ -2552,7 +2560,13 @@ def report_result(ctx, task_id, body):
             if exc.status != 400:
                 raise
             rejected = exc
-        if rejected is None:
+        from agentapi import address_guard
+        dropped = address_guard.result_refusal(task, result) if rejected is None else None  # an address can change after dispatch: asked again at ingestion
+        if dropped:
+            address_guard.drop_result(task, dropped)
+            audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
+                         agent_id=agent.pk, agent=agent.name, outcome='dropped', reason=str(dropped))
+        elif rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
             SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
                                                             error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
@@ -2569,6 +2583,8 @@ def report_result(ctx, task_id, body):
     if rejected is not None:
         raise rejected
     task.refresh_from_db()
+    if dropped:
+        return {'task': task_brief(task), 'duplicate': False, 'dropped': True, 'reason': str(dropped)}
     return {'task': task_brief(task), 'duplicate': False}
 
 

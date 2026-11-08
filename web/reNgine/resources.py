@@ -82,6 +82,16 @@ class ScannerUnavailable(MemoryBusy):
         super().__init__(f'no scanner could run {kind} work{": " + why if why else ""}; it stays due until one can')
 
 
+class AddressExcluded(ScannerUnavailable):
+    """The work names an address (or a host that resolves to one) on the organization's do-not-scan list, or the list could not be read: no task is created
+    (``agentapi.address_guard``). A ``ScannerUnavailable`` so that every stage already treats it as \"not the target's failure, nothing ran\"; ``refusal`` says
+    why, in plain words."""
+
+    def __init__(self, kind, refusal):
+        self.kind, self.why, self.done, self.refusal = kind, str(refusal), [], refusal
+        MemoryBusy.__init__(self, f'{kind} work was not started: {refusal}')
+
+
 class ScanAborted(RuntimeError):
     """The scan this work belongs to was stopped by a person; the work stops and the pipeline exits cleanly."""
 
