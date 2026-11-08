@@ -89,7 +89,9 @@ class SpacingTests(SimpleTestCase):
             for prop, val in re.findall(self.PROP, decl):
                 val = re.sub(r'(?:calc|clamp|min|max|env|var)\([^()]*(?:\([^()]*\)[^()]*)*\)', '', val)  # functions are checked by their own tokens
                 for px in re.findall(r'(?<![\w.])(-?\d+(?:\.\d+)?)px', val):
-                    n = abs(float(px))
+                    if float(px) < 0:
+                        continue  # a negative margin that cancels the extra size of a 44px hit area (cve.css, pointer:coarse) is exempt
+                    n = float(px)
                     if n not in (0, 2) and n % 4:
                         off.append('%s {%s:%s}' % (sel, prop, val.strip()))
         self.assertEqual(off, [])

@@ -792,7 +792,7 @@ a.why-more{color:var(--ink)}
 /* ---- host master/detail ---- */
 .split{display:grid;gap:var(--s-4);grid-template-columns:1fr;align-items:start}
 .split-list{padding:var(--s-3);display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
-.split-list>input{min-height:40px;font-size:var(--fs-4)}
+.split-list>input,.split-list>.filters-panel>input{min-height:40px;font-size:var(--fs-4)}
 .host-rows{display:flex;flex-direction:column;gap:var(--s-1);overflow:auto;scrollbar-width:thin;max-height:70dvh}
 .host-row{all:unset;box-sizing:border-box;display:flex;flex-direction:column;flex:none;gap:var(--s-1);min-height:var(--row-h);padding:var(--s-2) var(--s-3) var(--s-2) var(--s-5);border-radius:var(--r);cursor:pointer;border:1px solid transparent;position:relative;overflow:hidden}
 /* Hosts list: every row is the same height whatever it holds (the name is one line, the chips one line); other lists keep the same minimum and grow with their notes */
@@ -2200,3 +2200,43 @@ section.internal[hidden]{display:none}
 .cvx-refs li{display:flex;gap:var(--s-2);align-items:baseline;font-size:var(--fs-2);min-width:0}
 .cvx-refs a{min-width:0;overflow-wrap:anywhere;color:var(--ink-2)}
 @media (max-width:639px){.cvx-form{padding:var(--s-3)}.cvx-filters{width:100%}.cvx-filters select{flex:1}.cvx-open{padding:var(--s-3) var(--s-4) var(--s-3) var(--s-4)}.cvx-head,.cvx-pager{padding:var(--s-3) var(--s-4)}}
+
+/* ---- phones: the filters sit behind one button and the list comes first (static/cve/app.js filtersToggle / filtersGroup) ---- */
+.filters-row,.filters-toggle{display:none}
+.filters-panel{display:contents}
+@media (max-width:639px){
+  .filters-row{display:flex}
+  .filters-toggle{display:inline-flex}
+  .split-list:not(.filters-open) .filters-panel{display:none}
+  .split-list.filters-open .filters-panel{display:flex;flex-direction:column;gap:var(--s-3)}
+  .list-tools{grid-template-columns:minmax(0,1fr) auto}
+  .list-tools>select{grid-column:1/-1}
+  .split-list:not(.filters-open) .list-tools>select{display:none}
+  .split-list:not(.filters-open) .list-meta .meta-tools{display:none}
+}
+
+/* ---- a finger: every control is at least 44px in both directions on a touch screen. The size is the control's own (min-height, padding), or a
+   ::after that reaches past it, so nothing shifts; links inside a sentence keep the sentence's line height. ---- */
+@media (pointer:coarse){
+  :root{--hit:44px}
+  .btn,.btn.sm,.picker button,.heat-chips button,.split-list .picker button,.temp,.new-toggle,.bulk-toggle,.csv-btn,.view-save,.view-open,.theme-choice button,.copy,.copy-btn,.scan-chip,.svc-chip,.sb-toggle,.filters-toggle,.chart-ranges button,.sl-org-head,.see-all,.how-link,.set-nav button[data-tab]{min-height:var(--hit)!important;min-width:var(--hit)}
+  [role=tab]{min-height:var(--hit)!important}
+  .pagetabs a,.sheet-list a,.sheet-list button,.row-menu-item{min-height:var(--hit)}
+  input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=hidden]),select,textarea,.jump,summary{min-height:var(--hit)!important}
+  .skip{min-height:var(--hit)}
+  .brand{min-height:var(--hit);justify-content:center}
+  .set-group-title.set-toggle{min-height:var(--hit)}
+  /* a checkbox or radio is drawn 20px but answers a 44px square: the native control ignores padding, so it is drawn by hand */
+  input[type=checkbox],input[type=radio]{-webkit-appearance:none;appearance:none;position:relative;flex:none;width:var(--hit)!important;height:var(--hit)!important;min-height:0!important;margin:-13px!important;padding:0;border:0;background:transparent;cursor:pointer}
+  input[type=checkbox]::before,input[type=radio]::before{content:"";position:absolute;inset:12px;border:2px solid var(--muted);border-radius:var(--r-s);background:var(--surface)}
+  input[type=radio]::before{border-radius:50%}
+  input[type=checkbox]:checked::before,input[type=radio]:checked::before{background:var(--ink);border-color:var(--ink)}
+  input[type=checkbox]:checked::after{content:"";position:absolute;left:19px;top:14px;width:6px;height:11px;border:solid var(--on-ink);border-width:0 2px 2px 0;transform:rotate(45deg)}
+  input[type=radio]:checked::after{content:"";position:absolute;inset:18px;border-radius:50%;background:var(--on-ink)}
+  input[type=checkbox]:focus-visible,input[type=radio]:focus-visible{outline:2px solid var(--ink);outline-offset:-6px}
+  input[type=checkbox]:disabled::before,input[type=radio]:disabled::before{opacity:.5}
+  .row-menu-btn{width:var(--hit);height:var(--hit)}
+  .hr-top .row-menu-btn{margin:-8px -10px -14px 0}
+  a.host-link,a.cve-id,a.hit,.sub a,.table td a:not(.btn){position:relative}
+  a.host-link::after,a.cve-id::after,a.hit::after,.sub a::after,.table td a:not(.btn)::after{content:"";position:absolute;left:-8px;right:-8px;top:50%;height:var(--hit);transform:translateY(-50%)}
+}
