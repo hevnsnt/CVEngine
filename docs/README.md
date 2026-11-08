@@ -42,6 +42,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | [CONFIGURATION.md](CONFIGURATION.md)   | Every environment variable: memory, workers, scan windows, Sentinels, AI limits, feeds, retention, PDF reports, access |
 | [UPDATES.md](UPDATES.md)               | Automatic deployment, in-app approval, and the manual updater                                                          |
 | [UPGRADE.md](UPGRADE.md)               | Moving an older install to the current release, including the 1.3 to 1.4 notes                                         |
+| [1.4-OPERATOR-NOTES.md](1.4-OPERATOR-NOTES.md) | What an operator must know when upgrading to 1.4: new settings, the do-not-scan list, upgrade and rollback, AI model choice |
 
 ## Access and integration
 
