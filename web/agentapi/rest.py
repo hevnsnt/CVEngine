@@ -311,6 +311,8 @@ ROUTES = [
      lambda r, c, slug, secret_id, **k: secrets_api.get_secret(c, slug, secret_id)),
     ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/status', 'Set a secret\'s status {status: unverified|public_by_design|accepted|revoked|false_positive, note}; a write role. Audited',
      lambda r, c, slug, secret_id, **k: secrets_api.set_secret_status(c, slug, secret_id, _body(r))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/assign', 'Give a secret to a person {assignee: <user id from members>|null}; a write role. Audited',
+     lambda r, c, slug, secret_id, **k: secrets_api.set_secret_assignee(c, slug, secret_id, _body(r))),
     ('POST', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)/validate', 'Org Admin or App Admin, a project with validation on: queue a read-only check of this secret by the built-in scanner (202). Audited',
      lambda r, c, slug, secret_id, **k: (secrets_api.request_validation(c, slug, secret_id), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hygiene/run', 'Run the hygiene checks now (all targets, or {target_id})',

@@ -11,6 +11,7 @@ import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import { dialog } from "/staticfiles/cve/ui.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 
 const dash = document.getElementById("dash");
 const csrf = dash.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -328,7 +329,16 @@ function openScore(cell) {
   const dlg = dialog(`Why ${name} scores ${cell.dataset.score || 0}`, (body, close) => {
     body.classList.add("score-dlg");
     body.append(el("p", "note", [info.org, info.project].filter(Boolean).join(" / ") || "The score is the sum of these lines, at most 100."));
-    body.append(scoreList(info.score_parts || [], { slug: project, host: name }, { score: Number(cell.dataset.score || 0) }));
+    body.append(scoreList(info.score_parts || [], { slug: project, host: name }, {
+      score: Number(cell.dataset.score || 0),
+      // a secret opens in its side panel, over this dialog's page, without leaving the dashboard
+      onOpen: (l) => {
+        if (!l.ref || l.ref.type !== "secret" || !l.ref.id) return false;
+        close();
+        openSecret(project, l.ref.id);
+        return true;
+      },
+    }));
     const actions = el("div", "actions");
     const done = el("button", "btn ghost sm", "Close", { type: "button" });
     done.onclick = close;

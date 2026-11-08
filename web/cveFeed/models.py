@@ -2366,6 +2366,8 @@ class SecretOccurrence(models.Model):
     source = models.CharField(max_length=20)
     rule_id = models.CharField(max_length=120)
     line = models.PositiveIntegerField(null=True, blank=True)
+    # the text around the value, with the value masked before it was stored (cveFeed.secrets_catalog.mask_context); empty when it was not captured
+    context = models.TextField(blank=True, default="", db_default="")
     vulnerability = models.ForeignKey("startScan.Vulnerability", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     first_seen = models.DateTimeField(default=timezone.now, db_default=Now())
     last_seen = models.DateTimeField(default=timezone.now, db_default=Now())
