@@ -90,6 +90,14 @@ class ScannerUpdateTests(ScannerScriptBase):
         # the scanner was asked to finish its work first
         self.assertTrue([c for c in self.calls() if 'client.control drain' in c])
 
+    def test_a_rebuilt_image_of_the_same_commit_clears_the_failure_an_earlier_rollback_reported(self):
+        self.running_old()
+        self.state['release'][NEW] = self.state['release'][OLD]  # the fix is a new image of the same commit
+        self.save()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(self.running_image(), NEW, result.stderr)
+        self.assertTrue(any('report done' in r for r in self.reload()['reports']))
+
     def test_a_new_image_that_fails_its_health_wait_is_replaced_by_the_previous_one_and_says_why(self):
         self.running_old()
         self.state['healthy'][NEW] = False
@@ -412,6 +420,9 @@ class LockTests(unittest.TestCase):
             self.lock.raise_floor(self.data, 'short', 3)
         with self.assertRaises(self.lock.LockError):
             self.lock.validate({**self.data, 'tag': 'sha256:' + 'a' * 64})
+        self.lock.validate({**self.data, 'image': 'localhost:5055/cvengine-sentinel'})  # a registry with a port is a registry
+        with self.assertRaises(self.lock.LockError):
+            self.lock.validate({**self.data, 'image': 'localhost:5055'})
 
     def test_raise_floor_leaves_the_compose_default_alone(self):
         with tempfile.TemporaryDirectory() as tmp:

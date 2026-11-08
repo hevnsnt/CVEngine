@@ -193,7 +193,7 @@ cvengine_scanner_start() {
   if [ -n "$wanted" ] && [ -z "$wanted_id" ]; then
     if [ -n "$previous_id" ] && [ -z "$own" ] && docker tag "$previous_id" "$_cv_scanner_rollback_tag" 2>/dev/null; then
       _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
-      _cvengine_scanner_log "the built-in scanner image $wanted is not on this host; keeping the one that ran (${previous_ref:-$previous_id})"
+      _cvengine_scanner_log "the built-in scanner image $wanted is not on this host; keeping the one that ran (image ${previous_id#sha256:})"
       up_args=(--pull never)
     else
       _cvengine_scanner_log "the built-in scanner image $wanted is not on this host; the scanner cannot start until it is (make scanner-build, or the next update)"
@@ -212,13 +212,13 @@ cvengine_scanner_start() {
   if _cvengine_scanner_ready "$@"; then
     release_now=$(_cvengine_scanner_release "$@")
     _cvengine_scanner_log "the built-in scanner (${release_now:-$(_cvengine_scanner_image_of "$@")}) is healthy and has checked in with a contract version this server accepts"
-    if [ -n "$previous_release" ] && [ -n "$release_now" ] && [ "$previous_release" != "$release_now" ]; then
-      _cvengine_scanner_exec "$@" -- python3 -m client.control report done --phase scanner-update --from "$previous_release" --to "$release_now" >/dev/null 2>&1 || true
+    if [ -n "$release_now" ]; then  # also for a rebuilt image of the same commit: it clears a "failed" an earlier rollback reported
+      _cvengine_scanner_exec "$@" -- python3 -m client.control report done --phase scanner-update --from "${previous_release:-$release_now}" --to "$release_now" >/dev/null 2>&1 || true
     fi
     return 0
   fi
   if [ -n "$previous_id" ] && [ "$previous_id" != "$(_cvengine_scanner_running_id "$@")" ] && [ -z "$own" ] && [ -z "$(_cvengine_scanner_value CVENGINE_SCANNER_ROLLBACK_IMAGE "$file")" ]; then
-    _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $_cv_scanner_why. Putting the previous image back (${previous_ref:-$previous_id}); the next update tries the newest again"
+    _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $_cv_scanner_why. Putting the previous image back (build ${previous_release:-unknown}, image ${previous_id#sha256:}); the next update tries the newest again"
     _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
     if "$@" up -d --no-deps --force-recreate --pull never scanner; then
       # the restored scanner tells the server why, through its next heartbeat (the Sentinels page shows a failed update with its reason)
