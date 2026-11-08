@@ -25,7 +25,8 @@ from targetApp.models import Domain
 SHAPE = (600, 520, 420, 300, 250, 200, 150, 120, 100, 80, 60, 60, 50, 30, 10)  # hosts per project: 15 projects, 2,950 hosts
 TICK_SECONDS = 1.0
 TICK_QUERIES = 150
-CENSUS_SECONDS = 20.0  # the census runs in a worker every five minutes; this is the ceiling the test holds it to, measured about 1.5 s on a laptop
+CENSUS_SECONDS = 60.0  # the census runs in a worker every five minutes: about 1.4 s on a quiet laptop, 12 s on a loaded one; the query count below is the stable bound
+CENSUS_QUERIES = 600
 
 
 def build(hosts_per_project, now, tag='p', offset=0):
@@ -98,6 +99,7 @@ class LoadTests(TestCase):
         self.assertLess(tick[0], TICK_SECONDS, f'a tick took {tick[0]:.2f} s')
         self.assertLessEqual(tick[1], TICK_QUERIES, f'a tick ran {tick[1]} queries')
         self.assertLess(census[0], CENSUS_SECONDS, f'the census took {census[0]:.2f} s')
+        self.assertLessEqual(census[1], CENSUS_QUERIES, f'the census ran {census[1]} queries')
         # one batch is one task of at most 25 units, and the projects take turns inside each kind: 6 batches of a kind reach 6 projects, not one
         for kind in ('ssh_probe', 'secrets_scan'):
             self.assertEqual(len({b.project_id for b in PlannerBatch.objects.filter(kind=kind)}), PlannerBatch.objects.filter(kind=kind).count(), kind)
