@@ -121,10 +121,10 @@ def _env_in_force():
 
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, effective_settings, provider_defaults
+    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
     out = {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
            'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
-           'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
+           'selectable': list(SELECTABLE), 'keyless': list(KEYLESS), 'needs_url': list(SERVER_URL_PROVIDERS),
            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
@@ -294,23 +294,99 @@ def scan_policy_put(request):
     return scan_policy_get(request)
 
 
+MODELS_CACHE_SECONDS = 300  # a provider's model list changes a few times a year: five minutes is fresh enough and spares the provider
+MODELS_FAIL_SECONDS = 30  # a failed list is remembered briefly, so a page that asks again and again does not hammer a server that is down
+MODELS_MAX = 500  # models returned; a gateway can list thousands, and a drop-down of more than this is not a choice
+MODELS_ID_MAX = 200
+
+MODELS_FAIL_WORDS = {
+    'provider_auth': 'the key was refused, or none was sent (check the API key, and for a gateway the address it expects; a saved key is only used for the address it was saved for)',
+    'provider_rate_limit': 'the provider is rate limiting this key, so try again in a minute',
+    'provider_timeout': 'it did not answer in time',
+    'provider_connect_timeout': 'it did not accept a connection in time (check the address and the port)',
+    'provider_network': 'nothing answered at that address (check the address and the port, and that the server is running)',
+    'provider_http': 'it answered with an error (check the address: it may not offer a list of models)',
+    'provider_json': 'it answered, but not with a list of models (check the address, often it ends in /v1)',
+    'provider_shape': 'it answered, but not with a list of models (check that the provider type matches the server)',
+}
+
+
+def _models_cache_key(provider, base_url, key):
+    """The cache key of one list: provider, address and a hash of the key. The key itself is never part of it."""
+    import hashlib
+    from django.conf import settings
+    # a slow, salted derivation (the server's secret is the salt): the entry names a key without a dump of Redis being a way to guess it
+    digest = hashlib.pbkdf2_hmac('sha256', (key or '').encode(), f'cve-ai-models:{settings.SECRET_KEY}'.encode(), 20_000).hex()
+    raw = hashlib.sha256(f'{provider}\0{(base_url or "").strip().rstrip("/").lower()}\0{digest}'.encode()).hexdigest()
+    return f'cve:ai-models:{raw}'
+
+
+def _clean_models(listed):
+    out, seen = [], set()
+    for m in listed or []:
+        mid = m.get('id') if isinstance(m, dict) else None
+        if not isinstance(mid, str) or not mid or len(mid) > MODELS_ID_MAX or mid in seen:
+            continue
+        seen.add(mid)
+        price = m.get('price')
+        price = float(price) if isinstance(price, (int, float)) and not isinstance(price, bool) and 0 <= price < 1e6 else None
+        out.append({'id': mid, 'price': price})
+        if len(out) >= MODELS_MAX:
+            break
+    return out
+
+
 def ai_models(request):
-    """The models the chosen provider offers, for the model picker. Uses the key typed in the form, else the stored
-    one (only when the provider is unchanged, so a stored key is never sent to a different service)."""
-    from reNgine.ai_providers import AIProviderError, SELECTABLE, get_provider, pick_cheapest_newest
+    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
+    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
+    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
+    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+    from django.core.cache import cache
+    from reNgine.ai_providers import DEFAULT_MODELS, SELECTABLE, SERVER_URL_PROVIDERS, AIProviderError, get_provider, pick_cheapest_newest
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
+    if provider not in DEFAULT_MODELS:
+        raise SettingsError(400, 'unknown provider')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and not re.match(r'^https?://', base_url, re.I):
+        raise SettingsError(400, 'the server URL must start with http:// or https://')
     if base_url and ai_url_blocked(base_url):
         raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
+    if provider in SERVER_URL_PROVIDERS and not base_url:
+        raise SettingsError(400, 'enter the address of the server first')
     key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
-    try:
-        listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
-    except AIProviderError as exc:
-        raise SettingsError(400, f'could not list models: {exc}')
-    recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(listed) or '')
-    return {'models': [{'id': m['id'], 'price': m['price']} for m in listed[:500]], 'recommended': recommended}
+    cache_key = _models_cache_key(provider, base_url, key)
+    refresh = data.get('refresh') is True
+    hit = None
+    if not refresh:
+        try:
+            hit = cache.get(cache_key)
+        except Exception:  # noqa: BLE001 - a cache that is down is a miss, not a failed page
+            hit = None
+    if hit is None:
+        try:
+            raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
+            listed = _clean_models(raw)
+            recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
+            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else ''}
+            ttl = MODELS_CACHE_SECONDS
+        except AIProviderError as exc:
+            words = MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''))
+            if words is None and 'requires an API key' in str(exc):  # no key typed, and the saved one belongs to another address
+                words = 'there is no API key for this address: type one (a saved key is only used for the address it was saved for)'
+            hit = {'error': words or 'it did not answer'}
+            ttl = MODELS_FAIL_SECONDS
+        except (AttributeError, KeyError, TypeError, ValueError):  # a shape the provider class did not expect: not a list of models
+            hit = {'error': MODELS_FAIL_WORDS['provider_shape']}
+            ttl = MODELS_FAIL_SECONDS
+        try:
+            cache.set(cache_key, hit, ttl)
+        except Exception:  # noqa: BLE001
+            pass
+    if 'error' in hit:
+        raise SettingsError(400, hit['error'])
+    return {'models': hit['models'], 'recommended': hit['recommended']}
 
 
 AI_ERROR_HINTS = {

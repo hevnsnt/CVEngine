@@ -400,7 +400,11 @@ class AIProvider:
 		except (requests.RequestException, ValueError) as e:
 			# the error's own text names the address it tried and why it failed: to a caller that is a map of what answers where
 			status = getattr(getattr(e, 'response', None), 'status_code', None)
-			raise AIProviderError(f'{self.name} model list failed ({type(e).__name__}{f", HTTP {status}" if status else ""})') from e
+			category = ('provider_auth' if status in (401, 403) else 'provider_rate_limit' if status == 429 else 'provider_http' if status
+				else 'provider_connect_timeout' if isinstance(e, requests.ConnectTimeout) else 'provider_timeout' if isinstance(e, requests.Timeout)
+				else 'provider_json' if isinstance(e, ValueError) else 'provider_network')
+			raise AIProviderError(f'{self.name} model list failed ({type(e).__name__}{f", HTTP {status}" if status else ""})',
+				category=category, http_status=status) from e
 
 
 def _anthropic_text(data):
@@ -587,7 +591,7 @@ class OpenAIProvider(AIProvider):
 				price = float(price) * 1_000_000 if price is not None else None
 			except (TypeError, ValueError):
 				price = None
-			if m.get('id'):
+			if isinstance(m.get('id'), str) and m['id']:
 				models.append({'id': m['id'], 'created': _epoch(m.get('created')), 'price': price})
 		return sorted(models, key=lambda m: (-m['created'], m['id']))
 
