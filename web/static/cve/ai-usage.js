@@ -147,7 +147,7 @@ if (mount) {
         { label: "When (UTC)", render: (r) => shortDate(r.at) },
         { label: "Provider / model", render: (r) => `${r.provider} · ${r.actual_model || r.model || "unknown"}` },
         { label: "Stage", render: (r) => r.stage },
-        { label: "Result", render: (r) => r.error_category || r.status },
+        { label: "Result", render: (r) => (r.status === "failed" ? (r.reason || r.error_category || "failed") : r.status) + (r.stop_reason ? ` [${r.stop_reason}]` : "") },
         { label: "Input / output", render: (r) => `${count(r.input_tokens)} / ${count(r.output_tokens)}` },
         { label: "Latency", render: (r) => latency(r.duration_ms) },
       ], data.recent)));

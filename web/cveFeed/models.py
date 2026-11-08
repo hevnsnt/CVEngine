@@ -1106,6 +1106,7 @@ class AIUsage(models.Model):
     stage = models.CharField(max_length=40, default='unspecified')
     status = models.CharField(max_length=12)  # succeeded | failed
     error_category = models.CharField(max_length=40, blank=True, default='')
+    stop_reason = models.CharField(max_length=24, blank=True, default='', db_default='')  # the provider's stop reason (end_turn, max_tokens, refusal, ...), never text
     input_tokens = models.PositiveIntegerField(null=True, blank=True)
     output_tokens = models.PositiveIntegerField(null=True, blank=True)
     cache_read_tokens = models.PositiveIntegerField(null=True, blank=True)
