@@ -49,7 +49,7 @@ MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+\-]{0,200}$')
 # What a failure may be called: the categories of the container's request layer (cvengine_reviewer.llm), which are the server's own from
 # before 1.4, and two of the queue's.
 CATEGORIES = frozenset(('provider_error', 'provider_auth', 'provider_rate_limit', 'provider_http', 'provider_connect_timeout',
-                        'provider_timeout', 'provider_network', 'provider_json', 'provider_shape', 'output_truncated', 'empty_response',
+                        'provider_timeout', 'provider_network', 'provider_json', 'provider_shape', 'output_truncated', 'empty_response', 'refused',
                         'unsupported', 'unexpected_error', 'malformed_job', 'lease_expired'))
 
 # kind -> the module that continues it. Each defines ``job_answer(job, text)`` (returns None, or a ``Retry``) and ``job_failure(job,

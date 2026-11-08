@@ -100,6 +100,8 @@ def reply_limit(provider):
 	worker; OpenAI and OpenRouter get none (a hosted reasoning model spends part of its limit thinking, and OpenAI names the field
 	differently). A retry after a cut-off reply asks for ``token_factor`` times as much."""
 	options = _request_options.get()
+	if options.get('reply_limit'):  # a retry that asked for exactly this much (see ``complete_with_headroom``)
+		return int(options['reply_limit'])
 	cap = _layered('max_tokens', provider.runtime)[0]
 	if cap is None:
 		profile = PROFILES.get(provider.name)
@@ -175,7 +177,7 @@ def _usage_numbers(provider, raw):
 		None)
 
 
-def _record_completion(provider, status, category, started, duration_ms):
+def _record_completion(provider, status, category, started, duration_ms, stop_reason=''):
 	"""Best-effort usage metadata only. Accounting failure must never change an AI verdict."""
 	try:
 		from cveFeed.models import AIUsage
@@ -184,7 +186,8 @@ def _record_completion(provider, status, category, started, duration_ms):
 			actual_model=provider._last_actual_model[:200], stage=_usage_stage.get(),
 			status=status, error_category=category[:40], started_at=started,
 			input_tokens=counts[0], output_tokens=counts[1], cache_read_tokens=counts[2],
-			cache_write_tokens=counts[3], duration_ms=duration_ms)
+			cache_write_tokens=counts[3], duration_ms=duration_ms,
+			stop_reason=str(stop_reason or getattr(provider, '_last_stop_reason', '') or '')[:24])
 	except Exception:
 		logger.debug('AI usage metadata could not be stored', exc_info=False)
 
@@ -202,8 +205,8 @@ def tracked_completion(fn):
 			kwargs['user'] = redact_text(kwargs['user'])
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
-		self._last_usage, self._last_actual_model = None, ''
-		status, category = 'failed', ''
+		self._last_usage, self._last_actual_model, self._last_stop_reason = None, '', ''
+		status, category, stop_reason = 'failed', '', ''
 		try:
 			answer = fn(self, *args, **kwargs)
 			if _request_options.get().get('redact_reply', True):  # a stage whose reply is code that must stay literal (templategen) opts out
@@ -212,10 +215,56 @@ def tracked_completion(fn):
 			return answer
 		except Exception as exc:
 			category = exc.category if isinstance(exc, AIProviderError) else 'unexpected_error'
+			stop_reason = getattr(exc, 'stop_reason', '') or ''
+			if isinstance(exc, AIProviderError) and exc.usage and self._last_usage is None:
+				self._last_usage = exc.usage
 			raise
 		finally:
-			_record_completion(self, status, category, started, max(0, int((time.monotonic() - tick) * 1000)))
+			_record_completion(self, status, category, started, max(0, int((time.monotonic() - tick) * 1000)), stop_reason)
 	return wrapped
+
+def plain_failure(category, stop_reason=None, fix=False):
+	"""One plain sentence for a failed call, for the usage page and the activity feed: what happened. ``fix`` adds what to change. The words
+	depend on the category and the stop reason only, never on anything the model or a target said. '' for a category with no sentence."""
+	stop = (stop_reason or '').strip()
+	say, how = '', ''
+	if category == 'output_truncated':
+		say = 'The model answered with no text (it stopped at the token limit)'
+		how = 'raise "Reply limit" (CVENGINE_AI_MAX_TOKENS) or lower "Reasoning": a reasoning model spends the limit thinking'
+	elif category == 'refused':
+		say = 'The model declined to answer (stop reason: refusal)'
+		how = 'it is not asked the same question again; try another model if this keeps happening'
+	elif category == 'empty_response':
+		say = 'The model answered with no text' + (f' (stop reason: {stop})' if stop else '')
+		how = 'if it is a reasoning model, raise "Reply limit" (CVENGINE_AI_MAX_TOKENS) or lower "Reasoning"'
+	return say + (f'. To fix: {how}' if say and fix else '')
+
+
+RETRY_REPLY_FACTOR = 4   # a reply cut off at the limit is asked once more with this many times the limit ...
+RETRY_REPLY_CEILING = 8192  # ... but never more than this (a name-to-tag answer is a few hundred tokens: this is for a model that thinks first)
+
+
+def complete_with_headroom(provider, system, user, allow_retry=None):
+	"""``provider.complete(system, user)``, and when the answer was cut off at the reply limit (``output_truncated``: with a reasoning model
+	the limit can be gone before the first word of text) ONE more request with a larger limit, ``RETRY_REPLY_FACTOR`` times as much up to
+	``RETRY_REPLY_CEILING``. The retry is a request like any other: it is recorded in the usage table under the caller's stage, so it counts
+	against whatever the caller counts (``allow_retry``, a callable returning whether the caller's own per-day cap has room for one more, is
+	asked first). No retry when no limit is sent (OpenAI, OpenRouter), when the larger limit would not be larger, when the cap has no room, and
+	never after a refusal or any other failure: only a cut-off is fixed by asking for more room. A second failure is raised as it is."""
+	try:
+		return provider.complete(system, user)
+	except AIProviderError as error:
+		if error.category != 'output_truncated':
+			raise
+		sent = reply_limit(provider)
+		bigger = min(RETRY_REPLY_CEILING, sent * RETRY_REPLY_FACTOR) if sent else 0
+		if not bigger or bigger <= sent or (allow_retry is not None and not allow_retry()):
+			raise
+		logger.info('%s answered nothing usable at a reply limit of %s tokens (stop reason %s); asking once more with %s', provider.name, sent,
+			error.stop_reason, bigger)
+	with request_options(reply_limit=bigger):
+		return provider.complete(system, user)
+
 
 ANTHROPIC_URL = PROFILES['anthropic'].default_base
 ANTHROPIC_VERSION = '2023-06-01'
@@ -273,8 +322,9 @@ def untrusted_block(label, data):
 
 class AIProviderError(Exception):
 	def __init__(self, message, *, category='provider_error', http_status=None, stop_reason=None,
-				 output_length=None, digest=None, reason=None, attempts=None, hint=''):
+				 output_length=None, digest=None, reason=None, attempts=None, hint='', usage=None):
 		super().__init__(message)
+		self.usage = usage  # {'input_tokens', 'output_tokens'} the provider reported for the failed answer (numbers only), or None
 		self.hint = hint  # the start of a refused request's body, lower-cased: read by the caller to tell what was refused, never stored or shown
 		self.reason = reason  # why a reply failed validation: fixed wording and sanitized key names, never reply text
 		self.attempts = attempts
@@ -320,6 +370,8 @@ def _epoch(value):
 class AIProvider:
 	name = ''
 	timeout = REQUEST_TIMEOUT  # seconds a completion may take; a provider that loads models on demand overrides it
+
+	_last_stop_reason = ''
 
 	def __init__(self, model=None, api_key=None, base_url=None, runtime=None):
 		self.runtime = runtime if runtime is not None else AIRuntime()  # the operator's settings (reNgine.ai_profiles.AIRuntime)
@@ -376,6 +428,7 @@ class AIProvider:
 				self._last_usage = data.get('usage') or {
 					'prompt_tokens': data.get('prompt_eval_count'), 'completion_tokens': data.get('eval_count')}
 				self._last_actual_model = str(data.get('model') or '')
+				self._last_stop_reason = str(data.get('stop_reason') or data.get('done_reason') or '')[:24]
 			return data
 		except requests.HTTPError as e:
 			status = getattr(getattr(e, 'response', None), 'status_code', None)
@@ -407,18 +460,31 @@ class AIProvider:
 				category=category, http_status=status) from e
 
 
+def _anthropic_usage(data):
+	"""The token counts of an answer, numbers only, for an error that is logged and stored."""
+	raw = data.get('usage') if isinstance(data, dict) else None
+	return {k: _token_number(raw.get(k)) for k in ('input_tokens', 'output_tokens')} if isinstance(raw, dict) else None
+
+
 def _anthropic_text(data):
-	"""The text of an Anthropic response, shared by complete() and complete_vision(). Raises AIProviderError."""
-	if data.get('stop_reason') == 'max_tokens':
+	"""The text of an Anthropic response, shared by complete() and complete_vision(): every ``text`` block joined, whatever comes before it (a
+	model that thinks first answers with a ``thinking`` block and then the text). Raises AIProviderError. The cases with no usable text:
+	``max_tokens`` (cut off: a thinking block may have used the whole limit, so ``output_truncated``), ``refusal`` (the model declined: its
+	answer is empty and asking again will not change that), and any other stop with no text block (``tool_use``, ``pause_turn``, an empty
+	``end_turn``): ``empty_response`` with the stop reason named."""
+	stop = str(data.get('stop_reason') or '')[:24] or None
+	usage = _anthropic_usage(data)
+	if stop == 'max_tokens':
 		raise AIProviderError('anthropic response exceeded the output token limit', category='output_truncated',
-			stop_reason='max_tokens')
+			stop_reason='max_tokens', usage=usage)
+	if stop == 'refusal':
+		raise AIProviderError('anthropic model declined to answer', category='refused', stop_reason='refusal', usage=usage)
 	try:
 		answer = ''.join(b.get('text', '') for b in data['content'] if b.get('type') == 'text')
 	except (KeyError, TypeError, AttributeError) as e:
 		raise AIProviderError('unexpected anthropic response shape', category='provider_shape') from e
 	if not answer.strip():
-		raise AIProviderError('anthropic response contained no text', category='empty_response',
-			stop_reason=data.get('stop_reason'))
+		raise AIProviderError('anthropic response contained no text', category='empty_response', stop_reason=stop, usage=usage)
 	return answer
 
 

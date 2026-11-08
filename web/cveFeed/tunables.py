@@ -110,6 +110,10 @@ TUNABLES = [
             'Most questions the auto-tuner asks the AI advisor in a day (counted from UTC midnight). Each question is one small call with numbers only. '
             'Over the cap the deterministic controller keeps tuning on its own; with no AI provider it always does.',
             'ai_spend', 'CVENGINE_AUTOTUNE_AI_MAX_PER_DAY', 8, 1, 96, 'questions', caution='cap', window='utc_day', auto_tunable=False),
+    Tunable('nuclei_ai_max_per_day', 'Nuclei targeting AI calls per day',
+            'Most calls the AI may make in a day (counted from UTC midnight) to pick Nuclei tags for a scan: the tag selection and the targeting of each scan. '
+            'Failed calls and the one retry after a cut-off answer count. Over the cap the scan uses the standard templates and says so.',
+            'ai_spend', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY', 400, 1, 20000, 'calls', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('stage_parallel', 'Chunks of one scan stage at once',
             'The most chunk tasks ONE scan stage keeps in flight across Sentinel slots at once (the nmap and naabu chunks of up to 64 addresses, the nuclei chunks). '
             '1 sends them one after another. The window is also limited by the Sentinel slots that are free, so raising this does nothing without free slots.',
@@ -463,12 +467,12 @@ def reset_group(user, group_id):
 def usage_today():
     """{key: number used so far} for the caps that have a counter already: triage questions asked since UTC midnight, validation checks reserved
     today, template drafts in the last 24 hours. A counter that cannot be read is left out, never guessed."""
-    from cveFeed import triage, validation
+    from cveFeed import nuclei_templates, triage, validation
     out = {}
     from cveFeed import autotune
     from cveFeed import local_egress
     for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
-                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25))):
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('nuclei_ai_max_per_day', nuclei_templates.ai_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25))):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001

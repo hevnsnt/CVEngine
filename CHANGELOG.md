@@ -6,6 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **"anthropic response contained no text" no longer repeats and says why.** The AI behind Nuclei targeting could answer with no text block (the model stopped at the token limit before its answer, declined, or ended its turn empty), and every pass logged a traceback for it, several times a minute. The failure is now one log line with the stop reason and the token counts. A cut-off answer is asked once more with four times the reply limit (at most 8192, counted in the AI usage table and in the new `CVENGINE_NUCLEI_AI_MAX_PER_DAY` cap, 400 a day, under AI spend); a refusal is never retried; the same request is not sent again for 5 minutes, then 10, up to an hour (shared by the workers). The scan uses the standard templates, its activity says why, and the AI usage page shows the stop reason and a plain sentence with what to raise (`CVENGINE_AI_MAX_TOKENS`, Reasoning).
 - **Pages no longer flash unstyled content with a giant black glyph while the stylesheet loads.** Every inline icon now has `width` and `height`, the pages inline a small critical style (the icon stroke/size, background and text colour, the skip link, the rail width) before the stylesheet, and nginx serves hash-versioned `/staticfiles/` URLs with `Cache-Control: public, max-age=31536000, immutable` (any other URL keeps `no-cache`), so a second navigation fetches no stylesheet or script from the network.
 
 ### Added
