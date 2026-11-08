@@ -234,7 +234,7 @@ drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavaila
 
 ## Single-box install
 
-Add about 2 GB of memory (`SCANNER_MEM_LIMIT`; 1 GB on a host under about 7 GB, [DEPLOYMENT.md](DEPLOYMENT.md#memory)) and 1.5 GB of disk. If the scanner is offline, the work that needs it waits with a strip on every page, is never marked failed, and is queued again for when it is back.
+Add about 3 GB of memory (`SCANNER_MEM_LIMIT`; 1 GB on a host under about 7 GB, [DEPLOYMENT.md](DEPLOYMENT.md#memory)) and 1.5 GB of disk. If the scanner is offline, the work that needs it waits with a strip on every page, is never marked failed, and is queued again for when it is back.
 Air-gapped installs get a release bundle with both image tarballs, the CVE seed and the template bundle, with the version
 check off for the built-in.
 

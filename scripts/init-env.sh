@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; }
+created=0
+[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; created=1; }
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
@@ -35,6 +36,27 @@ fill() {
     echo "Generated ${key}."
   fi
 }
+
+# The Compose project name of a NEW installation (an existing .env keeps its own: volumes, networks and the update scripts are named by it). The example
+# says "rengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
+# project "rengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
+if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=rengine$' .env; then
+  chosen=${COMPOSE_PROJECT_NAME:-}
+  if ! [[ $chosen =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    chosen=''
+    if command -v docker >/dev/null 2>&1; then
+      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=rengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
+      if [ -n "$elsewhere" ]; then
+        chosen=rengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
+        [[ $chosen =~ ^rengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=rengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
+      fi
+    fi
+  fi
+  if [ -n "$chosen" ] && [ "$chosen" != rengine ]; then
+    set_value COMPOSE_PROJECT_NAME "$chosen"
+    echo "Compose project name: $chosen (another checkout on this host already uses \"rengine\")."
+  fi
+fi
 
 # The key that encrypts the stored API keys, webhook URLs and TOTP seeds, apart from Django's secret. A value already set is
 # never changed (that is what rotation is for: manage.py rotate_field_key); values stored before it existed still read.

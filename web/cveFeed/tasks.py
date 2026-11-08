@@ -1246,6 +1246,9 @@ def automatic_validate_finding(job_id):
                             project=job.project_id, status='running', job_id=job.pk, finding_id=job.triage_id)
     stage = 'load_finding'
     try:
+        # With no AI model connected the review can only say "unavailable": that was four activity lines per finding on the dashboard feed. The run
+        # keeps its one line (the one above, settled at the end with the whole outcome) and the two progress lines are not written.
+        ai_connected = bool(triage._resolve_provider(False))
         require_authority(job)
         from cveFeed.conductor import bounty_blocked_projects
         if job.source != 'manual' and job.project_id in bounty_blocked_projects():  # only a person's own request runs in a bug bounty project that has not confirmed automated testing
@@ -1280,22 +1283,24 @@ def automatic_validate_finding(job_id):
         checks = {'ran': 0, 'reused': 0, 'no_check': 1}
         stage = 'approved_checks'
         if row.kind in validation.PLANNED_KINDS:
-            activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
-                         project=job.project_id, job_id=job.pk, finding_id=row.pk)
+            if ai_connected:
+                activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
+                             project=job.project_id, job_id=job.pk, finding_id=row.pk)
             require_authority(job)
             checks = validation.run_validation(job.project_id, [row.pk], unattended=job.source != 'manual')
             row.refresh_from_db()
             check_state = ('no_check' if checks.get('no_check') and not checks.get('ran') else
                            'observed' if row.validation_status == 'observed' else
                            'checked' if checks.get('ran') or checks.get('reused') else 'not_run')
-        else:
+        elif ai_connected:
             activity.log('validate', f'Automatic validation #{job.pk}: no approved external check for {row.kind}',
                          project=job.project_id, job_id=job.pk, finding_id=row.pk, check_state='no_check')
         findings = triage.load_findings([row])
         row, described = triage.track(findings)[0]
         stage = 'ai_review'
-        activity.log('confirm', f'Automatic validation #{job.pk}: AI review started', project=job.project_id,
-                     job_id=job.pk, finding_id=row.pk)
+        if ai_connected:
+            activity.log('confirm', f'Automatic validation #{job.pk}: AI review started', project=job.project_id,
+                         job_id=job.pk, finding_id=row.pk)
         require_authority(job)
         ai = triage.run_triage([(row, described)])
         row.refresh_from_db()
@@ -1317,7 +1322,8 @@ def automatic_validate_finding(job_id):
             status=status, result=result, finished_at=timezone.now(),
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
         activity.settle(progress, 'failed' if failed else 'done',
-                        f'Automatic validation #{job.pk} {status}: checks {check_state}; AI {ai_state}',
+                        f'Automatic validation #{job.pk} {status}: checks {check_state}; ' +
+                        ('no AI model is connected, so no AI review' if not ai_connected and ai_state == 'unavailable' else f'AI {ai_state}'),
                         check_state=check_state, ai_state=ai_state)
         return result
     except Exception as exc:

@@ -102,9 +102,12 @@ function form(node, { title, lead, body, primary, onSubmit, skip, canBack = true
 }
 
 // --- the discovery strip: shown from step 2 on, so it is clear the first discovery is already running --------------------------------
+let builtinNote = null; // the plan step's line about the built-in scanner: kept current by the same poll
 async function pollStrip() {
   try {
     const r = await welcome('GET', 'progress');
+    const live = r.sentinel && r.sentinel.builtin_state;
+    if (live && builtinNote && builtinNote.isConnected) builtinNote.textContent = live.text; // "starting" must not stay once it has enrolled
     if (r.discovery) { discBar.classList.add('on'); discText.textContent = r.discovery.text; }
   } catch (_) { /* the next poll tries again */ }
 }
@@ -191,7 +194,8 @@ const steps = {
       const c = el('div'); c.append(el('b', '', title), el('span', '', blocked ? `${about} Not available: the built-in scanner is switched off on this install.` : about));
       label.append(radio, c); box.append(label);
     });
-    const status = el('p', 'note', builtin.text, { style: 'margin:-6px 0 16px' });
+    const status = el('p', 'note', builtin.text, { style: 'margin:-6px 0 16px', 'aria-live': 'polite' });
+    builtinNote = status;
     draw();
     form(node, {
       title: 'How will you scan?', lead: 'Pick where your scans run. You can change this later in Sentinels.',

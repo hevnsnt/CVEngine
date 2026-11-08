@@ -279,6 +279,13 @@ def start_discovery(row, project, domain):
         # the same step sent again after a discovery that ended with no host (refused, failed, stopped, or finished empty): it starts again, with a
         # fresh wait, instead of leaving the person on a screen that can only say it found nothing
         disc = {**disc, 'started_at': None, 'tries': 0}
+    if not live_sentinels()['live']:
+        # No scanner is live yet (a fresh install: the built-in one enrols within a minute of the installer finishing). A scan made now would be refused
+        # at once and show as a failed scan in the list on a clean install, so it is not made: the wizard holds the discovery and ``resume_discovery`` starts
+        # it, as one scan, the moment a scanner is live.
+        now = timezone.now().isoformat()
+        _store(row, discovery={'domain': domain, 'scan_id': None, 'pending': True, 'started_at': now, 'tries': 0, 'last_try': None})
+        return True
     try:
         scans = discovery.start_in_stored_modes([target])  # the mode stored on the target; the same call the dashboard's own discovery uses
     except RuntimeError:  # no scan engine yet: a fresh install is still finishing its first start
@@ -309,9 +316,18 @@ def resume_discovery(row, now=None):
     from targetApp.models import Domain
     data = row.data or {}
     disc = data.get('discovery') or {}
+    now = now or timezone.now()
+    if disc.get('pending') and not disc.get('scan_id'):  # held until a scanner is live (start_discovery): start it now, once
+        if not live_sentinels(now)['live']:
+            return False
+        target = Domain._base_manager.filter(name=disc.get('domain')).order_by('id').first()
+        scans = discovery.start_in_stored_modes([target]) if target is not None else []
+        if not scans:
+            return False
+        _store(row, discovery={**disc, 'scan_id': scans[0].id, 'pending': False, 'tries': 0, 'last_try': now.isoformat()})
+        return True
     if not disc.get('scan_id') or int(disc.get('tries') or 0) >= 20:
         return False
-    now = now or timezone.now()
     last = _parse(disc.get('last_try'))
     if last and (now - last).total_seconds() < REQUEUE_EVERY:
         return False
@@ -672,6 +688,9 @@ def progress(request, now=None):
                                 'queue_position': discovery.queue_position(scan.pk) if state == 'queued' else None,
                                 'error': (scan.error_message or '')[:290] if state == 'ended' else '',
                                 'text': discovery_text(state, scan.domain.name, found, live['live'], scan.error_message if state == 'ended' else '')}
+    if disc.get('pending') and not disc.get('scan_id'):  # held until a scanner is live: shown as queued, with no scan in the list yet
+        out['discovery'] = {'scan_id': None, 'domain': disc.get('domain'), 'state': 'queued', 'hosts': 0, 'recent': [], 'queue_position': None, 'error': '',
+                            'text': discovery_text('queued', disc.get('domain'), 0, False)}
     over = elapsed is None or elapsed >= out['dwell']['min_seconds']
     finished = bool(out['discovery'] and out['discovery']['state'] in ('done', 'ended'))
     ready = over or found >= ENOUGH_HOSTS or finished
