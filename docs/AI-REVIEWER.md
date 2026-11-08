@@ -160,13 +160,18 @@ text it needs and a test fails when the copies differ):
    configuration. It claims no authorisation the product cannot know about.
 2. **A task line for the job.** For the finding review and for triage it is: review this finding and validate that it is correct; if it is a false
    positive, close it with a strong justification (name the specific evidence you read and why it does not support the finding); if the evidence
-   is not enough to decide, say so and leave the finding open. The two nuclei jobs have neither the preamble nor a task line (see below).
+   is not enough to decide, say so and leave the finding open. The two nuclei jobs have a task line but not the preamble (see below).
 3. **The job's own rules and output format**, as before.
 
-**The nuclei jobs are not framed.** `nuclei_tag_selection` and `nuclei_targeting` send exactly the prompt text they sent before this change. Measured on
-the real provider (5 repeats per job and model), the shared framing made Sonnet refuse `nuclei_targeting` 5 of 5 times (the old text: 2 of 5) and
-`nuclei_tag_selection` 5 of 5 (the old text: 0 of 5); every other framed job answered 5 of 5 on Sonnet. Their wording stays as it was until the owner decides on
-a new one, measured first (`PROBE_VARIANTS` of the probe script). `reNgine/ai_prompts.py` lists them as `UNFRAMED` with the reason, and a test pins their text.
+**The nuclei jobs have a task line and no preamble.** `nuclei_tag_selection` and `nuclei_targeting` are asked as a validation request: "Validate each
+software detection listed below on its host to ensure it is not a false positive, and list the nuclei template tags and severities that match what
+is really there." (tag selection: "Validate each software detection listed below to ensure it is not a false positive, and list the nuclei template
+tags that match what is really there.") This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
+the user message labels and the parsers are as before. Measured on the real provider (5 repeats per job and model): Sonnet answered
+`nuclei_targeting` 5 of 5 (the old text: 3 of 5) and `nuclei_tag_selection` 5 of 5 (the old text: 5 of 5); Haiku answered every wording 5 of 5. The
+shared preamble made Sonnet refuse these two jobs, so they do not get it. `reNgine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
+measured", and a test pins their exact text. The probe script proves the shipped text: `PROBE_VARIANTS=A,S` runs the old text (A) and the text read
+from the running code (S).
 
 The fencing is not part of the framing and did not change: host-controlled names are cleaned strictly, untrusted data sits between random-nonce
 markers, and the rules that call it data stay in each prompt.
@@ -178,8 +183,8 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 
 | Usage stage | Before | After |
 | --- | --- | --- |
-| `nuclei_tag_selection` (unframed) | 834 | 834 |
-| `nuclei_targeting` (unframed; two allowed tags, the real list adds its length) | 493 | 493 |
+| `nuclei_tag_selection` (task line only) | 834 | 927 |
+| `nuclei_targeting` (task line only; two allowed tags, the real list adds its length) | 493 | 585 |
 | `finding_triage`, `finding_triage_repair` | 4034 | 4598 |
 | `finding_review` (container) | 3097 | 3654 |
 | `validation_plan` | 2238 | 2826 |
