@@ -10,7 +10,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0151_secretoccurrence_context'),
+        ('cveFeed', '0152_aiusage_stop_reason'),
         ('dashboard', '0032_setup_wizard'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
