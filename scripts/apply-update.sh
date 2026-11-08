@@ -336,7 +336,8 @@ deploy_builtin() {
   # it sends no heartbeat. Never a failed update. A checkout with scripts/update-deploy.sh does the same there.
   if [ -f scripts/scanner.sh ]; then
     . scripts/scanner.sh
-    cvengine_scanner_fetch "${compose[@]}"
+    # fetched already before the page went up when that was for the same image
+    [ -n "${CV_SCANNER_PREFETCHED:-}" ] && [ "$(cvengine_scanner_wanted_image "${compose[@]}" 2>/dev/null)" = "$CV_SCANNER_PREFETCHED" ] || cvengine_scanner_fetch "${compose[@]}"
     cvengine_scanner_start "${compose[@]}"
   fi
 }
@@ -586,6 +587,19 @@ rm -f "$STATE/last-wait" "$STATE/last-refusal" "$DRAIN_SINCE_FILE"
 
 PREV=$(git rev-parse HEAD)
 SWITCHED=0
+# The built-in scanner's image (about 5 GB) changes nothing the running site reads, so it is fetched NOW, while the site is still up (and the workers
+# drain), never under the maintenance page: that would lengthen the outage by minutes on a small host. The scanner.sh and lock of the files
+# that are on the host now are used (the lock names a moving tag); scripts/update-deploy.sh fetches again only if the new lock names another image
+# (CV_SCANNER_PREFETCHED). Skipped when nothing is to be updated, when the scanner is off (the fetch would remove it), and never a failure.
+if [ -f scripts/scanner.sh ] && { [ "$SWITCH" = 1 ] || ! git merge-base --is-ancestor "$SHA" HEAD || [ "$(python3 "$STATE_HELPER" built 2>/dev/null || true)" != "$PREV" ]; }; then
+  # shellcheck source=scanner.sh
+  . scripts/scanner.sh
+  if cvengine_scanner_enabled "${COMPOSE[@]}"; then
+    phase applying "fetching the built-in scanner image (the site is still up)"
+    cvengine_scanner_fetch "${COMPOSE[@]}" >>"$LOG" 2>&1 || true
+    CV_SCANNER_PREFETCHED=$(cvengine_scanner_wanted_image "${COMPOSE[@]}" 2>/dev/null) || CV_SCANNER_PREFETCHED=''
+  fi
+fi
 # From here the update changes files the running containers read (./web is a bind mount): the maintenance page goes up FIRST, before the
 # branch switch and before the fast-forward, not after the build. A run that has nothing to move (the files are already at the commit)
 # puts it up below, before it rebuilds.

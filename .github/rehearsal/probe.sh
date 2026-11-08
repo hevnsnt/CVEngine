@@ -9,6 +9,7 @@ rm -f "$HOME/probe.stop" "$HOME/probe.log"
 body=$(mktemp); hdr=$(mktemp)
 while [ ! -e "$HOME/probe.stop" ]; do
   now=$(date +%s)
+  : > "$body"  # a request that fails must not be judged by the previous answer's page
   code=$(curl -sk -m 4 -D "$hdr" -o "$body" -w '%{http_code}' "https://127.0.0.1:$(port)/" 2>/dev/null) || code=000
   marker=0; grep -q 'We are rebuilding cvENGINE\|The update did not finish' "$body" 2>/dev/null && marker=1
   api=$(curl -sk -m 4 -D "$hdr" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "https://127.0.0.1:$(port)/api/v1/sentinel/tasks/1/result" 2>/dev/null) || api=000
