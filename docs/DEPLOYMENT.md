@@ -179,16 +179,44 @@ Each container has a memory ceiling of its own, set in `.env` and applied by `ma
 | Container | Variable | Default | What it holds |
 | --- | --- | --- | --- |
 | `celery` | `CELERY_MEM_LIMIT` | `4g` | the workers: scan planning, the stages that wait for a Sentinel, the AI jobs, the CVE feed and the storing and judging of results. No scan tool runs here |
-| `scanner` | `SCANNER_MEM_LIMIT` | `2g` | the built-in scanner: nmap, naabu, nuclei, testssl.sh, WPScan, wafw00f, bbot, Kingfisher, sshamble and the screenshot browser, several at once |
+| `scanner` | `SCANNER_MEM_LIMIT` | `3g` | the built-in scanner: nmap, naabu, nuclei, testssl.sh, WPScan, wafw00f, bbot, Kingfisher, sshamble and the screenshot browser, as many at once as fit (below) |
 | `web` | `WEB_MEM_LIMIT` | `1g` | the web server |
 | `celery-beat` | `BEAT_MEM_LIMIT` | `512m` | the scheduler |
 | `reviewer` | `REVIEWER_MEM_LIMIT` | `256m` | the AI reviewer |
 
 With PostgreSQL, Redis and the proxy that comes to about 8 GB, which is why 8 GB is comfortable. On a smaller host the installer gives the
 scanner 1 GB (`SCANNER_MEM_LIMIT=1g`, written when the host has less than about 7 GB) and warns. Below 4 GB lower `CELERY_MEM_LIMIT` too (the
-no scan tool runs in celery, so it needs less than before 1.4). A scanner that hits its ceiling has the tool
-that was running killed by the kernel: that task is reported failed and the work waits for the scanner (nothing is marked failed in the scan).
-To keep fewer tools running at once, lower how many tasks the scanner runs at once on its card on the Sentinels page (**Settings**).
+no scan tool runs in celery, so it needs less than before 1.4). The scanner does not run into its ceiling: it reads its own container limit and weighs every kind of work against it
+before it takes the work (`client/admission.py` in the Sentinel). Measured peaks, one run each, against a local lab server: **nuclei 500 MB** (720-735 MB
+before it was started with a soft Go memory limit; it loads the whole template set whatever its tags), **the screenshot browser 224 MB** for two pages (a page can
+use more; the browser is stopped at 1500 MB), **nmap `-p-` 68 MB**, bbot 66 MB for a one-host run (weighed at 250 MB because a real discovery grows), Kingfisher
+about 150 MB. At 2 GB the scanner runs two nuclei and a browser together; at the default 3 GB it runs three nuclei and a browser, which is the mix that was
+once killed at 2 GB (one deep nuclei, several light ones and Chromium). A kind that does not fit waits (the server holds the task for the scanner, nothing fails); a run the
+kernel kills anyway reports *out of memory, retry later* and the work stays due. To run fewer tools at once, lower how many tasks the scanner runs at once on its
+card on the Sentinels page (**Settings**), or lower `SCANNER_MEM_LIMIT`.
+
+## Screenshots and AppArmor
+
+The screenshot browser (Chromium, in the built-in scanner container) is sandboxed with user namespaces. Docker's seccomp profile refuses them, which is why `docker-compose.yml` gives the scanner Playwright's seccomp profile (`config/seccomp/playwright-chromium.json`). On a host whose **AppArmor** also restricts unprivileged user namespaces (Ubuntu 24.04 and later, recent Debian and Kali) Docker's own `docker-default` AppArmor profile refuses them as well, and the browser dies at launch: Chromium prints `FATAL credentials.cc ... Check failed: Permission denied (13)`. The seccomp profile alone is not enough there.
+
+What you see: **Settings, System status** and the Sentinels page say *the host's AppArmor profile blocks Chromium's sandbox*, and the scanner stops taking `web_screenshot` work (it no longer declares it), so the pages stay queued instead of failing one by one. Everything else is unaffected. Once the host is fixed, the scanner proves its sandbox again within ten minutes (or at its next restart) and takes screenshots again.
+
+Fix it with a profile that is `docker-default` plus one line, `userns,` (`config/apparmor/cvengine-scanner`). It needs AppArmor 4.0 or newer, which is also the version that introduced the restriction:
+
+```bash
+sudo apparmor_parser -r -W config/apparmor/cvengine-scanner     # load it (until the host reboots)
+```
+
+Then run the scanner under it with the overlay `docker-compose.apparmor.yml` (it adds `apparmor=cvengine-scanner` to the scanner's `security_opt`; the commented line under `security_opt` in `docker-compose.yml` shows the same). Name the overlay in `.env` so `make up` and the updater keep using it:
+
+```bash
+echo 'CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.apparmor.yml' >> .env
+docker compose -f docker-compose.yml -f docker-compose.apparmor.yml up -d scanner
+```
+
+To keep it across reboots, copy the file to `/etc/apparmor.d/cvengine-scanner` and `sudo systemctl reload apparmor`. The profile changes nothing else about the container.
+
+The fallback is `apparmor=unconfined` in place of `apparmor=cvengine-scanner` in the overlay. It works, and the trade-off is real: the scanner container, which runs scan tools against the internet, then has no AppArmor confinement at all (its capabilities, user and seccomp limits still apply). Use it only to prove the diagnosis, and move to the profile.
 
 ## Backups
 
@@ -266,6 +294,6 @@ Three options, all of which keep the database and broker running: automatic depl
 
 ## Uninstall
 
-`scripts/uninstall.sh` lists the containers, volumes, and networks of this install's Compose project (named by `CVENGINE_COMPOSE_PROJECT`, then `COMPOSE_PROJECT_NAME`, then the checkout directory) and, once you type yes, deletes them and their locally built images. That includes all scan results. Other applications, including other reNgine installs, are not touched. `.env`, `secrets/`, `web/secret`, and `backups/` stay, and so do the update watcher and the automatic-deployment timer: run `sudo scripts/install-updater.sh --remove` and `sudo scripts/install-auto-deploy.sh --remove` first. It needs access to Docker, not necessarily `sudo`.
+`scripts/uninstall.sh` lists the containers, volumes, and networks of this install's Compose project (named by `CVENGINE_COMPOSE_PROJECT`, then `COMPOSE_PROJECT_NAME`, then the checkout directory) and, once you type yes, deletes them and their locally built images. That includes all scan results. Other applications, including other reNgine installs, are not touched. `.env`, `secrets/`, `web/secret`, and `backups/` stay, and so do the update watcher and the automatic-deployment timer: run `sudo scripts/uninstall-updater.sh` (or `sudo make uninstall-updater`) and `sudo scripts/install-auto-deploy.sh --remove` first. `install.sh` adds one line to root's crontab (it starts the watcher every minute); `uninstall-updater.sh` removes that line and nothing else in the crontab. It needs access to Docker, not necessarily `sudo`.
 
 See also: [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).

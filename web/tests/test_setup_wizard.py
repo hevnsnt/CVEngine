@@ -36,6 +36,11 @@ class WizardBase(TestCase):
         patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests
         self.resolves = patcher.start()
         self.addCleanup(patcher.stop)
+        self.live = True  # a scanner is live unless a test says otherwise (the first discovery is held until one is: setup_flow.start_discovery)
+        live = mock.patch.object(setup_flow, 'live_sentinels', side_effect=lambda now=None: {'live': int(self.live), 'builtin': int(self.live), 'external': 0})
+        live.start()
+        self.live_patch = live
+        self.addCleanup(live.stop)
 
     def seed(self, **changes):
         with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
@@ -179,6 +184,7 @@ class SeedTests(WizardBase):
         scan = ScanHistory.objects.get()
         # the fake scanner (tests.fake_scanner) does not stream bbot batches, so the run itself is not replayed here: what is proven is that the
         # discovery is queued for this scan and that a live (fake) built-in scanner is what the wizard reports as ready
+        self.live_patch.stop()  # the real reading of the heartbeats from here on
         self.assertEqual(setup_flow.live_sentinels()['builtin'], 0)
         with FakeScanner(kinds=['bbot_discovery']) as fake:
             self.assertEqual(setup_flow.live_sentinels()['builtin'], 1)
@@ -223,6 +229,7 @@ class SeedTests(WizardBase):
         scan = ScanHistory.objects.get()
         ScanHistory.objects.filter(pk=scan.pk).update(scan_status=discovery.FAILED, error_message='waiting for a scanner: bbot_discovery')
         row = SetupWizard.objects.get()
+        self.live = False
         with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
             self.assertFalse(setup_flow.resume_discovery(row))  # nobody is live: it stays as it is
             queued.assert_not_called()
@@ -230,11 +237,44 @@ class SeedTests(WizardBase):
             self.assertEqual(progress['discovery']['state'], 'waiting')
             self.assertIn('as soon as one is connected', progress['discovery']['text'])
             with FakeScanner(kinds=['bbot_discovery']):
+                self.live = True
                 SetupWizard.objects.update(data={**row.data, 'discovery': {**row.data['discovery'], 'last_try': None}})
                 self.assertTrue(setup_flow.resume_discovery(SetupWizard.objects.get()))
                 self.assertFalse(setup_flow.resume_discovery(SetupWizard.objects.get()))  # not again inside the window
         self.assertEqual(ScanHistory.objects.filter(domain__name='seed.test').count(), 2)
         queued.assert_called_once()
+
+    def test_the_first_discovery_is_held_until_a_scanner_is_live_and_no_failed_scan_is_made(self):
+        self.live = False
+        response = self.seed()
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(response.json()['discovery_started'])
+        self.assertFalse(ScanHistory.objects.exists())  # no scan to show as failed on a clean install
+        self.queued.assert_not_called()
+        progress = self.c.get('/cve/api/welcome/progress').json()
+        self.assertEqual(progress['discovery']['state'], 'queued')
+        self.assertIn('starts as soon as one is', progress['discovery']['text'])
+        self.assertFalse(ScanHistory.objects.exists())  # polling while nothing is live starts nothing
+        self.live = True  # the built-in scanner enrols
+        with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as queued:
+            progress = self.c.get('/cve/api/welcome/progress').json()
+        queued.assert_called_once()
+        self.assertEqual(ScanHistory.objects.filter(domain__name='seed.test').count(), 1)
+        self.assertEqual(progress['discovery']['state'], 'queued')
+        self.assertIsNotNone(progress['discovery']['scan_id'])
+        with mock.patch('cveFeed.tasks.run_bbot_discovery.delay') as again:
+            self.c.get('/cve/api/welcome/progress')
+        again.assert_not_called()  # once, not on every poll
+        self.assertEqual(ScanHistory.objects.filter(domain__name='seed.test').count(), 1)
+
+    def test_the_progress_poll_carries_the_built_in_scanners_current_state_for_the_plan_step(self):
+        self.seed()
+        with mock.patch.object(setup_flow, 'builtin_state', return_value={'enabled': True, 'enrolled': True, 'live': True, 'text': 'The built-in scanner is ready.'}):
+            out = self.c.get('/cve/api/welcome/progress').json()
+        self.assertEqual(out['sentinel']['builtin_state']['text'], 'The built-in scanner is ready.')
+        js = (setup_flow.__file__.rsplit('/cveFeed/', 1)[0] + '/static/cve/welcome.js')
+        text = open(js, encoding='utf-8').read()
+        self.assertIn('builtinNote.textContent = live.text', text)  # the plan step's line is rewritten by the poll, so "starting" never outlives the enrolment
 
 
 class PlanAndKindsTests(WizardBase):
@@ -532,6 +572,7 @@ class ProgressTests(WizardBase):
         return len(ctx)
 
     def test_nothing_found_yet_holds_the_wait_until_the_dwell_is_over(self):
+        self.live = False
         self.seed()
         out = self.c.get('/cve/api/welcome/progress').json()
         self.assertFalse(out['dwell']['ready'])

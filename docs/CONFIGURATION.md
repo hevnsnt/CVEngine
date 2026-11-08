@@ -216,7 +216,7 @@ digest, and the updates pull it, start it and roll it back on their own ([UPDATE
 | `CVENGINE_SCANNER_IMAGE` | unset | Another image for the `scanner` service than the one `scanner.lock.json` pins (read by compose and the update scripts), for example `cvengine-sentinel-local:latest` after `make scanner-build`. An image set here is never pulled over or rolled back. |
 | `CVENGINE_SCANNER_ROLLBACK_IMAGE` | unset | Written and removed by the update scripts, not by hand: the previous scanner image, kept while the image this release pins sent no heartbeat after an update. The next update removes it and tries its own pin again. |
 | `CVENGINE_SCANNER_READY_SECONDS` | `300` | How long an update waits for the new scanner image's first heartbeat before it rolls back to the previous image. Read by the update scripts. |
-| `SCANNER_MEM_LIMIT` | `2g` | Memory limit of the `scanner` container, read by compose. The installer writes `1g` on a host with less than about 7 GB of memory. The workers' own limit is `CELERY_MEM_LIMIT` ([DEPLOYMENT.md](DEPLOYMENT.md#memory)). |
+| `SCANNER_MEM_LIMIT` | `3g` | Memory limit of the `scanner` container, read by compose. The installer writes `1g` on a host with less than about 7 GB of memory. The workers' own limit is `CELERY_MEM_LIMIT` ([DEPLOYMENT.md](DEPLOYMENT.md#memory)). |
 | `CVENGINE_WEB_HOST_PORT` | `8000` | Only with `docker-compose.hostnet.yml`: the loopback port the web service is published on, where the built-in scanner (on the host network with celery) reaches the server. |
 
 ## AI reviewer

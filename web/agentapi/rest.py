@@ -604,7 +604,11 @@ def dispatch(request, path):
                 raise ApiError(403, 'this token is read only')
             result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
-            return JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
+            response = JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
+            wait = getattr(e, 'extra', {}).get('retry_after_seconds')
+            if e.status in (429, 503) and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait >= 0:
+                response['Retry-After'] = str(int(wait))  # a client waits this long instead of guessing
+            return response
         except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
             if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
                 return schema_guard.unavailable(request)

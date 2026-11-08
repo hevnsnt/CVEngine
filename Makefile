@@ -17,7 +17,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-down scanner-build scanner-logs
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-down uninstall-updater scanner-build scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -99,6 +99,9 @@ openvas-up: check-env	## Start the old in-stack OpenVAS (Greenbone) containers, 
 
 openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
+
+uninstall-updater:	## Remove the host's update watcher (the cron line install.sh added); run with sudo if install.sh ran as root (docs/UPDATES.md).
+	bash scripts/uninstall-updater.sh
 
 scanner-build:	## Build the built-in scanner image from source, the Sentinel commit scanner.lock.json pins (the fallback when the published image cannot be pulled).
 	@tag=$$(bash -c '. scripts/scanner.sh && cvengine_scanner_build' | tail -n1) && echo "Built $$tag (also cvengine-sentinel-local:latest)." && \
