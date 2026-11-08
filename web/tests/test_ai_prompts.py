@@ -311,3 +311,32 @@ class ReviewerUsageTests(TestCase):
     def test_the_reviewer_token_path_covers_the_route(self):
         from agentapi import auth
         self.assertTrue(auth.REVIEWER_PATH.match('/api/v1/reviewer/usage'))
+
+
+class UnnamedStageTests(TestCase):
+    """A call made outside usage_stage() says where it came from, once, so the 'unspecified' bucket can be traced on a live instance."""
+
+    def run_call(self, named):
+        from tests.anthropic_fake import SHAPES, FakeAnthropic
+        with FakeAnthropic([SHAPES['text_only']('ok'), SHAPES['text_only']('ok')]) as fake:
+            provider = ai_providers.get_provider('anthropic', api_key='not-a-real-key', model='claude-haiku-5-5', base_url=fake.url)
+            if named:
+                with ai_providers.usage_stage('connection_test'):
+                    provider.complete('s', 'u')
+            else:
+                for _ in range(2):  # the same place twice: one line in the log
+                    provider.complete('s', 'u')
+
+    def test_an_unnamed_call_is_logged_once_with_its_caller_and_no_text(self):
+        ai_providers._UNNAMED_SEEN.clear()
+        self.addCleanup(ai_providers._UNNAMED_SEEN.clear)
+        with self.assertLogs('reNgine.ai_providers', 'WARNING') as logs:
+            self.run_call(named=False)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn('test_ai_prompts.py', logs.output[0])
+        self.assertIn('usage_stage', logs.output[0])
+
+    def test_a_named_call_logs_nothing(self):
+        ai_providers._UNNAMED_SEEN.clear()
+        with self.assertNoLogs('reNgine.ai_providers', 'WARNING'):
+            self.run_call(named=True)

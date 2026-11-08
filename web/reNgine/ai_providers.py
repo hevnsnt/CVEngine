@@ -193,6 +193,23 @@ def _record_completion(provider, status, category, started, duration_ms, stop_re
 		logger.debug('AI usage metadata could not be stored', exc_info=False)
 
 
+_UNNAMED_SEEN = set()
+
+
+def _note_unnamed_stage():
+	"""A model call made outside ``usage_stage`` is recorded as ``unspecified``, which hides what the call was. Say where it came from, once per
+	place: file names and line numbers of the calling frames only, never any text of the request."""
+	try:
+		import traceback
+		frames = [f'{os.path.basename(f.filename)}:{f.lineno}' for f in traceback.extract_stack(limit=8)[:-2] if 'ai_providers' not in f.filename]
+		where = ' < '.join(reversed(frames[-4:]))
+		if where not in _UNNAMED_SEEN and len(_UNNAMED_SEEN) < 50:
+			_UNNAMED_SEEN.add(where)
+			logger.warning('AI call with no usage stage (recorded as "unspecified"), called from %s: wrap it in usage_stage() and name the job in reNgine/ai_prompts.py', where)
+	except Exception:  # noqa: BLE001 - diagnostics never change a call
+		pass
+
+
 def tracked_completion(fn):
 	"""Wraps complete() and complete_vision(): same usage accounting either way, and the one place every prompt and every reply passes, so
 	the last line of defence against a secret reaching the provider or being stored from its answer sits here: the user message is masked
@@ -204,6 +221,8 @@ def tracked_completion(fn):
 			args = (args[0], redact_text(args[1]), *args[2:])
 		elif 'user' in kwargs:
 			kwargs['user'] = redact_text(kwargs['user'])
+		if _usage_stage.get() == 'unspecified':
+			_note_unnamed_stage()
 		started = datetime.now(timezone.utc)
 		tick = time.monotonic()
 		self._last_usage, self._last_actual_model, self._last_stop_reason = None, '', ''
