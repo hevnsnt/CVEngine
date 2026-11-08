@@ -75,7 +75,7 @@ async function show(i) {
   drawDots();
   stepBox.textContent = '';
   if (STEPS[i] === 'build') {
-    discBar.classList.remove('on');
+    discBar.classList.remove('on'); discText.textContent = ''; // nothing of the strip's old words stays in the page
     try { gate = await welcome('GET', 'progress?build=1'); } catch (_) { gate = null; } // cannot ask: show it, it ends on its own timer
     if (index !== i) return;
     if (gate && !gate.build.show) { toDashboard(gate.discovery_scan); return; }
