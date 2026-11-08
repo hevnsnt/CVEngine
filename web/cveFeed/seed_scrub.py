@@ -53,7 +53,7 @@ _PLACEHOLDER = re.compile(r'(?i)^(?:user(?:name)?|pass(?:word)?|admin|root|login
 # legitimately says "the password parameter" or quotes a proof of concept)
 _ASSIGNED = re.compile(r'(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|auth[_-]?key|access[_-]?key|credential)s?["\']?\s*[:=]\s*["\']?(?!\$|\{|<|%|\*|x{3,})(?=[^\s"\',;]*\d)[^\s"\',;]{8,}')  # a value with a digit in it
 _RANDOM = re.compile(r'[A-Za-z0-9+=]{32,}')  # no '-' or '_': a hyphenated slug of words is not a token
-_PATHS = re.compile(r'/usr/src/(?:app|scan_results|github)\b|/root/\.config|/root/nuclei-templates|/var/lib/cvengine|(?<![A-Za-z0-9._-])/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._ -]+|[A-Za-z]:\\Users\\')
+_PATHS = re.compile(r'/usr/src/(?:app|scan_results|github)\b|(?<![A-Za-z0-9._-])/root/|/var/lib/cvengine|(?<![A-Za-z0-9._-])/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._ -]+|[A-Za-z]:\\Users\\')
 _PRIVATE_NETS = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', 'fc00::/7', 'fe80::/10')]
 
 
