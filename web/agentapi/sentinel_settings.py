@@ -392,6 +392,10 @@ def record_info(agent, raw, now=None):
     if not info:
         return False
     merged = {**(agent.info or {}), **info}
+    # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
+    if 'version' in info and (agent.info or {}).get('version') != info['version']:
+        from django.utils import timezone
+        merged['version_since'] = (now or timezone.now()).isoformat()
     fields = {'info': merged}
     version_changed = 'version' in info and (agent.info or {}).get('version') not in (None, info['version'])
     failed = (info.get('update') or {}).get('status') == 'failed'

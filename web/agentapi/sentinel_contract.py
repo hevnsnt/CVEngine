@@ -79,6 +79,24 @@ def state(reported):
     return 'previous' if reported >= min_supported() else 'unsupported'
 
 
+OLDER_NOTE = 'This scanner is older than this server needs, update it'
+NOTES = {
+    'unsupported': OLDER_NOTE,
+    'previous': 'This scanner is one release behind this server: it is offered the kinds it can run. Update it for the newest ones',
+    'newer': 'This scanner is newer than this server (fine): it is offered the kinds this server knows',
+}
+
+
+def note(reported):
+    """The sentence a page shows for a Sentinel that declared contract version ``reported``, or ``''`` when there is nothing to say (current, or an old
+    client the server still serves). A Sentinel older than ``min_supported`` is offered NO work (``can_run`` is false for every kind), and says so. One
+    that never reported a version is taken as version 1, so it gets the same sentence when the server no longer speaks 1."""
+    found = state(reported)
+    if found == 'unreported' and min_supported() > 1:
+        return OLDER_NOTE
+    return NOTES.get(found, '')
+
+
 def reply():
     """What a Sentinel is told in a register or heartbeat answer, so it can tell for itself whether it is behind."""
     return {'version': version(), 'min_supported': min_supported()}
