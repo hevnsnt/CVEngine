@@ -95,6 +95,9 @@ export async function agentsAdmin(panel) {
     output.append(el("h3", "", "Registered agents"));
     const waiting = agents.results.filter((a) => a.status === "pending").length;
     if (waiting) output.append(el("p", "msg", `${waiting} agent${waiting === 1 ? " is" : "s are"} waiting for approval and get no work until you approve them (Manage, Approve).`));
+    const named = agents.results.filter((a) => a.kind !== "scanner"); // Sentinels are managed on Scanners, Sentinels
+    output.append(el("p", "note", "Sentinels are on Scanners, Sentinels."));
+    agents.results = named;
     if (!agents.results.length) output.append(el("p", "empty", "No agent has registered yet. An agent calls register_agent (MCP) or PUT /api/v1/agent."));
     else {
       output.append(table([

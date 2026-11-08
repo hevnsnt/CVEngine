@@ -2568,3 +2568,17 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   /* a place's link keeps its 44px hit area (the ::after above) without making the card's line 44px tall */
   .table-page .table td.clip a:not(.btn){min-height:24px}
 }
+
+.api-keys-page{display:grid;gap:var(--s-4);max-width:880px}
+.api-keys-page .api-ro{display:grid;grid-template-columns:auto 1fr;gap:var(--s-2) var(--s-2);align-items:center}
+.api-keys-page .api-ro input{width:auto;min-height:0}
+.api-keys-page .api-ro label{margin:0}
+.api-keys-page .api-ro .note{grid-column:1/-1;margin:0}
+.api-keys-page #secret{margin-top:var(--s-3)}
+.api-keys-page .tok-row{display:flex;justify-content:space-between;align-items:center;gap:var(--s-3)}
+.api-keys-page .seg{display:flex;gap:var(--s-1);flex-wrap:wrap;margin-bottom:var(--s-3)}
+.api-keys-page .seg-btn{min-height:36px;padding:0 var(--s-3);border:1px solid var(--line);border-radius:var(--r);background:transparent;color:var(--ink);font:inherit;cursor:pointer}
+.api-keys-page .seg-btn[aria-selected="true"]{background:var(--ink);color:var(--on-ink)}
+@media (pointer:coarse){.api-keys-page .seg-btn,.api-keys-page .code .copy{min-height:44px}}
+.visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.api-keys-page #secret[hidden]{display:none}

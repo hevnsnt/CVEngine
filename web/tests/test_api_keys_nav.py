@@ -68,6 +68,34 @@ class ApiKeysMenuTests(TestCase):
         self.assertEqual(nav.build('agents', 'alpha', bounty_enabled=True, sentinels_enabled=True)['utility'], 'API keys')
 
 
+class ApiKeysPageLayoutTests(TestCase):
+    def test_the_page_order_is_new_key_then_connect_then_keys_and_it_is_single_purpose(self):
+        user = User.objects.create_superuser('lay-root', 'root@example.test', 'pw-12345-long')
+        html = client_for(user).get('/cve/agents/').content.decode()
+        ids = [html.index(i) for i in ('id="f"', 'id="connect"', 'id="list"', 'id="agents"', 'id="agents-admin"')]
+        self.assertEqual(ids, sorted(ids))
+        for gone in ('inv-open', 'inv-project', 'Host inventory', 'Set up host reporting'):
+            self.assertNotIn(gone, html)
+        self.assertIn('id="connect-live"', html)  # the announcement region
+        self.assertIn('aria-live="polite"', html)
+        self.assertIn('Read only', html)
+        self.assertIn('every tool that writes is refused', html)
+
+    def test_the_token_is_never_in_the_html_or_the_static_files(self):
+        from django.contrib.auth.models import User as U
+        user = U.objects.create_user('lay-member', password='x')
+        client = client_for(user)
+        raw = client.post('/api/v1/tokens', '{"name": "t1"}', content_type='application/json').json()['token']
+        self.assertTrue(raw)
+        self.assertNotIn(raw, client.get('/cve/agents/').content.decode())
+        for f in STATIC.glob('*.js'):
+            self.assertNotIn(raw, f.read_text(), f.name)
+        page = (STATIC / 'api-keys-page.js').read_text() + (STATIC / 'connect-card-logic.js').read_text()
+        for banned in ('localStorage', 'sessionStorage', 'document.cookie', 'history.', 'dataset', 'console.'):
+            self.assertNotIn(banned, page, banned)
+        self.assertNotIn('data-token', page)
+
+
 class AiUsageLinksTests(TestCase):
     @classmethod
     def setUpTestData(cls):

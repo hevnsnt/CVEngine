@@ -187,7 +187,7 @@ report_task_result {"task_id": 41, "outcome": "fixed", "summary": "upgraded ngin
 agent_heartbeat   {}                         (about once a minute while working)
 ```
 
-In the web app, **API keys** (account menu) shows, to administrators, **Agents in your organizations**: it lists agents with their scope, capabilities, last seen and task counts, with approve, limit, suspend and revoke, plus the work no agent can take and what is queued or running. The same page lists your own keys and agents. Sentinels also have their own page, **Scanners, Sentinels**. A finding and a host show which agent holds work on them.
+In the web app, **API keys** (account menu) shows, to administrators, **Agents in your organizations**: it lists agents (not Sentinels, which are on Scanners) with their scope, capabilities, last seen and task counts, with approve, limit, suspend and revoke, plus the work no agent can take and what is queued or running. The same page lists your own keys and agents. Sentinels also have their own page, **Scanners, Sentinels**. A finding and a host show which agent holds work on them.
 
 ## Sentinels: scan-stage agents
 
