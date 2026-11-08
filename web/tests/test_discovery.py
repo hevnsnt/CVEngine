@@ -605,7 +605,7 @@ class NucleiStageTests(TestCase):
 			CVEMatch.objects.create(cve_entry=cve, subdomain=sub, scan_history=scan, confidence=0.9, ai_verdict='affected')
 		calls = []
 		out = nuclei_scan.run_targeted_nuclei(scan.id, stream=lambda path, **k: iter([]), provider=None,
-			cve_runner=lambda cve, hosts, provider=None, project=None: calls.append((cve.cve_id, hosts, project)) or
+			cve_runner=lambda cve, hosts, ai=False, project=None: calls.append((cve.cve_id, hosts, project)) or
 				{'results': [{'host': hosts[0], 'vulnerable': True}]})
 		self.assertEqual(calls, [('CVE-2099-7', ['www.example.test'], self.project.id)])  # fire and smoke only
 		self.assertEqual((out['cves'], out['vulnerable']), (1, [('CVE-2099-7', 'www.example.test')]))
