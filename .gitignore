@@ -76,6 +76,9 @@ web/.openvas-wanted
 web/.openvas-wanted.tmp
 web/.openvas-applied
 web/.openvas-applied.tmp
+web/.scanner-update-requested
+web/.scanner-update-requested.tmp
+web/.scanner-update-done
 web/.openvas-log
 web/.openvas-restart
 web/.openvas-restart.tmp

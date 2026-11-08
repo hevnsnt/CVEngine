@@ -209,6 +209,49 @@ The three choices are keys in `.env` (the same ones `install.sh` writes):
 
 Read the state from a terminal: `scripts/update.sh --check` prints the memory the updater sees, whether it will write `SCANNER_MEM_LIMIT`, and how many Sentinels of your own are live when the running server can say (it changes nothing); `grep -E '^(CVENGINE_BUILTIN_SCANNER|CVENGINE_SENTINEL_PLAN|SCANNER_MEM_LIMIT)=' .env` shows the choice; `docker compose run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels` prints `EXTERNAL_SENTINELS_LIVE n` (read only). The memory budget line (see [DEPLOYMENT.md](DEPLOYMENT.md#memory)) is in the update's output (`scripts/update.sh`) or in the update log under Settings > Updates (`.git/cvengine-update/update.log` on the host).
 
+## Keeping Sentinels on the newest version
+
+On by default, and one switch: **Settings, Sentinels, Keep Sentinels on the newest version**. While it is on, a Sentinel that follows the instance default has self-update
+**Automatic**, and cvENGINE asks any Sentinel that runs a build behind the newest published one to update. "Behind" is the verdict the Sentinels page already shows (the newest
+build of the Sentinel repository's `main` is a descendant of the one the Sentinel reports); nothing is asked of a Sentinel that is current, ahead, unknown or on a commit GitHub
+could not compare. The Sentinels page shows, per Sentinel, `running abc1234, newest def5678, update requested 10:42` (or `updating`, `current`, or the reason nothing is asked), and each
+card keeps its **Update now** button.
+
+**How a Sentinel is asked.** In its heartbeat answer: `update: {setting, mode, requested: true, target: <commit>, reason: "newest"}`. `target` and `reason` are optional keys of an object
+every client already reads: a Sentinel that does not know them ignores them and still acts on `requested`, so the result contract version is not bumped. What the Sentinel does with
+the request is its own machine's business:
+
+| Sentinel | What acts | How |
+| --- | --- | --- |
+| External, host updater installed (the default of its `setup.sh`) | `scripts/update.sh` on the Sentinel's host | It sees `requested` at its next hourly run, builds, drains and swaps, as for **Update now** |
+| External, `CVENGINE_SENTINEL_UPDATE_EXIT=1` and a supervisor that replaces the image | the Sentinel daemon | It takes no new work, waits for its running tasks, exits with code 76; `scripts/pull-on-exit.sh` (or any puller) brings the newest image and starts it |
+| The built-in scanner | this server's host | The server writes `web/.scanner-update-requested`; `scripts/update-watch.sh` runs `scripts/scanner-update.sh` (drain, swap, rollback if the new image does not check in) |
+
+**Safety rails** (`agentapi/sentinel_autoupdate.py`, each one a test):
+
+- **Never during a heavy task.** A Sentinel running OpenVAS, a full port sweep, a UDP sweep, a thorough WPScan, bbot discovery, a deep nuclei pass or a secrets scan is not asked; it is asked at a later heartbeat. What is left is drained by the Sentinel's updater or daemon before anything stops (a task that outlasts the drain limit keeps running and the update waits for the next try).
+- **At most one request per Sentinel every 6 hours.**
+- **A Sentinel that does not come back is flagged and not asked again.** If it has not reported a new version 90 minutes after the request (`CVENGINE_SENTINEL_UPDATE_GRACE_MINUTES`, 5 to 1440), the Sentinels page says so in plain words (`Did not report a newer version within 90 minutes of the request (its updater or supervisor may not be running), so cvENGINE stopped asking. Press Update now to try again`) and the server stops asking until an administrator presses **Update now**, or the Sentinel updates on its own. A Sentinel that never comes back sends no heartbeat, so a sweep every few minutes (the `ensure_builtin_scanner` task) flags it too, and the page shows the flag from the moment the grace period ends.
+- **Never a downgrade.** A request is made only when the newest build is a descendant of the one the Sentinel runs.
+- **Never to a build this server cannot run.** The server reads the result contract of the newest build; when its version is above what this server speaks the page says `The newest Sentinel build is newer than this server, waiting for the server update`, and when the contract cannot be read nothing is asked.
+- **Opt-out per Sentinel.** Set its self-update to Off on the Sentinels page (`PATCH agents/{id}` with `{"settings": {"self_update": "off"}}`); the server never asks it, and a machine's own `CVENGINE_SENTINEL_UPDATE=off` is a ceiling the server cannot raise.
+- **Audited.** Each request is a `sentinel.update_requested` entry (the version it ran, the commit asked for, how), each flag a `sentinel.update_flagged` entry, the switch a `sentinel.defaults` entry, and an administrator's press an `agent.update_requested` entry.
+
+**Command line equivalents** (the interface is the Sentinels page and Settings; these do the same): `PUT /api/v1/sentinels/defaults` with `{"keep_newest": false}` (App Admin) turns the switch off,
+`PATCH /api/v1/agents/{id}` with `{"update": "now"}` presses Update now, `scripts/update.sh --now` on a Sentinel's host updates that Sentinel,
+`scripts/scanner-update.sh` (`make scanner-update`) updates the built-in scanner, and `touch web/.scanner-update-requested` on the server's host is what the server does to ask the watcher.
+
+## The Sentinel library in the server image
+
+The server reads the Sentinel result contract from the installed `cvengine-scanner` library. `web/requirements.txt` pins it to a full commit sha: the known-good **floor**, which CI,
+`pip install` and the tests use, so a check is the same on every run. The image build installs the **newest** Sentinel `main` over it: the `SENTINEL_REF` build argument
+(default `main`; a branch, a tag or a full sha) is resolved to a commit when the image is built (`scripts/sentinel-ref.sh`, passed as `SENTINEL_SHA`, so Docker rebuilds that layer when `main` moved; empty,
+the Dockerfile resolves it itself), and `make up`, `make build`, `scripts/update.sh` and the approved update all build that way. A server updated today therefore reads the contract of today's Sentinel.
+
+The commit that was installed is read back from the install (pip's `direct_url.json`), so it cannot disagree with what runs: the About page and the Sentinels page say `Result contract version 3, read from Sentinel <sha>`. The image carries the labels `com.cvengine.sentinel.ref` and `com.cvengine.sentinel.sha` (what it was asked for). To hold a server at one Sentinel library, set `SENTINEL_REF` in `.env` to a commit, a tag or a branch.
+
+Why not `@main` in `web/requirements.txt`: three CI places read a 40 character commit there (`build-pr.yml` fetches the Sentinel Dockerfile at it, `test_about_page.py` and `test_scanner_script.py` tie it to the floor in `scanner.lock.json`), the Sentinel repository checks that it is on `main`, and a moving requirement would let any Sentinel commit turn the server's CI red and make a build differ from the next one with no change here. Docker also caches an unchanged `@main` line, so the image would not move. The pinned floor keeps all of that, and the build argument is what makes the image follow.
+
 ## Branches and releases
 
 - `master` holds released versions only. Each release is tagged (`v1.0`, `v1.1`, ...); pushing the tag, or running the Release workflow by hand, publishes the GitHub release with that version's section of the [changelog](../CHANGELOG.md) as its notes (`.github/workflows/release.yml`). A patch such as `v1.0.1` keeps the notes of `v1.0` and adds its own short section at the end. The tag must match `web/.version`. A release that has to be made again, because a fix had to be in it, is re-run with the workflow's `recut` option: it deletes the version's release and tag and publishes again from the tip of `master`, so the tag and the downloads change. Use it only before the release has been relied on.

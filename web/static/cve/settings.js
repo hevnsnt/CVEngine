@@ -1376,6 +1376,46 @@ const sections = {
     await draw();
   },
 
+  // Settings > Sentinels: the one instance switch of "keep Sentinels on the newest version" (agentapi/sentinel_autoupdate.py). Per Sentinel, the Sentinels page has
+  // "Update now" and the self-update setting (Off is the opt-out).
+  async sentinels(m) {
+    const v1 = async (method, body) => {
+      const res = await fetch("/api/v1/sentinels/defaults", {
+        method,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        /* empty */
+      }
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      return data;
+    };
+    const s = await v1("GET");
+    const keep = check("Keep Sentinels on the newest version", s.keep_newest);
+    keep.wrap.style.minHeight = "44px";
+    keep.box.style.cssText = "width:24px;height:24px;min-height:0;flex:none";
+    m.append(
+      card(
+        "Sentinels",
+        el(
+          "p",
+          "note",
+          "On by default. When a Sentinel runs a build behind the newest published one, cvENGINE asks it to update: at most once every 6 hours per Sentinel, never while it runs a long task, never to a build this server cannot run yet, and every request is in the audit log. The built-in scanner is updated through this server's host updater. Turn it off here for all Sentinels, or set one Sentinel's self-update to Off on the Sentinels page to keep just that one where it is.",
+          { style: "margin:0 0 14px" },
+        ),
+        keep.wrap,
+        button("Save", async () => {
+          const next = await v1("PUT", { keep_newest: keep.box.checked });
+          toast(next.keep_newest ? "Sentinels are kept on the newest version" : "Sentinels are no longer asked to update");
+        }),
+      ),
+    );
+  },
   async reports(m) {
     const s = await api("GET", "reports");
     const inputs = {
@@ -1485,13 +1525,14 @@ const panel = el("div", "set-panel");
 view.append(tabs, panel);
 // Essentials are the four things most installs ever touch; everything else is under Advanced, collapsed. OpenVAS is not in Settings: its one
 // place is Administration > OpenVAS, which an organization admin can open too (the panel is the same).
-const essentials = ["ai", "alerts", "reports", "updates"];
+const essentials = ["ai", "alerts", "reports", "updates", "sentinels"];
 const advanced = ["keys", "tailscale", "scan_policy", "ip_allowlist", "proxy", "resources", "reset"];
 const labels = {
   ai: "AI model",
   alerts: "Alerts",
   reports: "Reports",
   updates: "Updates",
+  sentinels: "Sentinels",
   keys: "API keys",
   tailscale: "Tailscale",
   scan_policy: "Scan policy",
