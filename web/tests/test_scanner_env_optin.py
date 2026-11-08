@@ -100,7 +100,7 @@ class InstallTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = self.tmp / 'repo'
         (self.repo / 'scripts').mkdir(parents=True)
-        for rel in ('install.sh', 'scripts/init-env.sh', '.env.example'):
+        for rel in ('install.sh', 'scripts/init-env.sh', 'scripts/host-fit.sh', '.env.example'):
             shutil.copy(ROOT / rel, self.repo / rel)
         self.stub = self.tmp / 'stub'
         self.stub.mkdir()
@@ -136,9 +136,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.scanner_free()['CVENGINE_BUILTIN_SCANNER'], '0')
 
     def test_a_small_host_gets_a_smaller_scanner_limit(self):
-        text = (self.repo / 'install.sh').read_text()
-        self.assertIn("printf 'SCANNER_MEM_LIMIT=1g\\n' >> .env", text)
-        self.assertIn('-lt 7000000', text)
+        # the rule is scripts/host-fit.sh's, shared with the updater (tests/test_host_fit_script.py runs it); install.sh calls it
+        self.assertIn('cvengine_fit_memory .env', (self.repo / 'install.sh').read_text())
+        self.assertIn('cv_fit_small_kb=7000000', (ROOT / 'scripts' / 'host-fit.sh').read_text())
 
     def test_the_port_check_still_refuses_a_busy_port_and_defaults_to_443_and_8082(self):
         import socket

@@ -103,6 +103,28 @@ What the Sentinels page and **Settings, System status** show for it: the running
 
 `make scanner-build` builds the image from the floor commit `scanner.lock.json` names, the commit this release was tested with (10 to 25 minutes; on arm64 nmap is compiled), and tags it `cvengine-sentinel-local:<version>` and `cvengine-sentinel-local:latest`. It is the way to run when the published image cannot be pulled (an offline host, a registry that refuses): set `CVENGINE_SCANNER_IMAGE=cvengine-sentinel-local:latest` in `.env` and run `make up`. An image set there is used as it is, which also means it stays at that commit until you change it. Remove the line to go back to the newest published image. Building needs outbound HTTPS to the Ubuntu mirrors, nmap.org, go.dev and the Go module proxy, GitHub, testssl.sh, PyPI and rubygems.
 
+## Which scanners run
+
+Three choices, the ones the installer asks: **the built-in scanner only**, **your own Sentinels only** (the built-in scanner is removed and frees its memory), or **both** (yours first, the built-in scanner as the backup). Choose in **Settings > Sentinels, Which scanners run**, or in the dialog the Update button shows when a choice is worth making (a host under 7 GB, or Sentinels of yours live, and no choice on record). With only your own Sentinels, work that only the built-in scanner can run (scan path checks, template checks, signed-in route checks) waits until it is back, and every scan waits if all your Sentinels are offline; choose the built-in scanner again to undo it. The built-in scanner is never removed without an answer.
+
+### From the command line
+
+Almost everyone uses the buttons above. Everything they do can be done from a terminal, and an update run by hand, by cron or by systemd never asks a question and never waits for an answer.
+
+The three choices are keys in `.env` (the same ones `install.sh` writes):
+
+| Choice | `.env` |
+| --- | --- |
+| Use the built-in scanner only | nothing, or `CVENGINE_SENTINEL_PLAN=internal` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use both | `CVENGINE_SENTINEL_PLAN=both` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use my own Sentinels only | `CVENGINE_BUILTIN_SCANNER=0` and `CVENGINE_SENTINEL_PLAN=external`; the next update removes the `scanner` container |
+
+`SCANNER_MEM_LIMIT` is the built-in scanner's memory ceiling (`1g`, `2g`, ...). To answer the question in a script, pass it to the updater: `scripts/update.sh --sentinels external` (or `internal`, `both`), or set `CVENGINE_INSTALL_SENTINELS=external` in the environment. Either writes the keys above exactly as the dialog would, before anything is stopped. Anything else is refused before the update starts.
+
+**An update with no answer** (cron, `scripts/update.sh` with no flag, an automatic update, an update approved by a server too old to ask) applies the safe default: a host under 7 GB gets `SCANNER_MEM_LIMIT=1g` unless you set one, and a scanner is never removed. When it finds two or more Sentinels of your own live and nobody has chosen, it keeps the scanner, prints the finding and the exact flag (`scripts/update.sh --sentinels external`), and leaves a notice in `web/.update-notice.json` that Settings > Updates and Settings > Sentinels show until somebody chooses. When the running server cannot say how many Sentinels are live (it is an older version, or not running), the updater prints that and changes nothing about which scanners run.
+
+Read the state from a terminal: `scripts/update.sh --check` prints the memory the updater sees, whether it will write `SCANNER_MEM_LIMIT`, and how many Sentinels of your own are live (it changes nothing); `grep -E '^(CVENGINE_BUILTIN_SCANNER|CVENGINE_SENTINEL_PLAN|SCANNER_MEM_LIMIT)=' .env` shows the choice; `docker compose exec web python3 manage.py external_sentinels` prints `EXTERNAL_SENTINELS_LIVE n`. The memory budget line (see [DEPLOYMENT.md](DEPLOYMENT.md#memory)) is in the update's output (`scripts/update.sh`) or in the update log under Settings > Updates (`.git/cvengine-update/update.log` on the host).
+
 ## Turning it off
 
 `CVENGINE_BUILTIN_SCANNER=0` in `.env`, then `make up`. The server stops writing enrollments and revokes the scanner's token (its tasks go back to the queue and the card shows revoked) and `make up` and the updates remove the container. Nothing then scans until an external Sentinel is enrolled: no kind runs on the server. `sudo ./install.sh --sentinels=external` (or `--no-builtin-scanner`) installs without it. Remove the line (and `make up`) to turn it back on: it enrols again as a new Sentinel.

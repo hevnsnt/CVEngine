@@ -893,6 +893,14 @@ def builtin_pk():
     return pk
 
 
+def live_externals(now=None):
+    """The live, usable Sentinels that are not the built-in scanner: the same set ``_left_to_externals`` holds the last-resort scanner back for (``_live_scanners``,
+    heard from within ``LIVE_WINDOW``, minus ``builtin_pk``). The updater and the update dialog (``cveFeed.scanner_plan``) ask this, never a definition of their own."""
+    now = now or timezone.now()
+    own = builtin_pk()
+    return [e.agent for e in _live_scanners(now) if e.agent.pk != own]
+
+
 def is_builtin(agent):
     """Whether ``agent`` is the built-in scanner. The only thing that makes an Agent one is the server-minted built-in enrollment it redeemed, so a
     Sentinel cannot claim to be it by its name, scope or capabilities."""

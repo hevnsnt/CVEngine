@@ -901,9 +901,14 @@ def _update_row():
     return UpdateSettings.current()
 
 
+def _updates_state(row):
+    """The update state plus the question the Update button asks first (which scanners run) and what an unattended update left to say."""
+    from cveFeed import scanner_plan, updater
+    return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice()}
+
+
 def updates_get(request):
-    from cveFeed import updater
-    return updater.state(_update_row())
+    return _updates_state(_update_row())
 
 
 def updates_put(request):
@@ -953,13 +958,33 @@ def updates_approve(request):
     from cveFeed import updater
     from cveFeed.admin_api import audit
     row = _update_row()
+    plan = _body(request).get('sentinels')
     try:
-        updater.approve(row, request.user)
+        updater.approve(row, request.user, plan)
     except updater.UpdateError as exc:
         raise SettingsError(400, str(exc))
+    extra = {'sentinels': plan} if plan else {}
     audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by,
-          branch=row.branch, release_branch=not updater.branch_warning(row.branch))
+          branch=row.branch, release_branch=not updater.branch_warning(row.branch), **extra)
     return updater.state(row)
+
+
+def scanner_plan_get(request):
+    from cveFeed import scanner_plan
+    return scanner_plan.state()
+
+
+def scanner_plan_post(request):
+    """Which scanners run, changed on its own (Settings > Sentinels): the host applies it within seconds (scripts/apply-scanner-plan.sh)."""
+    from cveFeed import scanner_plan
+    from cveFeed.admin_api import audit
+    plan = _body(request).get('plan')
+    try:
+        scanner_plan.request(plan)
+    except scanner_plan.PlanError as exc:
+        raise SettingsError(400, str(exc))
+    audit(request.user, 'scanner_plan.changed', plan, previous=scanner_plan.current_plan())
+    return scanner_plan.state()
 
 
 def updates_cancel(request):
@@ -1111,6 +1136,7 @@ ROUTES = [
     ('POST', r'autotune/decisions/(?P<decision_id>\d+)/revert', lambda r, decision_id, **k: autotune_revert(r, decision_id)),
     ('POST', r'autotune/release', lambda r, **k: autotune_release(r)),
     ('GET', r'updates', lambda r, **k: updates_get(r)), ('PUT', r'updates', lambda r, **k: updates_put(r)),
+    ('GET', r'scanner_plan', lambda r, **k: scanner_plan_get(r)), ('POST', r'scanner_plan', lambda r, **k: scanner_plan_post(r)),
     ('POST', r'updates/check', lambda r, **k: updates_check(r)), ('POST', r'updates/approve', lambda r, **k: updates_approve(r)),
     ('POST', r'updates/cancel', lambda r, **k: updates_cancel(r)), ('POST', r'updates/dismiss', lambda r, **k: updates_dismiss(r)),
     ('GET', r'keys', lambda r, **k: keys_get(r)), ('PUT', r'keys', lambda r, **k: keys_put(r)),

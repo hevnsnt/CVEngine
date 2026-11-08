@@ -213,6 +213,36 @@ once killed at 2 GB (one deep nuclei, several light ones and Chromium). A kind t
 kernel kills anyway reports *out of memory, retry later* and the work stays due. To run fewer tools at once, lower how many tasks the scanner runs at once on its
 card on the Sentinels page (**Settings**), or lower `SCANNER_MEM_LIMIT`.
 
+**The host-size rule** is one function (`scripts/host-fit.sh`), used by `install.sh` and by every update (the Update button, `scripts/update.sh`, automatic updates):
+
+| Host memory | `SCANNER_MEM_LIMIT` |
+| --- | --- |
+| under 7 GB (7,000,000 kB) | `1g`, written to `.env` once, with a comment saying why |
+| 7 GB or more | nothing written (the default, `3g`) |
+
+A `SCANNER_MEM_LIMIT` you set, or any `CVENGINE_BUILTIN_SCANNER`, is never changed, and running the update again changes nothing more. The update prints one line when it writes (*This host has 4.5 GB of memory, so SCANNER_MEM_LIMIT=1g was written to .env ...*). `CVENGINE_HOST_MEM_MB` replaces the memory it reads; only the tests and rehearsals set it.
+
+**The budget check** runs at the end of every update, after the containers started. It adds up the memory limits of the project's running containers and compares the sum with the host: under 90 percent it prints one line, over it prints *Memory warning* with the sum, the largest container and the setting that lowers it (`CELERY_MEM_LIMIT`, `SCANNER_MEM_LIMIT`, `WEB_MEM_LIMIT`, `BEAT_MEM_LIMIT`, `REVIEWER_MEM_LIMIT`, `DB_MEM_LIMIT`). Limits are ceilings, so a sum over the host is a risk, not a failure, and the update does not fail on it. On a 4.5 GB host with the defaults the workers' 4 GB is the largest: lower `CELERY_MEM_LIMIT` (look at what the workers really use with `docker stats` first), or choose **Use my own Sentinels only** to free the scanner's.
+
+**From the command line.**
+
+Almost everyone uses the buttons above. Everything they do can be done from a terminal, and an update run by hand, by cron or by systemd never asks a question and never waits for an answer.
+
+The three choices are keys in `.env` (the same ones `install.sh` writes):
+
+| Choice | `.env` |
+| --- | --- |
+| Use the built-in scanner only | nothing, or `CVENGINE_SENTINEL_PLAN=internal` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use both | `CVENGINE_SENTINEL_PLAN=both` (and `CVENGINE_BUILTIN_SCANNER=1` if it was off) |
+| Use my own Sentinels only | `CVENGINE_BUILTIN_SCANNER=0` and `CVENGINE_SENTINEL_PLAN=external`; the next update removes the `scanner` container |
+
+`SCANNER_MEM_LIMIT` is the built-in scanner's memory ceiling (`1g`, `2g`, ...). To answer the question in a script, pass it to the updater: `scripts/update.sh --sentinels external` (or `internal`, `both`), or set `CVENGINE_INSTALL_SENTINELS=external` in the environment. Either writes the keys above exactly as the dialog would, before anything is stopped. Anything else is refused before the update starts.
+
+**An update with no answer** (cron, `scripts/update.sh` with no flag, an automatic update, an update approved by a server too old to ask) applies the safe default: a host under 7 GB gets `SCANNER_MEM_LIMIT=1g` unless you set one, and a scanner is never removed. When it finds two or more Sentinels of your own live and nobody has chosen, it keeps the scanner, prints the finding and the exact flag (`scripts/update.sh --sentinels external`), and leaves a notice in `web/.update-notice.json` that Settings > Updates and Settings > Sentinels show until somebody chooses. When the running server cannot say how many Sentinels are live (it is an older version, or not running), the updater prints that and changes nothing about which scanners run.
+
+Read the state from a terminal: `scripts/update.sh --check` prints the memory the updater sees, whether it will write `SCANNER_MEM_LIMIT`, and how many Sentinels of your own are live (it changes nothing); `grep -E '^(CVENGINE_BUILTIN_SCANNER|CVENGINE_SENTINEL_PLAN|SCANNER_MEM_LIMIT)=' .env` shows the choice; `docker compose exec web python3 manage.py external_sentinels` prints `EXTERNAL_SENTINELS_LIVE n`. The memory budget line (see [DEPLOYMENT.md](DEPLOYMENT.md#memory)) is in the update's output (`scripts/update.sh`) or in the update log under Settings > Updates (`.git/cvengine-update/update.log` on the host).
+
+
 ## Screenshots and AppArmor
 
 The screenshot browser (Chromium, in the built-in scanner container) is sandboxed with user namespaces. Docker's seccomp profile refuses them, which is why `docker-compose.yml` gives the scanner Playwright's seccomp profile (`config/seccomp/playwright-chromium.json`). On a host whose **AppArmor** also restricts unprivileged user namespaces (Ubuntu 24.04 and later, recent Debian and Kali) Docker's own `docker-default` AppArmor profile refuses them as well, and the browser dies at launch: Chromium prints `FATAL credentials.cc ... Check failed: Permission denied (13)`. The seccomp profile alone is not enough there.

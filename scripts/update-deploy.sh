@@ -73,8 +73,17 @@ deploy_steps() {
     listed=''
     services+=(proxy)
   fi
+  # Which scanners run, decided before anything is stopped (scripts/host-fit.sh, the rules scripts/update.sh and install.sh use too). The answer the Update
+  # button's dialog collected comes with the approval (web/.update-sentinels, read without following a link); without one (the button of an older server, a
+  # check that could not be made, automatic updates) the automatic default applies: the host-size rule, and a scanner is never removed.
+  local fit_plan=''
+  if [ -f scripts/host-fit.sh ]; then
+    . scripts/host-fit.sh
+    fit_plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || fit_plan=''
+    cvengine_fit_run "$fit_plan" "${compose[@]}" || true
+  fi
   DEPLOY_STAGE=build
-  phase applying "$DEPLOY_STAGE"
+  phase applying "$DEPLOY_STAGE${cv_fit_short:+: $cv_fit_short}"
   check_disk || return 1
   # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
   # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
@@ -144,6 +153,7 @@ deploy_steps() {
     phase applying scanner
     cvengine_scanner_start "${compose[@]}"
   fi
+  if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
   prune_old_images
 }
 
