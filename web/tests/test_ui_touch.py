@@ -34,6 +34,10 @@ class TouchTests(SimpleTestCase):
         self.assertIn('a.host-link::after', block)
         self.assertRegex(block, r'::after\{content:"";position:absolute;left:-8px;right:-8px;top:50%;height:var\(--hit\)')
 
+    def test_a_link_that_fills_its_own_line_is_a_44px_line(self):
+        block = coarse_block()
+        self.assertIn('li>a.cve-id,li .meta>a.hit,.table td a:not(.btn){display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}', block)
+
     def test_filters_are_one_button_on_a_phone_and_untouched_on_a_wide_screen(self):
         self.assertIn('.filters-row,.filters-toggle{display:none}', CSS)
         self.assertIn('.filters-panel{display:contents}', CSS)

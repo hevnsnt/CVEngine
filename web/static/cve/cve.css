@@ -2237,6 +2237,9 @@ section.internal[hidden]{display:none}
   input[type=checkbox]:disabled::before,input[type=radio]:disabled::before{opacity:.5}
   .row-menu-btn{width:var(--hit);height:var(--hit)}
   .hr-top .row-menu-btn{margin:-8px -10px -14px 0}
+  /* a link that is a whole line of its own (a feed row's CVE id, a table cell's link) is a 44px line, not a 20px one with a halo that the next row covers */
+  li>a.cve-id,li .meta>a.hit,.table td a:not(.btn){display:inline-flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}
+  li>a.cve-id{display:flex}
   a.host-link,a.cve-id,a.hit,.sub a,.table td a:not(.btn){position:relative}
   a.host-link::after,a.cve-id::after,a.hit::after,.sub a::after,.table td a:not(.btn)::after{content:"";position:absolute;left:-8px;right:-8px;top:50%;height:var(--hit);transform:translateY(-50%)}
 }
