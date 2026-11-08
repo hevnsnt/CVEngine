@@ -293,7 +293,8 @@ class CanaryOnTheRouteCheck(TestCase):
 
     def sent_row(self):
         """The credential fields a Sentinel sends for ``PAGE``, made by hand: the masked context and the line, never the value in them."""
-        return {'credentials': [{'rule_id': 'betterleaks.gcp-api-key', 'secret': CANARY, 'line': 3, 'context': self.MASKED}], 'sensitive': []}
+        return {'credentials': [{'type': 'google_key', 'value': CANARY, 'line': 3, 'context': self.MASKED}],  # the contract's value field, in memory, until filed
+                'sensitive': {'google_key': {'count': 1, 'sample': 'Google API key, 39 chars (AIza...)'}}}
 
     def test_a_route_credentials_context_is_filed_and_the_canary_is_nowhere_else(self):
         from tests.test_probe_kinds import RouteProbeStageTests
