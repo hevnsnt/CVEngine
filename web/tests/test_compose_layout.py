@@ -18,6 +18,7 @@ case " $* " in
       *environment_file*) cat "$STUB_DIR/running_env_file" 2>/dev/null;;
       *'.compose.project"'*) cat "$STUB_DIR/running_project" 2>/dev/null;;
     esac; echo; exit 0;;
+  *" ps -q --status running scanner "*) [ -f "$STUB_DIR/scanner_running" ] && echo scanner-container; exit 0;;
   *" config --services "*) printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; exit 0;;
 esac
 exit 0
@@ -92,6 +93,23 @@ class ComposeLayoutTests(unittest.TestCase):
         result = self.run_script('enable-redis-auth.sh')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recreates(), ['docker compose -f docker-compose.yml up -d --force-recreate redis web celery celery-beat proxy'])
+
+    def test_a_running_built_in_scanner_is_recreated_with_celery_whose_network_it_shares(self):
+        # the scanner uses network_mode service:celery: a celery that is recreated alone leaves it in a dead namespace where `web` no longer resolves
+        # (the Upgrade rehearsal failure after make redis-auth)
+        (self.stub / 'scanner_running').touch()
+        result = self.run_script('enable-redis-auth.sh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recreates(), ['docker compose -f docker-compose.yml up -d --force-recreate redis web celery celery-beat proxy scanner'])
+        result = self.run_script('rotate-field-key.sh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recreates()[-1], 'docker compose -f docker-compose.yml up -d --force-recreate web celery celery-beat scanner')
+
+    def test_a_scanner_that_is_not_running_is_not_started_by_these_scripts(self):
+        # an install that removed or stopped its scanner (host-fit, an external Sentinel) must not get one back
+        for name in ('enable-redis-auth.sh', 'rotate-field-key.sh'):
+            self.assertEqual(self.run_script(name).returncode, 0)
+        self.assertFalse([c for c in self.recreates() if 'scanner' in c])
 
     def test_a_running_stack_started_from_files_elsewhere_stops_the_script_before_anything_is_recreated(self):
         (self.stub / 'running_config_files').write_text('/srv/elsewhere/docker-compose.yml\n')
