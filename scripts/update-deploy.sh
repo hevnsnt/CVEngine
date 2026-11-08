@@ -62,6 +62,25 @@ run_migrations() {
   return 1
 }
 
+# On 1.4 an assessment holds a discovery slot while it waits for a Sentinel, so DISCOVERY_CONCURRENCY below 4 (a leftover of the 1.3 era, when the pool
+# only ran discovery) lets ONE host be assessed at a time for the whole instance while the Sentinels idle, and it pins the value: the server's own sizing
+# (autotune range 4 to 32) is not allowed to move it. Say so in the update log (the Update screen shows it). The owner's env file is NEVER edited here.
+# A Sentinel that is live, or the built-in scanner (on unless CVENGINE_BUILTIN_SCANNER=0), is what makes it matter. Always returns 0.
+warn_discovery_pin() {
+  local value builtin live env_file=''
+  if [ -f scripts/redis-password.sh ]; then . scripts/redis-password.sh; env_file=$(cvengine_compose_env_file "$@" 2>/dev/null || true); fi
+  declare -F cvengine_fit_value >/dev/null || return 0
+  value=$(cvengine_fit_value DISCOVERY_CONCURRENCY "$env_file")
+  [[ $value =~ ^[0-9]+$ ]] || return 0
+  value=$((10#$value))
+  (( value < 4 )) || return 0
+  builtin=$(cvengine_fit_value CVENGINE_BUILTIN_SCANNER "$env_file")
+  live=$(cvengine_fit_externals "$@" 2>/dev/null || true)
+  if [[ $builtin == 0 && ( $live == 0 ) ]]; then return 0; fi
+  log "Warning: Hosts assessed at once is held at $value by DISCOVERY_CONCURRENCY in .env, so only $value host$([ "$value" = 1 ] || echo s) $([ "$value" = 1 ] && echo is || echo are) assessed at a time and your Sentinels wait for work. Remove that line from .env and run docker compose up -d celery; the server then sizes it itself. (This update does not change your .env.)"
+  return 0
+}
+
 deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
@@ -108,6 +127,7 @@ deploy_steps() {
     cvengine_fit_run "$fit_plan" "${compose[@]}" || true
     [ -z "$cv_fit_short" ] || phase applying "build: $cv_fit_short"
   fi
+  warn_discovery_pin "${compose[@]}"
   # The built-in scanner's pinned image (scanner.lock.json): pulled now, before anything is stopped. It never fails the update (scripts/scanner.sh).
   if [ -f scripts/scanner.sh ]; then
     . scripts/scanner.sh
@@ -205,6 +225,25 @@ verify_serving() {
       return 1
     fi
   fi
+  verify_workers || return 1
+}
+
+# A web service that answers says nothing about the Celery workers, and an update that was "done" with only some of them running left the queues
+# unconsumed (the maintenance page was already gone). All four named workers must answer, each with its own queue, before the update is done and the
+# maintenance page is removed: discovery_worker, cve_feed_worker, validation_priority_worker and classic_worker. The check is the container's own
+# (web/celery_healthcheck.py, the HEALTHCHECK of the celery service), run in the recreated container; the entrypoint's start work (migrations wait,
+# collectstatic, template updates) can take minutes, so it is asked again for CVENGINE_VERIFY_WORKERS_SECONDS (default 600).
+verify_workers() {
+  local compose=("${COMPOSE[@]}") waited=0 limit="${CVENGINE_VERIFY_WORKERS_SECONDS:-600}" said=''
+  while :; do
+    said=$("${compose[@]}" exec -T celery python3 celery_healthcheck.py 2>&1) && return 0
+    [ "$waited" -ge "$limit" ] && break
+    sleep "${CVENGINE_VERIFY_WORKERS_POLL:-5}"
+    waited=$((waited + ${CVENGINE_VERIFY_WORKERS_POLL:-5}))
+  done
+  DEPLOY_WHY="The new version started, but not every background worker answers (${said:-the check could not run}). Scanning stays paused and the maintenance page stays up until they do: run docker compose restart celery, then retry the update."
+  log "$DEPLOY_WHY"
+  return 1
 }
 
 # An update builds a new image of a few gigabytes on top of the one it replaces, and a build that runs out of space fails half way, after the

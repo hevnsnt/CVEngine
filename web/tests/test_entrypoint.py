@@ -13,7 +13,7 @@ def worker_commands(autoreload=''):
     """Run just the worker-generation part of celery-entrypoint.sh and return the commands it would eval."""
     text = SCRIPT.read_text()
     start = text.index("loglevel='info'")
-    end = text.index('eval "$commands"')
+    end = text.index('# --- start_lanes')
     body = text[start:end] + 'echo "$commands"\n'
     env = dict(os.environ, CELERY_AUTORELOAD=autoreload)
     out = subprocess.run(['bash', '-c', body], capture_output=True, text=True, env=env, check=True).stdout
@@ -80,9 +80,11 @@ class WorkerSupervisionTests(SimpleTestCase):
 
     def start(self, tmp, workers):
         text = SCRIPT.read_text()
-        tail = text[text.index('eval "$commands"'):]
-        commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' &\n' for name, body in workers)
-        return subprocess.Popen(['bash', '-c', f'commands={shlex.quote(commands)}\n{tail}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        tail = text[text.index('# --- start_lanes'):]
+        # the real lines name the worker with `-n <node>`: the stand-ins carry it as a comment argument, so the supervisor can name the lane
+        commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' -n {name} &\n' for name, body in workers)
+        return subprocess.Popen(['bash', '-c', f'commands={shlex.quote(commands)}\nCELERY_SUPERVISE_INTERVAL=0.2\n{tail}'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     def pid(self, tmp, name):
         import time
@@ -111,7 +113,8 @@ class WorkerSupervisionTests(SimpleTestCase):
             lasting = self.pid(tmp, 'lasting')
             out, _ = process.communicate(timeout=20)
             self.assertEqual(process.returncode, 3, out)
-            self.assertIn('A Celery worker exited', out)
+            self.assertIn("The Celery worker 'dying'", out)
+            self.assertIn('is gone (status 3)', out)
             time.sleep(0.2)
             self.assertFalse(self.alive(lasting), 'the surviving worker must be stopped, so the restart brings all of them back')
 

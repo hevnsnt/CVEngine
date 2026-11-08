@@ -24,6 +24,7 @@ case " $* " in
       echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
     esac; exit 0;;
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
+  *"celery_healthcheck.py"*) if [ -f "$STUB_DIR/workers_down" ]; then echo "classic_worker does not answer"; exit 1; fi; exit 0;;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
@@ -425,7 +426,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
         # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
-        verification = lambda call: any(x in call for x in ('http.client', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
@@ -675,6 +676,33 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.head(), self.new)  # the schema is already the new one: the old code is not put back on it
         self.assertTrue(self.approved())  # kept: the next run retries
         self.assertFalse(self.deployed_marker())
+
+    def test_an_update_is_not_done_while_a_worker_does_not_answer(self):
+        # the web service answers, a migration is not waiting, but one of the four Celery workers is not there: not "done", the maintenance page is not
+        # taken down as if it were, and the screen says which worker and what to run (an update once ended "done" with three of four lanes missing)
+        (self.stub / 'workers_down').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_WORKERS_SECONDS='0', CVENGINE_VERIFY_WORKERS_POLL='1', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('not every background worker answers (classic_worker does not answer)', log)
+        self.assertIn('docker compose restart celery', log)
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+        self.assertNotIn('docker image prune -f', self.calls())
+        self.assertIn('exec -T celery python3 celery_healthcheck.py', ' '.join(self.calls()))
+
+    def test_every_worker_answering_is_checked_after_the_web_service_and_before_the_update_is_done(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        calls = self.calls()
+        web = next(i for i, c in enumerate(calls) if 'http.client' in c)
+        workers = next(i for i, c in enumerate(calls) if 'celery_healthcheck.py' in c)
+        self.assertLess(web, workers)
+        self.assertLess(workers, next(i for i, c in enumerate(calls) if 'image prune' in c))
+        self.assertEqual(self.deployed_marker(), self.new)
 
     def test_a_migration_still_waiting_after_the_restart_is_applied_and_checked_again(self):
         (self.stub / 'unmigrated_once').write_text('')
