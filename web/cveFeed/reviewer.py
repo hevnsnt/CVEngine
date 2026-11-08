@@ -350,12 +350,23 @@ class VerdictError(ValueError):
         self.status = status
 
 
+DIAGNOSIS_MIN_WORDS = 3  # a diagnosis says what is wrong and what to do: fewer than three words is not one
+
+
 def clean_note(text):
     """A model's note as stored: cleaned like a person's closure note, no markup characters, no links, at most NOTE_MAX characters."""
     from cveFeed import closure
     text = closure.clip_note(text if isinstance(text, str) else '', NOTE_MAX) or ''
     text = _LINK.sub('[link removed]', _MARKUP.sub('', text))
     return re.sub(r'[ \t]+', ' ', text).strip()[:NOTE_MAX]
+
+
+def usable_note(text, min_words=2):
+    """``clean_note(text)`` when it is a real note (``min_words`` words or more and not filler, ``cveFeed.filler``), else the empty string: the interface
+    shows the reviewer's line only when there is something in it."""
+    from cveFeed.filler import is_placeholder
+    note = clean_note(text)
+    return note if len(note.split()) >= min_words and not is_placeholder(note) else ''
 
 
 def _parse_verdict(body):
@@ -410,7 +421,7 @@ def apply_verdict(ref, body, now=None):
     d = triage_lib.describe(finding)
     raw = _raw_evidence(triage, finding)
     injection = injection_guard.families(raw, d.get('payload'), d.get('host_context'))
-    note = clean_note(parsed['note'])
+    note = usable_note(parsed['note'], min_words=2)  # filler ("Placeholder") is no reason: the verdict stands, with no note
     if injection_guard.repeats_marker(note, injection_guard.planted_markers(raw, d.get('payload'), d.get('host_context'))):
         injection = sorted(set(injection) | {'echo_marker'})
         note = 'The reviewer\'s note repeated an identifier planted in the evidence and was discarded.'
@@ -590,7 +601,8 @@ def ops_checks(now=None, templates_release=None):
         samples = {f['kind']: AgentActivity.objects.filter(status='failed', created_at__gte=six, kind=f['kind'])
                    .order_by('-created_at').values_list('message', flat=True).first() for f in heavy[:5]}
         checks.append(_check('scan_errors', 'problem', 'Scans and tasks are failing',
-                             '; '.join(f"{f['n']} failed {f['kind']} line(s)" for f in heavy) + ' in the last six hours.',
+                             '; '.join(f"{f['n']} failed {f['kind']} line(s)" for f in heavy) + ' in the last six hours. '
+                             + ' '.join(f"Latest {k}: {str(v or 'no message')[:160]}" for k, v in list(samples.items())[:3]),
                              {'kinds': {f['kind']: f['n'] for f in heavy}, 'last_messages': {k: str(v or '')[:200] for k, v in samples.items()}}))
     else:
         checks.append(_check('scan_errors', 'ok', 'Scans and tasks succeed', '', {}))
@@ -728,7 +740,8 @@ def apply_ops_report(body, now=None):
         alert = AdminAlert.objects.filter(code=check['code'], resolved_at__isnull=True).first()
         if alert is None:
             continue
-        alert.ai_detail, alert.ai_model = clean_note(item.get('diagnosis'))[:NOTE_MAX], model
+        alert.ai_detail = usable_note(item.get('diagnosis'), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]  # nothing, not filler, when the model gave no real diagnosis
+        alert.ai_model = model if alert.ai_detail else ''
         if item.get('severity') in ('info', 'warning', 'critical') and check['state'] != 'problem':
             alert.severity = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
         alert.save(update_fields=['ai_detail', 'ai_model', 'severity'])
@@ -759,8 +772,9 @@ def open_alerts(user=None):
     for a in rows:
         if a.dismissed_at and a.dismissed_digest == a.digest:
             continue
-        out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': a.detail, 'ai_detail': a.ai_detail,
-                    'ai_model': a.ai_model, 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
+        ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
+        out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': a.detail, 'ai_detail': ai_detail,
+                    'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
     return out
 
 

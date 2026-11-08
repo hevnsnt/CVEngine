@@ -234,7 +234,7 @@ the numbers behind that state, and the actions it allows:
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. An admin can dismiss an alert, and it stays dismissed until the problem changes.
 
-The operations job then gives the model the checks. The model writes a diagnosis and next steps for each alert, and may ask for actions. The
+The operations job then gives the model the checks. The model writes a diagnosis and next steps for each alert, and may ask for actions. A diagnosis (or a finding note) that is filler, such as "Placeholder", "TBD", "<diagnosis>" or fewer than three words, is dropped by the container and again by the server (`cveFeed/filler.py`): the alert then shows no reviewer line, never the filler, and a row stored earlier with filler is not shown. The
 server runs an action only when the check offered it at that moment, and no more often than its own minimum interval. To know whether a newer
 nuclei-templates release exists, the reviewer container reads the newest release tag from GitHub's API itself, at a fixed URL. The model is not
 involved in that request.

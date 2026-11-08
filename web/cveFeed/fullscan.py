@@ -191,6 +191,7 @@ def sweep_ip(ip, pipeline=None):
     """Sweep every TCP port of one IpAddress on a scanner and record it. Returns the result dict (``ok`` False with an ``error`` on a failed
     or timed-out sweep; ``full_scanned_at`` advances only on success). ``pipeline(domain_id, names)`` runs the re-test of the hosts on this IP.
     Nothing runs on this server: with no scanner able to take the sweep it waits and the address is swept later."""
+    from agentapi import sentinel_dispatch
     from cveFeed import activity, port_inventory, port_stage
     from reNgine.resources import ScannerUnavailable
     address = ip.address
@@ -212,11 +213,13 @@ def sweep_ip(ip, pipeline=None):
                                                                        f'{type(exc).__name__}: {exc}', type(exc).__name__)
                         + (f'; next try after {retry:%Y-%m-%d %H:%M} UTC' if retry else ''))
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
-    found, timedout = set(), False
+    found, timedout, flooded = set(), False, 0
     for host in hosts:
         if host.get('ip') == address:
             found.update(_open_tcp(host))
             timedout = timedout or bool(host.get('timedout'))
+            if host.get('port_list_truncated'):
+                flooded = max(flooded, int(host.get('open_ports_seen') or 0))
     if timedout:  # --host-timeout cut the sweep short: the ports above are a partial answer, not a clean sweep of 65,535
         retry = _back_off(ip)
         activity.settle(running, 'failed', message=f'Background full port scan of {address}: the scanner gave up on the host at its time limit '
@@ -225,6 +228,11 @@ def sweep_ip(ip, pipeline=None):
     _advance(ip, len(found))
     new = sorted(found - before)
     gone = sorted(before - found)
+    if flooded:  # a tarpit or a filtering device: a result (the list is cut and one info note stands for it), never a failure, and nothing to investigate
+        activity.settle(running, 'done', message=(
+            f'Background full port scan of {address}: {sentinel_dispatch.TARPIT_NOTE}; '
+            f'{flooded} open ports seen, the first {len(found)} kept'), open_ports=len(found), port_list_truncated=True)
+        return {'ip': address, 'ok': True, 'open': len(found), 'new': [], 'closed': [], 'port_list_truncated': True, 'open_ports_seen': flooded}
     activity.settle(running, 'done', message=(
         f'Background full port scan of {address}: {len(found)} open port(s)'
         + (f', {len(new)} new ({", ".join(map(str, new[:10]))})' if new else '')

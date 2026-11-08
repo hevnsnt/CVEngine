@@ -51,6 +51,20 @@ def scrub(text, limit):
     return re.sub(r'[ \t]+', ' ', text).strip()[:limit]
 
 
+_FILLER = re.compile(r'\b(?:placeholder|lorem ipsum|tbd|todo|fixme|n/a|not applicable|undefined|null|none|string|text|sample|example|diagnosis|note)\b', re.I)
+
+
+def is_filler(text, min_words=3):
+    """Whether ``text`` is template filler and not an answer (\"Placeholder\", \"TBD\", \"<diagnosis>\", fewer than ``min_words`` words): a model that
+    echoes the schema of its own answer gives such text. The server refuses it too (``cveFeed.reviewer.is_placeholder``); this keeps it from being sent."""
+    plain = ' '.join(str(text or '').split()).strip(' .!:;-')
+    if len(plain.split()) < min_words or 'lorem ipsum' in plain.lower():
+        return True
+    if re.match(r'^[\[<{(].*[\]>})]$', plain) or re.match(r'^(?:insert|your|enter|add|write)\b.*\bhere$', plain, re.I):
+        return True
+    return not re.sub(r'[\W_]+', ' ', _FILLER.sub('', plain)).strip()
+
+
 def _strip_thinking(text):
     """A local reasoning model may write its thinking before the answer; only what follows the last closing think tag is the answer."""
     lowered = text.lower()

@@ -86,7 +86,8 @@ def run_ops(server, provider, release=None):
     except guard.ReplyError as exc:
         logger.warning('operations: unusable answer (%s)', exc)
         answer = {'alerts': [], 'actions': []}
-    alerts = [{'code': a['code'], 'severity': a['severity'], 'diagnosis': guard.scrub(a['diagnosis'], NOTE_LIMIT)} for a in answer['alerts']]
+    alerts = [{'code': a['code'], 'severity': a['severity'], 'diagnosis': guard.scrub(a['diagnosis'], NOTE_LIMIT)} for a in answer['alerts']
+              if not guard.is_filler(guard.scrub(a['diagnosis'], NOTE_LIMIT))]  # a diagnosis that is filler ("Placeholder") is not sent: the alert shows no reviewer line
     return server.ops_report({'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release})
 
 
